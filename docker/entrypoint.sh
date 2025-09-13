@@ -1,10 +1,18 @@
 #!/bin/bash
 set -e
 
+# Cleanup any .mdauth files before running
+echo "Removing any existing .mdauth files..."
+find /app -type f -name "*.mdauth" -exec rm -f {} +
+echo ".mdauth cleanup complete."
+
 echo "Installing Python dependencies from requirements.txt files..."
 
-# Recursively install all requirements.txt files in the extensions directory
-find /app -name "requirements.txt" -exec pip install -r {} \;
+# Recursively install all requirements.txt files in the app directory
+find /app -type f -name "requirements.txt" | while read -r req; do
+    echo "Installing dependencies from $req..."
+    pip install --no-cache-dir -r "$req"
+done
 
 echo "Python dependencies installed."
 
