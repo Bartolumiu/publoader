@@ -28,7 +28,9 @@ class WebhookHelper:
         self.mangadex_chapter_url = "https://mangadex.org/chapter/{}"
         self.mangadex_manga_url = "https://mangadex.org/manga/{}"
         self.footer = (
-            {"text": f"extensions.{self.extension_name}"}
+            {
+                "text": f"{'' if self.extension_name.startswith('extensions.') else 'extensions.'}{self.extension_name}"
+            }
             if self.extension_name is not None
             else None
         )

@@ -430,7 +430,6 @@ def run_extensions(database_connection, extensions: dict, clean_db_override: boo
         PubloaderWebhook(
             extension_name,
             title=f"Reading data from {extension_name}",
-            add_timestamp=False,
         ).send()
 
         try:
