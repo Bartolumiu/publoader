@@ -10,6 +10,8 @@ services:
       - ./logs:/app/logs
       - extensions:/app/publoader/extensions
       - ./entrypoint.sh:/app/entrypoint.sh
+      - ./resources:/app/resources
+      - ./.mdauth:/app/.mdauth
     entrypoint: [ "/app/entrypoint.sh" ]
     command: [ "python", "run.py" ]
 

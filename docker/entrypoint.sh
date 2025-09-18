@@ -6,6 +6,11 @@ echo "Removing any existing .mdauth files..."
 find /app -type f -name "*.mdauth" -exec rm -f {} +
 echo ".mdauth cleanup complete."
 
+# Create a new empty .mdauth file
+echo "Creating fresh /app/.mdauth file..."
+touch /app/.mdauth
+echo "/app/.mdauth file created."
+
 echo "Installing Python dependencies from requirements.txt files..."
 
 # Recursively install all requirements.txt files in the app directory

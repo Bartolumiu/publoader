@@ -110,7 +110,9 @@ class PubloaderUpdater:
 
         return failed_download
 
-    def fetch_repo(self, repo_name, commit_sha_var, download_path) -> Tuple[bool, bool, str]:
+    def fetch_repo(
+        self, repo_name, commit_sha_var, download_path
+    ) -> Tuple[bool, bool, str]:
         try:
             repo = self.github.get_repo(f"{self.repo_owner}/{repo_name}")
         except github.UnknownObjectException:
@@ -169,7 +171,11 @@ class PubloaderUpdater:
 
             time.sleep(8)
 
-        extensions_repo_success, extensions_repo_failed, self.latest_extension_sha = self.fetch_repo(
+        (
+            extensions_repo_success,
+            extensions_repo_failed,
+            self.latest_extension_sha,
+        ) = self.fetch_repo(
             self.extensions_repo, self.latest_extension_sha, extensions_path
         )
 
@@ -182,7 +188,11 @@ class PubloaderUpdater:
             shutil.rmtree(self.update_path, ignore_errors=True)
             return
 
-        if base_repo_success or extensions_private_repo_success or extensions_repo_failed:
+        if (
+            base_repo_success
+            or extensions_private_repo_success
+            or extensions_repo_success
+        ):
             PubloaderWebhook(
                 extension_name=None,
                 title=f"Update download complete, applying changes.",

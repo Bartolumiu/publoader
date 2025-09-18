@@ -352,10 +352,12 @@ def run_extension(
         convert_chapters_datetimes(updated_chapters)
 
         try:
-            all_chapters = validate_list_chapters(all_chapters, Chapter)
+            all_chapters = validate_list_chapters(
+                all_chapters, Chapter, return_none=not clean_db
+            )
         except TypeError:
             logger.error(
-                f"{normalised_extension_name} all chapters is not a list, initialising list as empty."
+                f"{normalised_extension_name} all chapters is not a list, initialising list as None."
             )
             all_chapters = None
 
