@@ -33,7 +33,7 @@ This brings up:
 State lives in `./resources/` (mounted into `/app/resources`):
 - `publoader.db` — SQLite state DB (WAL mode, schedule overrides + run history)
 - `publoader.sock` — IPC unix socket
-- `.mdauth` — MangaDex session cache
+- `mdauth.json` — MangaDex session cache
 
 ### Single-instance CLI
 

@@ -10,15 +10,43 @@ services:
         # Wait for the sidecar's sync_extensions.py to finish before starting,
         # otherwise load_extensions runs against an empty volume.
         condition: service_completed_successfully
+      publoader-extensions-private:
+        condition: service_completed_successfully
     volumes:
       - ./config.ini:/app/config.ini
       - ./logs:/app/logs
       - extensions:/app/publoader/extensions
       - ./entrypoint.sh:/app/entrypoint.sh
       - ./resources:/app/resources
-      - ./.mdauth:/app/.mdauth
     entrypoint: [ "/app/entrypoint.sh" ]
     command: [ "python", "run.py" ]
+
+  publoader-bot:
+    # Discord control bot. Runs in its own container so it stays online even
+    # when the scheduler is down — commands will reply "instance not running"
+    # rather than going silent. Talks to the scheduler over the unix socket
+    # in the shared `resources` bind mount, and to the docker daemon via the
+    # mounted socket so /start, /shutdown and /restart can control the
+    # scheduler container even when it isn't responding to IPC.
+    image: ardax/publoader:latest
+    container_name: publoader-bot
+    restart: unless-stopped
+    depends_on:
+      publoader-extensions:
+        condition: service_completed_successfully
+      publoader-extensions-private:
+        condition: service_completed_successfully
+    environment:
+      - PUBLOADER_SCHEDULER_CONTAINER=publoader
+    volumes:
+      - ./config.ini:/app/config.ini
+      - ./logs:/app/logs
+      - extensions:/app/publoader/extensions:ro
+      - ./entrypoint.sh:/app/entrypoint.sh
+      - ./resources:/app/resources
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: [ "/app/entrypoint.sh" ]
+    command: [ "python", "-m", "publoader.bot.server" ]
 
   publoader-extensions:
     image: ardax/publoader-extensions:latest
@@ -29,6 +57,26 @@ services:
     # The image's CMD is `python sync_extensions.py`, which copies the bundled
     # extensions into the shared volume and exits. Don't override that — the
     # named volume keeps the contents after the container exits.
+
+  publoader-extensions-private:
+    # Private extensions repo isn't published as an image. We reuse the public
+    # sidecar's `sync_extensions.py` and point it at a host clone of the private
+    # repo via PUBLOADER_SOURCE. The script copies each `src/<ext>` and every
+    # `schedule*.json` into the shared `extensions` volume, alongside the public
+    # extensions. Names must not collide with the public repo.
+    image: ardax/publoader-extensions:latest
+    container_name: publoader-extensions-private
+    restart: "no"
+    environment:
+      - PUBLOADER_SOURCE=/extensions
+    volumes:
+      - ./publoader-extensions-private:/extensions:ro
+      - extensions:/shared/publoader/extensions
+    depends_on:
+      publoader-extensions:
+        # Run after the public sidecar so its files land first; the atomic
+        # per-extension replace keeps both repos coexisting in the volume.
+        condition: service_completed_successfully
 
   watchtower:
     image: containrrr/watchtower:latest
@@ -41,7 +89,9 @@ services:
       - WATCHTOWER_SCHEDULE=0 1 * * *
     depends_on:
       - publoader
+      - publoader-bot
       - publoader-extensions
+      - publoader-extensions-private
 
   cloudflared:
     image: cloudflare/cloudflared:latest

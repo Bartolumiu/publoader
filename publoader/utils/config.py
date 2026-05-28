@@ -21,7 +21,7 @@ def load_config_info(config: configparser.RawConfigParser):
 
     if config["Paths"].get("mdauth_path", "") == "":
         logger.info("Mdauth path empty, using default.")
-        config["Paths"]["mdauth_path"] = ".mdauth"
+        config["Paths"]["mdauth_path"] = "resources/mdauth.json"
 
     if config["Paths"].get("commits_path", "") == "":
         logger.info("Commits path empty, using default.")

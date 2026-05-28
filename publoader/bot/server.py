@@ -24,10 +24,74 @@ except ImportError:  # pragma: no cover - import guard
     )
     raise
 
+try:
+    import docker as docker_sdk
+    from docker.errors import APIError as DockerAPIError, DockerException, NotFound as DockerNotFound
+except ImportError:  # pragma: no cover - optional at import time
+    docker_sdk = None
+    DockerAPIError = DockerException = DockerNotFound = Exception
+
 from publoader.ipc import ipc_call, is_instance_running
 from publoader.utils.config import config
 
 logger = logging.getLogger("webhook")
+
+
+def _scheduler_container_name() -> str:
+    return (
+        os.environ.get("PUBLOADER_SCHEDULER_CONTAINER")
+        or config["Paths"].get("scheduler_container")
+        or "publoader"
+    )
+
+
+def _docker_container():
+    """Return the scheduler container handle, or a 1-line error string on failure.
+    The bot keeps running either way — callers just surface the error to Discord.
+    """
+    if docker_sdk is None:
+        return "docker SDK not installed in the bot container (pip install docker)."
+    try:
+        client = docker_sdk.from_env()
+        return client.containers.get(_scheduler_container_name())
+    except DockerNotFound:
+        return f"No container named {_scheduler_container_name()!r} found."
+    except (DockerException, OSError) as e:
+        return f"Could not reach the docker daemon: {e}"
+
+
+def _docker_action(action: str, timeout: int = 30) -> str:
+    """start / stop / restart the scheduler container. Returns a one-line
+    status string ready to send back to Discord. Synchronous — call via
+    asyncio.to_thread from command handlers."""
+    container = _docker_container()
+    if isinstance(container, str):
+        return f":red_circle: {container}"
+
+    name = _scheduler_container_name()
+    try:
+        if action == "start":
+            container.reload()
+            if container.status == "running":
+                return f":green_circle: `{name}` is already running."
+            container.start()
+            return f":green_circle: Started `{name}`."
+        if action == "stop":
+            container.reload()
+            if container.status != "running":
+                return f":yellow_circle: `{name}` is already stopped (status: {container.status})."
+            container.stop(timeout=timeout)
+            return f":yellow_circle: Stopped `{name}`."
+        if action == "restart":
+            container.restart(timeout=timeout)
+            return f":green_circle: Restarted `{name}`."
+        return f":red_circle: Unknown docker action: {action!r}"
+    except DockerAPIError as e:
+        logger.exception(f"docker {action} failed")
+        return f":red_circle: docker {action} failed: `{e.explanation or e}`"
+    except (DockerException, OSError) as e:
+        logger.exception(f"docker {action} crashed")
+        return f":red_circle: docker {action} crashed: `{e}`"
 
 
 # ---------- config helpers ----------
@@ -395,9 +459,26 @@ def _register_commands(bot: PubloaderBot) -> None:
     async def _reload(ctx: commands.Context):
         await bot._dispatch(ctx, "reload")
 
+    @bot.command(name="start")
+    async def _start(ctx: commands.Context):
+        if not _is_admin(ctx.author):
+            await ctx.send("Not allowed.")
+            return
+        await ctx.send(await asyncio.to_thread(_docker_action, "start"))
+
+    @bot.command(name="shutdown")
+    async def _shutdown(ctx: commands.Context):
+        if not _is_admin(ctx.author):
+            await ctx.send("Not allowed.")
+            return
+        await ctx.send(await asyncio.to_thread(_docker_action, "stop"))
+
     @bot.command(name="restart")
     async def _restart(ctx: commands.Context):
-        await bot._dispatch(ctx, "restart")
+        if not _is_admin(ctx.author):
+            await ctx.send("Not allowed.")
+            return
+        await ctx.send(await asyncio.to_thread(_docker_action, "restart"))
 
     @bot.command(name="status")
     async def _status(ctx: commands.Context):
@@ -456,9 +537,38 @@ def _register_commands(bot: PubloaderBot) -> None:
     async def _slash_reload(interaction: discord.Interaction):
         await bot._dispatch_slash(interaction, "reload")
 
-    @bot.tree.command(name="restart", description="Restart the scheduler (pulls updates).")
+    @bot.tree.command(
+        name="start",
+        description="Start the scheduler container (admin-only).",
+    )
+    async def _slash_start(interaction: discord.Interaction):
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("Not allowed.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        await interaction.followup.send(await asyncio.to_thread(_docker_action, "start"))
+
+    @bot.tree.command(
+        name="shutdown",
+        description="Stop the scheduler container (admin-only).",
+    )
+    async def _slash_shutdown(interaction: discord.Interaction):
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("Not allowed.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        await interaction.followup.send(await asyncio.to_thread(_docker_action, "stop"))
+
+    @bot.tree.command(
+        name="restart",
+        description="Restart the scheduler container (admin-only). Works even if IPC is dead.",
+    )
     async def _slash_restart(interaction: discord.Interaction):
-        await bot._dispatch_slash(interaction, "restart")
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("Not allowed.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        await interaction.followup.send(await asyncio.to_thread(_docker_action, "restart"))
 
     @bot.tree.command(name="status", description="Show scheduler PID and pending jobs.")
     async def _slash_status(interaction: discord.Interaction):

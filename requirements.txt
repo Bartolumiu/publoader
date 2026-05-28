@@ -1,5 +1,6 @@
 discord_webhook
 discord.py>=2.3
+docker>=7
 natsort
 Pillow>=10
 pydantic

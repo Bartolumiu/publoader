@@ -14,16 +14,25 @@ by the compose file in the same directory, then:
 ```bash
 cp ../config.ini.example config.ini   # fill in your credentials
 mkdir -p logs resources
-touch .mdauth
+# Optional: clone the private extensions repo if you have access. The
+# publoader-extensions-private service expects it at ./publoader-extensions-private.
+git clone git@github.com:ArdaxHz/publoader-extensions-private.git
 docker compose up -d
 ```
+
+If you don't have access to the private repo, either remove the
+`publoader-extensions-private` service from `docker-compose.yml` or create
+the directory empty: `mkdir -p publoader-extensions-private/src` — the sync
+will simply find nothing to copy and exit cleanly.
 
 ## What's in the stack
 
 | Service | Purpose |
 | --- | --- |
-| `publoader` | Scheduler, watchers, IPC server. Entrypoint also starts the Discord control bot in the background when `discord_bot_token` is set. |
-| `publoader-extensions` | Sidecar. Runs `sync_extensions.py` on each start to atomically populate the `extensions` named volume from the image, then exits. `publoader` waits for it via `service_completed_successfully`. |
+| `publoader` | Scheduler, watchers, IPC server. |
+| `publoader-bot` | Discord control bot. Runs in its own container so it stays online even when the scheduler is down — `/status` will reply "instance not running" instead of going silent. Talks to the scheduler via the unix socket in `./resources` and to the docker daemon via the mounted socket, so `/start`, `/shutdown` and `/restart` can control the scheduler container even when its IPC is dead. |
+| `publoader-extensions` | Sidecar. Runs `sync_extensions.py` to atomically populate the `extensions` named volume from the public image, then exits. |
+| `publoader-extensions-private` | Same as above, but sources from the host-mounted private repo (`./publoader-extensions-private`) since it isn't published as an image. Reuses the public sidecar image. Runs after the public sync. |
 | `watchtower` | Pulls fresh `ardax/publoader*` images on a daily cron (default 01:00). |
 | `cloudflared` | Optional Cloudflare tunnel — needs `CLOUDFLARE_PUBLOADER_TUNNEL_TOKEN` in the environment. |
 
@@ -31,10 +40,11 @@ docker compose up -d
 
 - `./config.ini` → `/app/config.ini` (read-only credentials + paths)
 - `./logs` → `/app/logs`
-- `./resources` → `/app/resources` (holds `publoader.db`, `publoader.sock`, `.mdauth`, cached chapter data)
+- `./resources` → `/app/resources` (holds `publoader.db`, `publoader.sock`, `mdauth.json`, cached chapter data)
 - `./entrypoint.sh` → `/app/entrypoint.sh`
-- `./.mdauth` → `/app/.mdauth`
-- Named volume `extensions` → `/app/publoader/extensions` (populated by the sidecar)
+- `./publoader-extensions-private` → `/extensions:ro` on the private sidecar (host clone of the private repo)
+- `/var/run/docker.sock` → `/var/run/docker.sock` on `publoader-bot` (so `/start`, `/shutdown`, `/restart` work)
+- Named volume `extensions` → `/app/publoader/extensions` (populated by both sidecars)
 
 The IPC unix socket lives at `/app/resources/publoader.sock`. Subsequent
 invocations of `python run.py` inside the container forward over that socket
