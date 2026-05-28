@@ -64,13 +64,17 @@ services:
     # repo via PUBLOADER_SOURCE. The script copies each `src/<ext>` and every
     # `schedule*.json` into the shared `extensions` volume, alongside the public
     # extensions. Names must not collide with the public repo.
+    #
+    # The image's WORKDIR is /extensions and `sync_extensions.py` lives there.
+    # Mounting the private repo at /extensions would shadow the script, so we
+    # bind-mount at /source and point PUBLOADER_SOURCE there instead.
     image: ardax/publoader-extensions:latest
     container_name: publoader-extensions-private
     restart: "no"
     environment:
-      - PUBLOADER_SOURCE=/extensions
+      - PUBLOADER_SOURCE=/source
     volumes:
-      - ./publoader-extensions-private:/extensions:ro
+      - ./publoader-extensions-private:/source:ro
       - extensions:/shared/publoader/extensions
     depends_on:
       publoader-extensions:

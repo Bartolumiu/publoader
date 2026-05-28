@@ -8,10 +8,11 @@ to JSON only.
 """
 import logging
 import os
+import re
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from publoader.utils.utils import root_path
 
@@ -49,7 +50,17 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS disabled_extensions (
+    extension TEXT PRIMARY KEY,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 """
+
+# Extension names use the same lowercase-alphanumeric convention enforced by
+# load_extensions.validate_extension_name — keep the regex local to the store
+# so callers can't smuggle e.g. SQL-shaped names through this layer.
+_EXT_NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
 # Default behaviour when an extension drops a chapter and offers no override.
 # Marked unavailable preserves the chapter card on MangaDex; "delete" enqueues
@@ -195,6 +206,46 @@ class StateStore:
             )
         self.set_setting(_REMOVAL_MODE_KEY, mode)
         return mode
+
+    # ---------- disabled extensions ----------
+
+    def list_disabled_extensions(self) -> List[str]:
+        rows = self.conn.execute(
+            "SELECT extension FROM disabled_extensions ORDER BY extension"
+        ).fetchall()
+        return [row["extension"] for row in rows]
+
+    def is_extension_disabled(self, extension: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM disabled_extensions WHERE extension = ?",
+            (extension,),
+        ).fetchone()
+        return row is not None
+
+    def disable_extension(self, extension: str) -> bool:
+        """Mark an extension as disabled. Returns True if a new row was added,
+        False if it was already disabled."""
+        if not _EXT_NAME_RE.match(extension or ""):
+            raise ValueError(f"invalid extension name: {extension!r}")
+        with self._write_lock:
+            cur = self.conn.execute(
+                "INSERT OR IGNORE INTO disabled_extensions (extension) VALUES (?)",
+                (extension,),
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def enable_extension(self, extension: str) -> bool:
+        """Remove the disabled flag. Returns True if a row was removed."""
+        if not _EXT_NAME_RE.match(extension or ""):
+            raise ValueError(f"invalid extension name: {extension!r}")
+        with self._write_lock:
+            cur = self.conn.execute(
+                "DELETE FROM disabled_extensions WHERE extension = ?",
+                (extension,),
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
 
     # ---------- run history (informational; written by the runner) ----------
 

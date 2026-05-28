@@ -551,6 +551,53 @@ def _setup_ipc_server(database_connection) -> IPCServer:
             }
         return {"ok": True, "removed": True, "rescheduled": True}
 
+    def _extensions_on_disk() -> list:
+        """Names of every extension dir in the runtime extensions volume.
+        Mirrors the iteration done by load_extensions.load_extensions()."""
+        try:
+            folder = root_path.joinpath("publoader", "extensions", "src")
+            return sorted(
+                p.name
+                for p in folder.iterdir()
+                if p.is_dir() and p.name != "__pycache__" and not p.name.startswith(".")
+            )
+        except (FileNotFoundError, NotADirectoryError, PermissionError):
+            return []
+
+    def cmd_list_extensions(_req):
+        try:
+            disabled = set(get_state_store().list_disabled_extensions())
+        except sqlite3.Error as e:
+            return {"ok": False, "error": f"state DB read failed: {e}"}
+        names = _extensions_on_disk()
+        return {
+            "ok": True,
+            "extensions": [
+                {"name": n, "disabled": n in disabled} for n in names
+            ],
+            "disabled": sorted(disabled),
+        }
+
+    def cmd_disable_extension(req):
+        ext = (req.get("extension") or "").strip()
+        if not _EXT_NAME_RE.match(ext):
+            return {"ok": False, "error": f"invalid extension name: {ext!r}"}
+        try:
+            added = get_state_store().disable_extension(ext)
+        except (sqlite3.Error, ValueError) as e:
+            return {"ok": False, "error": f"state DB write failed: {e}"}
+        return {"ok": True, "extension": ext, "disabled": True, "changed": added}
+
+    def cmd_enable_extension(req):
+        ext = (req.get("extension") or "").strip()
+        if not _EXT_NAME_RE.match(ext):
+            return {"ok": False, "error": f"invalid extension name: {ext!r}"}
+        try:
+            removed = get_state_store().enable_extension(ext)
+        except (sqlite3.Error, ValueError) as e:
+            return {"ok": False, "error": f"state DB write failed: {e}"}
+        return {"ok": True, "extension": ext, "disabled": False, "changed": removed}
+
     def cmd_get_removal_mode(_req):
         from publoader.state.store import (
             DEFAULT_REMOVAL_MODE,
@@ -595,6 +642,9 @@ def _setup_ipc_server(database_connection) -> IPCServer:
     server.register("remove_schedule", cmd_remove_schedule)
     server.register("get_removal_mode", cmd_get_removal_mode)
     server.register("set_removal_mode", cmd_set_removal_mode)
+    server.register("list_extensions", cmd_list_extensions)
+    server.register("disable_extension", cmd_disable_extension)
+    server.register("enable_extension", cmd_enable_extension)
     server.start()
     return server
 

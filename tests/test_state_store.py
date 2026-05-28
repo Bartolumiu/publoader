@@ -63,3 +63,30 @@ def test_wal_mode_enabled(store):
     cur = store.conn.execute("PRAGMA journal_mode")
     mode = cur.fetchone()[0]
     assert mode.lower() == "wal"
+
+
+def test_disable_then_list(store):
+    assert store.list_disabled_extensions() == []
+    assert store.is_extension_disabled("mangaplus") is False
+
+    assert store.disable_extension("mangaplus") is True
+    assert store.disable_extension("webtoon") is True
+    # Re-disabling is a no-op, not an error.
+    assert store.disable_extension("mangaplus") is False
+
+    assert store.is_extension_disabled("mangaplus") is True
+    assert store.list_disabled_extensions() == ["mangaplus", "webtoon"]
+
+
+def test_enable_removes_disabled(store):
+    store.disable_extension("mangaplus")
+    assert store.enable_extension("mangaplus") is True
+    assert store.enable_extension("mangaplus") is False
+    assert store.is_extension_disabled("mangaplus") is False
+
+
+def test_invalid_extension_name_rejected(store):
+    with pytest.raises(ValueError):
+        store.disable_extension("Bad-Name")
+    with pytest.raises(ValueError):
+        store.enable_extension("")

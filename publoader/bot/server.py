@@ -780,6 +780,70 @@ def _register_commands(bot: PubloaderBot) -> None:
             return
         await bot._dispatch(ctx, "set_removal_mode", mode=mode)
 
+    # ----- /load /unload /extensions: runtime enable/disable -----
+    # Persistently flag extensions as disabled in the state DB so the next
+    # scheduled run or `/reload` skips them. Admin-only since this affects
+    # what publishing actually happens.
+
+    @bot.tree.command(
+        name="load",
+        description="Re-enable a previously unloaded extension (admin-only).",
+    )
+    @app_commands.describe(extension="Extension to load.")
+    @app_commands.autocomplete(extension=_ext_autocomplete)
+    async def _slash_load(interaction: discord.Interaction, extension: str):
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("Not allowed.", ephemeral=True)
+            return
+        await bot._dispatch_slash(
+            interaction, "enable_extension", extension=extension
+        )
+
+    @bot.tree.command(
+        name="unload",
+        description="Disable an extension until it's loaded again (admin-only).",
+    )
+    @app_commands.describe(extension="Extension to unload.")
+    @app_commands.autocomplete(extension=_ext_autocomplete)
+    async def _slash_unload(interaction: discord.Interaction, extension: str):
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("Not allowed.", ephemeral=True)
+            return
+        await bot._dispatch_slash(
+            interaction, "disable_extension", extension=extension
+        )
+
+    @bot.tree.command(
+        name="extensions",
+        description="List extensions on disk and whether each is loaded.",
+    )
+    async def _slash_extensions(interaction: discord.Interaction):
+        await bot._dispatch_slash(interaction, "list_extensions")
+
+    @bot.command(name="load")
+    async def _prefix_load(ctx: commands.Context, extension: Optional[str] = None):
+        if not _is_admin(ctx.author):
+            await ctx.send("Not allowed.")
+            return
+        if not extension:
+            await ctx.send("Usage: `!load <extension>`")
+            return
+        await bot._dispatch(ctx, "enable_extension", extension=extension)
+
+    @bot.command(name="unload")
+    async def _prefix_unload(ctx: commands.Context, extension: Optional[str] = None):
+        if not _is_admin(ctx.author):
+            await ctx.send("Not allowed.")
+            return
+        if not extension:
+            await ctx.send("Usage: `!unload <extension>`")
+            return
+        await bot._dispatch(ctx, "disable_extension", extension=extension)
+
+    @bot.command(name="extensions")
+    async def _prefix_extensions(ctx: commands.Context):
+        await bot._dispatch(ctx, "list_extensions")
+
 def run() -> int:
     token = _bot_token()
     if not token:
