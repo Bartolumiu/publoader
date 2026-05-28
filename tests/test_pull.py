@@ -80,13 +80,32 @@ def test_resolve_repo_path_unknown():
     assert run_module._resolve_repo_path("does-not-exist") is None
 
 
-def test_resolve_repo_path_env_override(tmp_path, monkeypatch):
+@pytest.fixture
+def empty_repo_section(monkeypatch):
+    """Strip the [Repo] section the user's local config.ini may have populated,
+    so default-path / unconfigured assertions don't accidentally depend on the
+    dev machine's checkout layout."""
+    from publoader.utils.config import config
+
+    original = {}
+    if config.has_section("Repo"):
+        original = dict(config.items("Repo"))
+        for key in list(original):
+            config.remove_option("Repo", key)
+    try:
+        yield
+    finally:
+        for key, value in original.items():
+            config.set("Repo", key, value)
+
+
+def test_resolve_repo_path_env_override(tmp_path, monkeypatch, empty_repo_section):
     monkeypatch.setenv("PUBLOADER_REPO_BASE", str(tmp_path))
     resolved = run_module._resolve_repo_path("base")
     assert resolved == tmp_path.resolve()
 
 
-def test_resolve_repo_path_falls_back_to_default(monkeypatch):
+def test_resolve_repo_path_falls_back_to_default(monkeypatch, empty_repo_section):
     # 'extensions' has a sensible default path even without env override.
     monkeypatch.delenv("PUBLOADER_REPO_EXTENSIONS", raising=False)
     resolved = run_module._resolve_repo_path("extensions")
@@ -96,7 +115,9 @@ def test_resolve_repo_path_falls_back_to_default(monkeypatch):
     assert resolved.parent.name == "publoader"
 
 
-def test_resolve_repo_path_extensions_private_unconfigured(monkeypatch):
+def test_resolve_repo_path_extensions_private_unconfigured(
+    monkeypatch, empty_repo_section
+):
     monkeypatch.delenv("PUBLOADER_REPO_EXTENSIONS_PRIVATE", raising=False)
     # No default — should return None when neither env nor config supplies one.
     assert run_module._resolve_repo_path("extensions-private") is None

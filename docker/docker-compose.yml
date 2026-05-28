@@ -52,6 +52,10 @@ services:
     image: ardax/publoader-extensions:latest
     container_name: publoader-extensions
     restart: "no"
+    # Sidecars are one-shot — watchtower only refreshes long-running containers,
+    # so without `always` Docker keeps using whatever `:latest` was cached on
+    # first pull and never picks up newer pushes from the extensions repo.
+    pull_policy: always
     volumes:
       - extensions:/shared/publoader/extensions
     # The image's CMD is `python sync_extensions.py`, which copies the bundled
@@ -71,6 +75,7 @@ services:
     image: ardax/publoader-extensions:latest
     container_name: publoader-extensions-private
     restart: "no"
+    pull_policy: always
     environment:
       - PUBLOADER_SOURCE=/source
     volumes:

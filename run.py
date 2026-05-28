@@ -283,21 +283,21 @@ _EXT_NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
 
 # Repos that `cmd_pull` knows how to update. Path resolution order:
-#   1. env var (e.g. EXTENSIONS_REPO_PATH)
-#   2. config.ini [Repos] section (key matches env var minus the prefix, lowercased)
+#   1. env var (e.g. PUBLOADER_REPO_EXTENSIONS)
+#   2. config.ini [Repo] section (key matches env var minus the prefix, lowercased)
 #   3. a sensible default for the docker layout
 #
 # Each repo entry is (env_var, config_key, default_path).
 _REPO_DEFAULTS: dict = {
-    "base": ("BASE_REPO_PATH", "base", str(root_path)),
+    "base": ("PUBLOADER_REPO_BASE", "base_repo_path", str(root_path)),
     "extensions": (
-        "EXTENSIONS_REPO_PATH",
-        "extensions",
+        "PUBLOADER_REPO_EXTENSIONS",
+        "extensions_repo_path",
         str(root_path / "publoader" / "extensions"),
     ),
     "extensions-private": (
-        "EXTENSIONS_PRIVATE_REPO_PATH",
-        "extensions_private",
+        "PUBLOADER_REPO_EXTENSIONS_PRIVATE",
+        "extensions_private_repo_path",
         "",  # no default — only resolved if explicitly configured
     ),
 }
@@ -464,7 +464,7 @@ def _setup_ipc_server(database_connection) -> IPCServer:
                 per_repo[name] = {
                     "ok": False,
                     "error": f"no path configured for {name!r} — set {entry[0]} or "
-                    f"[Repos]/{entry[1]} in config.ini",
+                    f"[Repo]/{entry[1]} in config.ini",
                 }
                 any_ok = False
                 continue
