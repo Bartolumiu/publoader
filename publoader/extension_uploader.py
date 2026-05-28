@@ -5,10 +5,11 @@ import time
 from typing import Dict, List, Optional
 
 from publoader.manga_uploader import MangaUploaderProcess
-from publoader.models.database import update_expired_chapter_database
+from publoader.models.database import enqueue_chapter_removal
 from publoader.models.dataclasses import Chapter, Manga
 from publoader.utils.config import ratelimit_time, resources_path
 from publoader.utils.misc import format_title, get_md_api
+from publoader.utils.utils import atomic_write_text
 from publoader.webhook import PubloaderNotIndexedWebhook, PubloaderWebhook
 
 logger = logging.getLogger("publoader")
@@ -31,11 +32,13 @@ class ExtensionUploader:
         clean_db: bool,
         chapters_on_db: List[Chapter],
         manga_data_local: Dict[str, dict],
+        removal_mode: Optional[str] = None,
     ):
         self.database_connection = database_connection
         self.config = config
         self.extension = extension
         self.clean_db = clean_db
+        self.removal_mode = removal_mode
         self.chapters_on_db = chapters_on_db
         self.manga_data_local = manga_data_local
 
@@ -81,6 +84,14 @@ class ExtensionUploader:
             )
         return chapters_sorted
 
+    def _extension_instance(self):
+        """ExtensionUploader is passed the whole `extension_data` dict as
+        `extension`. The actual Extension instance is at ['extension'] — pull
+        it out when we need the removal-mode override."""
+        if isinstance(self.extension, dict):
+            return self.extension.get("extension")
+        return self.extension
+
     def find_untracked_md_manga(self):
         """Check if any series on MangaDex are not tracked."""
         manga_ids = set()
@@ -102,12 +113,14 @@ class ExtensionUploader:
         )
         for manga_id in self.chapters_on_md:
             if manga_id in manga_untracked:
-                update_expired_chapter_database(
+                enqueue_chapter_removal(
                     database_connection=self.database_connection,
                     extension_name=self.extension_name,
                     md_chapter=self.chapters_on_md[manga_id],
                     md_manga_id=manga_id,
                     mangadex_manga_data=self.manga_data_local,
+                    extension=self._extension_instance(),
+                    mode=self.removal_mode,
                 )
 
     def remove_chapters_if_not_external(self):
@@ -148,12 +161,14 @@ class ExtensionUploader:
 
         for manga_id in tracked_ids_no_chapters_md:
             if manga_id in tracked_ids_chapters_md:
-                update_expired_chapter_database(
+                enqueue_chapter_removal(
                     database_connection=self.database_connection,
                     extension_name=self.extension_name,
                     md_chapter=tracked_ids_no_chapters_md[manga_id],
                     md_manga_id=manga_id,
                     mangadex_manga_data=self.manga_data_local,
+                    extension=self._extension_instance(),
+                    mode=self.removal_mode,
                 )
 
     def _get_manga_data_md(self) -> Dict[str, dict]:
@@ -192,11 +207,10 @@ class ExtensionUploader:
                         {manga_id: {"id": manga_id, "title": manga_title}}
                     )
 
-            with open(
+            atomic_write_text(
                 resources_path.joinpath(self.config["Paths"]["manga_data_path"]),
-                "w",
-            ) as json_file:
-                json.dump(self.manga_data_local, json_file, indent=2)
+                json.dumps(self.manga_data_local, indent=2),
+            )
 
         return self.manga_data_local
 
@@ -275,7 +289,11 @@ class ExtensionUploader:
             ]
 
             logger.info(f"Chapters not indexed: {chapters_not_on_md}")
-            PubloaderNotIndexedWebhook(self.extension_name, chapters_not_on_md).main()
+            PubloaderNotIndexedWebhook(
+                extension_name=self.extension_name,
+                chapters_not_indexed=chapters_not_on_md,
+                chapters_indexed=len(uploaded_chapter_ids) - len(chapters_not_on_md),
+            ).main()
         else:
             logger.info("No uploaded chapter mangadex ids.")
 
@@ -305,11 +323,12 @@ class ExtensionUploader:
                 chapters_for_upload=self.chapters_for_upload,
                 chapters_for_skipping=self.chapters_for_skipping,
                 chapters_for_editing=self.chapters_for_editing,
+                extension=self._extension_instance(),
+                removal_mode=self.removal_mode,
             )
             manga_uploader.start_manga_uploading_process(
                 index == len(self.updated_manga_chapters)
             )
-            time.sleep(0.5)
 
         if self.current_uploaded_chapters:
             self._check_all_chapters_uploaded()

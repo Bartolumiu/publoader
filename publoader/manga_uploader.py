@@ -8,10 +8,11 @@ import gridfs.errors
 import pymongo
 from pymongo import UpdateOne
 
+from publoader.chapter_image import generate_chapter_card
 from publoader.http import http_client
 from publoader.models.database import (
+    enqueue_chapter_removal,
     update_database,
-    update_expired_chapter_database,
 )
 from publoader.models.dataclasses import Chapter
 from publoader.utils.misc import (
@@ -45,10 +46,14 @@ class MangaUploaderProcess:
         chapters_for_upload: List[Chapter],
         chapters_for_skipping: List[Chapter],
         chapters_for_editing: List[Chapter],
+        extension=None,
+        removal_mode: Optional[str] = None,
         **kwargs,
     ):
         self.database_connection = database_connection
         self.extension_name = extension_name
+        self.extension = extension
+        self.removal_mode = removal_mode
         self.clean_db = clean_db
         self.updated_chapters = [
             updated_chapter
@@ -102,13 +107,14 @@ class MangaUploaderProcess:
         if self.all_manga_chapters is None:
             return
 
+        allowed_languages = set(self.languages) | set(self.custom_language.values())
+        external_urls = {x.chapter_url for x in self.all_manga_chapters}
+
         md_chapters_not_external = [
             c
             for c in self.chapters_on_md
-            if c["attributes"]["translatedLanguage"]
-            not in list(set(self.languages + list(self.custom_language.values())))
-            or c["attributes"]["externalUrl"]
-            not in [x.chapter_url for x in self.all_manga_chapters]
+            if c["attributes"]["translatedLanguage"] not in allowed_languages
+            or c["attributes"]["externalUrl"] not in external_urls
         ]
 
         logger.info(
@@ -116,12 +122,14 @@ class MangaUploaderProcess:
             f"found: {md_chapters_not_external}"
         )
 
-        update_expired_chapter_database(
+        enqueue_chapter_removal(
             database_connection=self.database_connection,
             extension_name=self.extension_name,
             md_chapter=md_chapters_not_external,
             md_manga_id=self.mangadex_manga_id,
             mangadex_manga_data=self.mangadex_manga_data,
+            extension=self.extension,
+            mode=self.removal_mode,
         )
 
     def get_chapter_volumes(self):
@@ -285,12 +293,12 @@ class MangaUploaderProcess:
         )
 
         chapters_to_upload = [
-            chapter
-            for chapter in self.updated_chapters
-            if self._check_for_duplicate_chapter_md_list(chapter)["exists"] is False
-            and not self._check_uploaded_different_id(chapter)
+            result["chapter"]
+            for result in chapters_dupe_checker
+            if not result["exists"]
+            and not self._check_uploaded_different_id(result["chapter"])
         ]
-        dupes = [dupe for dupe in chapters_dupe_checker if dupe["exists"] is True]
+        dupes = [result for result in chapters_dupe_checker if result["exists"]]
 
         chapters_to_edit = [
             dupe for dupe in map(self.edit_chapter, dupes) if dupe is not None
@@ -324,24 +332,44 @@ class MangaUploaderProcess:
                 image_filestream = gridfs.GridFS(self.database_connection, "images")
 
                 for chap in chapters_to_insert:
-                    images = []
-                    images_length = 0
-                    if chap["images"] is not None and chap["images"]:
-                        images_length = len(chap["images"])
-                        for index, img in enumerate(chap["images"]):
-                            try:
-                                img_insert_id = image_filestream.put(
-                                    img, filename=index
-                                )
-                                images.append(img_insert_id)
-                            except gridfs.errors.GridFSError as e:
-                                traceback.print_exc()
-                                logger.exception(
-                                    f"{self.start_manga_uploading_process.__name__} raised an error when uploading image for chapter {chap}."
-                                )
-                                break
+                    # Prepend the auto-generated info card so even external
+                    # chapters have at least one page on MD. Lets us strip
+                    # `externalUrl` later (chapter goes unavailable on the
+                    # publisher) without leaving the chapter content-less.
+                    raw_images = list(chap.get("images") or [])
+                    try:
+                        card_bytes = generate_chapter_card(
+                            manga_name=chap.get("manga_name"),
+                            chapter_number=chap.get("chapter_number"),
+                            chapter_title=chap.get("chapter_title"),
+                            chapter_language=chap.get("chapter_language"),
+                            extension_name=chap.get("extension_name"),
+                            chapter_url=chap.get("chapter_url"),
+                        )
+                        raw_images.insert(0, card_bytes)
+                    except Exception:
+                        traceback.print_exc()
+                        logger.exception(
+                            "Failed to generate chapter card; uploading without it."
+                        )
 
-                    chap.pop("images")
+                    images = []
+                    images_length = len(raw_images)
+                    for index, img in enumerate(raw_images):
+                        try:
+                            img_insert_id = image_filestream.put(
+                                img, filename=index
+                            )
+                            images.append(img_insert_id)
+                        except gridfs.errors.GridFSError:
+                            traceback.print_exc()
+                            logger.exception(
+                                f"{self.start_manga_uploading_process.__name__} "
+                                f"raised an error when uploading image for chapter {chap}."
+                            )
+                            break
+
+                    chap.pop("images", None)
                     chap["images"] = images if images_length == len(images) else []
 
                 upload_insertion = self.database_connection["to_upload"].bulk_write(
