@@ -195,9 +195,7 @@ def _reschedule_all(database_connection) -> None:
             try:
                 sched.delete_job(job)
             except Exception:
-                logger.exception(
-                    "Failed to delete a schedule job during reschedule"
-                )
+                logger.exception("Failed to delete a schedule job during reschedule")
 
     schedule_extensions(database_connection)
 
@@ -285,20 +283,20 @@ _EXT_NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
 
 # Repos that `cmd_pull` knows how to update. Path resolution order:
-#   1. env var (e.g. PUBLOADER_REPO_EXTENSIONS)
+#   1. env var (e.g. EXTENSIONS_REPO_PATH)
 #   2. config.ini [Repos] section (key matches env var minus the prefix, lowercased)
 #   3. a sensible default for the docker layout
 #
 # Each repo entry is (env_var, config_key, default_path).
 _REPO_DEFAULTS: dict = {
-    "base": ("PUBLOADER_REPO_BASE", "base", str(root_path)),
+    "base": ("BASE_REPO_PATH", "base", str(root_path)),
     "extensions": (
-        "PUBLOADER_REPO_EXTENSIONS",
+        "EXTENSIONS_REPO_PATH",
         "extensions",
         str(root_path / "publoader" / "extensions"),
     ),
     "extensions-private": (
-        "PUBLOADER_REPO_EXTENSIONS_PRIVATE",
+        "EXTENSIONS_PRIVATE_REPO_PATH",
         "extensions_private",
         "",  # no default — only resolved if explicitly configured
     ),
@@ -315,7 +313,7 @@ def _resolve_repo_path(name: str) -> Optional[Path]:
     raw = os.environ.get(env_var)
     if not raw:
         try:
-            raw = config["Repos"].get(cfg_key) if config.has_section("Repos") else None
+            raw = config["Repo"].get(cfg_key) if config.has_section("Repo") else None
         except (KeyError, configparser.NoSectionError):
             raw = None
     if not raw:
@@ -328,6 +326,7 @@ def _resolve_repo_path(name: str) -> Optional[Path]:
 
 def _git_pull(repo_path: Path, timeout: int = 60) -> dict:
     """Run `git pull --ff-only` against repo_path. Returns a serialisable status dict."""
+
     def _git(*args, t: int = timeout):
         return subprocess.run(
             ["git", "-C", str(repo_path), *args],
@@ -421,7 +420,12 @@ def _setup_ipc_server(database_connection) -> IPCServer:
     def cmd_reload(_req):
         # The next main() call already reloads the publoader package; queue a no-op run
         # with no extensions which will trigger reload via importlib.reload.
-        _ipc_jobs.put((JOB_RUN, {"extension_names": None, "general_run": False, "clean_db": False}))
+        _ipc_jobs.put(
+            (
+                JOB_RUN,
+                {"extension_names": None, "general_run": False, "clean_db": False},
+            )
+        )
         return {"reloaded": True}
 
     def cmd_restart(_req):
@@ -460,7 +464,7 @@ def _setup_ipc_server(database_connection) -> IPCServer:
                 per_repo[name] = {
                     "ok": False,
                     "error": f"no path configured for {name!r} — set {entry[0]} or "
-                             f"[Repos]/{entry[1]} in config.ini",
+                    f"[Repos]/{entry[1]} in config.ini",
                 }
                 any_ok = False
                 continue
@@ -508,7 +512,10 @@ def _setup_ipc_server(database_connection) -> IPCServer:
         if not isinstance(minute, int) or not 0 <= minute <= 59:
             return {"ok": False, "error": f"minute must be int 0-59 (got {minute!r})"}
         if day is not None and (not isinstance(day, int) or not 0 <= day <= 6):
-            return {"ok": False, "error": f"day must be int 0-6 (Mon=0) or null (got {day!r})"}
+            return {
+                "ok": False,
+                "error": f"day must be int 0-6 (Mon=0) or null (got {day!r})",
+            }
 
         try:
             get_state_store().upsert_schedule(ext, hour, minute, day)
@@ -572,9 +579,7 @@ def _setup_ipc_server(database_connection) -> IPCServer:
         names = _extensions_on_disk()
         return {
             "ok": True,
-            "extensions": [
-                {"name": n, "disabled": n in disabled} for n in names
-            ],
+            "extensions": [{"name": n, "disabled": n in disabled} for n in names],
             "disabled": sorted(disabled),
         }
 
@@ -603,6 +608,7 @@ def _setup_ipc_server(database_connection) -> IPCServer:
             DEFAULT_REMOVAL_MODE,
             VALID_REMOVAL_MODES,
         )
+
         try:
             mode = get_state_store().get_removal_mode()
             row_set = get_state_store().get_setting("chapter_removal_mode")
@@ -618,6 +624,7 @@ def _setup_ipc_server(database_connection) -> IPCServer:
 
     def cmd_set_removal_mode(req):
         from publoader.state.store import VALID_REMOVAL_MODES
+
         mode = (req.get("mode") or "").strip().lower()
         if mode not in VALID_REMOVAL_MODES:
             return {
