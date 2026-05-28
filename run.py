@@ -639,6 +639,47 @@ def _setup_ipc_server(database_connection) -> IPCServer:
             return {"ok": False, "error": f"state DB write failed: {e}"}
         return {"ok": True, "mode": mode}
 
+    def cmd_refresh_extensions(req):
+        """Re-run sync_extensions.py for each configured source, then queue a
+        reload so the freshly-synced code is picked up without restarting the
+        container. The bot's /refresh routes through here."""
+        sources = req.get("sources") or req.get("source")
+        if isinstance(sources, str):
+            sources = [sources]
+
+        try:
+            sys.path.insert(0, "/app")
+            import sync_extensions  # type: ignore
+        except ImportError as e:
+            return {"ok": False, "error": f"sync_extensions.py not importable: {e}"}
+
+        if sources:
+            paths = [Path(s) for s in sources]
+        else:
+            paths = sync_extensions._resolve_sources([])
+        if not paths:
+            return {"ok": False, "error": "no sources to sync"}
+
+        try:
+            results = sync_extensions.sync_all(paths)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.exception("refresh_extensions sync failed")
+            return {"ok": False, "error": str(e)}
+
+        reload_after = req.get("reload", True)
+        if reload_after:
+            _ipc_jobs.put(
+                (
+                    JOB_RUN,
+                    {"extension_names": None, "general_run": False, "clean_db": False},
+                )
+            )
+        return {
+            "ok": all(r.get("ok") for r in results),
+            "results": results,
+            "reload_queued": bool(reload_after),
+        }
+
     server.register("run", cmd_run)
     server.register("reload", cmd_reload)
     server.register("restart", cmd_restart)
@@ -652,6 +693,7 @@ def _setup_ipc_server(database_connection) -> IPCServer:
     server.register("list_extensions", cmd_list_extensions)
     server.register("disable_extension", cmd_disable_extension)
     server.register("enable_extension", cmd_enable_extension)
+    server.register("refresh_extensions", cmd_refresh_extensions)
     server.start()
     return server
 

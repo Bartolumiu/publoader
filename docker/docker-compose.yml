@@ -5,19 +5,23 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
-    depends_on:
-      publoader-extensions:
-        # Wait for the sidecar's sync_extensions.py to finish before starting,
-        # otherwise load_extensions runs against an empty volume.
-        condition: service_completed_successfully
-      publoader-extensions-private:
-        condition: service_completed_successfully
+    environment:
+      # Lets `/pull extensions` and `/pull extensions-private` git-pull the
+      # bind-mounted source clones below.
+      - PUBLOADER_REPO_EXTENSIONS=/sources/public
+      - PUBLOADER_REPO_EXTENSIONS_PRIVATE=/sources/private
     volumes:
       - ./config.ini:/app/config.ini
       - ./logs:/app/logs
       - extensions:/app/publoader/extensions
       - ./entrypoint.sh:/app/entrypoint.sh
+      - ./sync_extensions.py:/app/sync_extensions.py:ro
       - ./resources:/app/resources
+      # Host clones of the extension repos. The entrypoint runs sync_extensions.py
+      # over each `/sources/<name>/` on every container start, so a `git pull` +
+      # `docker compose restart publoader` is the canonical refresh path.
+      - ./publoader-extensions:/sources/public
+      - ./publoader-extensions-private:/sources/private
     entrypoint: [ "/app/entrypoint.sh" ]
     command: [ "python", "run.py" ]
 
@@ -32,10 +36,8 @@ services:
     container_name: publoader-bot
     restart: unless-stopped
     depends_on:
-      publoader-extensions:
-        condition: service_completed_successfully
-      publoader-extensions-private:
-        condition: service_completed_successfully
+      publoader:
+        condition: service_started
     environment:
       - PUBLOADER_SCHEDULER_CONTAINER=publoader
     volumes:
@@ -47,45 +49,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     entrypoint: [ "/app/entrypoint.sh" ]
     command: [ "python", "-m", "publoader.bot.server" ]
-
-  publoader-extensions:
-    image: ardax/publoader-extensions:latest
-    container_name: publoader-extensions
-    restart: "no"
-    # Sidecars are one-shot — watchtower only refreshes long-running containers,
-    # so without `always` Docker keeps using whatever `:latest` was cached on
-    # first pull and never picks up newer pushes from the extensions repo.
-    pull_policy: always
-    volumes:
-      - extensions:/shared/publoader/extensions
-    # The image's CMD is `python sync_extensions.py`, which copies the bundled
-    # extensions into the shared volume and exits. Don't override that — the
-    # named volume keeps the contents after the container exits.
-
-  publoader-extensions-private:
-    # Private extensions repo isn't published as an image. We reuse the public
-    # sidecar's `sync_extensions.py` and point it at a host clone of the private
-    # repo via PUBLOADER_SOURCE. The script copies each `src/<ext>` and every
-    # `schedule*.json` into the shared `extensions` volume, alongside the public
-    # extensions. Names must not collide with the public repo.
-    #
-    # The image's WORKDIR is /extensions and `sync_extensions.py` lives there.
-    # Mounting the private repo at /extensions would shadow the script, so we
-    # bind-mount at /source and point PUBLOADER_SOURCE there instead.
-    image: ardax/publoader-extensions:latest
-    container_name: publoader-extensions-private
-    restart: "no"
-    pull_policy: always
-    environment:
-      - PUBLOADER_SOURCE=/source
-    volumes:
-      - ./publoader-extensions-private:/source:ro
-      - extensions:/shared/publoader/extensions
-    depends_on:
-      publoader-extensions:
-        # Run after the public sidecar so its files land first; the atomic
-        # per-extension replace keeps both repos coexisting in the volume.
-        condition: service_completed_successfully
 
   watchtower:
     image: containrrr/watchtower:latest
@@ -99,8 +62,6 @@ services:
     depends_on:
       - publoader
       - publoader-bot
-      - publoader-extensions
-      - publoader-extensions-private
 
   cloudflared:
     image: cloudflare/cloudflared:latest

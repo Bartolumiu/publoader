@@ -27,11 +27,9 @@ except ImportError:  # pragma: no cover - import guard
 try:
     import docker as docker_sdk
     from docker.errors import APIError as DockerAPIError, DockerException, NotFound as DockerNotFound
-    from docker.types import Mount as DockerMount
 except ImportError:  # pragma: no cover - optional at import time
     docker_sdk = None
     DockerAPIError = DockerException = DockerNotFound = Exception
-    DockerMount = None
 
 from publoader.ipc import ipc_call, is_instance_running
 from publoader.utils.config import config
@@ -60,185 +58,6 @@ def _docker_container():
         return f"No container named {_scheduler_container_name()!r} found."
     except (DockerException, OSError) as e:
         return f"Could not reach the docker daemon: {e}"
-
-
-def _extension_sidecar_names() -> List[str]:
-    """Sidecar container names whose CMD runs sync_extensions.py.
-    Comma- or space-separated via env var or [Paths]extension_sidecars."""
-    raw = (
-        os.environ.get("PUBLOADER_EXTENSION_SIDECARS")
-        or config["Paths"].get("extension_sidecars")
-        or "publoader-extensions,publoader-extensions-private"
-    )
-    return [n.strip() for n in raw.replace(",", " ").split() if n.strip()]
-
-
-def _refresh_sidecar(name: str, pull: bool = True, wait_seconds: int = 180) -> dict:
-    """Pull the sidecar's image (optional), re-run the container, wait for exit.
-
-    When the pulled image differs from the running container's image hash we
-    recreate the container — `container.start()` alone would re-run the OLD
-    image bytes. The recreate copies essential config off `container.attrs`:
-    networks, mounts, env, command, entrypoint, restart policy, labels.
-    """
-    if docker_sdk is None:
-        return {"name": name, "ok": False, "error": "docker SDK not installed in bot container"}
-    try:
-        client = docker_sdk.from_env()
-    except (DockerException, OSError) as e:
-        return {"name": name, "ok": False, "error": f"docker daemon unreachable: {e}"}
-    try:
-        old = client.containers.get(name)
-    except DockerNotFound:
-        return {"name": name, "ok": False, "error": f"no container named {name!r}"}
-    except (DockerException, OSError) as e:
-        return {"name": name, "ok": False, "error": f"docker inspect failed: {e}"}
-
-    attrs = old.attrs or {}
-    image_tag = (old.image.tags or [None])[0]
-    current_image_id = old.image.id
-
-    pulled = False
-    pull_error = None
-    new_image_id = current_image_id
-    if pull and image_tag:
-        try:
-            img = client.images.pull(image_tag)
-            new_image_id = img.id
-            pulled = True
-        except DockerAPIError as e:
-            pull_error = str(e.explanation or e)
-        except (DockerException, OSError) as e:
-            pull_error = str(e)
-
-    image_changed = pulled and new_image_id != current_image_id
-    container = old
-    action: str
-
-    if image_changed:
-        try:
-            container = _recreate_with_image(client, old, image_tag)
-            action = "recreated"
-        except (DockerException, OSError, KeyError) as e:
-            logger.exception("sidecar recreate failed")
-            return {
-                "name": name,
-                "ok": False,
-                "image": image_tag,
-                "pulled": pulled,
-                "pull_error": pull_error,
-                "image_changed": True,
-                "error": f"recreate failed: {e}",
-            }
-    else:
-        try:
-            old.reload()
-            if old.status == "running":
-                # Already syncing — let it finish, no double-run.
-                action = "already-running"
-            else:
-                old.start()
-                action = "restarted"
-        except (DockerAPIError, DockerException, OSError) as e:
-            return {
-                "name": name,
-                "ok": False,
-                "image": image_tag,
-                "pulled": pulled,
-                "pull_error": pull_error,
-                "error": f"start failed: {e}",
-            }
-
-    exit_code: Optional[int] = None
-    if action != "already-running":
-        try:
-            result = container.wait(timeout=wait_seconds) or {}
-            exit_code = result.get("StatusCode", -1)
-        except Exception as e:  # pragma: no cover - defensive
-            return {
-                "name": name,
-                "ok": False,
-                "image": image_tag,
-                "pulled": pulled,
-                "image_changed": image_changed,
-                "action": action,
-                "error": f"wait failed: {e}",
-            }
-
-    try:
-        tail = container.logs(tail=15, stdout=True, stderr=True).decode(errors="replace")
-    except Exception:
-        tail = ""
-
-    return {
-        "name": name,
-        "ok": exit_code in (0, None),
-        "action": action,
-        "image": image_tag,
-        "pulled": pulled,
-        "pull_error": pull_error,
-        "image_changed": image_changed,
-        "exit_code": exit_code,
-        "logs_tail": tail.strip()[-500:] if tail else "",
-    }
-
-
-def _recreate_with_image(client, old, image_tag: str):
-    """Remove `old` and start a new container with the same name + essential
-    config but using `image_tag`. Returns the new Container handle."""
-    attrs = old.attrs or {}
-    cfg = attrs.get("Config") or {}
-    host = attrs.get("HostConfig") or {}
-    networks = list((attrs.get("NetworkSettings") or {}).get("Networks") or {})
-    name = (attrs.get("Name") or old.name).lstrip("/")
-
-    # Compose populates HostConfig.Mounts (typed); CLI -v populates Binds.
-    # Sidecars in our compose use both: named volume via Mounts, bind via Binds.
-    mounts = []
-    for m in host.get("Mounts") or []:
-        target = m.get("Target")
-        source = m.get("Source")
-        mtype = m.get("Type") or "bind"
-        read_only = bool(m.get("ReadOnly", False))
-        if not target:
-            continue
-        mounts.append(
-            DockerMount(
-                target=target,
-                source=source,
-                type=mtype,
-                read_only=read_only,
-            )
-        )
-
-    binds = host.get("Binds") or None
-
-    restart_policy = host.get("RestartPolicy") or {}
-    if not restart_policy.get("Name") or restart_policy["Name"] == "no":
-        restart_policy = None
-
-    run_kwargs: dict = {
-        "image": image_tag,
-        "name": name,
-        "detach": True,
-        "command": cfg.get("Cmd") or None,
-        "entrypoint": cfg.get("Entrypoint") or None,
-        "environment": cfg.get("Env") or None,
-        "working_dir": cfg.get("WorkingDir") or None,
-        "labels": cfg.get("Labels") or None,
-        "network": networks[0] if networks else None,
-    }
-    if mounts:
-        run_kwargs["mounts"] = mounts
-    elif binds:
-        run_kwargs["volumes"] = binds
-    if restart_policy:
-        run_kwargs["restart_policy"] = restart_policy
-
-    old.remove(force=True)
-    return client.containers.run(
-        **{k: v for k, v in run_kwargs.items() if v is not None}
-    )
 
 
 def _docker_action(action: str, timeout: int = 30) -> str:
@@ -1025,73 +844,60 @@ def _register_commands(bot: PubloaderBot) -> None:
     async def _prefix_extensions(ctx: commands.Context):
         await bot._dispatch(ctx, "list_extensions")
 
-    # ----- /refresh: pull extensions sidecar image + re-run sync -----
-    # The named extensions volume is populated by the sidecars' sync_extensions.py.
-    # /pull and watchtower's daily check don't refresh one-shot sidecars, so this
-    # command is the canonical way to get a new MangaDex group / extension push
-    # live without redeploying compose.
+    # ----- /refresh: re-sync extensions from bind-mounted source repos -----
+    # publoader's entrypoint runs sync_extensions.py at container start, but
+    # /refresh lets admins re-sync without bouncing the scheduler — useful
+    # after a `/pull extensions` to pick up new code in-place.
 
-    async def _do_refresh(reload_after: bool, pull: bool) -> List[dict]:
-        names = _extension_sidecar_names()
-        out: List[dict] = []
-        for n in names:
-            out.append(await asyncio.to_thread(_refresh_sidecar, n, pull))
-        if reload_after and is_instance_running():
-            try:
-                out.append(
-                    {"name": "scheduler-reload", **await asyncio.to_thread(ipc_call, "reload")}
-                )
-            except Exception as e:  # pragma: no cover - defensive
-                out.append({"name": "scheduler-reload", "ok": False, "error": str(e)})
-        return out
-
-    def _format_refresh(results: List[dict]) -> str:
+    def _format_refresh(payload: dict) -> str:
+        if not payload.get("ok") and payload.get("error"):
+            return f":red_circle: refresh failed — {payload['error']}"
+        results = payload.get("results") or []
+        if not results:
+            return "no extension sources synced."
         lines = []
         for r in results:
             icon = ":green_circle:" if r.get("ok") else ":red_circle:"
-            name = r.get("name", "?")
-            if r.get("name") == "scheduler-reload":
-                lines.append(f"{icon} scheduler reload — `{r.get('ok')}`")
-                continue
-            parts = [f"image={r.get('image') or '?'}"]
-            if r.get("pulled"):
-                parts.append("pulled")
-            if r.get("pull_error"):
-                parts.append(f"pull-error: {r['pull_error']}")
-            if r.get("image_changed"):
-                parts.append("image-changed")
-            parts.append(f"action={r.get('action') or '?'}")
-            if r.get("exit_code") is not None:
-                parts.append(f"exit={r['exit_code']}")
+            src = r.get("source") or "?"
+            synced = r.get("synced") or []
+            skipped = r.get("skipped") or []
+            parts = [f"synced={len(synced)}"]
+            if skipped:
+                parts.append(f"skipped={','.join(skipped)}")
             if r.get("error"):
                 parts.append(f"error: {r['error']}")
-            lines.append(f"{icon} `{name}` — " + ", ".join(parts))
-            tail = (r.get("logs_tail") or "").strip()
-            if tail:
-                lines.append(f"```\n{tail[-400:]}\n```")
-        return "\n".join(lines) or "no sidecars configured."
+            lines.append(f"{icon} `{src}` — " + ", ".join(parts))
+        if payload.get("reload_queued"):
+            lines.append(":arrows_counterclockwise: scheduler reload queued.")
+        return "\n".join(lines)
 
     @bot.tree.command(
         name="refresh",
-        description="Pull the extensions sidecar image and re-run sync (admin-only).",
+        description="Re-sync extensions from bind-mounted source repos (admin-only).",
     )
     @app_commands.describe(
-        nopull="Skip the docker pull and just re-run sync with the current image.",
-        noreload="Don't trigger a scheduler reload after sync.",
+        noreload="Don't queue a scheduler reload after sync.",
     )
     async def _slash_refresh(
         interaction: discord.Interaction,
-        nopull: Optional[bool] = False,
         noreload: Optional[bool] = False,
     ):
         if not _is_admin(interaction.user):
             await interaction.response.send_message("Not allowed.", ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
-        results = await _do_refresh(
-            reload_after=not noreload, pull=not nopull
-        )
-        await interaction.followup.send(_format_refresh(results)[:1900])
+        if not is_instance_running():
+            await interaction.followup.send(
+                ":red_circle: scheduler isn't running — start it first."
+            )
+            return
+        try:
+            payload = await asyncio.to_thread(
+                ipc_call, "refresh_extensions", reload=not noreload
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            payload = {"ok": False, "error": str(e)}
+        await interaction.followup.send(_format_refresh(payload)[:1900])
 
     @bot.command(name="refresh")
     async def _prefix_refresh(ctx: commands.Context, *flags: str):
@@ -1099,10 +905,17 @@ def _register_commands(bot: PubloaderBot) -> None:
             await ctx.send("Not allowed.")
             return
         flag_set = {f.lstrip("-").lower() for f in flags}
-        pull = "nopull" not in flag_set
         reload_after = "noreload" not in flag_set
-        results = await _do_refresh(reload_after=reload_after, pull=pull)
-        await ctx.send(_format_refresh(results)[:1900])
+        if not is_instance_running():
+            await ctx.send(":red_circle: scheduler isn't running — start it first.")
+            return
+        try:
+            payload = await asyncio.to_thread(
+                ipc_call, "refresh_extensions", reload=reload_after
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            payload = {"ok": False, "error": str(e)}
+        await ctx.send(_format_refresh(payload)[:1900])
 
 def run() -> int:
     token = _bot_token()

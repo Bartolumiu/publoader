@@ -21,12 +21,11 @@ docker compose up -d
 
 This brings up:
 
-- `publoader` — main scheduler, workers, IPC server, and the Discord control
-  bot (one container; bot is started in the background by the entrypoint).
-- `publoader-extensions` — sidecar that syncs `src/<extension>/` from the
-  extensions image into the named `extensions` volume on every start, then
-  exits. The main container waits for this to finish via
-  `service_completed_successfully`.
+- `publoader` — main scheduler, workers, IPC server. The entrypoint runs
+  `sync_extensions.py` over each `/sources/<name>/` bind-mounted clone of an
+  extensions repo, then starts `run.py`.
+- `publoader-bot` — Discord control bot in its own container (stays online
+  even when the scheduler is stopped).
 - `watchtower` — auto-pulls new images on a cron (defaults to 01:00).
 - `cloudflared` — optional Cloudflare tunnel.
 
