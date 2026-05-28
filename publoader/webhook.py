@@ -27,11 +27,11 @@ webhook_url = webhook_urls[0] if webhook_urls else None
 
 
 def make_webhook():
-    # discord_webhook supports url=list[str], posting to every URL on .execute().
-    if not webhook_urls:
-        return DiscordWebhook(url="", rate_limit_retry=True)
+    # Older discord_webhook releases don't actually iterate when `url` is a
+    # list — they pass `str(list)` to requests and fail with InvalidSchema.
+    # Always construct with a single URL; `send_webhook` fan-outs per-URL.
     return DiscordWebhook(
-        url=webhook_urls if len(webhook_urls) > 1 else webhook_urls[0],
+        url=webhook_urls[0] if webhook_urls else "",
         rate_limit_retry=True,
     )
 
@@ -198,19 +198,27 @@ class WebhookHelper:
         local_webhook.embeds.clear()
 
         for count, embed in enumerate(embeds_split, start=1):
-            local_webhook.embeds = embed
-            response = local_webhook.execute(remove_embeds=True)
-            try:
-                if isinstance(response, list):
-                    status_codes = [r.status_code for r in response]
-                    messages = [r.json() for r in response]
-                    logger.info(f"Discord API returned: {status_codes}, {messages}")
-                else:
-                    logger.info(
-                        f"Discord API returned: {response.status_code}, {response.json()}"
-                    )
-            except (JSONDecodeError, AttributeError, KeyError) as e:
-                logger.error(e)
+            # Fan out the same batch to every configured URL. Re-assigning
+            # embeds before each execute is required because remove_embeds=True
+            # clears them after the first send.
+            for url in webhook_urls:
+                local_webhook.url = url
+                local_webhook.embeds = list(embed)
+                response = local_webhook.execute(remove_embeds=True)
+                try:
+                    if isinstance(response, list):
+                        status_codes = [r.status_code for r in response]
+                        messages = [r.json() for r in response]
+                        logger.info(
+                            f"Discord API returned for {url}: {status_codes}, {messages}"
+                        )
+                    else:
+                        logger.info(
+                            f"Discord API returned for {url}: "
+                            f"{response.status_code}, {response.json()}"
+                        )
+                except (JSONDecodeError, AttributeError, KeyError) as e:
+                    logger.error(e)
 
             if count < len(embeds_split):
                 time.sleep(1)

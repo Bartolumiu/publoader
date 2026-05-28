@@ -107,9 +107,16 @@ def _guild_id() -> Optional[int]:
 
 
 def _bot_token() -> Optional[str]:
-    return config["Credentials"].get("discord_bot_token") or os.environ.get(
+    raw = config["Credentials"].get("discord_bot_token") or os.environ.get(
         "PUBLOADER_DISCORD_TOKEN"
     )
+    if not raw:
+        return None
+    # configparser keeps surrounding whitespace and never strips quotes —
+    # `DISCORD_BOT_TOKEN="MTxxx..."` in config.ini would otherwise be handed to
+    # discord.py with the quotes still attached, producing "Improper token".
+    token = raw.strip().strip("'\"").strip()
+    return token or None
 
 
 def _allowed_channels() -> set:
@@ -795,8 +802,14 @@ def run() -> int:
         print(msg)
         return 1
     except discord.LoginFailure as e:
-        logger.error(f"Bot login failed: {e}")
-        print(f"Bot login failed: {e}")
+        hint = (
+            "  Check config.ini [Credentials] DISCORD_BOT_TOKEN — make sure it's "
+            "the *bot* token from the Developer Portal (not the client secret / "
+            "OAuth secret / public key), with no surrounding quotes. If you "
+            "recently regenerated the token, the old one is permanently revoked."
+        )
+        logger.error(f"Bot login failed: {e}\n{hint}")
+        print(f"Bot login failed: {e}\n{hint}")
         return 1
     except Exception:
         logger.exception("Discord bot crashed")
