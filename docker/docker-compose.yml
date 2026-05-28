@@ -5,23 +5,12 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
-    environment:
-      # Lets `/pull extensions` and `/pull extensions-private` git-pull the
-      # bind-mounted source clones below.
-      - PUBLOADER_REPO_EXTENSIONS=/sources/public
-      - PUBLOADER_REPO_EXTENSIONS_PRIVATE=/sources/private
     volumes:
       - ./config.ini:/app/config.ini
       - ./logs:/app/logs
       - extensions:/app/publoader/extensions
       - ./entrypoint.sh:/app/entrypoint.sh
-      - ./sync_extensions.py:/app/sync_extensions.py:ro
       - ./resources:/app/resources
-      # Host clones of the extension repos. The entrypoint runs sync_extensions.py
-      # over each `/sources/<name>/` on every container start, so a `git pull` +
-      # `docker compose restart publoader` is the canonical refresh path.
-      - ./publoader-extensions:/sources/public
-      - ./publoader-extensions-private:/sources/private
     entrypoint: [ "/app/entrypoint.sh" ]
     command: [ "python", "run.py" ]
 

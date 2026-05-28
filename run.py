@@ -1,5 +1,4 @@
 import argparse
-import configparser
 import json
 import logging
 import os
@@ -13,7 +12,6 @@ import time
 from datetime import time as dtTime, timezone
 from importlib import reload
 from pathlib import Path
-from typing import Optional
 
 from scheduler import Scheduler
 
@@ -282,103 +280,7 @@ def restart():
 _EXT_NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
 
-# Repos that `cmd_pull` knows how to update. Path resolution order:
-#   1. env var (e.g. PUBLOADER_REPO_EXTENSIONS)
-#   2. config.ini [Repo] section (key matches env var minus the prefix, lowercased)
-#   3. a sensible default for the docker layout
-#
-# Each repo entry is (env_var, config_key, default_path).
-_REPO_DEFAULTS: dict = {
-    "base": ("PUBLOADER_REPO_BASE", "base_repo_path", str(root_path)),
-    "extensions": (
-        "PUBLOADER_REPO_EXTENSIONS",
-        "extensions_repo_path",
-        str(root_path / "publoader" / "extensions"),
-    ),
-    "extensions-private": (
-        "PUBLOADER_REPO_EXTENSIONS_PRIVATE",
-        "extensions_private_repo_path",
-        "",  # no default — only resolved if explicitly configured
-    ),
-}
-
-
-def _resolve_repo_path(name: str) -> Optional[Path]:
-    """Return the configured filesystem path for a known repo name, or None."""
-    entry = _REPO_DEFAULTS.get(name)
-    if entry is None:
-        return None
-    env_var, cfg_key, default_path = entry
-
-    raw = os.environ.get(env_var)
-    if not raw:
-        try:
-            raw = config["Repo"].get(cfg_key) if config.has_section("Repo") else None
-        except (KeyError, configparser.NoSectionError):
-            raw = None
-    if not raw:
-        raw = default_path
-    raw = (raw or "").strip()
-    if not raw:
-        return None
-    return Path(raw).expanduser().resolve()
-
-
-def _git_pull(repo_path: Path, timeout: int = 60) -> dict:
-    """Run `git pull --ff-only` against repo_path. Returns a serialisable status dict."""
-
-    def _git(*args, t: int = timeout):
-        return subprocess.run(
-            ["git", "-C", str(repo_path), *args],
-            capture_output=True,
-            text=True,
-            timeout=t,
-        )
-
-    try:
-        is_wt = _git("rev-parse", "--is-inside-work-tree", t=10)
-    except FileNotFoundError:
-        return {"ok": False, "error": "git binary not installed"}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "git rev-parse timed out"}
-
-    if is_wt.returncode != 0 or is_wt.stdout.strip() != "true":
-        return {
-            "ok": False,
-            "error": (
-                f"{repo_path} is not a git working tree — update via image pull "
-                "(docker compose pull && docker compose up -d) instead."
-            ),
-        }
-
-    try:
-        before = _git("rev-parse", "HEAD", t=10).stdout.strip()
-    except subprocess.TimeoutExpired:
-        before = ""
-
-    try:
-        pull = _git("pull", "--ff-only")
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "git pull timed out"}
-
-    if pull.returncode != 0:
-        return {
-            "ok": False,
-            "error": (pull.stderr.strip() or pull.stdout.strip() or "git pull failed"),
-        }
-
-    try:
-        after = _git("rev-parse", "HEAD", t=10).stdout.strip()
-    except subprocess.TimeoutExpired:
-        after = ""
-
-    return {
-        "ok": True,
-        "changed": bool(before and after and before != after),
-        "before": before,
-        "after": after,
-        "summary": pull.stdout.strip().splitlines()[-1] if pull.stdout.strip() else "",
-    }
+_PULL_REPOS = ("base", "extensions", "extensions-private")
 
 
 def _setup_ipc_server(database_connection) -> IPCServer:
@@ -440,48 +342,39 @@ def _setup_ipc_server(database_connection) -> IPCServer:
         }
 
     def cmd_pull(req):
-        """Pull the latest changes for one or more repos. The accepted names are
-        the keys of _REPO_DEFAULTS plus the alias 'all'."""
+        """Pull the latest changes for one or more repos via the GitHub tarball
+        API. Accepted names are 'base', 'extensions', 'extensions-private', or
+        the alias 'all'. Delegates to PubloaderUpdater so the existing PAT in
+        [Repo]github_access_token authenticates private-repo downloads."""
         names = req.get("repos") or req.get("repo")
         if isinstance(names, str):
             names = [names]
         if not names:
             return {"ok": False, "error": "no repos requested"}
         if "all" in names:
-            names = list(_REPO_DEFAULTS.keys())
+            names = list(_PULL_REPOS)
+
+        try:
+            updater = PubloaderUpdater()
+        except Exception as e:
+            logger.exception("updater init failed")
+            return {"ok": False, "error": f"updater init failed: {e}"}
 
         per_repo: dict = {}
         any_changed = False
         any_ok = True
         for name in names:
-            entry = _REPO_DEFAULTS.get(name)
-            if entry is None:
+            if name not in _PULL_REPOS:
                 per_repo[name] = {"ok": False, "error": f"unknown repo {name!r}"}
                 any_ok = False
                 continue
-            path = _resolve_repo_path(name)
-            if path is None:
-                per_repo[name] = {
-                    "ok": False,
-                    "error": f"no path configured for {name!r} — set {entry[0]} or "
-                    f"[Repo]/{entry[1]} in config.ini",
-                }
-                any_ok = False
-                continue
-            if not path.is_dir():
-                per_repo[name] = {"ok": False, "error": f"path missing: {path}"}
-                any_ok = False
-                continue
-
             try:
-                status = _git_pull(path)
+                status = updater.update_one(name)
             except Exception as e:  # pragma: no cover - defensive
                 logger.exception(f"pull for {name} crashed")
                 per_repo[name] = {"ok": False, "error": str(e)}
                 any_ok = False
                 continue
-
-            status["path"] = str(path)
             per_repo[name] = status
             if not status.get("ok"):
                 any_ok = False
@@ -639,47 +532,6 @@ def _setup_ipc_server(database_connection) -> IPCServer:
             return {"ok": False, "error": f"state DB write failed: {e}"}
         return {"ok": True, "mode": mode}
 
-    def cmd_refresh_extensions(req):
-        """Re-run sync_extensions.py for each configured source, then queue a
-        reload so the freshly-synced code is picked up without restarting the
-        container. The bot's /refresh routes through here."""
-        sources = req.get("sources") or req.get("source")
-        if isinstance(sources, str):
-            sources = [sources]
-
-        try:
-            sys.path.insert(0, "/app")
-            import sync_extensions  # type: ignore
-        except ImportError as e:
-            return {"ok": False, "error": f"sync_extensions.py not importable: {e}"}
-
-        if sources:
-            paths = [Path(s) for s in sources]
-        else:
-            paths = sync_extensions._resolve_sources([])
-        if not paths:
-            return {"ok": False, "error": "no sources to sync"}
-
-        try:
-            results = sync_extensions.sync_all(paths)
-        except Exception as e:  # pragma: no cover - defensive
-            logger.exception("refresh_extensions sync failed")
-            return {"ok": False, "error": str(e)}
-
-        reload_after = req.get("reload", True)
-        if reload_after:
-            _ipc_jobs.put(
-                (
-                    JOB_RUN,
-                    {"extension_names": None, "general_run": False, "clean_db": False},
-                )
-            )
-        return {
-            "ok": all(r.get("ok") for r in results),
-            "results": results,
-            "reload_queued": bool(reload_after),
-        }
-
     server.register("run", cmd_run)
     server.register("reload", cmd_reload)
     server.register("restart", cmd_restart)
@@ -693,7 +545,6 @@ def _setup_ipc_server(database_connection) -> IPCServer:
     server.register("list_extensions", cmd_list_extensions)
     server.register("disable_extension", cmd_disable_extension)
     server.register("enable_extension", cmd_enable_extension)
-    server.register("refresh_extensions", cmd_refresh_extensions)
     server.start()
     return server
 

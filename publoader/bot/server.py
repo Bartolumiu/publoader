@@ -844,39 +844,52 @@ def _register_commands(bot: PubloaderBot) -> None:
     async def _prefix_extensions(ctx: commands.Context):
         await bot._dispatch(ctx, "list_extensions")
 
-    # ----- /refresh: re-sync extensions from bind-mounted source repos -----
-    # publoader's entrypoint runs sync_extensions.py at container start, but
-    # /refresh lets admins re-sync without bouncing the scheduler — useful
-    # after a `/pull extensions` to pick up new code in-place.
+    # ----- /refresh: pull all repos via the updater, then reload -----
+    # Convenience wrapper for the common "pull everything and apply" flow.
+    # For per-repo control, use `/pull <name>` then `/reload`.
 
     def _format_refresh(payload: dict) -> str:
-        if not payload.get("ok") and payload.get("error"):
+        if not payload.get("ok") and payload.get("error") and not payload.get("repos"):
             return f":red_circle: refresh failed — {payload['error']}"
-        results = payload.get("results") or []
-        if not results:
-            return "no extension sources synced."
+        repos = payload.get("repos") or {}
+        if not repos:
+            return "no repos updated."
         lines = []
-        for r in results:
+        for name, r in repos.items():
             icon = ":green_circle:" if r.get("ok") else ":red_circle:"
-            src = r.get("source") or "?"
-            synced = r.get("synced") or []
-            skipped = r.get("skipped") or []
-            parts = [f"synced={len(synced)}"]
-            if skipped:
-                parts.append(f"skipped={','.join(skipped)}")
+            parts = []
+            if r.get("changed"):
+                parts.append(f"updated → `{(r.get('sha') or '')[:7]}`")
+            elif r.get("ok"):
+                parts.append("up to date")
             if r.get("error"):
                 parts.append(f"error: {r['error']}")
-            lines.append(f"{icon} `{src}` — " + ", ".join(parts))
+            lines.append(f"{icon} `{name}` — " + ", ".join(parts))
         if payload.get("reload_queued"):
             lines.append(":arrows_counterclockwise: scheduler reload queued.")
         return "\n".join(lines)
 
+    async def _do_refresh(reload_after: bool) -> dict:
+        if not is_instance_running():
+            return {"ok": False, "error": "scheduler isn't running — start it first."}
+        try:
+            payload = await asyncio.to_thread(ipc_call, "pull", repos=["all"])
+        except Exception as e:  # pragma: no cover - defensive
+            return {"ok": False, "error": str(e)}
+        if reload_after and payload.get("changed"):
+            try:
+                await asyncio.to_thread(ipc_call, "reload")
+                payload["reload_queued"] = True
+            except Exception as e:  # pragma: no cover - defensive
+                payload["reload_error"] = str(e)
+        return payload
+
     @bot.tree.command(
         name="refresh",
-        description="Re-sync extensions from bind-mounted source repos (admin-only).",
+        description="Pull all repos via the updater and reload (admin-only).",
     )
     @app_commands.describe(
-        noreload="Don't queue a scheduler reload after sync.",
+        noreload="Don't queue a scheduler reload after pulling.",
     )
     async def _slash_refresh(
         interaction: discord.Interaction,
@@ -886,17 +899,7 @@ def _register_commands(bot: PubloaderBot) -> None:
             await interaction.response.send_message("Not allowed.", ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
-        if not is_instance_running():
-            await interaction.followup.send(
-                ":red_circle: scheduler isn't running — start it first."
-            )
-            return
-        try:
-            payload = await asyncio.to_thread(
-                ipc_call, "refresh_extensions", reload=not noreload
-            )
-        except Exception as e:  # pragma: no cover - defensive
-            payload = {"ok": False, "error": str(e)}
+        payload = await _do_refresh(reload_after=not noreload)
         await interaction.followup.send(_format_refresh(payload)[:1900])
 
     @bot.command(name="refresh")
@@ -906,15 +909,7 @@ def _register_commands(bot: PubloaderBot) -> None:
             return
         flag_set = {f.lstrip("-").lower() for f in flags}
         reload_after = "noreload" not in flag_set
-        if not is_instance_running():
-            await ctx.send(":red_circle: scheduler isn't running — start it first.")
-            return
-        try:
-            payload = await asyncio.to_thread(
-                ipc_call, "refresh_extensions", reload=reload_after
-            )
-        except Exception as e:  # pragma: no cover - defensive
-            payload = {"ok": False, "error": str(e)}
+        payload = await _do_refresh(reload_after=reload_after)
         await ctx.send(_format_refresh(payload)[:1900])
 
 def run() -> int:

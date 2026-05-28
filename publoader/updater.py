@@ -163,9 +163,70 @@ class PubloaderUpdater:
         )
         shutil.rmtree(self.update_path, ignore_errors=True)
 
+    def _extensions_staging(self) -> Path:
+        return self.update_path.joinpath(self.extensions_path)
+
+    def _record_sha(self, slot: str, sha: str) -> None:
+        if slot == "base":
+            self.latest_commit_sha = sha
+        elif slot == "extensions":
+            self.latest_extension_sha = sha
+        elif slot == "extensions-private":
+            self.latest_extension_private_sha = sha
+
+    def update_one(self, name: str) -> dict:
+        """Pull updates for a single repo. Returns a serialisable status dict
+        — used by the IPC `pull` command so the bot can fetch one repo at a
+        time without invoking the full `update()` (which always touches all
+        three and webhooks Discord). `name` must be one of 'base',
+        'extensions', or 'extensions-private'."""
+        table = {
+            "base": (self.base_repo, self.latest_commit_sha, self.update_path),
+            "extensions": (
+                self.extensions_repo,
+                self.latest_extension_sha,
+                self._extensions_staging(),
+            ),
+            "extensions-private": (
+                self.extensions_private_repo,
+                self.latest_extension_private_sha,
+                self._extensions_staging(),
+            ),
+        }
+        if name not in table:
+            return {"ok": False, "error": f"unknown repo {name!r}"}
+        repo_name, sha_before, dest = table[name]
+        if not repo_name:
+            return {"ok": False, "error": f"{name} not configured in [Repo]"}
+
+        try:
+            success, failed, new_sha = self.fetch_repo(repo_name, sha_before, dest)
+        except Exception as e:
+            shutil.rmtree(self.update_path, ignore_errors=True)
+            logger.exception("update_one fetch failed")
+            return {"ok": False, "error": f"fetch failed: {e}"}
+
+        if failed:
+            shutil.rmtree(self.update_path, ignore_errors=True)
+            return {"ok": False, "error": "tarball download/extract failed"}
+
+        if not success:
+            return {"ok": True, "changed": False, "sha": sha_before}
+
+        Path(config["Paths"]["mdauth_path"]).unlink(missing_ok=True)
+        self.move_files()
+        self._record_sha(name, new_sha)
+        self._save_commits()
+        return {
+            "ok": True,
+            "changed": True,
+            "sha": new_sha,
+            "previous": sha_before,
+        }
+
     def update(self):
         print(f"Looking for new updates.")
-        extensions_path = self.update_path.joinpath(self.extensions_path)
+        extensions_path = self._extensions_staging()
 
         base_repo_success, base_repo_failed, self.latest_commit_sha = self.fetch_repo(
             self.base_repo, self.latest_commit_sha, self.update_path
