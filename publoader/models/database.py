@@ -230,10 +230,11 @@ def mark_chapters_unavailable(
 
     Instead of deleting them on MangaDex like update_expired_chapter_database
     does, these are queued in the `to_unavailable` collection. A dedicated
-    worker (workers/unavailable.py) then strips the externalUrl on the live
-    chapter via the MD API, leaving the pre-uploaded chapter card image as
-    the visible content. After successful processing the row moves into the
-    `unavailable` archive collection (never hard-deleted)."""
+    worker (workers/unavailable.py) then generates a chapter card image,
+    uploads it to the live chapter and clears the externalUrl in the same
+    edit via the MD API, leaving the card as the visible content. After
+    successful processing the row moves into the `unavailable` archive
+    collection (never hard-deleted)."""
     if md_chapter is None:
         md_chapter = []
     if chapter is None:
@@ -247,8 +248,10 @@ def mark_chapters_unavailable(
 
     if isinstance(chapter, Chapter):
         chapter = vars(chapter)
-    chapters = [chapter] if not isinstance(chapter, list) else list(
-        map(convert_model_dict, chapter)
+    chapters = (
+        [chapter]
+        if not isinstance(chapter, list)
+        else list(map(convert_model_dict, chapter))
     )
 
     if isinstance(md_chapter, dict):
@@ -350,7 +353,9 @@ def enqueue_chapter_removal(
         resolve_chapter_removal_mode,
     )
 
-    effective = mode if mode in VALID_REMOVAL_MODES else resolve_chapter_removal_mode(extension)
+    effective = (
+        mode if mode in VALID_REMOVAL_MODES else resolve_chapter_removal_mode(extension)
+    )
 
     if effective == REMOVAL_MODE_DELETE:
         return update_expired_chapter_database(

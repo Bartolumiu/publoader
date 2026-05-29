@@ -34,9 +34,7 @@ def get_md_api(route: str, **params: dict) -> List[dict]:
         logger.debug(f"Request parameters: {parameters}")
 
         try:
-            response = http_client.get(
-                f"{mangadex_api_url}/{route}", params=parameters
-            )
+            response = http_client.get(f"{mangadex_api_url}/{route}", params=parameters)
         except RequestError as e:
             logger.error(e)
             retry += 1
@@ -64,8 +62,12 @@ def get_md_api(route: str, **params: dict) -> List[dict]:
         # Mangadex caps offset at 10k. Reset using the last item's createdAt to
         # walk past the wall.
         if offset >= 10000:
-            logger.debug(f"Reached 10k {route}s, continuing with createdAtSince cursor.")
-            created_at_since_time = chapters[-1]["attributes"]["createdAt"].split("+")[0]
+            logger.debug(
+                f"Reached 10k {route}s, continuing with createdAtSince cursor."
+            )
+            created_at_since_time = chapters[-1]["attributes"]["createdAt"].split("+")[
+                0
+            ]
             offset = 0
             first_call = True
 

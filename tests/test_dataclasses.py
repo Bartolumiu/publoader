@@ -3,18 +3,38 @@ from publoader.models.dataclasses import Chapter
 
 
 def test_equal_when_identity_tuple_matches():
-    a = Chapter(chapter_id="1", chapter_number="1", chapter_language="en",
-                manga_id="m", manga_name="title")
-    b = Chapter(chapter_id="1", chapter_number="1", chapter_language="en",
-                manga_id="m", manga_name="title")
+    a = Chapter(
+        chapter_id="1",
+        chapter_number="1",
+        chapter_language="en",
+        manga_id="m",
+        manga_name="title",
+    )
+    b = Chapter(
+        chapter_id="1",
+        chapter_number="1",
+        chapter_language="en",
+        manga_id="m",
+        manga_name="title",
+    )
     assert a == b
 
 
 def test_not_equal_when_field_differs():
-    a = Chapter(chapter_id="1", chapter_number="1", chapter_language="en",
-                manga_id="m", manga_name="title")
-    b = Chapter(chapter_id="2", chapter_number="1", chapter_language="en",
-                manga_id="m", manga_name="title")
+    a = Chapter(
+        chapter_id="1",
+        chapter_number="1",
+        chapter_language="en",
+        manga_id="m",
+        manga_name="title",
+    )
+    b = Chapter(
+        chapter_id="2",
+        chapter_number="1",
+        chapter_language="en",
+        manga_id="m",
+        manga_name="title",
+    )
     assert a != b
 
 

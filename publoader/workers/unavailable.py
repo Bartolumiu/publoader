@@ -1,22 +1,33 @@
 """Worker that processes the `to_unavailable` queue.
 
-For each chapter:
+When a chapter lands here it still exists on MangaDex as an *external* chapter:
+an `externalUrl` pointing at the publisher and no hosted pages. For each one we:
+
   1. Fetch the current chapter from MangaDex so we know its version, groups,
      language, etc.
-  2. PUT /chapter/{id} with the same payload minus `externalUrl` (and bump
-     version). The chapter card image uploaded at initial upload stays as
-     the visible content.
-  3. On success, archive the row in the `unavailable` collection and remove
+  2. Generate a per-chapter info card image (publoader.chapter_image) — this is
+     the only place cards are generated; uploads no longer create them eagerly.
+  3. Open an *edit* upload session for the chapter
+     (POST /upload/begin/{chapterId}), upload the card as the single page, and
+     commit it (chapterDraft only accepts volume/chapter/title/language +
+     externalUrl, so the link can't be dropped here).
+  4. PUT /chapter/{id} with the full chapter body (the ChapterEdit schema
+     requires volume, chapter, title, translatedLanguage, groups and version)
+     and externalUrl set to null, dropping the now-dead publisher link.
+  5. On success, archive the row in the `unavailable` collection and remove
      it from `to_unavailable`.
 
 Failures are left on the queue so they retry on the next scheduler tick.
 """
+
 import logging
+import traceback
 from typing import Optional
 
+from publoader.chapter_image import generate_chapter_card
 from publoader.http.properties import RequestError
 from publoader.models.dataclasses import Chapter
-from publoader.utils.config import mangadex_api_url
+from publoader.utils.config import mangadex_api_url, md_upload_api_url, upload_retry
 from publoader.utils.utils import get_current_datetime
 
 logger = logging.getLogger("publoader-unavailable")
@@ -28,12 +39,9 @@ class UnavailableProcess:
         self.http_client = http_client
         self.md_chapter_id: Optional[str] = item.get("md_chapter_id")
         self.chapter = Chapter(
-            **{
-                k: v
-                for k, v in item.items()
-                if k in Chapter.__dataclass_fields__
-            }
+            **{k: v for k, v in item.items() if k in Chapter.__dataclass_fields__}
         )
+        self.upload_session_id: Optional[str] = None
 
     def _fetch_md_chapter(self):
         try:
@@ -51,6 +59,142 @@ class UnavailableProcess:
         if resp.status_code != 200:
             return None
         return resp.data.get("data")
+
+    def _delete_existing_upload_session(self):
+        """MangaDex allows one upload session at a time; clear any stale one."""
+        try:
+            existing = self.http_client.get(
+                f"{md_upload_api_url}", successful_codes=[404]
+            )
+        except RequestError as e:
+            logger.error(f"Couldn't probe existing upload session: {e}")
+            return
+
+        if existing.status_code == 200 and existing.data is not None:
+            self._remove_upload_session(existing.data["data"]["id"])
+
+    def _remove_upload_session(self, session_id: Optional[str] = None):
+        session_id = session_id or self.upload_session_id
+        if not session_id:
+            return
+        try:
+            self.http_client.delete(
+                f"{md_upload_api_url}/{session_id}", successful_codes=[404]
+            )
+        except RequestError as e:
+            logger.error(f"Couldn't delete upload session {session_id}: {e}")
+
+    def _begin_edit_session(self, version: Optional[int]) -> Optional[str]:
+        """Start an edit-chapter upload session for the existing chapter."""
+        self._delete_existing_upload_session()
+        try:
+            resp = self.http_client.post(
+                f"{md_upload_api_url}/begin/{self.md_chapter_id}",
+                json={"version": version},
+                tries=1,
+            )
+        except RequestError as e:
+            logger.error(f"Couldn't begin edit session for {self.md_chapter_id}: {e}")
+            return None
+
+        if not resp.ok or resp.data is None:
+            logger.error(
+                f"Begin edit session for {self.md_chapter_id} returned "
+                f"{resp.status_code}: {resp.data!r}"
+            )
+            return None
+        return resp.data["data"]["id"]
+
+    def _upload_card(self, card_bytes: bytes) -> Optional[str]:
+        """Upload the generated card as the chapter's single page."""
+        files = {"0": ("0.png", card_bytes, "image/png")}
+        for _ in range(upload_retry):
+            try:
+                resp = self.http_client.post(
+                    f"{md_upload_api_url}/{self.upload_session_id}", files=files
+                )
+            except RequestError as e:
+                logger.error(f"Card upload failed for {self.md_chapter_id}: {e}")
+                continue
+
+            if resp.data is None:
+                continue
+            if resp.data.get("errors") or resp.data.get("result") == "error":
+                logger.warning(f"Card upload reported errors: {resp.data}")
+                continue
+
+            try:
+                return resp.data["data"][0]["id"]
+            except (KeyError, IndexError):
+                logger.warning(f"Unexpected card upload response: {resp.data}")
+                continue
+        return None
+
+    def _commit_page(self, attrs: dict, page_id: str) -> Optional[dict]:
+        """Attach the uploaded card to the chapter via the upload session.
+
+        The `chapterDraft` schema (ChapterDraft) is strict — `additionalProperties:
+        false`, required volume/chapter/title/translatedLanguage — and rejects
+        `version`/`groups`, so we send only those plus the existing externalUrl.
+        The publisher link is dropped separately in _clear_external_url. Returns
+        the committed chapter on success (its bumped version feeds the edit)."""
+        payload = {
+            "chapterDraft": {
+                "volume": attrs.get("volume"),
+                "chapter": attrs.get("chapter"),
+                "title": attrs.get("title"),
+                "translatedLanguage": attrs.get("translatedLanguage"),
+                "externalUrl": attrs.get("externalUrl"),
+            },
+            "pageOrder": [page_id],
+            "termsAccepted": True,
+        }
+        try:
+            resp = self.http_client.post(
+                f"{md_upload_api_url}/{self.upload_session_id}/commit", json=payload
+            )
+        except RequestError as e:
+            logger.error(f"Commit failed for {self.md_chapter_id}: {e}")
+            return None
+
+        if resp.status_code != 200 or resp.data is None:
+            logger.error(
+                f"Commit returned {resp.status_code} for chapter "
+                f"{self.md_chapter_id}: {resp.data!r}"
+            )
+            return None
+        return resp.data.get("data")
+
+    def _clear_external_url(self, attrs: dict, groups: list, version) -> bool:
+        """Remove the publisher link via the chapter-edit endpoint.
+
+        PUT /chapter/{id} (ChapterEdit) requires the full chapter body — volume,
+        chapter, title, translatedLanguage, groups and version — so we resend all
+        of it, only swapping externalUrl to null."""
+        payload = {
+            "volume": attrs.get("volume"),
+            "chapter": attrs.get("chapter"),
+            "title": attrs.get("title"),
+            "translatedLanguage": attrs.get("translatedLanguage"),
+            "groups": groups,
+            "externalUrl": None,  # strip the dead publisher link
+            "version": version,
+        }
+        try:
+            resp = self.http_client.put(
+                f"{mangadex_api_url}/chapter/{self.md_chapter_id}", json=payload
+            )
+        except RequestError as e:
+            logger.error(f"Couldn't clear externalUrl on {self.md_chapter_id}: {e}")
+            return False
+
+        if resp.status_code != 200:
+            logger.error(
+                f"Chapter edit returned {resp.status_code} for chapter "
+                f"{self.md_chapter_id}: {resp.data!r}"
+            )
+            return False
+        return True
 
     def mark_unavailable(self) -> bool:
         if not self.md_chapter_id:
@@ -85,37 +229,64 @@ class UnavailableProcess:
             )
             return True
 
-        payload = {
-            "volume": attrs.get("volume"),
-            "chapter": attrs.get("chapter"),
-            "title": attrs.get("title"),
-            "translatedLanguage": attrs.get("translatedLanguage"),
-            "externalUrl": None,  # strip the source link
-            "version": attrs.get("version"),
-            "groups": [
-                rel["id"]
-                for rel in chapter_data.get("relationships", [])
-                if rel.get("type") == "scanlation_group"
-            ],
-        }
+        groups = [
+            rel["id"]
+            for rel in chapter_data.get("relationships", [])
+            if rel.get("type") == "scanlation_group"
+        ]
 
+        # Generate the card now, at unavailability time, rather than at upload.
         try:
-            resp = self.http_client.put(
-                f"{mangadex_api_url}/chapter/{self.md_chapter_id}", json=payload
+            card_bytes = generate_chapter_card(
+                manga_name=self.chapter.manga_name,
+                chapter_number=attrs.get("chapter") or self.chapter.chapter_number,
+                chapter_title=attrs.get("title") or self.chapter.chapter_title,
+                chapter_language=attrs.get("translatedLanguage")
+                or self.chapter.chapter_language,
+                extension_name=self.chapter.extension_name,
+                publisher=self.chapter.extension_name,
+                chapter_url=attrs.get("externalUrl") or self.chapter.chapter_url,
+                available_from=self.item.get("chapter_timestamp"),
+                available_to=self.item.get("unavailable_at"),
             )
-        except RequestError as e:
-            logger.error(f"Couldn't edit chapter {self.md_chapter_id}: {e}")
+        except Exception:
+            traceback.print_exc()
+            logger.exception(
+                f"Couldn't generate chapter card for {self.md_chapter_id}; "
+                "leaving on the queue to retry."
+            )
             return False
 
-        if resp.status_code != 200:
-            logger.error(
-                f"Edit returned {resp.status_code} for chapter {self.md_chapter_id}"
+        self.upload_session_id = self._begin_edit_session(attrs.get("version"))
+        if not self.upload_session_id:
+            return False
+
+        page_id = self._upload_card(card_bytes)
+        if not page_id:
+            logger.error(f"Couldn't upload chapter card for {self.md_chapter_id}.")
+            self._remove_upload_session()
+            return False
+
+        committed = self._commit_page(attrs, page_id)
+        if committed is None:
+            self._remove_upload_session()
+            return False
+
+        # The commit bumps the chapter version; PUT /chapter needs the current
+        # one. Prefer the value the commit returned, re-fetching only if absent.
+        version = (committed.get("attributes") or {}).get("version")
+        if version is None:
+            refetched = self._fetch_md_chapter() or {}
+            version = (refetched.get("attributes") or {}).get("version") or attrs.get(
+                "version"
             )
+
+        if not self._clear_external_url(attrs, groups, version):
             return False
 
         logger.info(
-            f"Marked chapter {self.md_chapter_id} unavailable "
-            f"(extension={self.chapter.extension_name})."
+            f"Marked chapter {self.md_chapter_id} unavailable (uploaded card, "
+            f"cleared externalUrl; extension={self.chapter.extension_name})."
         )
         return True
 

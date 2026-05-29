@@ -120,9 +120,9 @@ class UploaderProcess:
                 uploaded_filename = uploaded_image_attributes["originalFileName"]
                 file_size = uploaded_image_attributes["fileSize"]
 
-                self.uploaded_image_ids_by_index[int(uploaded_filename)] = (
-                    uploaded_image["id"]
-                )
+                self.uploaded_image_ids_by_index[
+                    int(uploaded_filename)
+                ] = uploaded_image["id"]
                 original_filename = self.images_to_upload_names[uploaded_filename]
 
                 print(successful_upload_message.format(original_filename, file_size))

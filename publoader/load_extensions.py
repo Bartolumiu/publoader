@@ -288,6 +288,7 @@ def load_extension(extension: Path, clean_db: bool = False, general_run: bool = 
     # Runtime unload via the bot: skip without parsing/importing.
     try:
         from publoader.state import get_state_store
+
         if get_state_store().is_extension_disabled(extension.name):
             print(f"{normalised_extension_name} is unloaded via state DB, skipping.")
             return

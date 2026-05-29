@@ -101,16 +101,12 @@ class PubloaderUpdater:
                     try:
                         candidate.relative_to(target_root)
                     except ValueError:
-                        logger.warning(
-                            f"Skipping unsafe tarball entry: {member.name}"
-                        )
+                        logger.warning(f"Skipping unsafe tarball entry: {member.name}")
                         continue
 
                     # Drop symlinks/hardlinks that could escape the target dir
                     if member.issym() or member.islnk():
-                        logger.warning(
-                            f"Skipping link entry in tarball: {member.name}"
-                        )
+                        logger.warning(f"Skipping link entry in tarball: {member.name}")
                         continue
 
                     tar.extract(member, download_path)

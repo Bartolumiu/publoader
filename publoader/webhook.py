@@ -141,7 +141,9 @@ class WebhookHelper:
             embed_len += len(field.get("name") or "") + len(field.get("value") or "")
         return embed_len
 
-    def _make_multiple_embeds(self, embed: Union["DiscordEmbed", dict], list_fields: List[List[dict]]):
+    def _make_multiple_embeds(
+        self, embed: Union["DiscordEmbed", dict], list_fields: List[List[dict]]
+    ):
         embed_dict = self._embed_as_dict(embed)
         new_embeds = []
         for fields in list_fields:

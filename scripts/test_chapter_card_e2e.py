@@ -1,8 +1,10 @@
 """End-to-end test for the chapter-card / unavailable flow.
 
-THIS HITS THE REAL MangaDex API. It creates a real chapter under the group
-you specify, then immediately edits it to clear externalUrl. Run it only
-against a manga you have permission to publish to.
+THIS HITS THE REAL MangaDex API. It creates a real *external* chapter under
+the group you specify (no pages, just an externalUrl), then runs the same
+mark-unavailable path the live worker uses: generate a card, open an edit
+upload session, upload the card, and commit with externalUrl cleared. Run it
+only against a manga you have permission to publish to.
 
 Usage (inside the publoader container, or anywhere config.ini lives):
 
@@ -13,14 +15,16 @@ Usage (inside the publoader container, or anywhere config.ini lives):
         --confirm
 
 Steps:
-  1. Generate the chapter-card PNG with PIL (same code path as live uploads).
-  2. Log in to MangaDex (or refresh) via the singleton http_client.
-  3. Delete any existing upload session.
-  4. Create a new upload session for the manga.
-  5. Upload the card image.
-  6. Commit the chapter with externalUrl=<placeholder> + pageOrder=[card].
-  7. Edit the chapter to clear externalUrl (mark unavailable).
-  8. Print the chapter URL so you can eyeball it on mangadex.org.
+  1. Log in to MangaDex (or refresh) via the singleton http_client.
+  2. Delete any existing upload session.
+  3. Create a new upload session for the manga.
+  4. Commit an external-only chapter (externalUrl set, no pages).
+  5. Mark unavailable, mirroring workers/unavailable.py:
+       a. Generate the chapter-card PNG with PIL.
+       b. Open an edit upload session on the chapter (begin/{chapterId}).
+       c. Upload the card image.
+       d. Commit with externalUrl=None + pageOrder=[card].
+  6. Re-fetch and print the chapter so you can eyeball it on mangadex.org.
 
 The script does not write anything to MongoDB — it only validates that the
 MangaDex side of the round-trip works the way the live workers expect.
@@ -30,6 +34,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Optional
 
 from publoader.chapter_image import generate_chapter_card
 from publoader.http import http_client
@@ -52,9 +57,7 @@ def _delete_existing_session() -> None:
         sid = resp.data["data"]["id"]
         print(f"[info] deleting stale upload session {sid}")
         try:
-            http_client.delete(
-                f"{md_upload_api_url}/{sid}", successful_codes=[404]
-            )
+            http_client.delete(f"{md_upload_api_url}/{sid}", successful_codes=[404])
         except RequestError as e:
             print(f"[warn] couldn't delete stale session: {e}")
 
@@ -72,6 +75,19 @@ def _begin_session(manga_id: str, group_id: str) -> str:
     return sid
 
 
+def _begin_edit_session(chapter_id: str, version: Optional[int]) -> str:
+    resp = http_client.post(
+        f"{md_upload_api_url}/begin/{chapter_id}",
+        json={"version": version},
+        tries=1,
+    )
+    if not resp.ok or resp.data is None:
+        raise SystemExit(f"begin edit failed: {resp.status_code} {resp.data!r}")
+    sid = resp.data["data"]["id"]
+    print(f"[ok ] edit upload session: {sid}")
+    return sid
+
+
 def _upload_card(session_id: str, png_bytes: bytes) -> str:
     files = {"0": ("card.png", png_bytes, "image/png")}
     resp = http_client.post(f"{md_upload_api_url}/{session_id}", files=files)
@@ -84,31 +100,37 @@ def _upload_card(session_id: str, png_bytes: bytes) -> str:
     return page_id
 
 
-def _commit_chapter(
-    session_id: str,
-    page_id: str,
-    chapter_number: str,
-    title: str,
-    language: str,
-    external_url: str,
-) -> str:
-    payload = {
-        "chapterDraft": {
-            "volume": None,
-            "chapter": chapter_number,
-            "title": title,
-            "translatedLanguage": language,
-            "externalUrl": external_url,
-        },
-        "pageOrder": [page_id],
-        "termsAccepted": True,
-    }
+def _commit(session_id: str, payload: dict) -> str:
     resp = http_client.post(f"{md_upload_api_url}/{session_id}/commit", json=payload)
     if not resp.ok or resp.data is None:
         raise SystemExit(f"commit failed: {resp.status_code} {resp.data!r}")
     chap_id = resp.data["data"]["id"]
     print(f"[ok ] committed chapter: {chap_id}")
     return chap_id
+
+
+def _commit_external(
+    session_id: str,
+    chapter_number: str,
+    title: str,
+    language: str,
+    external_url: str,
+) -> str:
+    """Create a plain external chapter — externalUrl, no hosted pages."""
+    return _commit(
+        session_id,
+        {
+            "chapterDraft": {
+                "volume": None,
+                "chapter": chapter_number,
+                "title": title,
+                "translatedLanguage": language,
+                "externalUrl": external_url,
+            },
+            "pageOrder": [],
+            "termsAccepted": True,
+        },
+    )
 
 
 def _fetch_chapter(chap_id: str) -> dict:
@@ -121,27 +143,61 @@ def _fetch_chapter(chap_id: str) -> dict:
     return resp.data["data"]
 
 
-def _mark_unavailable(chap_id: str) -> None:
+def _mark_unavailable(chap_id: str, png: bytes) -> None:
     """Mirror the workers/unavailable.py logic against the live API."""
     chap = _fetch_chapter(chap_id)
     attrs = chap["attributes"]
-    payload = {
-        "volume": attrs.get("volume"),
-        "chapter": attrs.get("chapter"),
-        "title": attrs.get("title"),
-        "translatedLanguage": attrs.get("translatedLanguage"),
-        "externalUrl": None,
-        "version": attrs.get("version"),
-        "groups": [
-            rel["id"]
-            for rel in chap.get("relationships", [])
-            if rel.get("type") == "scanlation_group"
-        ],
-    }
-    resp = http_client.put(f"{mangadex_api_url}/chapter/{chap_id}", json=payload)
+    groups = [
+        rel["id"]
+        for rel in chap.get("relationships", [])
+        if rel.get("type") == "scanlation_group"
+    ]
+
+    print("[step] opening edit upload session…")
+    sid = _begin_edit_session(chap_id, attrs.get("version"))
+
+    print("[step] uploading card…")
+    page_id = _upload_card(sid, png)
+
+    # ChapterDraft can't drop externalUrl (additionalProperties:false, no
+    # version/groups), so the commit just attaches the page, keeping the link.
+    print("[step] committing edit (attaching card page)…")
+    committed = http_client.post(
+        f"{md_upload_api_url}/{sid}/commit",
+        json={
+            "chapterDraft": {
+                "volume": attrs.get("volume"),
+                "chapter": attrs.get("chapter"),
+                "title": attrs.get("title"),
+                "translatedLanguage": attrs.get("translatedLanguage"),
+                "externalUrl": attrs.get("externalUrl"),
+            },
+            "pageOrder": [page_id],
+            "termsAccepted": True,
+        },
+    )
+    if not committed.ok or committed.data is None:
+        raise SystemExit(f"commit failed: {committed.status_code} {committed.data!r}")
+    version = committed.data["data"]["attributes"]["version"]
+    print(f"[ok ] committed page (version now {version})")
+
+    # ChapterEdit requires the full body; resend everything, externalUrl=null.
+    print("[step] PUT /chapter to clear externalUrl…")
+    resp = http_client.put(
+        f"{mangadex_api_url}/chapter/{chap_id}",
+        json={
+            "volume": attrs.get("volume"),
+            "chapter": attrs.get("chapter"),
+            "title": attrs.get("title"),
+            "translatedLanguage": attrs.get("translatedLanguage"),
+            "groups": groups,
+            "externalUrl": None,
+            "version": version,
+        },
+    )
     if not resp.ok:
-        raise SystemExit(f"mark-unavailable PUT failed: {resp.status_code} {resp.data!r}")
-    print(f"[ok ] cleared externalUrl on {chap_id}")
+        raise SystemExit(f"chapter edit failed: {resp.status_code} {resp.data!r}")
+    print(f"[ok ] uploaded card and cleared externalUrl on {chap_id}")
 
     # Re-fetch to confirm
     confirmed = _fetch_chapter(chap_id)
@@ -162,7 +218,7 @@ def main() -> int:
     parser.add_argument(
         "--external-url",
         default="https://example.com/publoader-e2e-test",
-        help="Placeholder externalUrl; will be cleared in step 7.",
+        help="Placeholder externalUrl; will be cleared in step 5.",
     )
     parser.add_argument(
         "--manga-name",
@@ -214,13 +270,9 @@ def main() -> int:
     print("[step] beginning new upload session…")
     sid = _begin_session(args.manga_id, args.group_id)
 
-    print("[step] uploading card…")
-    page_id = _upload_card(sid, png)
-
-    print("[step] committing chapter…")
-    chap_id = _commit_chapter(
+    print("[step] committing external chapter (no pages)…")
+    chap_id = _commit_external(
         sid,
-        page_id,
         args.chapter_number,
         args.chapter_title,
         args.language,
@@ -228,10 +280,10 @@ def main() -> int:
     )
     print(f"[link] https://mangadex.org/chapter/{chap_id}")
 
-    print("[step] marking unavailable (clearing externalUrl)…")
-    _mark_unavailable(chap_id)
+    print("[step] marking unavailable (upload card + clear externalUrl)…")
+    _mark_unavailable(chap_id, png)
 
-    print("[done] open the link above — the card should still render as the page.")
+    print("[done] open the link above — the card should now render as the page.")
     return 0
 
 

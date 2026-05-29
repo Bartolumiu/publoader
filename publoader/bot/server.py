@@ -26,7 +26,11 @@ except ImportError:  # pragma: no cover - import guard
 
 try:
     import docker as docker_sdk
-    from docker.errors import APIError as DockerAPIError, DockerException, NotFound as DockerNotFound
+    from docker.errors import (
+        APIError as DockerAPIError,
+        DockerException,
+        NotFound as DockerNotFound,
+    )
 except ImportError:  # pragma: no cover - optional at import time
     docker_sdk = None
     DockerAPIError = DockerException = DockerNotFound = Exception
@@ -96,6 +100,7 @@ def _docker_action(action: str, timeout: int = 30) -> str:
 
 # ---------- config helpers ----------
 
+
 def _guild_id() -> Optional[int]:
     raw = config["Paths"].get("discord_guild_id") or os.environ.get(
         "PUBLOADER_DISCORD_GUILD"
@@ -121,9 +126,8 @@ def _bot_token() -> Optional[str]:
 
 def _allowed_channels() -> set:
     """Channel/thread IDs the bot will accept commands from. Empty set = anywhere."""
-    raw = (
-        config["Paths"].get("discord_allowed_channels")
-        or os.environ.get("PUBLOADER_DISCORD_CHANNELS", "")
+    raw = config["Paths"].get("discord_allowed_channels") or os.environ.get(
+        "PUBLOADER_DISCORD_CHANNELS", ""
     )
     out: set = set()
     for tok in raw.replace(",", " ").split():
@@ -141,17 +145,15 @@ def _channel_allowed(channel_id: Optional[int]) -> bool:
 
 
 def _admin_user_ids() -> set:
-    raw = (
-        config["Paths"].get("discord_admin_users")
-        or os.environ.get("PUBLOADER_ADMIN_USERS", "")
+    raw = config["Paths"].get("discord_admin_users") or os.environ.get(
+        "PUBLOADER_ADMIN_USERS", ""
     )
     return {int(t) for t in raw.replace(",", " ").split() if t.strip().isdigit()}
 
 
 def _admin_role_ids() -> set:
-    raw = (
-        config["Paths"].get("discord_admin_roles")
-        or os.environ.get("PUBLOADER_ADMIN_ROLES", "")
+    raw = config["Paths"].get("discord_admin_roles") or os.environ.get(
+        "PUBLOADER_ADMIN_ROLES", ""
     )
     return {int(t) for t in raw.replace(",", " ").split() if t.strip().isdigit()}
 
@@ -194,6 +196,7 @@ def _split_extensions(value: Optional[str]) -> Optional[list]:
 
 
 # ---------- bot ----------
+
 
 class PubloaderBot(commands.Bot):
     def __init__(self):
@@ -250,7 +253,9 @@ class PubloaderBot(commands.Bot):
         except Exception as e:  # pragma: no cover - defensive
             await ctx.send(f"IPC call failed: `{e}`")
             return
-        await ctx.send(f"`{cmd}` -> ```json\n{json.dumps(result, indent=2)[:1800]}\n```")
+        await ctx.send(
+            f"`{cmd}` -> ```json\n{json.dumps(result, indent=2)[:1800]}\n```"
+        )
 
     async def _dispatch_slash(
         self, interaction: discord.Interaction, cmd: str, **payload
@@ -300,7 +305,8 @@ class PubloaderBot(commands.Bot):
         embed.add_field(
             name="Loaded extensions",
             value=(
-                f"{len(extensions)}: " + ", ".join(extensions[:15])
+                f"{len(extensions)}: "
+                + ", ".join(extensions[:15])
                 + ("…" if len(extensions) > 15 else "")
                 if extensions
                 else "none on disk"
@@ -314,6 +320,25 @@ class PubloaderBot(commands.Bot):
                 jobs = status.get("jobs", []) or []
                 embed.add_field(name="PID", value=str(status.get("pid", "?")))
                 embed.add_field(name="Scheduled jobs", value=str(len(jobs)))
+
+                workers = status.get("workers", []) or []
+                if workers:
+                    worker_lines = []
+                    for w in workers:
+                        queued = w.get("queued")
+                        if w.get("error"):
+                            depth = f":warning: `{w['error']}`"
+                        elif queued is None:
+                            depth = "`?`"
+                        else:
+                            depth = f"**{queued}** queued"
+                        worker_lines.append(f"• `{w.get('name')}` — {depth}")
+                    embed.add_field(
+                        name="Workers",
+                        value="\n".join(worker_lines)[:1000],
+                        inline=False,
+                    )
+
                 if jobs:
                     preview = "\n".join(f"• {j}" for j in jobs[:8])
                     if len(jobs) > 8:
@@ -324,12 +349,15 @@ class PubloaderBot(commands.Bot):
                         inline=False,
                     )
             except Exception as e:
-                embed.add_field(name="Status fetch", value=f"failed: `{e}`", inline=False)
+                embed.add_field(
+                    name="Status fetch", value=f"failed: `{e}`", inline=False
+                )
 
         return embed
 
 
 # ---------- prefix-command picker UI ----------
+
 
 class ExtensionPickerView(discord.ui.View):
     """Send a Select component bound to the invoking user. On submit, calls
@@ -337,7 +365,9 @@ class ExtensionPickerView(discord.ui.View):
 
     ALL_VALUE = "__all__"
 
-    def __init__(self, on_pick, author_id: int, multi: bool = True, timeout: float = 120):
+    def __init__(
+        self, on_pick, author_id: int, multi: bool = True, timeout: float = 120
+    ):
         super().__init__(timeout=timeout)
         self.on_pick = on_pick
         self.author_id = author_id
@@ -383,7 +413,9 @@ class ExtensionPickerView(discord.ui.View):
         await self.on_pick(interaction, extensions)
 
 
-async def _send_picker(bot: PubloaderBot, ctx: commands.Context, cmd: str, **base_payload):
+async def _send_picker(
+    bot: PubloaderBot, ctx: commands.Context, cmd: str, **base_payload
+):
     if not _list_extensions():
         await ctx.send("No extensions found on disk.")
         return
@@ -410,6 +442,7 @@ async def _send_picker(bot: PubloaderBot, ctx: commands.Context, cmd: str, **bas
 
 # ---------- slash autocomplete ----------
 
+
 async def _ext_autocomplete(
     interaction: discord.Interaction, current: str
 ) -> List[app_commands.Choice[str]]:
@@ -423,6 +456,7 @@ async def _ext_autocomplete(
 
 
 # ---------- command registration ----------
+
 
 def _register_commands(bot: PubloaderBot) -> None:
     # Channel gate for prefix commands.
@@ -438,9 +472,7 @@ def _register_commands(bot: PubloaderBot) -> None:
     @bot.command(name="run")
     async def _run(ctx: commands.Context, *extensions):
         if extensions:
-            await bot._dispatch(
-                ctx, "run", extensions=[str(e) for e in extensions]
-            )
+            await bot._dispatch(ctx, "run", extensions=[str(e) for e in extensions])
         else:
             await _send_picker(bot, ctx, "run")
 
@@ -487,22 +519,15 @@ def _register_commands(bot: PubloaderBot) -> None:
             return
         await ctx.send(await asyncio.to_thread(_docker_action, "restart"))
 
-    @bot.command(name="status")
+    # `status` is the single health command — bot heartbeat, scheduler/IPC
+    # reachability, loaded extensions, scheduled jobs and per-worker queue
+    # depth. `ping` is kept as an alias so existing muscle memory still works.
+    @bot.command(name="status", aliases=["ping"])
     async def _status(ctx: commands.Context):
-        await bot._dispatch(ctx, "status")
-
-    @bot.command(name="ping")
-    async def _ping(ctx: commands.Context):
         embed = await bot.build_status_embed()
         await ctx.send(embed=embed)
 
     # ----- slash commands -----
-
-    @bot.tree.command(name="ping", description="Bot heartbeat + scheduler status.")
-    async def _slash_ping(interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True)
-        embed = await bot.build_status_embed()
-        await interaction.followup.send(embed=embed)
 
     @bot.tree.command(name="run", description="Run extensions on schedule.")
     @app_commands.describe(extension="Pick an extension (autocompletes from disk).")
@@ -514,7 +539,9 @@ def _register_commands(bot: PubloaderBot) -> None:
             interaction, "run", extensions=_split_extensions(extension)
         )
 
-    @bot.tree.command(name="force", description="Force-run extensions regardless of schedule.")
+    @bot.tree.command(
+        name="force", description="Force-run extensions regardless of schedule."
+    )
     @app_commands.describe(extension="Pick an extension (autocompletes from disk).")
     @app_commands.autocomplete(extension=_ext_autocomplete)
     async def _slash_force(
@@ -553,7 +580,9 @@ def _register_commands(bot: PubloaderBot) -> None:
             await interaction.response.send_message("Not allowed.", ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
-        await interaction.followup.send(await asyncio.to_thread(_docker_action, "start"))
+        await interaction.followup.send(
+            await asyncio.to_thread(_docker_action, "start")
+        )
 
     @bot.tree.command(
         name="shutdown",
@@ -575,11 +604,18 @@ def _register_commands(bot: PubloaderBot) -> None:
             await interaction.response.send_message("Not allowed.", ephemeral=True)
             return
         await interaction.response.defer(thinking=True)
-        await interaction.followup.send(await asyncio.to_thread(_docker_action, "restart"))
+        await interaction.followup.send(
+            await asyncio.to_thread(_docker_action, "restart")
+        )
 
-    @bot.tree.command(name="status", description="Show scheduler PID and pending jobs.")
+    @bot.tree.command(
+        name="status",
+        description="Bot heartbeat, scheduler status, workers and queue depth.",
+    )
     async def _slash_status(interaction: discord.Interaction):
-        await bot._dispatch_slash(interaction, "status")
+        await interaction.response.defer(thinking=True)
+        embed = await bot.build_status_embed()
+        await interaction.followup.send(embed=embed)
 
     # ----- /pull group -----
     _REPO_NAMES = ("base", "extensions", "extensions-private", "all")
@@ -609,17 +645,13 @@ def _register_commands(bot: PubloaderBot) -> None:
         repo="Which repo(s) to update — `all`, `base`, `extensions`, `extensions-private`.",
     )
     @app_commands.autocomplete(repo=_repo_autocomplete)
-    async def _slash_pull(
-        interaction: discord.Interaction, repo: Optional[str] = None
-    ):
+    async def _slash_pull(interaction: discord.Interaction, repo: Optional[str] = None):
         if not _is_admin(interaction.user):
             await interaction.response.send_message(
                 "You are not allowed to pull repos.", ephemeral=True
             )
             return
-        await bot._dispatch_slash(
-            interaction, "pull", repos=_parse_repo_arg(repo)
-        )
+        await bot._dispatch_slash(interaction, "pull", repos=_parse_repo_arg(repo))
 
     @bot.command(name="pull")
     async def _prefix_pull(ctx: commands.Context, *repos: str):
@@ -684,9 +716,7 @@ def _register_commands(bot: PubloaderBot) -> None:
         if not _is_admin(interaction.user):
             await interaction.response.send_message("Not allowed.", ephemeral=True)
             return
-        await bot._dispatch_slash(
-            interaction, "remove_schedule", extension=extension
-        )
+        await bot._dispatch_slash(interaction, "remove_schedule", extension=extension)
 
     bot.tree.add_command(schedule_group)
 
@@ -755,7 +785,9 @@ def _register_commands(bot: PubloaderBot) -> None:
         name="set",
         description="Set chapter-removal mode globally (admin-only). Extensions can still force a mode.",
     )
-    @app_commands.describe(mode="`unavailable` keeps the chapter card; `delete` removes it outright.")
+    @app_commands.describe(
+        mode="`unavailable` keeps the chapter card; `delete` removes it outright."
+    )
     @app_commands.autocomplete(mode=_removal_mode_autocomplete)
     async def _removal_set(interaction: discord.Interaction, mode: str):
         if not _is_admin(interaction.user):
@@ -795,9 +827,7 @@ def _register_commands(bot: PubloaderBot) -> None:
         if not _is_admin(interaction.user):
             await interaction.response.send_message("Not allowed.", ephemeral=True)
             return
-        await bot._dispatch_slash(
-            interaction, "enable_extension", extension=extension
-        )
+        await bot._dispatch_slash(interaction, "enable_extension", extension=extension)
 
     @bot.tree.command(
         name="unload",
@@ -809,9 +839,7 @@ def _register_commands(bot: PubloaderBot) -> None:
         if not _is_admin(interaction.user):
             await interaction.response.send_message("Not allowed.", ephemeral=True)
             return
-        await bot._dispatch_slash(
-            interaction, "disable_extension", extension=extension
-        )
+        await bot._dispatch_slash(interaction, "disable_extension", extension=extension)
 
     @bot.tree.command(
         name="extensions",
@@ -911,6 +939,7 @@ def _register_commands(bot: PubloaderBot) -> None:
         reload_after = "noreload" not in flag_set
         payload = await _do_refresh(reload_after=reload_after)
         await ctx.send(_format_refresh(payload)[:1900])
+
 
 def run() -> int:
     token = _bot_token()

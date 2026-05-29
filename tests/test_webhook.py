@@ -33,7 +33,5 @@ def test_parse_newline_separated():
 
 
 def test_parse_mixed_with_blanks():
-    urls = _parse_webhook_urls(
-        "a\n\n,b , \nc\n   "
-    )
+    urls = _parse_webhook_urls("a\n\n,b , \nc\n   ")
     assert urls == ["a", "b", "c"]

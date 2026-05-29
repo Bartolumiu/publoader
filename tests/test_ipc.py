@@ -70,6 +70,7 @@ def test_handler_exception_returned_as_error(ipc, caplog):
 
 def test_is_instance_running_false_when_no_socket():
     from publoader.ipc.client import is_instance_running
+
     missing = Path(tempfile.gettempdir()) / f"pl-missing-{uuid.uuid4().hex[:6]}.sock"
     assert is_instance_running(missing) is False
 
@@ -77,4 +78,5 @@ def test_is_instance_running_false_when_no_socket():
 def test_is_instance_running_true_when_server_up(ipc):
     server, sock = ipc
     from publoader.ipc.client import is_instance_running
+
     assert is_instance_running(sock) is True

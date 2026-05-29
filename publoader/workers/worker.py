@@ -2,6 +2,16 @@ import multiprocessing
 
 from publoader.workers import watcher
 
+# Single source of truth for the worker subprocesses and the MongoDB collection
+# each one drains. Imported by the IPC `status` handler so `/status` and `/ping`
+# can report per-worker queue depth.
+WATCHERS = [
+    {"name": "uploader", "table": "to_upload", "colour": "26D454"},
+    {"name": "deleter", "table": "to_delete", "colour": "C43542"},
+    {"name": "editor", "table": "to_edit", "colour": "FFF71C"},
+    {"name": "unavailable", "table": "to_unavailable", "colour": "9B9B9B"},
+]
+
 
 def main(database_connection=None, restart_threads=True):
     """Spawn the watcher subprocesses.
@@ -10,13 +20,7 @@ def main(database_connection=None, restart_threads=True):
     MongoClient is not fork-safe, so each watcher process opens its own.
     """
     try:
-        watchers = [
-            {"name": "uploader", "table": "to_upload", "colour": "26D454"},
-            {"name": "deleter", "table": "to_delete", "colour": "C43542"},
-            {"name": "editor", "table": "to_edit", "colour": "FFF71C"},
-            {"name": "unavailable", "table": "to_unavailable", "colour": "9B9B9B"},
-        ]
-        for worker in watchers:
+        for worker in WATCHERS:
             process = multiprocessing.Process(
                 target=watcher.main,
                 kwargs={

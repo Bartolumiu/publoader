@@ -3,6 +3,7 @@
 The real download + tarball-extract path is exercised by `PubloaderUpdater`
 directly and is networked, so these tests just confirm cmd_pull handles
 arg parsing, alias expansion, and unknown repos without touching GitHub."""
+import logging
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -91,8 +92,10 @@ def test_pull_reports_changed_when_any_repo_updated(pull_handler):
     assert result["changed"] is True
 
 
-def test_pull_propagates_updater_init_failure(pull_handler):
-    with patch.object(
+def test_pull_propagates_updater_init_failure(pull_handler, caplog):
+    # cmd_pull logs.exception() on init failure — capture the traceback at
+    # ERROR level instead of letting it spill onto the test runner's stderr.
+    with caplog.at_level(logging.CRITICAL, logger="publoader"), patch.object(
         run_module,
         "PubloaderUpdater",
         side_effect=RuntimeError("github_access_token missing"),

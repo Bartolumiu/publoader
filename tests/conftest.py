@@ -85,6 +85,7 @@ def temp_state_db(tmp_path, monkeypatch):
     monkeypatch.setenv("PUBLOADER_STATE_DB", str(db_path))
     # Force the singleton to recreate
     import publoader.state.store as store_mod
+
     store_mod._singleton = None
     yield db_path
     store_mod._singleton = None

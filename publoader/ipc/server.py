@@ -12,7 +12,9 @@ from publoader.utils.utils import root_path
 logger = logging.getLogger("publoader")
 
 SOCKET_PATH = Path(
-    os.environ.get("PUBLOADER_SOCKET", str(root_path.joinpath("resources", "publoader.sock")))
+    os.environ.get(
+        "PUBLOADER_SOCKET", str(root_path.joinpath("resources", "publoader.sock"))
+    )
 )
 PID_FILE = root_path.joinpath("resources", "publoader.pid")
 

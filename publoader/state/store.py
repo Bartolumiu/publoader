@@ -129,9 +129,7 @@ class StateStore:
         return out
 
     def has_any_schedule(self) -> bool:
-        row = self.conn.execute(
-            "SELECT 1 FROM schedule_overrides LIMIT 1"
-        ).fetchone()
+        row = self.conn.execute("SELECT 1 FROM schedule_overrides LIMIT 1").fetchone()
         return row is not None
 
     def upsert_schedule(
@@ -301,5 +299,7 @@ def resolve_chapter_removal_mode(extension=None) -> str:
     try:
         return get_state_store().get_removal_mode()
     except sqlite3.Error:
-        logger.warning("State DB read failed; using default removal mode", exc_info=True)
+        logger.warning(
+            "State DB read failed; using default removal mode", exc_info=True
+        )
         return DEFAULT_REMOVAL_MODE

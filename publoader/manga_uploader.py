@@ -8,7 +8,6 @@ import gridfs.errors
 import pymongo
 from pymongo import UpdateOne
 
-from publoader.chapter_image import generate_chapter_card
 from publoader.http import http_client
 from publoader.models.database import (
     enqueue_chapter_removal,
@@ -332,34 +331,17 @@ class MangaUploaderProcess:
                 image_filestream = gridfs.GridFS(self.database_connection, "images")
 
                 for chap in chapters_to_insert:
-                    # Prepend the auto-generated info card so even external
-                    # chapters have at least one page on MD. Lets us strip
-                    # `externalUrl` later (chapter goes unavailable on the
-                    # publisher) without leaving the chapter content-less.
+                    # External chapters upload with whatever pages the extension
+                    # provided (usually none). The visible chapter card is
+                    # generated and uploaded later, when the chapter is marked
+                    # unavailable on the publisher (see workers/unavailable.py).
                     raw_images = list(chap.get("images") or [])
-                    try:
-                        card_bytes = generate_chapter_card(
-                            manga_name=chap.get("manga_name"),
-                            chapter_number=chap.get("chapter_number"),
-                            chapter_title=chap.get("chapter_title"),
-                            chapter_language=chap.get("chapter_language"),
-                            extension_name=chap.get("extension_name"),
-                            chapter_url=chap.get("chapter_url"),
-                        )
-                        raw_images.insert(0, card_bytes)
-                    except Exception:
-                        traceback.print_exc()
-                        logger.exception(
-                            "Failed to generate chapter card; uploading without it."
-                        )
 
                     images = []
                     images_length = len(raw_images)
                     for index, img in enumerate(raw_images):
                         try:
-                            img_insert_id = image_filestream.put(
-                                img, filename=index
-                            )
+                            img_insert_id = image_filestream.put(img, filename=index)
                             images.append(img_insert_id)
                         except gridfs.errors.GridFSError:
                             traceback.print_exc()

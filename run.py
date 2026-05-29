@@ -277,6 +277,25 @@ def restart():
     os.execv(sys.executable, [sys.executable, sys.argv[0]])
 
 
+def _worker_queue_lengths(database_connection) -> list:
+    """Per-worker pending queue depth, one entry per watcher subprocess.
+
+    Each worker drains a dedicated MongoDB collection and deletes rows once
+    they're processed, so the live document count is the authoritative pending
+    work for that worker (more reliable than the in-process queue, which lives
+    inside each subprocess and isn't reachable from here)."""
+    workers = []
+    for w in worker.WATCHERS:
+        entry = {"name": w["name"], "table": w["table"]}
+        try:
+            entry["queued"] = int(database_connection[w["table"]].count_documents({}))
+        except Exception as e:  # pragma: no cover - defensive
+            entry["queued"] = None
+            entry["error"] = str(e)
+        workers.append(entry)
+    return workers
+
+
 _EXT_NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
 
@@ -339,6 +358,7 @@ def _setup_ipc_server(database_connection) -> IPCServer:
         return {
             "pid": os.getpid(),
             "jobs": [str(j) for j in getattr(sched, "jobs", [])] if sched else [],
+            "workers": _worker_queue_lengths(database_connection),
         }
 
     def cmd_pull(req):
