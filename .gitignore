@@ -5,6 +5,8 @@ last_run.txt
 *.log
 logs/*
 .mdauth
+resources/mdauth.json
+resources/*.sock
 *.bak
 manga_data.json
 .idea

@@ -1,7 +1,9 @@
 import logging
-from typing import Optional
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 
 from publoader.http.properties import RequestError
+from publoader.models.database import enqueue_chapter_removal
 from publoader.models.dataclasses import Chapter
 from publoader.utils.config import mangadex_api_url
 from publoader.utils.utils import get_current_datetime
@@ -59,16 +61,57 @@ def run(item, http_client, queue_webhook, database_connection, **kwargs):
         database_connection["deleted"].insert_one(item)
 
 
-def fetch_data_from_database(database_connection):
-    chapters = []
+def sweep_expired_chapters(database_connection):
+    """Route time-expired uploaded chapters through the removal pipeline.
 
-    chapters.extend([chap for chap in database_connection["to_delete"].find()])
-    chapters.extend(
-        [
-            chap
-            for chap in database_connection["uploaded"].find(
-                {"chapter_expire": {"$lte": get_current_datetime()}}
-            )
-        ]
+    A chapter only carries a `chapter_expire` date if its extension set one.
+    Once that date passes we no longer hard-delete it here; instead we hand it
+    to enqueue_chapter_removal, which honours the configured removal mode —
+    either a hard delete (to_delete) or replacing the chapter with an
+    "unavailable" card (to_unavailable). enqueue_chapter_removal also pulls the
+    rows out of `uploaded`, so the next sweep won't pick them up again.
+
+    The mode is resolved from the global setting only (extension=None): the
+    deleter runs in its own subprocess without loaded extension instances, so
+    per-extension `chapter_removal_mode` overrides don't apply to the
+    time-expiry path — only the global setting (controlled via the bot) does.
+    """
+    expired = list(
+        database_connection["uploaded"].find(
+            {"chapter_expire": {"$lte": get_current_datetime()}}
+        )
     )
-    return chapters
+    if not expired:
+        return
+
+    # enqueue_chapter_removal works per (extension, manga); group accordingly.
+    grouped: Dict[Tuple[Optional[str], Optional[str]], List[dict]] = defaultdict(list)
+    for chap in expired:
+        # `_id` is immutable and would break the upsert into the removal queue.
+        chap.pop("_id", None)
+        grouped[(chap.get("extension_name"), chap.get("md_manga_id"))].append(chap)
+
+    for (extension_name, md_manga_id), chapters in grouped.items():
+        if not md_manga_id:
+            logger.warning(
+                f"Skipping {len(chapters)} expired chapter(s) with no md_manga_id "
+                f"(extension={extension_name})."
+            )
+            continue
+        enqueue_chapter_removal(
+            database_connection=database_connection,
+            extension_name=extension_name,
+            md_manga_id=md_manga_id,
+            chapter=chapters,
+        )
+
+
+def fetch_data_from_database(database_connection):
+    # Expired chapters are routed into to_delete / to_unavailable by the sweep;
+    # this worker then only drains the to_delete queue.
+    try:
+        sweep_expired_chapters(database_connection)
+    except Exception:
+        logger.exception("Expired-chapter sweep failed; draining to_delete only.")
+
+    return list(database_connection["to_delete"].find())

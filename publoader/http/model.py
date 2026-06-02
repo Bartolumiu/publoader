@@ -325,8 +325,8 @@ class HTTPModel(metaclass=Singleton):
     def _refresh_token_md(self) -> "bool":
         """Use the refresh token to get a new access token."""
         if self.refresh_token is None:
-            logger.error(
-                f"Refresh token doesn't exist, logging in through account details."
+            logger.info(
+                "No saved refresh token; logging in with account details."
             )
             return self._login_using_details()
 
