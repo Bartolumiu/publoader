@@ -79,7 +79,6 @@ class UploaderProcess:
             logger.error(e)
             return
 
-        # Some images returned errors
         uploaded_image_data = image_upload_response.data
         successful_upload_data = uploaded_image_data["data"]
         if uploaded_image_data["errors"] or uploaded_image_data["result"] == "error":
@@ -89,7 +88,6 @@ class UploaderProcess:
 
     def _upload_images(self, image_batch: Dict[str, bytes]) -> bool:
         """Try to upload every 10 (default) images to the upload session."""
-        # No images to upload
         if not image_batch:
             return True
 
@@ -127,8 +125,6 @@ class UploaderProcess:
 
                 print(successful_upload_message.format(original_filename, file_size))
 
-            # Length of images array returned from the api is the same as the array
-            # sent to the api
             if len(successful_upload_data) == len(image_batch):
                 logger.info(
                     f"Uploaded images {int(image_batch_list[0]) + 1} to "
@@ -137,7 +133,6 @@ class UploaderProcess:
                 self.failed_image_upload = False
                 break
 
-            # Update the images to upload dictionary with the images that failed
             already_uploaded = {
                 i["attributes"]["originalFileName"] for i in successful_upload_data
             }
@@ -155,12 +150,9 @@ class UploaderProcess:
         logger.info(
             f"Reading data for images: {[img.filename for img in images_to_read]}"
         )
-        # Dictionary to store the image index to the image bytes
         files: Dict[str, bytes] = {}
         for array_index, image in enumerate(images_to_read, start=1):
-            # Get index of the image in the images array
             renamed_file = str(self.image_ids_str.index(str(image._id)))
-            # Keeps track of which image index belongs to which image name
             self.images_to_upload_names.update({renamed_file: image.filename})
             files.update({renamed_file: image.read()})
         return files
@@ -212,7 +204,6 @@ class UploaderProcess:
         except Exception as e:
             logger.error(e)
         else:
-            # Start the upload session
             try:
                 upload_session_response = self.http_client.post(
                     f"{md_upload_api_url}/begin",
@@ -228,7 +219,6 @@ class UploaderProcess:
                 if upload_session_response.ok:
                     return upload_session_response.data
 
-        # Couldn't create an upload session, skip the chapter
         upload_session_response_json_message = (
             f"Couldn't create an upload session for "
             f"{self.manga_generic_error_message}."
@@ -252,14 +242,6 @@ class UploaderProcess:
             ),
             "termsAccepted": True,
         }
-
-        # if (
-        #     self.chapter.chapter_expire is not None
-        #     and self.chapter.chapter_expire > datetime.now()
-        # ):
-        #     payload["chapterDraft"]["publishAt"] = self.chapter.chapter_expire.strftime(
-        #         "%Y-%m-%dT%H:%M:%S"
-        #     )
 
         logger.info(f"Commit payload: {payload}")
 
@@ -317,11 +299,9 @@ class UploaderProcess:
                 images_to_upload = self.get_images_to_upload(images_array)
                 self._upload_images(images_to_upload)
 
-                # Don't upload rest of the chapter's images if the images before failed
                 if self.failed_image_upload:
                     break
 
-        # Skip chapter upload and delete upload session
         if self.failed_image_upload:
             failed_image_upload_message = f"Couldn't upload images for {self.upload_session_id}: {self.manga_generic_error_message}."
             print(failed_image_upload_message)
@@ -378,17 +358,6 @@ def check_all_chapters_uploaded():
     )
     print("Checking which chapters weren't indexed.")
     chapters_on_md = []
-
-    # if self.clean_db:
-    #     uploaded_chapter_ids.extend(
-    #         [
-    #             chapter.md_chapter_id
-    #             for chapter in self.chapters_on_db
-    #             if chapter.chapter_expire
-    #             >= get_current_datetime()
-    #             and chapter.md_chapter_id. is not None
-    #         ]
-    #     )
 
     uploaded_chapter_ids = list(set(uploaded_list))
     if uploaded_chapter_ids:

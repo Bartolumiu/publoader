@@ -130,25 +130,16 @@ class ExtensionUploader:
         if self.all_manga_chapters is None:
             return
 
-        # missing_ids = list(
-        #     set(self.updated_manga_chapters.keys()).difference(
-        #         set(self.all_manga_chapters.keys())
-        #     )
-        # )
-
-        # Manga ids of no chapters from tracked series in updates
         tracked_ids_no_chapters_external = [
             m
             for m in self.tracked_mangadex_ids
             if m not in self.all_manga_chapters.keys()
         ]
 
-        # Chapters of tracked_ids_no_chapters_external, if id not available, no chapters
         tracked_ids_no_chapters_md = self._get_external_chapters_md(
             tracked_ids_no_chapters_external
         )
 
-        # Manga ids of chapters from tracked series, chapters on md, no chapters in updates
         tracked_ids_chapters_md = [
             m
             for m in tracked_ids_no_chapters_external
@@ -299,7 +290,6 @@ class ExtensionUploader:
 
     def upload_chapters(self):
         """Go through each new chapter and upload it to mangadex."""
-        # Sort each chapter by manga
         for index, mangadex_manga_id in enumerate(self.updated_manga_chapters, start=1):
             all_chapters = None
             if self.all_manga_chapters is not None:

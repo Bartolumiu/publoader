@@ -53,7 +53,6 @@ def get_md_api(route: str, **params: dict) -> List[dict]:
             logger.debug(f"{pages} page(s) for {route}.")
             first_call = False
 
-        # Empty page => done
         if not page:
             break
 

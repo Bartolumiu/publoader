@@ -410,17 +410,14 @@ class PubloaderQueueWebhook(WebhookHelper):
         self.failed_count = 0
 
     def send_queue_finished(self):
-        # embed = self.make_embed(self.normalise_embed())
         embed_last = self.make_embed(
             {
                 "title": f"{self.worker_type}: Finished all items in queue",
                 "color": self.colour,
             }
         )
-        # self.add_fields_to_embed(embed, self.fields)
         self.fields[:] = []
 
-        # self.webhook.add_embed(embed)
         self.webhook.add_embed(embed_last)
         self.send_webhook(self.webhook)
 

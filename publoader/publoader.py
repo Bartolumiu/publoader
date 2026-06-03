@@ -97,7 +97,6 @@ def run_updates(
             title=f"Found {len(updated_chapters)} chapters for {normalised_extension_name}",
         ).send()
 
-        # Get already posted chapters for the extension
         posted_chapters_data = list(
             database_connection["uploaded"].find(
                 {"extension_name": {"$eq": extension_name}}
