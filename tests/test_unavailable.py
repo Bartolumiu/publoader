@@ -204,3 +204,48 @@ def test_begin_failure_keeps_on_queue():
 
     assert proc.mark_unavailable() is False
     assert not http.find("POST", "/session-1/commit")
+
+
+def test_chapter_fetch_includes_manga():
+    http = FakeHTTP(chapter_responses=[FakeResp(200, {"data": _chapter_doc()})])
+    proc = UnavailableProcess(_item(), http)
+    proc.mark_unavailable()
+
+    fetch = http.find("GET", "/chapter/md-chap-1")[0]
+    assert "manga" in fetch[2]["params"]["includes[]"]
+
+
+def _manga_rel(title=None, original_language="ja"):
+    return {
+        "id": "manga-1",
+        "type": "manga",
+        "attributes": {
+            "title": title if title is not None else {"en": "Real Manga Title"},
+            "originalLanguage": original_language,
+        },
+    }
+
+
+def test_resolve_manga_name_prefers_relationship():
+    proc = UnavailableProcess(_item(), FakeHTTP(chapter_responses=[]))
+    chapter_data = _chapter_doc()
+    chapter_data["relationships"].append(_manga_rel())
+
+    # Even though the row carried "Demo Manga", the live relationship wins.
+    assert proc._resolve_manga_name(chapter_data) == "Real Manga Title"
+
+
+def test_resolve_manga_name_falls_back_to_original_language():
+    proc = UnavailableProcess(_item(), FakeHTTP(chapter_responses=[]))
+    chapter_data = _chapter_doc()
+    chapter_data["relationships"].append(
+        _manga_rel(title={"ja": "日本語タイトル"}, original_language="ja")
+    )
+
+    assert proc._resolve_manga_name(chapter_data) == "日本語タイトル"
+
+
+def test_resolve_manga_name_falls_back_to_row_when_no_relationship():
+    proc = UnavailableProcess(_item(), FakeHTTP(chapter_responses=[]))
+    # _chapter_doc() carries only a scanlation_group relationship.
+    assert proc._resolve_manga_name(_chapter_doc()) == "Demo Manga"

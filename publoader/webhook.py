@@ -335,11 +335,18 @@ class PubloaderUpdatesWebhook(WebhookBase):
 
 
 class PubloaderQueueWebhook(WebhookHelper):
+    # Worker types that report a single end-of-queue count summary instead of an
+    # embed per processed chapter (mirrors PubloaderNotIndexedWebhook). For these
+    # a per-chapter card is noise — only the total matters.
+    SUMMARY_ONLY = {"unavailable"}
+
     def __init__(self, worker_type: str, **kwargs) -> None:
         super().__init__(**kwargs)
         self.webhook = make_webhook()
         self.worker_type = worker_type.capitalize()
         self.fields = []
+        self.processed_count = 0
+        self.failed_count = 0
 
     def normalise_embed(self) -> Dict[str, str]:
         return {
@@ -349,6 +356,14 @@ class PubloaderQueueWebhook(WebhookHelper):
         }
 
     def add_chapter(self, chapter: dict, processed: bool = True):
+        if self.worker_type.lower() in self.SUMMARY_ONLY:
+            # Don't build an embed per chapter — just tally for send_summary().
+            if processed:
+                self.processed_count += 1
+            else:
+                self.failed_count += 1
+            return
+
         if self.worker_type.lower() in ["uploader", "deleter"]:
             if self.worker_type.lower() == "uploader" and not processed:
                 pass
@@ -365,6 +380,34 @@ class PubloaderQueueWebhook(WebhookHelper):
             self.send_webhook(self.webhook)
 
             self.fields[:] = []
+
+    def send_summary(self):
+        """Send a single count summary for SUMMARY_ONLY workers, then reset.
+
+        Called when the queue drains (workers/watcher.py). A no-op for every
+        other worker type and when nothing was processed, so it's safe to call
+        unconditionally after each drain."""
+        if self.worker_type.lower() not in self.SUMMARY_ONLY:
+            return
+        if not (self.processed_count or self.failed_count):
+            return
+
+        description = f"Marked unavailable: {self.processed_count}"
+        if self.failed_count:
+            description += f"\nFailed: {self.failed_count}"
+
+        embed = self.make_embed(
+            {
+                "title": f"{self.processed_count} chapters marked unavailable",
+                "description": description,
+                "color": self.colour,
+            }
+        )
+        self.webhook.add_embed(embed)
+        self.send_webhook(self.webhook)
+
+        self.processed_count = 0
+        self.failed_count = 0
 
     def send_queue_finished(self):
         # embed = self.make_embed(self.normalise_embed())

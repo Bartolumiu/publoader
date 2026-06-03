@@ -41,7 +41,9 @@ def worker(
 
         bot_queue.task_done()
         if bot_queue.qsize() == 0:
-            # queue_webhook.send_queue_finished()
+            # Flush the count summary for summary-only workers (unavailable);
+            # a no-op for the rest.
+            queue_webhook.send_summary()
 
             if worker_type == "uploader":
                 worker_module.check_all_chapters_uploaded()

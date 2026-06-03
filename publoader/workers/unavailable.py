@@ -28,6 +28,7 @@ from publoader.chapter_image import generate_chapter_card
 from publoader.http.properties import RequestError
 from publoader.models.dataclasses import Chapter
 from publoader.utils.config import mangadex_api_url, md_upload_api_url, upload_retry
+from publoader.utils.misc import format_title
 from publoader.utils.utils import get_current_datetime
 
 logger = logging.getLogger("publoader-unavailable")
@@ -47,7 +48,7 @@ class UnavailableProcess:
         try:
             resp = self.http_client.get(
                 f"{mangadex_api_url}/chapter/{self.md_chapter_id}",
-                params={"includes[]": ["scanlation_group"]},
+                params={"includes[]": ["scanlation_group", "manga"]},
                 successful_codes=[404],
             )
         except RequestError as e:
@@ -59,6 +60,33 @@ class UnavailableProcess:
         if resp.status_code != 200:
             return None
         return resp.data.get("data")
+
+    def _resolve_manga_name(self, chapter_data: dict) -> Optional[str]:
+        """Work out the series title to print on the card.
+
+        The queue row's manga_name is frequently missing (it's only populated
+        when the manga happened to be in the upload batch's metadata), which is
+        why some cards rendered as "Untitled". The chapter fetch now pulls the
+        manga relationship via includes[]=manga, so prefer that — run through
+        format_title (handles the en/originalLanguage fallback) — and only fall
+        back to whatever the row carried."""
+        manga_rel = next(
+            (
+                rel
+                for rel in chapter_data.get("relationships", [])
+                if rel.get("type") == "manga"
+            ),
+            None,
+        )
+        if manga_rel and manga_rel.get("attributes"):
+            try:
+                return format_title(manga_rel)
+            except Exception:
+                logger.warning(
+                    f"Couldn't format manga title from relationship for "
+                    f"{self.md_chapter_id}; falling back to the queued name."
+                )
+        return self.chapter.manga_name
 
     def _delete_existing_upload_session(self):
         """MangaDex allows one upload session at a time; clear any stale one."""
@@ -238,7 +266,7 @@ class UnavailableProcess:
         # Generate the card now, at unavailability time, rather than at upload.
         try:
             card_bytes = generate_chapter_card(
-                manga_name=self.chapter.manga_name,
+                manga_name=self._resolve_manga_name(chapter_data),
                 chapter_number=attrs.get("chapter") or self.chapter.chapter_number,
                 chapter_title=attrs.get("title") or self.chapter.chapter_title,
                 chapter_language=attrs.get("translatedLanguage")
