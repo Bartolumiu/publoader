@@ -46,7 +46,6 @@ def load_config_info(config: configparser.RawConfigParser):
 
 
 def open_config_file() -> configparser.RawConfigParser:
-    # Open config file and read values
     if config_file_path.exists():
         config = configparser.RawConfigParser()
         config.read(config_file_path)

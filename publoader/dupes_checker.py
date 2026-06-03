@@ -75,7 +75,6 @@ class DeleteDuplicatesMD:
         chapters: List[dict],
         dupes_webhook: "PubloaderDupesWebhook",
     ) -> Optional[List[dict]]:
-        # Chapters that are from the extension's group
         chapters_to_check = [
             chapter
             for chapter in chapters
@@ -88,7 +87,6 @@ class DeleteDuplicatesMD:
             and chapter["attributes"]["externalUrl"]
         ]
 
-        # No chapters found
         if len(chapters_to_check) <= 1:
             return
 
@@ -107,7 +105,6 @@ class DeleteDuplicatesMD:
                 if other["attributes"]["externalUrl"] == external_url
             ]
 
-            # Add both search term and search results to list
             if match_list:
                 dupes.extend([chapter, *match_list])
             else:
@@ -115,7 +112,6 @@ class DeleteDuplicatesMD:
 
         dupes_unique_external_url = {x["attributes"]["externalUrl"] for x in dupes}
 
-        # Create sublists of identical external urls
         to_check = [
             [d for d in dupes if d["attributes"]["externalUrl"] == y]
             for y in dupes_unique_external_url
@@ -123,7 +119,6 @@ class DeleteDuplicatesMD:
 
         checked_to_remove = []
         for unsorted_dupes in to_check:
-            # Sort sublist by ascending timestamp
             sorted_chapters = sorted(
                 unsorted_dupes,
                 key=lambda chap_timestamp: datetime.strptime(
@@ -133,9 +128,6 @@ class DeleteDuplicatesMD:
 
             chapters_to_remove = []
 
-            # Create list of external ids that have multiple chapters associated
-            # Loop through list of known external multi chapter id to loop through
-            # list of sorted chapters if they contain an id of the known multi chapters
             multi_chapter_chapters = [
                 {"external_chapter_id": multi_chapter_id, "chapter_to_check": x}
                 for multi_chapter_id in self.override_options.get("multi_chapters", {})
@@ -153,7 +145,6 @@ class DeleteDuplicatesMD:
                 )
             ]
 
-            # Filter out elements from the sorted chapters not present in multi-chapters list
             single_chapter_chapters = [
                 x
                 for x in sorted_chapters
@@ -162,9 +153,6 @@ class DeleteDuplicatesMD:
 
             multi_chapter_chapters_not_remove = []
 
-            # Loop through the multi-chapter list and keep minimum the oldest
-            # md chapter object for the different chapter numbers listed for
-            # known multi-chapter ids
             for multi_chap_obj in multi_chapter_chapters:
                 multi_chapter_id = multi_chap_obj["external_chapter_id"]
                 chap = multi_chap_obj["chapter_to_check"]
@@ -174,22 +162,18 @@ class DeleteDuplicatesMD:
                     for not_remove_chap in self.override_options.get(
                         "multi_chapters", {}
                     ).get(multi_chapter_id, []):
-                        # Don't add duplicate numbers to the list if they exist
                         if not_remove_chap not in [
                             x["attributes"]["chapter"]
                             for x in multi_chapter_chapters_not_remove
                         ]:
                             multi_chapter_chapters_not_remove.append(chap)
 
-            # List of multi chapters to remove if they don't exist in the
-            # multi-chapters not remove list
             chapters_to_remove = [
                 chap["chapter_to_check"]
                 for chap in multi_chapter_chapters
                 if chap["chapter_to_check"] not in multi_chapter_chapters_not_remove
             ]
 
-            # Add all the dupes from the first (oldest) element onwards
             chapters_to_remove.extend(single_chapter_chapters[1:])
             checked_to_remove.extend(chapters_to_remove)
 

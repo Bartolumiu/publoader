@@ -232,9 +232,6 @@ def check_extension_run(
     if not isinstance(days_to_clean_unsanitised, (list, type(None))):
         days_to_clean_unsanitised = None
 
-    # if days_to_clean_unsanitised is None:
-    #     days_to_run.append(DEFAULT_CLEAN_DAY)
-
     cleaned_list = []
     if isinstance(days_to_clean_unsanitised, list):
         for elem in days_to_clean_unsanitised:

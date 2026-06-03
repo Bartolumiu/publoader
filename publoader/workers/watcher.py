@@ -108,7 +108,6 @@ def main(
 
     worker_module = open_worker_module(worker_type)
 
-    # Turn-on the worker thread.
     thread = setup_thread(
         worker_type=worker_type,
         queue_webhook=queue_webhook,
@@ -143,6 +142,5 @@ def main(
             logger.error(f"{worker_type.title()} change-stream error: {e}")
             print(e)
 
-    # Block until all tasks are done.
     bot_queue.join()
     print("All work completed")

@@ -44,8 +44,8 @@ def setup_logs(
     )
     fileh.setFormatter(formatter)
 
-    log = logging.getLogger(logger_name)  # root logger
-    for hdlr in log.handlers[:]:  # remove all old handlers
+    log = logging.getLogger(logger_name)
+    for hdlr in log.handlers[:]:
         if isinstance(hdlr, logging.FileHandler):
             log.removeHandler(hdlr)
     log.addHandler(fileh)

@@ -135,7 +135,6 @@ class MangaUploaderProcess:
         aggregate_chapters = fetch_aggregate(
             http_client,
             self.mangadex_manga_id,
-            # **{"translatedLanguage[]": ["en"]},
         )
         if aggregate_chapters is None:
             return
@@ -177,7 +176,6 @@ class MangaUploaderProcess:
             ] or chapter.chapter_id in flatten(list(self.same_chapter_dict.values())):
                 continue
 
-            # Chapter id is not in the external url
             path_match = check_chapter_url_same(
                 md_chapter["attributes"]["externalUrl"], chapter.chapter_id
             )
