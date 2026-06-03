@@ -122,15 +122,65 @@ def test_uploads_card_then_clears_external_url():
     assert "groups" not in commit["chapterDraft"]
     assert commit["pageOrder"] == ["page-1"]
 
-    # The PUT edit sends the full body, nulls externalUrl, uses the bumped version.
+    # The PUT edit sends the full body and uses the bumped version. With no
+    # manga_url on the row, externalUrl is repointed to the publisher site root
+    # derived from the chapter link rather than cleared outright.
     edit = http.find("PUT", f"{mangadex_api_url}/chapter/md-chap-1")[0][2]["json"]
-    assert edit["externalUrl"] is None
+    assert edit["externalUrl"] == "https://publisher.example/"
     assert edit["version"] == 4
     assert edit["groups"] == ["group-1"]
     assert edit["volume"] == "2"
     assert edit["chapter"] == "5"
     assert edit["title"] == "A Title"
     assert edit["translatedLanguage"] == "en"
+
+
+def test_external_url_repointed_to_manga_page_when_available():
+    item = _item()
+    item["manga_url"] = "https://publisher.example/manga/42"
+    http = FakeHTTP(chapter_responses=[FakeResp(200, {"data": _chapter_doc()})])
+    proc = UnavailableProcess(item, http)
+
+    assert proc.mark_unavailable() is True
+    edit = http.find("PUT", f"{mangadex_api_url}/chapter/md-chap-1")[0][2]["json"]
+    assert edit["externalUrl"] == "https://publisher.example/manga/42"
+
+
+def test_external_url_falls_back_to_domain_root_without_manga_page():
+    # No manga_url; chapter_url drives the scheme://host/ fallback.
+    http = FakeHTTP(chapter_responses=[FakeResp(200, {"data": _chapter_doc()})])
+    proc = UnavailableProcess(_item(), http)
+
+    assert proc.mark_unavailable() is True
+    edit = http.find("PUT", f"{mangadex_api_url}/chapter/md-chap-1")[0][2]["json"]
+    assert edit["externalUrl"] == "https://publisher.example/"
+
+
+def test_resolve_replacement_url_priority():
+    item = _item()
+    item["manga_url"] = "https://publisher.example/manga/42"
+    proc = UnavailableProcess(item, FakeHTTP(chapter_responses=[]))
+
+    # 1. Manga page wins outright.
+    assert (
+        proc._resolve_replacement_url({"externalUrl": "https://publisher.example/ch/9"})
+        == "https://publisher.example/manga/42"
+    )
+
+    # 2. No manga page → site root from the live externalUrl (query stripped).
+    item.pop("manga_url")
+    item.pop("chapter_url", None)
+    proc = UnavailableProcess(item, FakeHTTP(chapter_responses=[]))
+    assert (
+        proc._resolve_replacement_url(
+            {"externalUrl": "https://publisher.example/ch/9?foo=bar"}
+        )
+        == "https://publisher.example/"
+    )
+
+    # 3. No usable URL anywhere → None (link dropped entirely).
+    assert proc._resolve_replacement_url({"externalUrl": "not-a-url"}) is None
+    assert proc._resolve_replacement_url({}) is None
 
 
 def test_already_cleared_is_success_without_uploading():

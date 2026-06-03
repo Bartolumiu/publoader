@@ -13,7 +13,9 @@ an `externalUrl` pointing at the publisher and no hosted pages. For each one we:
      externalUrl, so the link can't be dropped here).
   4. PUT /chapter/{id} with the full chapter body (the ChapterEdit schema
      requires volume, chapter, title, translatedLanguage, groups and version)
-     and externalUrl set to null, dropping the now-dead publisher link.
+     and externalUrl repointed away from the now-dead chapter link: to the
+     publisher's manga page if known, else the publisher's site root, else
+     null (dropping the link entirely). See _resolve_replacement_url.
   5. On success, archive the row in the `unavailable` collection and remove
      it from `to_unavailable`.
 
@@ -23,6 +25,7 @@ Failures are left on the queue so they retry on the next scheduler tick.
 import logging
 import traceback
 from typing import Optional
+from urllib.parse import urlparse
 
 from publoader.chapter_image import generate_chapter_card
 from publoader.http.properties import RequestError
@@ -164,8 +167,9 @@ class UnavailableProcess:
         The `chapterDraft` schema (ChapterDraft) is strict — `additionalProperties:
         false`, required volume/chapter/title/translatedLanguage — and rejects
         `version`/`groups`, so we send only those plus the existing externalUrl.
-        The publisher link is dropped separately in _clear_external_url. Returns
-        the committed chapter on success (its bumped version feeds the edit)."""
+        The publisher link is repointed/dropped separately in _set_external_url.
+        Returns the committed chapter on success (its bumped version feeds the
+        edit)."""
         payload = {
             "chapterDraft": {
                 "volume": attrs.get("volume"),
@@ -193,19 +197,64 @@ class UnavailableProcess:
             return None
         return resp.data.get("data")
 
-    def _clear_external_url(self, attrs: dict, groups: list, version) -> bool:
-        """Remove the publisher link via the chapter-edit endpoint.
+    @staticmethod
+    def _is_http_url(url: Optional[str]) -> bool:
+        if not url:
+            return False
+        parsed = urlparse(url.strip())
+        return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+
+    @classmethod
+    def _domain_root(cls, url: Optional[str]) -> Optional[str]:
+        """The scheme://host/ root of a URL, or None if it isn't a usable link."""
+        if not cls._is_http_url(url):
+            return None
+        parsed = urlparse(url.strip())
+        return f"{parsed.scheme}://{parsed.netloc}/"
+
+    def _resolve_replacement_url(self, attrs: dict) -> Optional[str]:
+        """Work out what externalUrl to leave on the chapter once it's gone.
+
+        Rather than always dropping the publisher link, keep a useful landing
+        point so readers can still find the series. Resolution order:
+
+          1. The publisher's *manga* page (the queued manga_url), if it's a
+             valid http(s) link.
+          2. Otherwise the publisher's site root (scheme://host/) derived from
+             any URL we have for this chapter — the live externalUrl, the
+             queued chapter_url, then the manga_url.
+          3. Otherwise None, dropping the link entirely as before.
+        """
+        manga_url = (self.chapter.manga_url or "").strip()
+        if self._is_http_url(manga_url):
+            return manga_url
+
+        for candidate in (
+            attrs.get("externalUrl"),
+            self.chapter.chapter_url,
+            self.chapter.manga_url,
+        ):
+            domain_root = self._domain_root(candidate)
+            if domain_root:
+                return domain_root
+
+        return None
+
+    def _set_external_url(
+        self, attrs: dict, groups: list, version, new_url: Optional[str]
+    ) -> bool:
+        """Repoint (or drop) the publisher link via the chapter-edit endpoint.
 
         PUT /chapter/{id} (ChapterEdit) requires the full chapter body — volume,
         chapter, title, translatedLanguage, groups and version — so we resend all
-        of it, only swapping externalUrl to null."""
+        of it, only swapping externalUrl to `new_url` (None drops the link)."""
         payload = {
             "volume": attrs.get("volume"),
             "chapter": attrs.get("chapter"),
             "title": attrs.get("title"),
             "translatedLanguage": attrs.get("translatedLanguage"),
             "groups": groups,
-            "externalUrl": None,  # strip the dead publisher link
+            "externalUrl": new_url,  # manga page / site root / None
             "version": version,
         }
         try:
@@ -213,7 +262,7 @@ class UnavailableProcess:
                 f"{mangadex_api_url}/chapter/{self.md_chapter_id}", json=payload
             )
         except RequestError as e:
-            logger.error(f"Couldn't clear externalUrl on {self.md_chapter_id}: {e}")
+            logger.error(f"Couldn't set externalUrl on {self.md_chapter_id}: {e}")
             return False
 
         if resp.status_code != 200:
@@ -309,12 +358,14 @@ class UnavailableProcess:
                 "version"
             )
 
-        if not self._clear_external_url(attrs, groups, version):
+        replacement_url = self._resolve_replacement_url(attrs)
+        if not self._set_external_url(attrs, groups, version, replacement_url):
             return False
 
         logger.info(
             f"Marked chapter {self.md_chapter_id} unavailable (uploaded card, "
-            f"cleared externalUrl; extension={self.chapter.extension_name})."
+            f"externalUrl -> {replacement_url or 'cleared'}; "
+            f"extension={self.chapter.extension_name})."
         )
         return True
 
