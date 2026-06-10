@@ -143,18 +143,41 @@ def find_key_from_value(
 
 
 def format_title(manga_data: dict) -> str:
-    """Get the MD title from the manga data."""
+    """Get the MD title from the manga data.
+
+    Handles both API shapes: the title may carry an "en" key directly, or
+    (as in MangaDex's newer responses) only a romanised title such as
+    "ja-ro" with the English title living in altTitles, which is a list of
+    single-key {lang: title} dicts."""
     attributes = manga_data.get("attributes", None)
     if attributes is None:
         return manga_data["id"]
 
-    manga_title = attributes["title"].get("en")
-    if manga_title is None:
-        key = next(iter(attributes["title"]))
-        manga_title = attributes["title"].get(
-            attributes["originalLanguage"], attributes["title"][key]
-        )
-    return manga_title
+    title = attributes.get("title") or {}
+    alt_titles = attributes.get("altTitles") or []
+
+    # Flatten altTitles (list of single-key dicts) into lang -> first title seen.
+    alt_lookup: dict = {}
+    for entry in alt_titles:
+        if isinstance(entry, dict):
+            for lang, value in entry.items():
+                alt_lookup.setdefault(lang, value)
+
+    def pick(lang: str):
+        return title.get(lang) or alt_lookup.get(lang)
+
+    original_language = attributes.get("originalLanguage")
+    manga_title = pick("en")
+    if manga_title is None and original_language:
+        # The romanised title is keyed "{lang}-ro" (e.g. ja -> ja-ro), so try
+        # that before the bare original-language key.
+        manga_title = pick(f"{original_language}-ro") or pick(original_language)
+    if manga_title is None and title:
+        manga_title = title[next(iter(title))]
+    if manga_title is None and alt_lookup:
+        manga_title = alt_lookup[next(iter(alt_lookup))]
+
+    return manga_title or manga_data.get("id", "Untitled")
 
 
 def create_new_event_loop():

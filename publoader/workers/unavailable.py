@@ -170,14 +170,18 @@ class UnavailableProcess:
         The publisher link is repointed/dropped separately in _set_external_url.
         Returns the committed chapter on success (its bumped version feeds the
         edit)."""
+        chapter_draft = {
+            "volume": attrs.get("volume"),
+            "chapter": attrs.get("chapter"),
+            "title": attrs.get("title"),
+            "translatedLanguage": attrs.get("translatedLanguage"),
+        }
+        # The draft schema requires externalUrl to be a string when present;
+        # a null is rejected, so only include it when the chapter has one.
+        if attrs.get("externalUrl"):
+            chapter_draft["externalUrl"] = attrs["externalUrl"]
         payload = {
-            "chapterDraft": {
-                "volume": attrs.get("volume"),
-                "chapter": attrs.get("chapter"),
-                "title": attrs.get("title"),
-                "translatedLanguage": attrs.get("translatedLanguage"),
-                "externalUrl": attrs.get("externalUrl"),
-            },
+            "chapterDraft": chapter_draft,
             "pageOrder": [page_id],
             "termsAccepted": True,
         }
