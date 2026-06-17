@@ -1,6 +1,7 @@
 import logging
+from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from publoader.http import http_client
 from publoader.http.properties import RequestError
@@ -70,6 +71,22 @@ class DeleteDuplicatesMD:
 
         return {manga_id: {"id": manga_id, "title": manga_title}}
 
+    @staticmethod
+    def _dupe_key(chapter: dict) -> Tuple:
+        """Key that groups chapters which are duplicates of one another.
+
+        External/link chapters are keyed on their exact externalUrl; image
+        chapters (no externalUrl) fall back to chapter number + volume so they
+        still get deduped. Language is part of every key so the same chapter in
+        different languages is never treated as a dupe."""
+        attributes = chapter["attributes"]
+        language = attributes["translatedLanguage"]
+        external_url = attributes.get("externalUrl")
+
+        if external_url:
+            return (language, "url", external_url)
+        return (language, "image", attributes.get("volume"), attributes.get("chapter"))
+
     def check_chapters(
         self,
         chapters: List[dict],
@@ -84,38 +101,21 @@ class DeleteDuplicatesMD:
                 for g in chapter["relationships"]
                 if g["type"] == "scanlation_group"
             ]
-            and chapter["attributes"]["externalUrl"]
         ]
 
         if len(chapters_to_check) <= 1:
             return
 
-        not_dupe = []
-        dupes = []
-
+        # Group each chapter under its dupe key once, then keep only the groups
+        # that actually have more than one chapter. Grouping (rather than the
+        # old incremental match against a running list) guarantees every chapter
+        # appears in exactly one group, so a chapter id can no longer be emitted
+        # multiple times when 3+ share the same key.
+        grouped: Dict[Tuple, List[dict]] = defaultdict(list)
         for chapter in chapters_to_check:
-            external_url = chapter["attributes"]["externalUrl"]
+            grouped[self._dupe_key(chapter)].append(chapter)
 
-            # Chapters with the *exact* same external url. Using str equality
-            # because the previous regex match treated URLs as patterns, so
-            # dots/slashes silently became metacharacters and matched too much.
-            match_list = [
-                other
-                for other in not_dupe
-                if other["attributes"]["externalUrl"] == external_url
-            ]
-
-            if match_list:
-                dupes.extend([chapter, *match_list])
-            else:
-                not_dupe.append(chapter)
-
-        dupes_unique_external_url = {x["attributes"]["externalUrl"] for x in dupes}
-
-        to_check = [
-            [d for d in dupes if d["attributes"]["externalUrl"] == y]
-            for y in dupes_unique_external_url
-        ]
+        to_check = [group for group in grouped.values() if len(group) > 1]
 
         checked_to_remove = []
         for unsorted_dupes in to_check:
@@ -136,7 +136,7 @@ class DeleteDuplicatesMD:
                         lambda y: (
                             y
                             if check_chapter_url_same(
-                                y["attributes"]["externalUrl"], multi_chapter_id
+                                y["attributes"].get("externalUrl"), multi_chapter_id
                             )
                             else None
                         ),

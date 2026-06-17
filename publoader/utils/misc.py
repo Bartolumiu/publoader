@@ -195,6 +195,8 @@ def create_new_event_loop():
 
 def check_chapter_url_same(md_external_url: str, chapter_id: str) -> bool:
     """Check if the chapter id is present in the chapter"""
+    if not md_external_url:
+        return False
     try:
         parsed_url = urlparse(md_external_url)
         path = parsed_url.path.strip("/")
