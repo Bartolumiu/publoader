@@ -50,6 +50,28 @@ def test_run_history(store):
     store.record_run_completed(rid, True)
 
 
+def test_recent_runs_orders_and_filters(store):
+    store.record_run_started("alpha", "run", "discord")
+    store.record_run_started("beta", "force", "schedule")
+    rid = store.record_run_started("alpha", "clean", "discord")
+    store.record_run_completed(rid, True)
+
+    recent = store.recent_runs(limit=10)
+    assert [r["extension"] for r in recent] == ["alpha", "beta", "alpha"]
+    assert recent[0]["kind"] == "clean"
+    assert recent[0]["success"] == 1
+
+    only_alpha = store.recent_runs(limit=10, extension="alpha")
+    assert {r["extension"] for r in only_alpha} == {"alpha"}
+    assert len(only_alpha) == 2
+
+
+def test_recent_runs_limit_clamped(store):
+    for _ in range(5):
+        store.record_run_started("alpha", "run", "discord")
+    assert len(store.recent_runs(limit=2)) == 2
+
+
 def test_exists_on_disk(tmp_path):
     db_path = tmp_path / "state.db"
     s = StateStore(db_path)

@@ -64,6 +64,22 @@ def _docker_container():
         return f"Could not reach the docker daemon: {e}"
 
 
+def _docker_logs(lines: int = 40) -> str:
+    """Tail the scheduler container's stdout/stderr via the Docker SDK. Works
+    even when the IPC socket is dead (e.g. the scheduler crashed on boot).
+    Synchronous — call via asyncio.to_thread."""
+    container = _docker_container()
+    if isinstance(container, str):
+        return f":red_circle: {container}"
+    lines = max(1, min(int(lines), 200))
+    try:
+        raw = container.logs(tail=lines, timestamps=False)
+    except (DockerException, OSError) as e:
+        return f":red_circle: could not read container logs: `{e}`"
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw)
+    return text.strip() or "<no container output>"
+
+
 def _docker_action(action: str, timeout: int = 30) -> str:
     """start / stop / restart the scheduler container. Returns a one-line
     status string ready to send back to Discord. Synchronous — call via
@@ -453,6 +469,44 @@ async def _ext_autocomplete(
         for e in extensions
         if not needle or needle in e.lower()
     ][:25]
+
+
+# Worker subprocess names — mirrors publoader.workers.worker.WATCHERS. Kept as a
+# literal so the bot process doesn't import the worker/mongo stack.
+_WORKER_NAMES = ("uploader", "deleter", "editor", "unavailable")
+
+# Log scopes the bot can request. "container" is bot-local (Docker SDK); the rest
+# are served by the scheduler's `logs` IPC handler.
+_LOG_SCOPES = ("bot", "workers", "webhook", "debug", "extensions", "container")
+
+
+def _codeblock(text: str, lang: str = "", limit: int = 1900) -> str:
+    """Wrap `text` in a fenced code block, keeping the *tail* when it's too long
+    (log/queue output is most useful at the end)."""
+    body = text if len(text) <= limit else "…\n" + text[-limit:]
+    return f"```{lang}\n{body}\n```"
+
+
+async def _worker_autocomplete(
+    interaction: "discord.Interaction", current: str
+) -> List[app_commands.Choice[str]]:
+    needle = (current or "").lower()
+    return [
+        app_commands.Choice(name=w, value=w)
+        for w in _WORKER_NAMES
+        if not needle or needle in w
+    ]
+
+
+async def _log_scope_autocomplete(
+    interaction: "discord.Interaction", current: str
+) -> List[app_commands.Choice[str]]:
+    needle = (current or "").lower()
+    return [
+        app_commands.Choice(name=s, value=s)
+        for s in _LOG_SCOPES
+        if not needle or needle in s
+    ]
 
 
 # ---------- command registration ----------
@@ -939,6 +993,268 @@ def _register_commands(bot: PubloaderBot) -> None:
         reload_after = "noreload" not in flag_set
         payload = await _do_refresh(reload_after=reload_after)
         await ctx.send(_format_refresh(payload)[:1900])
+
+    # ----- /logs: tail scheduler / worker / extension logs (+ container) -----
+
+    async def _logs_text(scope: str, name: Optional[str], lines: int) -> str:
+        scope = (scope or "bot").strip().lower()
+        if scope == "container":
+            text = await asyncio.to_thread(_docker_logs, lines)
+            return _codeblock(text)
+        if not is_instance_running():
+            return "Publoader instance is not running (use `/logs container` to read Docker output)."
+        try:
+            result = await asyncio.to_thread(
+                ipc_call, "logs", scope=scope, name=name, lines=lines
+            )
+        except Exception as e:
+            return f"IPC call failed: `{e}`"
+        if not result.get("ok"):
+            return f":red_circle: {result.get('error', 'unknown error')}"
+        header = f"**{result.get('file', scope)}** (last {result.get('lines', lines)} lines)"
+        return f"{header}\n{_codeblock(result.get('text', ''))}"
+
+    @bot.tree.command(
+        name="logs",
+        description="Tail logs (bot/workers/webhook/debug/extensions/container).",
+    )
+    @app_commands.describe(
+        scope="Which log to read.",
+        name="Worker or extension name (for the workers/extensions scopes).",
+        lines="How many trailing lines (1-200, default 40).",
+    )
+    @app_commands.autocomplete(scope=_log_scope_autocomplete, name=_ext_autocomplete)
+    async def _slash_logs(
+        interaction: discord.Interaction,
+        scope: Optional[str] = "bot",
+        name: Optional[str] = None,
+        lines: Optional[app_commands.Range[int, 1, 200]] = 40,
+    ):
+        await interaction.response.defer(thinking=True)
+        await interaction.followup.send(await _logs_text(scope, name, lines or 40))
+
+    @bot.command(name="logs")
+    async def _prefix_logs(ctx: commands.Context, scope: str = "bot", *rest: str):
+        # `!logs <scope> [name] [lines]` — trailing int is read as line count.
+        name: Optional[str] = None
+        lines = 40
+        tokens = list(rest)
+        if tokens and tokens[-1].isdigit():
+            lines = int(tokens.pop())
+        if tokens:
+            name = tokens[0]
+        await ctx.send(await _logs_text(scope, name, lines))
+
+    # ----- /history: recent run_history rows -----
+
+    def _format_history(payload: dict) -> str:
+        if not payload.get("ok"):
+            return f":red_circle: {payload.get('error', 'unknown error')}"
+        runs = payload.get("runs") or []
+        if not runs:
+            return "No runs recorded yet."
+        lines = []
+        for r in runs:
+            if r.get("success") == 1:
+                icon = ":green_circle:"
+            elif r.get("completed_at") is None:
+                icon = ":hourglass:"
+            else:
+                icon = ":red_circle:"
+            started = (r.get("started_at") or "")[:19]
+            who = r.get("triggered_by") or "schedule"
+            lines.append(
+                f"{icon} `{started}` **{r.get('extension', '?')}** "
+                f"[{r.get('kind', '?')}] — {who}"
+            )
+        return "\n".join(lines)[:1900]
+
+    @bot.tree.command(
+        name="history",
+        description="Show recent extension run history.",
+    )
+    @app_commands.describe(
+        extension="Filter to one extension (optional).",
+        limit="How many rows (1-100, default 15).",
+    )
+    @app_commands.autocomplete(extension=_ext_autocomplete)
+    async def _slash_history(
+        interaction: discord.Interaction,
+        extension: Optional[str] = None,
+        limit: Optional[app_commands.Range[int, 1, 100]] = 15,
+    ):
+        await interaction.response.defer(thinking=True)
+        if not is_instance_running():
+            await interaction.followup.send("Publoader instance is not running.")
+            return
+        try:
+            payload = await asyncio.to_thread(
+                ipc_call, "run_history", extension=extension, limit=limit or 15
+            )
+        except Exception as e:
+            await interaction.followup.send(f"IPC call failed: `{e}`")
+            return
+        await interaction.followup.send(_format_history(payload))
+
+    @bot.command(name="history")
+    async def _prefix_history(ctx: commands.Context, extension: Optional[str] = None):
+        if not is_instance_running():
+            await ctx.send("Publoader instance is not running.")
+            return
+        try:
+            payload = await asyncio.to_thread(
+                ipc_call, "run_history", extension=extension, limit=15
+            )
+        except Exception as e:
+            await ctx.send(f"IPC call failed: `{e}`")
+            return
+        await ctx.send(_format_history(payload))
+
+    # ----- /stats: queue + collection document counts -----
+
+    @bot.tree.command(name="stats", description="Queue depth and collection counts.")
+    async def _slash_stats(interaction: discord.Interaction):
+        await bot._dispatch_slash(interaction, "stats")
+
+    @bot.command(name="stats")
+    async def _prefix_stats(ctx: commands.Context):
+        await bot._dispatch(ctx, "stats")
+
+    # ----- /mdauth: MangaDex token status -----
+
+    @bot.tree.command(
+        name="mdauth", description="Show MangaDex auth token status and expiry."
+    )
+    async def _slash_mdauth(interaction: discord.Interaction):
+        await bot._dispatch_slash(interaction, "mdauth_status")
+
+    @bot.command(name="mdauth")
+    async def _prefix_mdauth(ctx: commands.Context):
+        await bot._dispatch(ctx, "mdauth_status")
+
+    # ----- /workers restart -----
+
+    @bot.tree.command(
+        name="workers",
+        description="Restart the worker subprocesses (admin-only).",
+    )
+    async def _slash_workers(interaction: discord.Interaction):
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("Not allowed.", ephemeral=True)
+            return
+        await bot._dispatch_slash(interaction, "restart_workers")
+
+    @bot.command(name="workers")
+    async def _prefix_workers(ctx: commands.Context, action: str = "restart"):
+        if not _is_admin(ctx.author):
+            await ctx.send("Not allowed.")
+            return
+        if action != "restart":
+            await ctx.send("Usage: `!workers restart`")
+            return
+        await bot._dispatch(ctx, "restart_workers")
+
+    # ----- /queue group: peek + clear worker queues -----
+    queue_group = app_commands.Group(
+        name="queue",
+        description="Inspect or flush the worker MongoDB queues.",
+    )
+
+    @queue_group.command(name="peek", description="Sample documents in a worker queue.")
+    @app_commands.describe(
+        worker="Which worker queue.", limit="How many docs (1-20, default 5)."
+    )
+    @app_commands.autocomplete(worker=_worker_autocomplete)
+    async def _queue_peek(
+        interaction: discord.Interaction,
+        worker: str,
+        limit: Optional[app_commands.Range[int, 1, 20]] = 5,
+    ):
+        await bot._dispatch_slash(
+            interaction, "queue_peek", worker=worker, limit=limit or 5
+        )
+
+    @queue_group.command(
+        name="clear",
+        description="Delete every queued document for a worker (admin-only).",
+    )
+    @app_commands.describe(worker="Which worker queue to flush.")
+    @app_commands.autocomplete(worker=_worker_autocomplete)
+    async def _queue_clear(interaction: discord.Interaction, worker: str):
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("Not allowed.", ephemeral=True)
+            return
+        await bot._dispatch_slash(interaction, "queue_clear", worker=worker)
+
+    bot.tree.add_command(queue_group)
+
+    @bot.group(name="queue", invoke_without_command=True)
+    async def _queue_prefix(ctx: commands.Context):
+        await ctx.send("Usage: `!queue peek <worker> [limit]` or `!queue clear <worker>`")
+
+    @_queue_prefix.command(name="peek")
+    async def _queue_prefix_peek(
+        ctx: commands.Context, worker: str, limit: Optional[int] = 5
+    ):
+        await bot._dispatch(ctx, "queue_peek", worker=worker, limit=limit or 5)
+
+    @_queue_prefix.command(name="clear")
+    async def _queue_prefix_clear(ctx: commands.Context, worker: str):
+        if not _is_admin(ctx.author):
+            await ctx.send("Not allowed.")
+            return
+        await bot._dispatch(ctx, "queue_clear", worker=worker)
+
+    # ----- /config group: view + set config.ini values -----
+    config_group = app_commands.Group(
+        name="config",
+        description="View or change config.ini values (secrets redacted).",
+    )
+
+    @config_group.command(name="show", description="Show config values (secrets redacted).")
+    @app_commands.describe(section="Limit to one [section] (optional).")
+    async def _config_show(
+        interaction: discord.Interaction, section: Optional[str] = None
+    ):
+        await bot._dispatch_slash(interaction, "config_show", section=section)
+
+    @config_group.command(
+        name="set",
+        description="Set a config.ini value (admin-only; most need a /restart).",
+    )
+    @app_commands.describe(
+        section="Config [section] (e.g. Options).",
+        key="Key within the section.",
+        value="New value.",
+    )
+    async def _config_set(
+        interaction: discord.Interaction, section: str, key: str, value: str
+    ):
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("Not allowed.", ephemeral=True)
+            return
+        await bot._dispatch_slash(
+            interaction, "config_set", section=section, key=key, value=value
+        )
+
+    bot.tree.add_command(config_group)
+
+    @bot.group(name="config", invoke_without_command=True)
+    async def _config_prefix(ctx: commands.Context):
+        await bot._dispatch(ctx, "config_show")
+
+    @_config_prefix.command(name="show")
+    async def _config_prefix_show(ctx: commands.Context, section: Optional[str] = None):
+        await bot._dispatch(ctx, "config_show", section=section)
+
+    @_config_prefix.command(name="set")
+    async def _config_prefix_set(
+        ctx: commands.Context, section: str, key: str, *, value: str
+    ):
+        if not _is_admin(ctx.author):
+            await ctx.send("Not allowed.")
+            return
+        await bot._dispatch(ctx, "config_set", section=section, key=key, value=value)
 
 
 def run() -> int:
