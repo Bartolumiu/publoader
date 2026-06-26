@@ -813,6 +813,9 @@ if __name__ == "__main__":
 
     try:
         while True:
+            # Idempotent: reuses the live watchers and only respawns any that
+            # have died, so the workers stay alive for the lifetime of the loop.
+            worker.main(database_connection)
             schedule.exec_jobs()
             _drain_ipc_jobs(database_connection)
             time.sleep(1)
