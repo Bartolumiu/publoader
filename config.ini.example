@@ -40,3 +40,20 @@ BASE_REPO_PATH=publoader
 EXTENSIONS_REPO_PATH=publoader-extensions
 EXTENSIONS_PRIVATE_REPO_PATH=
 GITHUB_ACCESS_TOKEN=
+
+[GithubWebhook]
+# Listen for GitHub push webhooks and download updates the instant code is
+# pushed, instead of waiting for the daily restart (which stays as a fallback).
+# Add a webhook on each tracked repo: Payload URL = the PATH below, content
+# type application/json, secret = SECRET below, events = "push".
+# Leave ENABLED=false to keep the polling-only behaviour.
+ENABLED=false
+# Address/port the listener binds inside the container. 8080 matches the port
+# the docker-compose already publishes; point GitHub at it through whatever
+# ingress you use (reverse proxy / port-forward) so deliveries reach this port.
+HOST=0.0.0.0
+PORT=8080
+PATH=/webhook
+# Shared secret; must match the secret set on the GitHub webhook. Required —
+# the listener refuses to start without one.
+SECRET=

@@ -115,6 +115,55 @@ If a path isn't a git working tree (the production image doesn't ship `.git`),
 `/pull` returns a hint to update via `docker compose pull && docker compose up -d`
 or to let watchtower handle it.
 
+## Push-based updates (GitHub webhooks)
+
+By default updates are picked up by the daily restart job, which checks every
+tracked repo once a day. Enable the webhook listener to instead download an
+update **the moment code is pushed** — the daily job stays on as a fallback.
+
+Pushes are handled per repo:
+
+- **base** push → full download + process restart (core code needs a re-exec).
+- **extensions / extensions-private** push → that repo is pulled and the
+  extension modules are reloaded in place — no full restart.
+
+Only pushes to each repo's **default branch** trigger an update; everything
+else is acknowledged and ignored.
+
+### 1. Enable in `config.ini`
+
+```ini
+[GithubWebhook]
+ENABLED=true
+HOST=0.0.0.0
+PORT=8080
+PATH=/webhook
+SECRET=<random string, e.g. `openssl rand -hex 32`>
+```
+
+The listener **refuses to start without a secret** — an unauthenticated update
+trigger would be a remote-code path. It binds inside the container on `PORT`
+(8080 is already published by `docker-compose.yml`); expose that through your
+reverse proxy / port-forward so GitHub can reach `https://<host>/webhook`.
+
+All tracked repos must live under the same owner as `[Repo] repo_owner`, and
+`extensions_private_repo_path` must be set or private-repo pushes are ignored.
+
+### 2. Add the webhook on GitHub
+
+Configure **one webhook per tracked repo** (or a single org-level webhook that
+covers them all — untracked repos are ignored):
+
+- **Payload URL:** `https://<host>/webhook`
+- **Content type:** `application/json` (required — the raw JSON body is
+  HMAC-verified; `x-www-form-urlencoded` will fail the signature check)
+- **Secret:** the same `SECRET` as above
+- **Events:** just the `push` event
+
+GitHub's "ping" on save returns `200 {"pong": true}`. A delivery returning
+`401` means the secret doesn't match; `202 {"ignored": …}` means the push was
+for an untracked repo or a non-default branch.
+
 ## Extensions
 
 Extension trees are mounted into `/app/publoader/extensions/src/<extension>/`.
@@ -140,8 +189,9 @@ For writing a new extension, see the
 ```
 
 The suite covers the IPC server, state DB, AST scanner, atomic writes,
-webhook URL parsing, chapter dataclasses, chapter card generation, and the
-`/pull` git wiring.
+webhook URL parsing, chapter dataclasses, chapter card generation, the
+`/pull` git wiring, and the GitHub push-webhook listener (signature
+verification, push routing, pull+reload).
 
 ## Contributing
 

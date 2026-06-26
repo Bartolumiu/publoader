@@ -15,6 +15,7 @@ from pathlib import Path
 
 from scheduler import Scheduler
 
+from publoader.github_webhook import GithubWebhookListener
 from publoader.ipc import IPCServer, ipc_call, is_instance_running
 from publoader.state import get_state_store
 from publoader.updater import PubloaderUpdater
@@ -24,6 +25,11 @@ from publoader.utils.config import (
     daily_run_time_checks_minute,
     daily_run_time_daily_hour,
     daily_run_time_daily_minute,
+    github_webhook_enabled,
+    github_webhook_host,
+    github_webhook_path,
+    github_webhook_port,
+    github_webhook_secret,
 )
 from publoader.utils.utils import (
     get_current_datetime,
@@ -37,6 +43,7 @@ logger = logging.getLogger("publoader")
 # Job kinds the IPC handlers enqueue for the main loop to drain.
 JOB_RUN = "run"
 JOB_RESTART = "restart"
+JOB_PULL = "pull"
 
 # Holds (kind, payload) tuples; populated by IPC threads, drained on main thread.
 _ipc_jobs: "queue.Queue" = queue.Queue()
@@ -300,6 +307,68 @@ _EXT_NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
 
 _PULL_REPOS = ("base", "extensions", "extensions-private")
+
+
+def _enqueue_push_update(slot: str, payload: dict) -> None:
+    """Webhook callback: a push landed on a tracked repo, queue the matching
+    update for the main loop to run.
+
+    A push to the base repo changes core code, so it takes the full
+    download+re-exec path (`restart()`) — the same path as the daily fallback.
+    A push to an extension repo only needs that repo pulled and the extension
+    modules re-imported, so it takes the lighter pull+reload path and avoids
+    restarting the whole process (and interrupting any in-flight run).
+
+    Called from the webhook server thread, so it only touches the thread-safe
+    job queue — the heavy work happens on the main thread."""
+    after = ((payload or {}).get("after") or "")[:7]
+    sha = after or "unknown sha"
+    if slot == "base":
+        logger.info(f"Push received for base repo ({sha}); queuing update + restart.")
+        _ipc_jobs.put((JOB_RESTART, {}))
+    else:
+        logger.info(f"Push received for {slot!r} ({sha}); queuing pull + reload.")
+        _ipc_jobs.put((JOB_PULL, {"repos": [slot]}))
+
+
+def _build_repo_slots() -> dict:
+    """GitHub repo name -> internal slot, matching the repos the updater pulls."""
+    slots = {
+        config["Repo"]["base_repo_path"]: "base",
+        config["Repo"]["extensions_repo_path"]: "extensions",
+    }
+    private = config["Repo"].get("extensions_private_repo_path")
+    if private:
+        slots[private] = "extensions-private"
+    return slots
+
+
+def _start_webhook_listener():
+    """Start the GitHub push-webhook listener when enabled and configured.
+    Returns the listener (so the caller can stop it) or None."""
+    if not github_webhook_enabled:
+        return None
+    if not github_webhook_secret:
+        logger.warning(
+            "GitHub webhook listener enabled but [GithubWebhook]secret is unset; "
+            "refusing to start an unauthenticated update trigger."
+        )
+        return None
+    try:
+        listener = GithubWebhookListener(
+            host=github_webhook_host,
+            port=github_webhook_port,
+            path=github_webhook_path,
+            secret=github_webhook_secret,
+            owner=config["Repo"]["repo_owner"],
+            repo_slots=_build_repo_slots(),
+            on_push=_enqueue_push_update,
+        )
+        listener.start()
+        return listener
+    except OSError:
+        logger.exception("Failed to start GitHub webhook listener")
+        return None
 
 
 def _setup_ipc_server(database_connection) -> IPCServer:
@@ -569,6 +638,42 @@ def _setup_ipc_server(database_connection) -> IPCServer:
     return server
 
 
+def _run_pull_job(database_connection, payload: dict) -> None:
+    """Pull the named repos and, if any changed, reload so the new extension
+    code is picked up — without a full process restart. Used by the webhook's
+    extension-push path. `payload["repos"]` holds slot names understood by
+    PubloaderUpdater.update_one ('extensions', 'extensions-private')."""
+    repos = payload.get("repos") or []
+    try:
+        updater = PubloaderUpdater()
+    except Exception:
+        logger.exception("pull job: updater init failed")
+        return
+
+    changed = False
+    for name in repos:
+        try:
+            status = updater.update_one(name)
+        except Exception:
+            logger.exception(f"pull job: pulling {name!r} failed")
+            continue
+        if status.get("changed"):
+            changed = True
+            logger.info(f"pull job: {name!r} updated to {status.get('sha')}.")
+        elif not status.get("ok"):
+            logger.warning(f"pull job: {name!r} pull failed: {status.get('error')}")
+
+    if changed:
+        # Re-import extension modules to activate the new code. Mirrors /reload:
+        # general_run=False means only extensions already due now actually run.
+        main(
+            database_connection=database_connection,
+            extension_names=None,
+            general_run=False,
+            clean_db=False,
+        )
+
+
 def _drain_ipc_jobs(database_connection) -> None:
     """Pull queued IPC jobs and execute them. Called from the main loop."""
     while True:
@@ -582,6 +687,8 @@ def _drain_ipc_jobs(database_connection) -> None:
                 main(database_connection=database_connection, **payload)
             elif kind == JOB_RESTART:
                 restart()
+            elif kind == JOB_PULL:
+                _run_pull_job(database_connection, payload)
             else:
                 logger.warning(f"Unknown IPC job kind: {kind!r}")
         except Exception:
@@ -657,6 +764,7 @@ if __name__ == "__main__":
     database_connection = get_database_connection()
     worker.main(database_connection)
     ipc_server = _setup_ipc_server(database_connection)
+    webhook_listener = _start_webhook_listener()
 
     if vargs["extension"] is None:
         extension_to_run = None
@@ -710,5 +818,7 @@ if __name__ == "__main__":
             time.sleep(1)
     except KeyboardInterrupt:
         ipc_server.stop()
+        if webhook_listener is not None:
+            webhook_listener.stop()
         worker.kill()
         sys.exit(1)

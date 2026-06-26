@@ -123,3 +123,39 @@ DEFAULT_TIME = time(hour=daily_run_time_daily_hour, minute=daily_run_time_daily_
 CLEAN_TIME = time(hour=daily_run_time_checks_hour, minute=daily_run_time_checks_minute)
 DEFAULT_CLEAN_DAY = WEDNESDAY
 ALL_DAYS = range(7)
+
+
+def _config_get(section: str, option: str, fallback: str = "") -> str:
+    """Read [section]option, tolerating a missing section entirely."""
+    try:
+        return config[section].get(option, fallback)
+    except KeyError:
+        return fallback
+
+
+# GitHub push-webhook listener. When enabled, GitHub fires an HTTP POST the
+# moment code is pushed to a tracked repo, so updates download immediately
+# instead of waiting for the daily restart job (which stays as a fallback).
+github_webhook_enabled = _config_get(
+    "GithubWebhook", "enabled", "false"
+).strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+github_webhook_host = _config_get("GithubWebhook", "host", "0.0.0.0") or "0.0.0.0"
+
+try:
+    github_webhook_port = int(_config_get("GithubWebhook", "port", "9000") or "9000")
+except ValueError:
+    github_webhook_port = 9000
+
+github_webhook_path = _config_get("GithubWebhook", "path", "/webhook") or "/webhook"
+if not github_webhook_path.startswith("/"):
+    github_webhook_path = "/" + github_webhook_path
+
+# Shared secret configured on the GitHub webhook; used to verify the
+# X-Hub-Signature-256 HMAC of each delivery. The listener refuses to start
+# without one (an unauthenticated update trigger would be a remote-code path).
+github_webhook_secret = _config_get("GithubWebhook", "secret", "") or ""
