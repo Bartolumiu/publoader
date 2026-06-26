@@ -17,8 +17,15 @@ class EditorProcess:
     ):
         self.upload_chapter = upload_chapter
         self.http_client = http_client
-        self.chapter = Chapter(**self.upload_chapter["chapter"])
+        self.chapter = Chapter(
+            **{
+                k: v
+                for k, v in self.upload_chapter.items()
+                if k not in ("old_info", "payload", "_id")
+            }
+        )
         self.payload = self.upload_chapter["payload"]
+        self.old_info = self.upload_chapter.get("old_info")
         self.md_chapter_id = self.upload_chapter["md_chapter_id"]
 
         self.manga_generic_error_message = (
@@ -54,10 +61,10 @@ def run(item, http_client, queue_webhook, database_connection, **kwargs):
     chapter_editor = EditorProcess(item, http_client)
     edited = chapter_editor.start_edit()
 
-    queue_webhook.add_chapter(item["chapter"], processed=edited)
+    queue_webhook.add_chapter(vars(chapter_editor.chapter), processed=edited)
     database_connection["to_edit"].delete_one({"_id": {"$eq": item["_id"]}})
     if edited:
-        update_database(database_connection, item["chapter"])
+        update_database(database_connection, chapter_editor.chapter)
 
 
 def fetch_data_from_database(database_connection):

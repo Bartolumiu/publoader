@@ -29,6 +29,7 @@ class Chapter:
 
     manga_id: Optional[str] = None
     md_manga_id: Optional[str] = None
+    md_group_id: Optional[str] = None
 
     manga_name: Optional[str] = None
     manga_url: Optional[str] = None
@@ -45,6 +46,8 @@ class Chapter:
         "chapter_url",
         "md_chapter_id",
         "manga_id",
+        "md_manga_id",
+        "md_group_id",
         "manga_name",
         "manga_url",
         "extension_name",

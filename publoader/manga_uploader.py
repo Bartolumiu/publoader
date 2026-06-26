@@ -243,6 +243,10 @@ class MangaUploaderProcess:
                 if g["type"] == "scanlation_group"
             ],
         }
+        # Snapshot the chapter's current MangaDex state before any field is
+        # overwritten below — stored alongside the edit so the row keeps both
+        # the old info and the new info (`payload`) in the same shape.
+        old_info = dict(data_to_post)
         changed = False
 
         if str(chapter.chapter_id) not in chapter_attrs["externalUrl"]:
@@ -273,10 +277,14 @@ class MangaUploaderProcess:
             logger.debug(f"Editing chapter {md_id} with old info {chapter_attrs}")
             logger.info(f"Editing chapter {md_id} with new info {data_to_post}")
 
+            # Store the chapter in the same flat, canonical shape every other
+            # collection uses; the edit delta is the only edit-specific extra.
+            chapter.md_chapter_id = md_id
+            chapter.md_manga_id = chapter.md_manga_id or self.mangadex_manga_id
+            chapter.md_group_id = self.mangadex_group_id
             return {
-                "md_chapter_id": md_id,
-                "md_group_id": self.mangadex_group_id,
-                "chapter": vars(chapter),
+                **vars(chapter),
+                "old_info": old_info,
                 "payload": data_to_post,
             }
         else:
@@ -300,7 +308,12 @@ class MangaUploaderProcess:
         chapters_to_edit = [
             dupe for dupe in map(self.edit_chapter, dupes) if dupe is not None
         ]
-        dupes_for_editing = [Chapter(**dupe["chapter"]) for dupe in chapters_to_edit]
+        dupes_for_editing = [
+            Chapter(
+                **{k: v for k, v in dupe.items() if k not in ("old_info", "payload")}
+            )
+            for dupe in chapters_to_edit
+        ]
 
         chapters_skipped = [
             chapter["chapter"]
@@ -309,16 +322,14 @@ class MangaUploaderProcess:
             and chapter["chapter"] not in dupes_for_editing
         ]
 
-        chapters_to_insert = [
-            {
-                **{
-                    "mangadex_manga_id": self.mangadex_manga_id,
-                    "mangadex_group_id": self.mangadex_group_id,
-                },
-                **vars(chapter),
-            }
-            for chapter in chapters_to_upload
-        ]
+        for chapter in chapters_to_upload:
+            chapter.md_manga_id = chapter.md_manga_id or self.mangadex_manga_id
+            chapter.md_group_id = self.mangadex_group_id
+
+        # Flat, canonical Chapter shape — the MangaDex manga/group ids now live on
+        # the chapter itself (md_manga_id / md_group_id) instead of redundant
+        # top-level mangadex_* keys. `images` is replaced with GridFS ids below.
+        chapters_to_insert = [{**vars(chapter)} for chapter in chapters_to_upload]
 
         print(
             f"Inserting chapters for manga {self.mangadex_manga_id}: {self.mangadex_manga_data['title']}"

@@ -37,8 +37,8 @@ class UploaderProcess:
         self.chapter = Chapter(**upload_chapter)
         self.http_client = http_client
         self.extension_name = self.chapter.extension_name
-        self.mangadex_manga_id = upload_chapter.get("mangadex_manga_id", "")
-        self.mangadex_group_id = upload_chapter.get("mangadex_group_id", "")
+        self.mangadex_manga_id = self.chapter.md_manga_id or ""
+        self.mangadex_group_id = self.chapter.md_group_id or ""
         self.image_ids = images
         self.image_ids_str = [str(img._id) for img in self.image_ids]
 
