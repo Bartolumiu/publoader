@@ -269,6 +269,31 @@ class StateStore:
             )
             self.conn.commit()
 
+    def recent_runs(
+        self, limit: int = 20, extension: Optional[str] = None
+    ) -> List[dict]:
+        """Most recent run_history rows, newest first. Filter by extension when
+        given (matches the exact value stored at record time)."""
+        limit = max(1, min(int(limit), 100))
+        if extension:
+            rows = self.conn.execute(
+                """
+                SELECT id, extension, kind, triggered_by, started_at, completed_at, success
+                FROM run_history WHERE extension = ?
+                ORDER BY id DESC LIMIT ?
+                """,
+                (extension, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT id, extension, kind, triggered_by, started_at, completed_at, success
+                FROM run_history ORDER BY id DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
 
 _singleton: Optional[StateStore] = None
 _singleton_lock = threading.Lock()

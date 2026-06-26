@@ -76,16 +76,41 @@ def _release_extensions(names):
         _inflight_extensions.difference_update(names)
 
 
+def _record_run_started(extension_names, general_run, clean_db, triggered_by):
+    """Best-effort run_history insert. Never let bookkeeping break a run."""
+    kind = "clean" if clean_db else ("force" if general_run else "run")
+    ext = ", ".join(extension_names) if extension_names else "all"
+    try:
+        return get_state_store().record_run_started(ext, kind, triggered_by)
+    except sqlite3.Error:
+        logger.warning("Couldn't record run start", exc_info=True)
+        return None
+
+
+def _record_run_completed(run_id, success):
+    if run_id is None:
+        return
+    try:
+        get_state_store().record_run_completed(run_id, success)
+    except sqlite3.Error:
+        logger.warning("Couldn't record run completion", exc_info=True)
+
+
 def main(
     database_connection,
     extension_names: list[str] = None,
     general_run=False,
     clean_db=False,
+    triggered_by: str = None,
 ):
     """Call the main function of the publoader bot."""
     from publoader import publoader
 
     reload(publoader)
+    run_id = _record_run_started(
+        extension_names, general_run, clean_db, triggered_by
+    )
+    success = False
     try:
         with _run_lock:
             publoader.open_extensions(
@@ -94,7 +119,9 @@ def main(
                 general_run=general_run,
                 clean_db=clean_db,
             )
+        success = True
     finally:
+        _record_run_completed(run_id, success)
         _release_extensions(extension_names or [])
 
 
@@ -308,6 +335,73 @@ _EXT_NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
 _PULL_REPOS = ("base", "extensions", "extensions-private")
 
+# Log scope -> folder under <root>/logs. workers/extensions hold per-name
+# subfolders; the rest hold a single dated file.
+_LOG_SCOPES = {
+    "bot": ("logs", "bot"),
+    "workers": ("logs", "workers"),
+    "webhook": ("logs", "webhook"),
+    "debug": ("logs", "debug"),
+    "extensions": ("logs", "extensions"),
+}
+
+# config.ini keys that must never be echoed back over Discord in full.
+_SECRET_CONFIG_KEYS = {
+    "mangadex_password",
+    "client_secret",
+    "mongodb_uri",
+    "discord_bot_token",
+    "github_access_token",
+}
+
+
+def _redact_secret(key: str, value: str) -> str:
+    if value and key.lower() in _SECRET_CONFIG_KEYS:
+        tail = value[-4:] if len(value) > 4 else ""
+        return f"***set*** (…{tail})" if tail else "***set***"
+    return value
+
+
+def _worker_tables() -> dict:
+    """Map worker name -> MongoDB collection it drains."""
+    return {w["name"]: w["table"] for w in worker.WATCHERS}
+
+
+def _tail_lines(path: Path, lines: int) -> str:
+    """Return the last `lines` lines of a text file. Reads the whole file —
+    log files are rotated daily and capped by clear_old_logs, so they stay
+    small enough that a full read is simpler than seeking."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            data = fh.read().splitlines()
+    except OSError as e:
+        return f"<could not read {path.name}: {e}>"
+    if not data:
+        return "<empty>"
+    return "\n".join(data[-lines:])
+
+
+def _resolve_log_file(scope: str, name) -> Path:
+    """Folder for `scope` (+ optional per-name subfolder), then the newest
+    *.log inside it. Raises ValueError on bad scope/name (path-traversal safe)."""
+    parts = _LOG_SCOPES.get(scope)
+    if parts is None:
+        raise ValueError(
+            f"unknown log scope {scope!r}; choose one of {sorted(_LOG_SCOPES)}"
+        )
+    folder = root_path.joinpath(*parts)
+    if scope in ("workers", "extensions") and name:
+        name = str(name).strip()
+        if not _EXT_NAME_RE.match(name) and name not in _worker_tables():
+            raise ValueError(f"invalid {scope} name: {name!r}")
+        folder = folder.joinpath(name)
+    candidates = sorted(
+        folder.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+    if not candidates:
+        raise ValueError(f"no log files under {folder}")
+    return candidates[0]
+
 
 def _enqueue_push_update(slot: str, payload: dict) -> None:
     """Webhook callback: a push landed on a tracked repo, queue the matching
@@ -399,6 +493,7 @@ def _setup_ipc_server(database_connection) -> IPCServer:
                     "extension_names": extensions,
                     "general_run": bool(req.get("force", False)),
                     "clean_db": bool(req.get("clean", False)),
+                    "triggered_by": req.get("triggered_by") or "discord",
                 },
             )
         )
@@ -413,7 +508,12 @@ def _setup_ipc_server(database_connection) -> IPCServer:
         _ipc_jobs.put(
             (
                 JOB_RUN,
-                {"extension_names": None, "general_run": False, "clean_db": False},
+                {
+                    "extension_names": None,
+                    "general_run": False,
+                    "clean_db": False,
+                    "triggered_by": "reload",
+                },
             )
         )
         return {"reloaded": True}
@@ -621,6 +721,193 @@ def _setup_ipc_server(database_connection) -> IPCServer:
             return {"ok": False, "error": f"state DB write failed: {e}"}
         return {"ok": True, "mode": mode}
 
+    def cmd_run_history(req):
+        ext = (req.get("extension") or "").strip() or None
+        if ext is not None and not _EXT_NAME_RE.match(ext):
+            return {"ok": False, "error": f"invalid extension name: {ext!r}"}
+        try:
+            limit = int(req.get("limit") or 15)
+        except (TypeError, ValueError):
+            limit = 15
+        try:
+            runs = get_state_store().recent_runs(limit=limit, extension=ext)
+        except sqlite3.Error as e:
+            return {"ok": False, "error": f"state DB read failed: {e}"}
+        return {"ok": True, "runs": runs}
+
+    def cmd_logs(req):
+        """Tail a log file. With no scope, list the scopes available. For
+        `workers`/`extensions` a `name` selects the per-name subfolder."""
+        scope = (req.get("scope") or "").strip().lower()
+        if not scope:
+            return {"ok": True, "scopes": sorted(_LOG_SCOPES), "workers": sorted(_worker_tables())}
+        try:
+            lines = int(req.get("lines") or 40)
+        except (TypeError, ValueError):
+            lines = 40
+        lines = max(1, min(lines, 200))
+        try:
+            path = _resolve_log_file(scope, req.get("name"))
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        return {
+            "ok": True,
+            "scope": scope,
+            "file": path.name,
+            "lines": lines,
+            "text": _tail_lines(path, lines),
+        }
+
+    def cmd_queue_peek(req):
+        """Sample documents from a worker's MongoDB collection. `worker` accepts
+        a worker name (uploader/…) or the raw collection name."""
+        tables = _worker_tables()
+        name = (req.get("worker") or req.get("table") or "").strip()
+        table = tables.get(name, name)
+        if table not in tables.values():
+            return {
+                "ok": False,
+                "error": f"unknown worker/table {name!r}; choose from {sorted(tables)}",
+            }
+        try:
+            limit = int(req.get("limit") or 5)
+        except (TypeError, ValueError):
+            limit = 5
+        limit = max(1, min(limit, 20))
+        try:
+            collection = database_connection[table]
+            total = int(collection.count_documents({}))
+            sample = []
+            for doc in collection.find({}, limit=limit):
+                sample.append(
+                    {
+                        "_id": str(doc.get("_id")),
+                        "md_chapter_id": doc.get("md_chapter_id"),
+                        "manga_id": doc.get("manga_id") or doc.get("md_manga_id"),
+                        "chapter_number": doc.get("chapter_number"),
+                        "extension_name": doc.get("extension_name"),
+                    }
+                )
+        except Exception as e:  # pragma: no cover - defensive
+            return {"ok": False, "error": f"mongo read failed: {e}"}
+        return {"ok": True, "worker": name, "table": table, "queued": total, "sample": sample}
+
+    def cmd_queue_clear(req):
+        """Empty a worker's MongoDB collection. Destructive — admin-gated in the bot."""
+        tables = _worker_tables()
+        name = (req.get("worker") or req.get("table") or "").strip()
+        table = tables.get(name, name)
+        if table not in tables.values():
+            return {
+                "ok": False,
+                "error": f"unknown worker/table {name!r}; choose from {sorted(tables)}",
+            }
+        try:
+            result = database_connection[table].delete_many({})
+        except Exception as e:  # pragma: no cover - defensive
+            return {"ok": False, "error": f"mongo delete failed: {e}"}
+        return {"ok": True, "worker": name, "table": table, "deleted": result.deleted_count}
+
+    def cmd_restart_workers(_req):
+        """Kill and respawn the watcher subprocesses without restarting the
+        whole scheduler. Useful when a worker wedges on a bad request."""
+        try:
+            worker.kill()
+            worker.main(database_connection)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.exception("worker restart failed")
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "restarted": sorted(_worker_tables())}
+
+    def cmd_stats(_req):
+        """Document counts for the worker queues plus the core collections."""
+        out: dict = {"queues": {}, "collections": {}}
+        for name, table in _worker_tables().items():
+            try:
+                out["queues"][name] = int(database_connection[table].count_documents({}))
+            except Exception as e:  # pragma: no cover - defensive
+                out["queues"][name] = f"error: {e}"
+        for coll in ("uploaded", "chapters", "manga", "to_upload"):
+            try:
+                if coll in database_connection.list_collection_names():
+                    out["collections"][coll] = int(
+                        database_connection[coll].count_documents({})
+                    )
+            except Exception as e:  # pragma: no cover - defensive
+                out["collections"][coll] = f"error: {e}"
+        return {"ok": True, **out}
+
+    def cmd_config_show(req):
+        section = (req.get("section") or "").strip()
+        out: dict = {}
+        sections = [section] if section else list(config.sections())
+        for sec in sections:
+            if sec not in config:
+                return {"ok": False, "error": f"unknown section {sec!r}"}
+            out[sec] = {
+                key: _redact_secret(key, value)
+                for key, value in config[sec].items()
+            }
+        return {"ok": True, "config": out}
+
+    def cmd_config_set(req):
+        section = (req.get("section") or "").strip()
+        key = (req.get("key") or "").strip()
+        value = req.get("value")
+        if section not in config:
+            return {"ok": False, "error": f"unknown section {section!r}"}
+        if not key:
+            return {"ok": False, "error": "key is required"}
+        if value is None:
+            return {"ok": False, "error": "value is required"}
+        config[section][key] = str(value)
+        try:
+            from publoader.utils.config import config_file_path
+
+            with open(config_file_path, "w", encoding="utf-8") as fh:
+                config.write(fh)
+        except OSError as e:
+            return {"ok": False, "error": f"config write failed: {e}"}
+        return {
+            "ok": True,
+            "section": section,
+            "key": key,
+            "value": _redact_secret(key, str(value)),
+            "note": "written to config.ini — most values need a /restart to apply.",
+        }
+
+    def cmd_mdauth_status(_req):
+        """Report whether the saved MangaDex token exists and when it expires,
+        decoding the JWT `exp` claim without verifying the signature."""
+        import base64
+        from datetime import datetime, timezone as _tz
+
+        token_file = root_path.joinpath(config["Paths"]["mdauth_path"])
+        if not token_file.exists():
+            return {"ok": True, "exists": False, "note": "no mdauth file; logs in with account details."}
+        try:
+            data = json.loads(token_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            return {"ok": False, "error": f"could not read mdauth file: {e}"}
+
+        out = {"ok": True, "exists": True, "has_access": bool(data.get("access")),
+               "has_refresh": bool(data.get("refresh"))}
+        access = data.get("access") or ""
+        try:
+            payload_b64 = access.split(".")[1]
+            payload_b64 += "=" * (-len(payload_b64) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload_b64))
+            exp = claims.get("exp")
+            if exp:
+                expires = datetime.fromtimestamp(exp, tz=_tz.utc)
+                now = datetime.now(tz=_tz.utc)
+                out["access_expires_at"] = expires.isoformat()
+                out["access_expired"] = expires <= now
+                out["expires_in_seconds"] = int((expires - now).total_seconds())
+        except (ValueError, IndexError, KeyError, json.JSONDecodeError):
+            out["note"] = "access token present but not a decodable JWT."
+        return out
+
     server.register("run", cmd_run)
     server.register("reload", cmd_reload)
     server.register("restart", cmd_restart)
@@ -634,6 +921,15 @@ def _setup_ipc_server(database_connection) -> IPCServer:
     server.register("list_extensions", cmd_list_extensions)
     server.register("disable_extension", cmd_disable_extension)
     server.register("enable_extension", cmd_enable_extension)
+    server.register("run_history", cmd_run_history)
+    server.register("logs", cmd_logs)
+    server.register("queue_peek", cmd_queue_peek)
+    server.register("queue_clear", cmd_queue_clear)
+    server.register("restart_workers", cmd_restart_workers)
+    server.register("stats", cmd_stats)
+    server.register("config_show", cmd_config_show)
+    server.register("config_set", cmd_config_set)
+    server.register("mdauth_status", cmd_mdauth_status)
     server.start()
     return server
 
