@@ -66,6 +66,16 @@ class _WebhookHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_GET(self):  # noqa: N802 (stdlib naming)
+        # A liveness probe for humans/uptime checks. GitHub only ever POSTs, so
+        # GET carries no payload to act on — we just confirm the listener is up.
+        # Without this the stdlib base returns a confusing 501 to browser visits.
+        cfg = self.server.publoader_cfg
+        if self.path.split("?", 1)[0] != cfg["path"]:
+            self._reply(404, {"ok": False, "error": "not found"})
+            return
+        self._reply(200, {"ok": True, "listener": "alive"})
+
     def do_POST(self):  # noqa: N802 (stdlib naming)
         cfg = self.server.publoader_cfg
 
