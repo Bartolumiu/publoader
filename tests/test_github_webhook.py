@@ -180,3 +180,24 @@ def test_wrong_path_404(listener):
         listener.bound_port, body, signature=_sign(body), path="/nope"
     )
     assert status == 404
+
+
+def _get(port, *, path="/webhook"):
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method="GET")
+    try:
+        resp = urllib.request.urlopen(req, timeout=5)
+        return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def test_get_on_path_returns_health(listener):
+    status, payload = _get(listener.bound_port)
+    assert status == 200
+    assert payload == {"ok": True, "listener": "alive"}
+    assert listener.received == []
+
+
+def test_get_on_wrong_path_404(listener):
+    status, _ = _get(listener.bound_port, path="/nope")
+    assert status == 404
