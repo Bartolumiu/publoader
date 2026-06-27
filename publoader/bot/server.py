@@ -36,6 +36,7 @@ except ImportError:  # pragma: no cover - optional at import time
     DockerAPIError = DockerException = DockerNotFound = Exception
 
 from publoader.ipc import ipc_call, is_instance_running
+from publoader.ipc.client import IPCClient
 from publoader.utils.config import config
 
 logger = logging.getLogger("webhook")
@@ -260,12 +261,22 @@ class PubloaderBot(commands.Bot):
 
     # ---------- IPC dispatch helpers ----------
 
-    async def _dispatch(self, ctx: commands.Context, cmd: str, **payload) -> None:
+    @staticmethod
+    def _ipc(cmd: str, timeout: Optional[float], **payload) -> dict:
+        # Network-bound handlers (e.g. force_login) can exceed the default 5s
+        # client timeout, so allow callers to widen it.
+        if timeout is None:
+            return ipc_call(cmd, **payload)
+        return IPCClient(timeout=timeout).call(cmd, **payload)
+
+    async def _dispatch(
+        self, ctx: commands.Context, cmd: str, timeout: Optional[float] = None, **payload
+    ) -> None:
         if not is_instance_running():
             await ctx.send("Publoader instance is not running.")
             return
         try:
-            result = await asyncio.to_thread(ipc_call, cmd, **payload)
+            result = await asyncio.to_thread(self._ipc, cmd, timeout, **payload)
         except Exception as e:  # pragma: no cover - defensive
             await ctx.send(f"IPC call failed: `{e}`")
             return
@@ -274,7 +285,11 @@ class PubloaderBot(commands.Bot):
         )
 
     async def _dispatch_slash(
-        self, interaction: discord.Interaction, cmd: str, **payload
+        self,
+        interaction: discord.Interaction,
+        cmd: str,
+        timeout: Optional[float] = None,
+        **payload,
     ) -> None:
         # IPC is a blocking unix-socket call; defer so we don't hit the 3s
         # interaction response window.
@@ -284,7 +299,7 @@ class PubloaderBot(commands.Bot):
             await interaction.followup.send("Publoader instance is not running.")
             return
         try:
-            result = await asyncio.to_thread(ipc_call, cmd, **payload)
+            result = await asyncio.to_thread(self._ipc, cmd, timeout, **payload)
         except Exception as e:  # pragma: no cover - defensive
             await interaction.followup.send(f"IPC call failed: `{e}`")
             return
@@ -336,6 +351,14 @@ class PubloaderBot(commands.Bot):
                 jobs = status.get("jobs", []) or []
                 embed.add_field(name="PID", value=str(status.get("pid", "?")))
                 embed.add_field(name="Scheduled jobs", value=str(len(jobs)))
+
+                if status.get("paused"):
+                    mins = round((status.get("pause_remaining_seconds", 0) or 0) / 60, 1)
+                    embed.add_field(
+                        name="Paused",
+                        value=f":pause_button: resumes in ~{mins} min",
+                        inline=False,
+                    )
 
                 workers = status.get("workers", []) or []
                 if workers:
@@ -1255,6 +1278,87 @@ def _register_commands(bot: PubloaderBot) -> None:
             await ctx.send("Not allowed.")
             return
         await bot._dispatch(ctx, "config_set", section=section, key=key, value=value)
+
+    # ----- /login /logout: MangaDex session control (admin-only) -----
+    # Login can do a full network round-trip, so give the IPC call extra headroom
+    # over the default 5s client timeout.
+
+    @bot.tree.command(
+        name="login",
+        description="Force a fresh MangaDex login and save the token (admin-only).",
+    )
+    async def _slash_login(interaction: discord.Interaction):
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("Not allowed.", ephemeral=True)
+            return
+        await bot._dispatch_slash(interaction, "force_login", timeout=45.0)
+
+    @bot.command(name="login")
+    async def _prefix_login(ctx: commands.Context):
+        if not _is_admin(ctx.author):
+            await ctx.send("Not allowed.")
+            return
+        await bot._dispatch(ctx, "force_login", timeout=45.0)
+
+    @bot.tree.command(
+        name="logout",
+        description="Clear the MangaDex session / delete the saved token (admin-only).",
+    )
+    async def _slash_logout(interaction: discord.Interaction):
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("Not allowed.", ephemeral=True)
+            return
+        await bot._dispatch_slash(interaction, "logout")
+
+    @bot.command(name="logout")
+    async def _prefix_logout(ctx: commands.Context):
+        if not _is_admin(ctx.author):
+            await ctx.send("Not allowed.")
+            return
+        await bot._dispatch(ctx, "logout")
+
+    # ----- /pause /resume: suspend scheduled + manual runs (admin-only) -----
+
+    @bot.tree.command(
+        name="pause",
+        description="Pause scheduled runs, manual runs and workers for N minutes (admin-only).",
+    )
+    @app_commands.describe(minutes="How long to pause for (1-1440).")
+    async def _slash_pause(
+        interaction: discord.Interaction,
+        minutes: app_commands.Range[int, 1, 1440],
+    ):
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("Not allowed.", ephemeral=True)
+            return
+        await bot._dispatch_slash(interaction, "pause", minutes=minutes)
+
+    @bot.command(name="pause")
+    async def _prefix_pause(ctx: commands.Context, minutes: Optional[int] = None):
+        if not _is_admin(ctx.author):
+            await ctx.send("Not allowed.")
+            return
+        if minutes is None:
+            await ctx.send("Usage: `!pause <minutes>` (1-1440).")
+            return
+        await bot._dispatch(ctx, "pause", minutes=minutes)
+
+    @bot.tree.command(
+        name="resume",
+        description="Resume immediately after a /pause (admin-only).",
+    )
+    async def _slash_resume(interaction: discord.Interaction):
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("Not allowed.", ephemeral=True)
+            return
+        await bot._dispatch_slash(interaction, "resume")
+
+    @bot.command(name="resume")
+    async def _prefix_resume(ctx: commands.Context):
+        if not _is_admin(ctx.author):
+            await ctx.send("Not allowed.")
+            return
+        await bot._dispatch(ctx, "resume")
 
 
 def run() -> int:

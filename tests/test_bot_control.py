@@ -240,3 +240,155 @@ def test_run_history_passthrough(handlers, monkeypatch):
 def test_run_history_rejects_bad_extension(handlers):
     h, _db = handlers
     assert h["run_history"]({"extension": "Bad Name!"})["ok"] is False
+
+
+# ---------- pause / resume ----------
+
+
+class _FakeStore:
+    def __init__(self):
+        self.settings = {}
+
+    def set_setting(self, key, value):
+        self.settings[key] = value
+
+    def clear_setting(self, key):
+        return self.settings.pop(key, None)
+
+    def get_setting(self, key):
+        return self.settings.get(key)
+
+
+@pytest.fixture(autouse=True)
+def _reset_pause():
+    # cmd_run consults the module-global pause deadline; keep tests isolated.
+    run_module._pause_until = 0.0
+    yield
+    run_module._pause_until = 0.0
+
+
+@pytest.fixture
+def paused_handlers(handlers, monkeypatch):
+    h, db = handlers
+    monkeypatch.setattr(run_module, "get_state_store", lambda: _FakeStore())
+    return h, db
+
+
+def test_pause_sets_deadline(paused_handlers):
+    h, _db = paused_handlers
+    result = h["pause"]({"minutes": 10})
+    assert result["ok"] is True
+    assert result["paused"] is True
+    assert result["resumes_in_seconds"] > 0
+    assert run_module._is_paused() is True
+
+
+def test_pause_rejects_out_of_range(paused_handlers):
+    h, _db = paused_handlers
+    assert h["pause"]({"minutes": 0})["ok"] is False
+    assert h["pause"]({"minutes": 5000})["ok"] is False
+    assert h["pause"]({"minutes": "abc"})["ok"] is False
+
+
+def test_resume_clears_pause(paused_handlers):
+    h, _db = paused_handlers
+    h["pause"]({"minutes": 30})
+    result = h["resume"]({})
+    assert result["ok"] is True
+    assert result["was_paused"] is True
+    assert run_module._is_paused() is False
+
+
+def test_run_rejected_while_paused(paused_handlers):
+    h, _db = paused_handlers
+    h["pause"]({"minutes": 30})
+    result = h["run"]({"extensions": ["demo"]})
+    assert result["queued"] is False
+    assert result["paused"] is True
+
+
+def test_status_reports_pause(paused_handlers):
+    h, _db = paused_handlers
+    h["pause"]({"minutes": 30})
+    status = h["status"]({})
+    assert status["paused"] is True
+    assert status["pause_remaining_seconds"] > 0
+
+
+# ---------- force_login / logout ----------
+
+
+class _FakeOAuth:
+    def __init__(self, ok=True):
+        self._ok = ok
+        self._OAuth2__access_token = "a"
+        self._OAuth2__refresh_token = "r"
+
+    def login(self):
+        return self._ok
+
+
+class _FakeClient:
+    login_ok = True
+
+    def __init__(self):
+        self.oauth = _FakeOAuth(self.login_ok)
+        self.access_token = "acc"
+        self.refresh_token = "ref"
+        self.saved = None
+        self._first_login = False
+        self._successful_login = True
+
+    def _update_headers(self, _tok):
+        pass
+
+    def _save_tokens(self, access, refresh):
+        self.saved = (access, refresh)
+
+    def login(self):
+        pass
+
+
+def test_force_login_success(handlers, monkeypatch):
+    h, _db = handlers
+    monkeypatch.setattr("publoader.http.client.HTTPClient", _FakeClient)
+    result = h["force_login"]({})
+    assert result["ok"] is True
+    assert result["logged_in"] is True
+    assert result["forced"] is True
+
+
+def test_force_login_failure(handlers, monkeypatch):
+    h, _db = handlers
+
+    class _RejectClient(_FakeClient):
+        login_ok = False
+
+    monkeypatch.setattr("publoader.http.client.HTTPClient", _RejectClient)
+    result = h["force_login"]({})
+    assert result["ok"] is False
+    assert "rejected" in result["error"]
+
+
+def test_logout_removes_token_file(tmp_path, handlers, monkeypatch):
+    h, _db = handlers
+    res_dir = tmp_path / "resources"
+    res_dir.mkdir()
+    token = res_dir / "mdauth.json"
+    token.write_text(json.dumps({"access": "x", "refresh": "y"}), encoding="utf-8")
+
+    monkeypatch.setattr(run_module, "root_path", tmp_path)
+    monkeypatch.setattr("publoader.http.client.HTTPClient", _FakeClient)
+    result = h["logout"]({})
+    assert result["ok"] is True
+    assert result["file_removed"] is True
+    assert not token.exists()
+
+
+def test_logout_when_no_token_file(tmp_path, handlers, monkeypatch):
+    h, _db = handlers
+    monkeypatch.setattr(run_module, "root_path", tmp_path)
+    monkeypatch.setattr("publoader.http.client.HTTPClient", _FakeClient)
+    result = h["logout"]({})
+    assert result["ok"] is True
+    assert result["file_removed"] is False

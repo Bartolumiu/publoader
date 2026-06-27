@@ -11,6 +11,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -71,6 +72,11 @@ VALID_REMOVAL_MODES = (REMOVAL_MODE_UNAVAILABLE, REMOVAL_MODE_DELETE)
 DEFAULT_REMOVAL_MODE = REMOVAL_MODE_UNAVAILABLE
 
 _REMOVAL_MODE_KEY = "chapter_removal_mode"
+
+# Settings key holding the pause deadline (epoch seconds). Written by the
+# scheduler's /pause handler and read by the worker subprocesses so a pause
+# suspends both scheduled runs and live queue processing.
+_PAUSE_KEY = "pause_until"
 
 
 class StateStore:
@@ -188,6 +194,19 @@ class StateStore:
             cur = self.conn.execute("DELETE FROM settings WHERE key = ?", (key,))
             self.conn.commit()
             return cur.rowcount
+
+    # ---------- pause gate (shared across processes via the settings row) ----------
+
+    def get_pause_until(self) -> float:
+        """Epoch seconds the bot is paused until; 0.0 when not paused."""
+        raw = self.get_setting(_PAUSE_KEY)
+        try:
+            return float(raw) if raw else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    def is_paused(self) -> bool:
+        return time.time() < self.get_pause_until()
 
     # ---------- chapter removal mode ----------
 

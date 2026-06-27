@@ -72,6 +72,26 @@ def test_recent_runs_limit_clamped(store):
     assert len(store.recent_runs(limit=2)) == 2
 
 
+def test_pause_flag_round_trip(store):
+    import time
+
+    assert store.is_paused() is False
+    assert store.get_pause_until() == 0.0
+
+    store.set_setting("pause_until", str(time.time() + 600))
+    assert store.is_paused() is True
+    assert store.get_pause_until() > 0
+
+    store.set_setting("pause_until", str(time.time() - 5))
+    assert store.is_paused() is False
+
+
+def test_pause_flag_ignores_garbage(store):
+    store.set_setting("pause_until", "not-a-number")
+    assert store.get_pause_until() == 0.0
+    assert store.is_paused() is False
+
+
 def test_exists_on_disk(tmp_path):
     db_path = tmp_path / "state.db"
     s = StateStore(db_path)
