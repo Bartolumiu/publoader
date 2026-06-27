@@ -3,8 +3,13 @@ services:
     image: ardax/publoader:latest
     container_name: publoader
     restart: unless-stopped
-    ports:
-      - "8080:8080"
+    # The GitHub webhook listener binds 8080 inside the container. We do NOT
+    # publish it to the host — exposing it there would put the endpoint on the
+    # host's public interface, reachable bypassing the tunnel (HMAC is the only
+    # guard then). `expose` keeps it reachable only from other services on this
+    # compose network, i.e. the cloudflared tunnel below.
+    expose:
+      - "8080"
     volumes:
       - ./config.ini:/app/config.ini
       - ./logs:/app/logs
@@ -53,12 +58,22 @@ services:
       - publoader-bot
 
   cloudflared:
+    # Public ingress for the GitHub push webhook. The tunnel is created and its
+    # ingress is configured in the Cloudflare Zero Trust dashboard (token-based,
+    # remotely managed); add a Public Hostname routing your chosen hostname to
+    # `http://publoader:8080` — `publoader` resolves over this compose network.
+    # GitHub then posts to https://<hostname>/webhook. See README "Push-based
+    # updates" for the full setup, including the optional GitHub source-IP WAF
+    # allowlist. Nothing is published on the host: the tunnel is the only path in.
     image: cloudflare/cloudflared:latest
     container_name: cloudflared
     restart: unless-stopped
     command: tunnel run
     environment:
       - TUNNEL_TOKEN=${CLOUDFLARE_PUBLOADER_TUNNEL_TOKEN}
+    depends_on:
+      publoader:
+        condition: service_started
 
 volumes:
   extensions:

@@ -48,9 +48,9 @@ GITHUB_ACCESS_TOKEN=
 # type application/json, secret = SECRET below, events = "push".
 # Leave ENABLED=false to keep the polling-only behaviour.
 ENABLED=false
-# Address/port the listener binds inside the container. 8080 matches the port
-# the docker-compose already publishes; point GitHub at it through whatever
-# ingress you use (reverse proxy / port-forward) so deliveries reach this port.
+# Address/port the listener binds inside the container. docker-compose `expose`s
+# 8080 on the internal network (not on the host) and routes GitHub deliveries in
+# through the cloudflared tunnel — see README "Push-based updates" for setup.
 HOST=0.0.0.0
 PORT=8080
 PATH=/webhook

@@ -142,19 +142,47 @@ SECRET=<random string, e.g. `openssl rand -hex 32`>
 ```
 
 The listener **refuses to start without a secret** — an unauthenticated update
-trigger would be a remote-code path. It binds inside the container on `PORT`
-(8080 is already published by `docker-compose.yml`); expose that through your
-reverse proxy / port-forward so GitHub can reach `https://<host>/webhook`.
+trigger would be a remote-code path. Every delivery is HMAC-verified
+(`X-Hub-Signature-256`, constant-time compare), so the secret is the real
+authentication; the transport below only needs to deliver GitHub's requests to
+the container, not to add auth of its own.
 
 All tracked repos must live under the same owner as `[Repo] repo_owner`, and
 `extensions_private_repo_path` must be set or private-repo pushes are ignored.
 
-### 2. Add the webhook on GitHub
+### 2. Expose the endpoint with the Cloudflare Tunnel
+
+GitHub's servers are on the public internet, so they need a public way to reach
+the listener. The compose stack ships a `cloudflared` service for exactly this —
+**no host port is published** (`publoader` only `expose`s 8080 on the internal
+compose network), so the tunnel is the only path in and the origin IP stays
+hidden.
+
+1. Create a tunnel in the **Cloudflare Zero Trust dashboard**
+   (Networks → Tunnels) and put its token in `CLOUDFLARE_PUBLOADER_TUNNEL_TOKEN`
+   (the env var `docker-compose.yml` reads).
+2. Under the tunnel's **Public Hostnames**, add one route:
+   - **Subdomain/domain:** e.g. `hooks.yourdomain.com`
+   - **Service:** `http://publoader:8080` — `publoader` resolves to the
+     container over the compose network.
+3. (Recommended) Lock the hostname down to GitHub's webhook source IPs with a
+   Cloudflare WAF rule. GitHub publishes the ranges at
+   `https://api.github.com/meta` under `hooks`; allow those and block the rest.
+   The HMAC check already rejects forged payloads, so this is defence-in-depth.
+
+GitHub then reaches the listener at `https://hooks.yourdomain.com/webhook`.
+
+> Prefer Tailscale? Tailscale **Funnel** (not plain Tailscale — GitHub isn't on
+> your tailnet) can replace `cloudflared`: funnel a public `*.ts.net` URL to
+> `http://publoader:8080` and use that as the Payload URL. Cloudflare is the
+> default here only because it's already wired up and supports the IP allowlist.
+
+### 3. Add the webhook on GitHub
 
 Configure **one webhook per tracked repo** (or a single org-level webhook that
 covers them all — untracked repos are ignored):
 
-- **Payload URL:** `https://<host>/webhook`
+- **Payload URL:** `https://hooks.yourdomain.com/webhook` (your tunnel hostname)
 - **Content type:** `application/json` (required — the raw JSON body is
   HMAC-verified; `x-www-form-urlencoded` will fail the signature check)
 - **Secret:** the same `SECRET` as above
