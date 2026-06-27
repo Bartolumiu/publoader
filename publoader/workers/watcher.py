@@ -3,6 +3,7 @@ import logging
 import queue
 import sys
 import threading
+import time
 import traceback
 
 import pymongo
@@ -18,6 +19,37 @@ worker_paths = root_path.joinpath("publoader", "workers")
 worker_paths.mkdir(parents=True, exist_ok=True)
 bot_queue = queue.Queue()
 
+# How often a paused worker re-checks the shared pause flag.
+_PAUSE_POLL_SECONDS = 5
+
+
+def _wait_while_paused(worker_type: str) -> None:
+    """Block until the bot is not paused. The item has already been pulled from
+    bot_queue but isn't removed from MongoDB until it's processed, so holding it
+    here loses no work even if the process is killed mid-pause. Fail-open: any
+    state-DB error resumes processing rather than wedging the worker."""
+    try:
+        from publoader.state import get_state_store
+
+        store = get_state_store()
+    except Exception:
+        return
+
+    announced = False
+    while True:
+        try:
+            if not store.is_paused():
+                if announced:
+                    logger.info(f"{worker_type.title()} resuming after pause.")
+                return
+        except Exception:
+            logger.debug("pause check failed; continuing", exc_info=True)
+            return
+        if not announced:
+            logger.info(f"{worker_type.title()} paused; holding queue work.")
+            announced = True
+        time.sleep(_PAUSE_POLL_SECONDS)
+
 
 def worker(
     worker_type: str,
@@ -30,6 +62,9 @@ def worker(
     """Run the worker."""
     while True:
         item = bot_queue.get()
+
+        # Suspend processing (no MangaDex calls) while the bot is paused.
+        _wait_while_paused(worker_type)
 
         try:
             print(f"----{worker_type.title()}: Working on {item['_id']}----")

@@ -55,6 +55,53 @@ _run_lock = threading.Lock()
 _inflight_extensions: set = set()
 _inflight_lock = threading.Lock()
 
+# Pause gate. While `time.time() < _pause_until` the scheduler skips its due
+# jobs and manual /run requests are rejected. Mirrored to the state DB setting
+# `pause_until` so a restart mid-pause still honours it. 0 = not paused.
+_PAUSE_SETTING_KEY = "pause_until"
+_pause_lock = threading.Lock()
+_pause_until = 0.0
+
+
+def _set_pause_until(epoch: float) -> None:
+    global _pause_until
+    with _pause_lock:
+        _pause_until = epoch
+    try:
+        store = get_state_store()
+        if epoch > 0:
+            store.set_setting(_PAUSE_SETTING_KEY, str(epoch))
+        else:
+            store.clear_setting(_PAUSE_SETTING_KEY)
+    except sqlite3.Error:
+        logger.warning("Couldn't persist pause state", exc_info=True)
+
+
+def _load_pause_until() -> None:
+    """Restore a pause deadline from the state DB on startup (best-effort)."""
+    global _pause_until
+    try:
+        raw = get_state_store().get_setting(_PAUSE_SETTING_KEY)
+    except sqlite3.Error:
+        return
+    if not raw:
+        return
+    try:
+        with _pause_lock:
+            _pause_until = float(raw)
+    except (TypeError, ValueError):
+        pass
+
+
+def _is_paused() -> bool:
+    with _pause_lock:
+        return time.time() < _pause_until
+
+
+def _pause_remaining() -> float:
+    with _pause_lock:
+        return max(0.0, _pause_until - time.time())
+
 
 def _claim_extensions(names):
     """Atomically claim a set of extension names. Returns (accepted, skipped)."""
@@ -470,6 +517,14 @@ def _setup_ipc_server(database_connection) -> IPCServer:
     server = IPCServer()
 
     def cmd_run(req):
+        if _is_paused():
+            return {
+                "queued": False,
+                "paused": True,
+                "error": "bot is paused",
+                "resumes_in_seconds": int(_pause_remaining()),
+            }
+
         extensions = req.get("extensions")
         if extensions is None and req.get("extension"):
             extensions = [req["extension"]]
@@ -528,6 +583,8 @@ def _setup_ipc_server(database_connection) -> IPCServer:
             "pid": os.getpid(),
             "jobs": [str(j) for j in getattr(sched, "jobs", [])] if sched else [],
             "workers": _worker_queue_lengths(database_connection),
+            "paused": _is_paused(),
+            "pause_remaining_seconds": int(_pause_remaining()),
         }
 
     def cmd_pull(req):
@@ -908,6 +965,90 @@ def _setup_ipc_server(database_connection) -> IPCServer:
             out["note"] = "access token present but not a decodable JWT."
         return out
 
+    def cmd_force_login(req):
+        """Force a fresh MangaDex login (password grant) and persist the new
+        token to mdauth.json. With force=False, validate/refresh the existing
+        token instead."""
+        from publoader.http.client import HTTPClient
+
+        force = bool(req.get("force", True))
+        try:
+            client = HTTPClient()
+            if force:
+                ok = client.oauth.login()
+                if ok:
+                    client._update_headers(client.access_token)
+                    client._save_tokens(client.access_token, client.refresh_token)
+            else:
+                client.login()
+                ok = True
+        except Exception as e:
+            logger.exception("force login failed")
+            return {"ok": False, "error": str(e)}
+        if not ok:
+            return {"ok": False, "error": "login rejected by MangaDex (check credentials)"}
+        return {
+            "ok": True,
+            "logged_in": True,
+            "forced": force,
+            "note": "token written to mdauth.json; /workers restart to propagate to workers.",
+        }
+
+    def cmd_logout(_req):
+        """Invalidate the current MangaDex session: delete mdauth.json and clear
+        the in-memory tokens so the next request re-authenticates from scratch."""
+        token_file = root_path.joinpath(config["Paths"]["mdauth_path"])
+        existed = token_file.exists()
+        try:
+            token_file.unlink()
+        except FileNotFoundError:
+            existed = False
+        except OSError as e:
+            return {"ok": False, "error": f"could not delete mdauth file: {e}"}
+
+        # Best-effort: clear the running singleton's cached tokens (name-mangled
+        # on OAuth2) so the live process stops using the old session too.
+        try:
+            from publoader.http.client import HTTPClient
+
+            client = HTTPClient()
+            client.oauth._OAuth2__access_token = None
+            client.oauth._OAuth2__refresh_token = None
+            client._first_login = True
+            client._successful_login = False
+        except Exception:
+            logger.debug("Couldn't clear in-memory tokens on logout", exc_info=True)
+
+        return {
+            "ok": True,
+            "logged_out": True,
+            "file_removed": existed,
+            "note": "workers keep their own session until /workers restart.",
+        }
+
+    def cmd_pause(req):
+        minutes = req.get("minutes")
+        try:
+            minutes = int(minutes)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": f"minutes must be an integer (got {minutes!r})"}
+        if not 1 <= minutes <= 1440:
+            return {"ok": False, "error": "minutes must be between 1 and 1440 (24h)"}
+        deadline = time.time() + minutes * 60
+        _set_pause_until(deadline)
+        return {
+            "ok": True,
+            "paused": True,
+            "minutes": minutes,
+            "resumes_in_seconds": int(_pause_remaining()),
+            "note": "scheduled runs, manual runs and worker queue processing are all suspended.",
+        }
+
+    def cmd_resume(_req):
+        was_paused = _is_paused()
+        _set_pause_until(0.0)
+        return {"ok": True, "paused": False, "was_paused": was_paused}
+
     server.register("run", cmd_run)
     server.register("reload", cmd_reload)
     server.register("restart", cmd_restart)
@@ -930,6 +1071,10 @@ def _setup_ipc_server(database_connection) -> IPCServer:
     server.register("config_show", cmd_config_show)
     server.register("config_set", cmd_config_set)
     server.register("mdauth_status", cmd_mdauth_status)
+    server.register("force_login", cmd_force_login)
+    server.register("logout", cmd_logout)
+    server.register("pause", cmd_pause)
+    server.register("resume", cmd_resume)
     server.start()
     return server
 
@@ -1061,6 +1206,7 @@ if __name__ == "__main__":
     worker.main(database_connection)
     ipc_server = _setup_ipc_server(database_connection)
     webhook_listener = _start_webhook_listener()
+    _load_pause_until()
 
     if vargs["extension"] is None:
         extension_to_run = None
@@ -1112,7 +1258,10 @@ if __name__ == "__main__":
             # Idempotent: reuses the live watchers and only respawns any that
             # have died, so the workers stay alive for the lifetime of the loop.
             worker.main(database_connection)
-            schedule.exec_jobs()
+            # While paused, skip due scheduled jobs; manual /run is rejected at
+            # the IPC layer, so nothing new enters the queue to drain either.
+            if not _is_paused():
+                schedule.exec_jobs()
             _drain_ipc_jobs(database_connection)
             time.sleep(1)
     except KeyboardInterrupt:
