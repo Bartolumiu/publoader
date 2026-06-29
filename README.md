@@ -27,8 +27,11 @@ This brings up:
   `/pull` / `/refresh` commands.
 - `publoader-bot` — Discord control bot in its own container (stays online
   even when the scheduler is stopped).
+- `publoader-dash` — optional Discord-authenticated web control panel
+  (see [Dashboard](#dashboard-web-control-panel)).
 - `watchtower` — auto-pulls new images on a cron (defaults to 01:00).
 - `cloudflared` — optional Cloudflare tunnel.
+- `autoheal` — restarts the scheduler/dashboard if their healthcheck wedges.
 
 State lives in `./resources/` (mounted into `/app/resources`):
 - `publoader.db` — SQLite state DB (WAL mode, schedule overrides + run history)
@@ -192,6 +195,68 @@ GitHub's "ping" on save returns `200 {"pong": true}`. A delivery returning
 `401` means the secret doesn't match; `202 {"ignored": …}` means the push was
 for an untracked repo or a non-default branch.
 
+## Dashboard (web control panel)
+
+A Discord-authenticated web UI that views all bot state (status, queues, stats,
+schedule, extensions, run history, logs, MangaDex auth) and drives every control
+command (run / force / **clean** run, pause/resume, restart, pull, reload,
+worker restart, queue clear, extension enable/disable, removal mode, config).
+It runs in the `publoader-dash` container and talks to the scheduler over the
+same IPC socket the Discord bot uses — so it can do everything the bot can.
+
+Access is gated by Discord OAuth login, restricted to an allowlist of Discord
+user IDs (defaults to `[Paths] DISCORD_ADMIN_USERS`).
+
+### 1. Create a Discord OAuth app
+
+In the [Discord Developer Portal](https://discord.com/developers/applications)
+open your bot's application → **OAuth2**:
+
+- copy the **Client ID** and a **Client Secret**
+- under **Redirects**, add `https://publoader.ardax.dev/auth/callback` (must
+  exactly match `REDIRECT_URI` below)
+
+### 2. Enable in `config.ini`
+
+```ini
+[Dashboard]
+ENABLED=true
+HOST=0.0.0.0
+PORT=8090
+DISCORD_CLIENT_ID=<oauth client id>
+DISCORD_CLIENT_SECRET=<oauth client secret>
+REDIRECT_URI=https://publoader.ardax.dev/auth/callback
+# python -c "import secrets; print(secrets.token_urlsafe(48))"
+SESSION_SECRET=<long random string>
+# blank reuses [Paths]DISCORD_ADMIN_USERS
+ALLOWED_USERS=
+SESSION_TTL_MINUTES=720
+```
+
+The container binds `8090` on the internal compose network only (never the
+host). When `ENABLED=false` or it's misconfigured, the container still answers
+`/healthz` (so it stays healthy) but serves no app routes.
+
+### 3. Route it through the tunnel
+
+In the **Cloudflare Zero Trust dashboard**, under the tunnel's **Public
+Hostnames**, point your dashboard URL at `http://publoader-dash:8090`. To keep
+it on the same `publoader.ardax.dev` domain as the webhook, add **path-based**
+rules (order matters — most specific first):
+
+| Path | Service |
+|------|---------|
+| `/webhook` | `http://publoader:8080` |
+| `/` (everything else) | `http://publoader-dash:8090` |
+
+Or give it its own subdomain (e.g. `dash.publoader.ardax.dev → publoader-dash:8090`)
+and set `REDIRECT_URI`/the Discord redirect to match.
+
+Visit the hostname, click **Log in with Discord**, and — if your Discord ID is
+on the allowlist — the full panel loads. The dashboard is locked down with
+HMAC-signed `HttpOnly`/`Secure`/`SameSite=Lax` session cookies, a signed OAuth
+`state` cookie, an Origin check on writes, and a fixed command allowlist.
+
 ## Extensions
 
 Extension trees are mounted into `/app/publoader/extensions/src/<extension>/`.
@@ -218,8 +283,9 @@ For writing a new extension, see the
 
 The suite covers the IPC server, state DB, AST scanner, atomic writes,
 webhook URL parsing, chapter dataclasses, chapter card generation, the
-`/pull` git wiring, and the GitHub push-webhook listener (signature
-verification, push routing, pull+reload).
+`/pull` git wiring, the GitHub push-webhook listener (signature verification,
+push routing, pull+reload), the liveness heartbeat, and the web dashboard
+(signed sessions, OAuth state, the user allowlist, and command auth gating).
 
 ## Contributing
 
