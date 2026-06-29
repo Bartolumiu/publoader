@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>publoader · control panel</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c2330; --line:#2b333f;
+    --txt:#e6edf3; --muted:#8b95a3; --accent:#4f9cf9; --ok:#3fb950; --bad:#f85149;
+    --warn:#d29922;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+       background:var(--bg);color:var(--txt)}
+  a{color:var(--accent);text-decoration:none}
+  header{display:flex;align-items:center;gap:16px;padding:14px 20px;border-bottom:1px solid var(--line);
+         position:sticky;top:0;background:var(--bg);z-index:5}
+  header h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.3px}
+  header .spacer{flex:1}
+  .pill{padding:2px 9px;border-radius:999px;font-size:12px;border:1px solid var(--line);color:var(--muted)}
+  .pill.ok{color:var(--ok);border-color:#27432b}
+  .pill.bad{color:var(--bad);border-color:#5a2a28}
+  .pill.warn{color:var(--warn);border-color:#4a3c1d}
+  main{max-width:1100px;margin:0 auto;padding:20px;display:grid;gap:16px}
+  .grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .card h2{margin:0 0 12px;font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted)}
+  button{background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:7px;
+         padding:7px 12px;font-size:13px;cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:#143055;border-color:#1f4d80}
+  button.danger{background:#3a1d1d;border-color:#5a2a28}
+  button:disabled{opacity:.5;cursor:default}
+  .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  input,select{background:#0e141c;color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:6px 8px;font-size:13px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:500}
+  pre{background:#0a0e13;border:1px solid var(--line);border-radius:7px;padding:10px;overflow:auto;
+      max-height:360px;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap}
+  .muted{color:var(--muted)}
+  .badge{font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid var(--line)}
+  .badge.off{color:var(--bad);border-color:#5a2a28}
+  .badge.on{color:var(--ok);border-color:#27432b}
+  #login{display:none;place-items:center;height:80vh;text-align:center}
+  #login .box{max-width:380px}
+  #toast{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:20}
+  .t{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;max-width:380px;font-size:13px}
+  .t.ok{border-color:#27432b}.t.bad{border-color:#5a2a28}
+  .full{grid-column:1/-1}
+</style>
+</head>
+<body>
+<header>
+  <h1>publoader<span class="muted"> · control panel</span></h1>
+  <span id="schedState" class="pill">…</span>
+  <span class="spacer"></span>
+  <span id="who" class="muted"></span>
+  <span id="refreshState" class="pill">idle</span>
+  <a href="/auth/logout"><button>Log out</button></a>
+</header>
+
+<section id="login">
+  <div class="box card">
+    <h2>Sign in</h2>
+    <p class="muted">This control panel is restricted to authorised Discord accounts.</p>
+    <a href="/auth/login"><button class="primary">Log in with Discord</button></a>
+    <p id="loginErr" class="muted" style="margin-top:14px"></p>
+  </div>
+</section>
+
+<main id="app" style="display:none">
+  <div class="card full">
+    <h2>Controls</h2>
+    <div class="row">
+      <button class="primary" onclick="run({})">Run due</button>
+      <button onclick="run({force:true})">Force all</button>
+      <button onclick="run({clean:true})">Clean run</button>
+      <span style="width:14px"></span>
+      <input id="pauseMin" type="number" min="1" max="1440" value="60" style="width:80px">
+      <button onclick="pause()">Pause (min)</button>
+      <button onclick="post('resume')">Resume</button>
+      <span style="width:14px"></span>
+      <button onclick="post('reload')">Reload</button>
+      <button onclick="post('restart_workers')">Restart workers</button>
+      <button onclick="post('pull',{repos:['all']})">Pull all</button>
+      <button class="danger" onclick="confirmPost('restart','Restart the scheduler (re-exec)?')">Restart scheduler</button>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Status</h2>
+      <div id="status" class="muted">…</div>
+    </div>
+    <div class="card">
+      <h2>Queues &amp; collections</h2>
+      <div id="stats" class="muted">…</div>
+    </div>
+    <div class="card">
+      <h2>MangaDex auth</h2>
+      <div id="mdauth" class="muted">…</div>
+      <div class="row" style="margin-top:10px">
+        <button onclick="post('force_login',{force:false}).then(refreshMdauth)">Validate</button>
+        <button onclick="confirmPost('force_login','Force a fresh MangaDex login?',{force:true}).then(refreshMdauth)">Force login</button>
+        <button class="danger" onclick="confirmPost('logout','Delete the MangaDex token?').then(refreshMdauth)">Log out MD</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Chapter removal mode</h2>
+      <div id="removal" class="muted">…</div>
+      <div class="row" style="margin-top:10px">
+        <select id="removalSel"></select>
+        <button onclick="setRemoval()">Set</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card full">
+    <h2>Extensions</h2>
+    <div id="extensions" class="muted">…</div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Schedule</h2>
+      <div id="schedule" class="muted">…</div>
+    </div>
+    <div class="card">
+      <h2>Recent runs</h2>
+      <div id="history" class="muted">…</div>
+    </div>
+  </div>
+
+  <div class="card full">
+    <h2>Logs</h2>
+    <div class="row">
+      <select id="logScope"></select>
+      <input id="logName" placeholder="worker/extension name (optional)" style="width:240px">
+      <input id="logLines" type="number" min="1" max="200" value="60" style="width:80px">
+      <button onclick="fetchLogs()">Fetch</button>
+    </div>
+    <pre id="logOut" style="margin-top:10px">—</pre>
+  </div>
+
+  <div class="card full">
+    <h2>Config</h2>
+    <div class="row">
+      <select id="cfgSection"></select>
+      <button onclick="showConfig()">Show</button>
+    </div>
+    <pre id="cfgOut" style="margin-top:10px">—</pre>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function apiGet(name, params){
+  const q = params && Object.keys(params).length ? "?"+new URLSearchParams(params) : "";
+  const r = await fetch("/api/cmd/"+name+q, {headers:{"Accept":"application/json"}});
+  return r.json();
+}
+async function apiPost(name, body){
+  const r = await fetch("/api/cmd/"+name, {
+    method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body||{})
+  });
+  return r.json();
+}
+function toast(msg, ok=true){
+  const el = document.createElement("div");
+  el.className = "t "+(ok?"ok":"bad");
+  el.textContent = msg;
+  $("toast").appendChild(el);
+  setTimeout(()=>el.remove(), 5000);
+}
+function summarize(name, res){
+  if(res && res.ok===false) return toast(name+": "+(res.error||"failed"), false);
+  toast(name+": ok");
+}
+
+// generic control helpers used by buttons
+async function post(name, body){ const r = await apiPost(name, body); summarize(name, r); refreshAll(); return r; }
+async function confirmPost(name, msg, body){ if(!confirm(msg)) return {}; return post(name, body); }
+async function run(opts){ const r = await apiPost("run", opts); summarize("run", r); refreshAll(); }
+async function pause(){ const m = parseInt($("pauseMin").value,10)||60; const r = await apiPost("pause",{minutes:m}); summarize("pause", r); refreshStatus(); }
+
+// ---- renderers ----
+function kv(obj){
+  return "<table>"+Object.entries(obj).map(([k,v])=>
+    `<tr><th>${k}</th><td>${typeof v==="object"?JSON.stringify(v):v}</td></tr>`).join("")+"</table>";
+}
+async function refreshStatus(){
+  const s = await apiGet("status");
+  if(s.ok===false){ $("status").textContent = s.error; return; }
+  const paused = s.paused;
+  $("schedState").textContent = paused ? "paused "+Math.ceil((s.pause_remaining_seconds||0)/60)+"m" : "running";
+  $("schedState").className = "pill "+(paused?"warn":"ok");
+  let html = `<div class="muted">pid ${s.pid} · ${(s.jobs||[]).length} scheduled jobs</div>`;
+  if(s.workers && s.workers.length){
+    html += "<table><tr><th>worker</th><th>queued</th></tr>"+
+      s.workers.map(w=>`<tr><td>${w.name}</td><td>${w.queued ?? ("err: "+(w.error||"?"))}</td></tr>`).join("")+"</table>";
+  }
+  $("status").innerHTML = html;
+}
+async function refreshStats(){
+  const s = await apiGet("stats");
+  if(s.ok===false){ $("stats").textContent = s.error; return; }
+  $("stats").innerHTML =
+    "<div class='muted'>queues</div>"+kv(s.queues||{})+
+    "<div class='muted' style='margin-top:8px'>collections</div>"+kv(s.collections||{});
+}
+async function refreshMdauth(){
+  const s = await apiGet("mdauth_status");
+  if(s.ok===false){ $("mdauth").textContent = s.error; return; }
+  if(!s.exists){ $("mdauth").innerHTML = "<span class='badge off'>no token</span> "+(s.note||""); return; }
+  const exp = s.access_expired===true ? "<span class='badge off'>expired</span>"
+            : s.access_expired===false ? "<span class='badge on'>valid</span>" : "";
+  $("mdauth").innerHTML = `${exp} access:${s.has_access} refresh:${s.has_refresh}`+
+    (s.access_expires_at?`<div class='muted'>expires ${s.access_expires_at}</div>`:"");
+}
+async function refreshRemoval(){
+  const s = await apiGet("get_removal_mode");
+  if(s.ok===false){ $("removal").textContent = s.error; return; }
+  $("removal").innerHTML = `mode: <b>${s.mode}</b> ${s.explicit?"":"<span class='muted'>(default)</span>"}`;
+  const sel = $("removalSel");
+  if(!sel.dataset.filled){
+    sel.innerHTML = (s.valid_modes||[]).map(m=>`<option ${m===s.mode?"selected":""}>${m}</option>`).join("");
+    sel.dataset.filled = "1";
+  }
+}
+async function setRemoval(){ const r = await apiPost("set_removal_mode",{mode:$("removalSel").value}); summarize("set_removal_mode", r); refreshRemoval(); }
+
+async function refreshExtensions(){
+  const s = await apiGet("list_extensions");
+  if(s.ok===false){ $("extensions").textContent = s.error; return; }
+  const rows = (s.extensions||[]).map(e=>{
+    const badge = e.disabled?"<span class='badge off'>disabled</span>":"<span class='badge on'>enabled</span>";
+    const toggle = e.disabled
+      ? `<button onclick="post('enable_extension',{extension:'${e.name}'})">Enable</button>`
+      : `<button onclick="post('disable_extension',{extension:'${e.name}'})">Disable</button>`;
+    return `<tr><td>${e.name}</td><td>${badge}</td><td class="row">
+      <button onclick="run({extensions:['${e.name}']})">Run</button>
+      <button onclick="run({extensions:['${e.name}'],force:true})">Force</button>
+      <button onclick="run({extensions:['${e.name}'],clean:true})">Clean</button>
+      ${toggle}</td></tr>`;
+  }).join("");
+  $("extensions").innerHTML = "<table><tr><th>name</th><th></th><th>actions</th></tr>"+rows+"</table>";
+}
+async function refreshSchedule(){
+  const s = await apiGet("list_schedule");
+  if(s.ok===false){ $("schedule").textContent = s.error; return; }
+  const eff = s.effective||{};
+  const rows = Object.entries(eff).map(([name,t])=>
+    `<tr><td>${name}</td><td>${(""+(t.hour??"–")).padStart(2,"0")}:${(""+(t.minute??0)).padStart(2,"0")}</td><td>${t.day??"daily"}</td></tr>`).join("");
+  $("schedule").innerHTML = rows
+    ? "<table><tr><th>extension</th><th>time(UTC)</th><th>day</th></tr>"+rows+"</table>"
+    : "<span class='muted'>no timings</span>";
+}
+async function refreshHistory(){
+  const s = await apiGet("run_history", {limit:15});
+  if(s.ok===false){ $("history").textContent = s.error; return; }
+  const rows = (s.runs||[]).map(r=>{
+    const ok = r.success===1||r.success===true ? "<span class='badge on'>ok</span>"
+             : r.success===0||r.success===false ? "<span class='badge off'>fail</span>" : "…";
+    return `<tr><td>${r.extension||"all"}</td><td>${r.kind||""}</td><td>${ok}</td><td class="muted">${r.started_at||r.created_at||""}</td></tr>`;
+  }).join("");
+  $("history").innerHTML = rows
+    ? "<table><tr><th>ext</th><th>kind</th><th></th><th>when</th></tr>"+rows+"</table>"
+    : "<span class='muted'>no runs recorded</span>";
+}
+async function fetchLogs(){
+  const scope = $("logScope").value, name = $("logName").value.trim(), lines = parseInt($("logLines").value,10)||60;
+  const params = {scope, lines}; if(name) params.name = name;
+  const s = await apiGet("logs", params);
+  $("logOut").textContent = s.ok===false ? (s.error||"failed") : (("# "+(s.file||"")+"\n")+(s.text||""));
+}
+async function initLogScopes(){
+  const s = await apiGet("logs");
+  if(s.scopes){ $("logScope").innerHTML = s.scopes.map(x=>`<option>${x}</option>`).join(""); }
+}
+async function showConfig(){
+  const s = await apiGet("config_show", {section:$("cfgSection").value});
+  $("cfgOut").textContent = s.ok===false ? s.error : JSON.stringify(s.config, null, 2);
+}
+async function initConfigSections(){
+  const s = await apiGet("config_show");
+  if(s.config){ $("cfgSection").innerHTML = Object.keys(s.config).map(x=>`<option>${x}</option>`).join(""); }
+}
+
+function refreshAll(){ refreshStatus(); refreshStats(); refreshMdauth(); refreshRemoval(); refreshExtensions(); refreshSchedule(); refreshHistory(); }
+
+async function boot(){
+  let me;
+  try{ const r = await fetch("/api/me"); me = await r.json(); }catch(e){ me = {ok:false}; }
+  if(!me.ok){
+    $("login").style.display = "grid";
+    return;
+  }
+  $("who").textContent = "@"+(me.user?.name||me.user?.id||"");
+  $("app").style.display = "grid";
+  await initLogScopes(); await initConfigSections();
+  refreshAll();
+  setInterval(()=>{ $("refreshState").textContent="↻"; refreshStatus(); refreshStats();
+    setTimeout(()=>$("refreshState").textContent="live",300); }, 10000);
+  $("refreshState").textContent = "live";
+}
+boot();
+</script>
+</body>
+</html>

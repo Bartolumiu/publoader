@@ -65,6 +65,48 @@ services:
     entrypoint: [ "/app/entrypoint.sh" ]
     command: [ "python", "-m", "publoader.bot.server" ]
 
+  publoader-dash:
+    # Discord-authenticated web control panel. Reads all bot state and drives
+    # every control command by talking to the scheduler over the same unix
+    # socket in the shared `resources` mount that the Discord bot uses. Like the
+    # webhook, it binds 8090 on the internal network only (not on the host) and
+    # is reached through the cloudflared tunnel. Add a Public Hostname in the
+    # Cloudflare Zero Trust dashboard routing your dashboard URL (e.g. the same
+    # publoader.ardax.dev with a path rule, or a dash.* subdomain) to
+    # `http://publoader-dash:8090`. See README "Dashboard" for the full setup.
+    image: ardax/publoader:latest
+    container_name: publoader-dash
+    restart: unless-stopped
+    expose:
+      - "8090"
+    depends_on:
+      publoader:
+        condition: service_started
+    volumes:
+      - ./config.ini:/app/config.ini
+      - ./logs:/app/logs
+      - ./entrypoint.sh:/app/entrypoint.sh
+      - ./resources:/app/resources
+    entrypoint: [ "/app/entrypoint.sh" ]
+    command: [ "python", "-m", "publoader.dashboard.server" ]
+    labels:
+      - autoheal=true
+    # Liveness via the dashboard's own unauthenticated /healthz route, which is
+    # served even when the dashboard is disabled/misconfigured (it binds and
+    # answers /healthz regardless, only gating the app routes). So the container
+    # is healthy whether or not the dashboard is enabled, and autoheal restarts
+    # it only if the process genuinely wedges.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=5).status==200 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
   watchtower:
     image: containrrr/watchtower:latest
     container_name: watchtower

@@ -57,3 +57,31 @@ PATH=/webhook
 # Shared secret; must match the secret set on the GitHub webhook. Required —
 # the listener refuses to start without one.
 SECRET=
+
+[Dashboard]
+# Web control panel that views all bot state and drives every control command,
+# gated behind Discord OAuth login. Served by the publoader-dash container and
+# routed in through the Cloudflare tunnel — see the README "Dashboard" section.
+# Leave ENABLED=false to keep the dashboard off (its container idles).
+ENABLED=false
+# Address/port the dashboard binds inside the container (not published on the
+# host; reached only via the tunnel).
+HOST=0.0.0.0
+PORT=8090
+# Discord OAuth2 application (https://discord.com/developers/applications):
+#   OAuth2 page -> copy CLIENT ID and a CLIENT SECRET, and add REDIRECT_URI
+#   below to the "Redirects" allowlist. Only the `identify` scope is requested.
+DISCORD_CLIENT_ID=
+DISCORD_CLIENT_SECRET=
+# Must exactly match a redirect registered on the Discord app and be reachable
+# publicly (the tunnel hostname + /auth/callback).
+REDIRECT_URI=https://publoader.ardax.dev/auth/callback
+# Secret used to sign session cookies. REQUIRED for production — without it a
+# random one is generated per start and every session drops on restart.
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+SESSION_SECRET=
+# Discord user IDs allowed to log in (comma/space separated). Leave blank to
+# reuse [Paths]DISCORD_ADMIN_USERS.
+ALLOWED_USERS=
+# Minutes a login stays valid before re-auth.
+SESSION_TTL_MINUTES=720
