@@ -1,7 +1,7 @@
 import logging
 
 from publoader.http.properties import RequestError
-from publoader.models.database import update_database
+from publoader.models.database import record_chapter_edit, update_database
 from publoader.models.dataclasses import Chapter
 from publoader.utils.config import mangadex_api_url
 
@@ -65,6 +65,12 @@ def run(item, http_client, queue_webhook, database_connection, **kwargs):
     database_connection["to_edit"].delete_one({"_id": {"$eq": item["_id"]}})
     if edited:
         update_database(database_connection, chapter_editor.chapter)
+        record_chapter_edit(
+            database_connection,
+            chapter_editor.chapter,
+            old_info=chapter_editor.old_info,
+            new_info=chapter_editor.payload,
+        )
 
 
 def fetch_data_from_database(database_connection):

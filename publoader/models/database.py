@@ -116,6 +116,58 @@ def update_database(
         return
 
 
+def record_chapter_edit(
+    database_connection,
+    chapter: Union[Chapter, dict],
+    old_info: dict = None,
+    new_info: dict = None,
+    **kwargs,
+):
+    """Append an edit event to the `edited` history collection.
+
+    There is one document per chapter, keyed by `md_chapter_id`, that
+    accumulates every edit in an `edits` array — each entry holding the
+    chapter's `old` and `new` MangaDex state plus when it was edited. The same
+    chapter can therefore gather multiple changes over time in a single
+    document. The top-level fields mirror the canonical Chapter shape used by
+    every other collection and are refreshed to the chapter's latest state on
+    each edit."""
+    chap = dict(convert_model_dict(chapter))
+    chap.pop("_id", None)
+    # The audit log tracks metadata, not page images.
+    chap.pop("images", None)
+
+    md_chapter_id = chap.get("md_chapter_id")
+    if md_chapter_id is None:
+        logger.warning("Cannot record chapter edit: md_chapter_id is null.")
+        return
+
+    now = get_current_datetime()
+    edit_entry = {
+        "edited_at": now,
+        "old": old_info,
+        "new": new_info,
+    }
+
+    try:
+        database_connection["edited"].update_one(
+            {"md_chapter_id": {"$eq": md_chapter_id}},
+            {
+                "$set": {**chap, "last_edited_at": now},
+                "$push": {"edits": edit_entry},
+            },
+            upsert=True,
+        )
+    except pymongo.errors.PyMongoError:
+        traceback.print_exc()
+        logger.exception(
+            f"{record_chapter_edit.__name__} raised an error when writing to 'edited'."
+        )
+        return
+
+    logger.info(f"Recorded edit for chapter {md_chapter_id} in 'edited'.")
+
+
 def update_expired_chapter_database(
     database_connection,
     extension_name: str,
