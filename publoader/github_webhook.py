@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import json
 import logging
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -130,6 +131,29 @@ class _WebhookHandler(BaseHTTPRequestHandler):
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        """Log a benign client disconnect quietly instead of dumping a full
+        traceback to stderr.
+
+        Scanners, uptime probes and GitHub's own retries routinely drop the TCP
+        connection mid-request, which surfaces as ConnectionResetError /
+        BrokenPipeError from the socket read/write. The threaded server shrugs
+        these off and keeps serving, but the stdlib default prints an
+        `Exception occurred during processing of request ...` block for each one
+        — noise that reads like a crash and buries a genuine failure. Only
+        unexpected errors get a real traceback here."""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionError, BrokenPipeError, TimeoutError)):
+            logger.debug(
+                "github-webhook client %s disconnected mid-request: %r",
+                client_address,
+                exc,
+            )
+            return
+        logger.exception(
+            "github-webhook error handling request from %s", client_address
+        )
 
 
 class GithubWebhookListener:

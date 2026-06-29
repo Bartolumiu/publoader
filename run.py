@@ -45,6 +45,17 @@ JOB_RUN = "run"
 JOB_RESTART = "restart"
 JOB_PULL = "pull"
 
+# Liveness heartbeat. A daemon thread rewrites this file every few seconds; the
+# container healthcheck (docker-compose) treats a stale/missing file as "process
+# wedged" and lets autoheal restart the container. Kept independent of the
+# scheduler loop on purpose: it keeps ticking through long extension runs (so a
+# busy-but-healthy bot is never falsely restarted) and stops only when the
+# process is truly dead or the interpreter is hard-wedged — exactly when a
+# restart is the right move. /tmp survives os.execv (the daily restarter) and is
+# recreated within the healthcheck's start_period after a container restart.
+HEARTBEAT_PATH = Path("/tmp/publoader_heartbeat")
+HEARTBEAT_INTERVAL_SECONDS = 5
+
 # Holds (kind, payload) tuples; populated by IPC threads, drained on main thread.
 _ipc_jobs: "queue.Queue" = queue.Queue()
 _run_lock = threading.Lock()
@@ -510,6 +521,37 @@ def _start_webhook_listener():
     except OSError:
         logger.exception("Failed to start GitHub webhook listener")
         return None
+
+
+def _write_heartbeat() -> None:
+    """Atomically stamp the heartbeat file with the current time.
+
+    Write-then-rename so a concurrent healthcheck reader never catches the file
+    mid-truncate (an empty read would otherwise look like a stale heartbeat and
+    spuriously mark the container unhealthy). os.replace is atomic within a
+    filesystem, which /tmp always satisfies."""
+    tmp = HEARTBEAT_PATH.with_name(HEARTBEAT_PATH.name + ".tmp")
+    try:
+        tmp.write_text(str(time.time()))
+        os.replace(tmp, HEARTBEAT_PATH)
+    except OSError:
+        logger.debug("Couldn't write heartbeat file", exc_info=True)
+
+
+def _heartbeat_loop() -> None:
+    while True:
+        _write_heartbeat()
+        time.sleep(HEARTBEAT_INTERVAL_SECONDS)
+
+
+def _start_heartbeat() -> threading.Thread:
+    """Start the liveness-heartbeat daemon thread (see HEARTBEAT_PATH)."""
+    # Write an initial beat synchronously so the healthcheck has something to
+    # read immediately, rather than waiting a full interval after startup.
+    _write_heartbeat()
+    thread = threading.Thread(target=_heartbeat_loop, name="heartbeat", daemon=True)
+    thread.start()
+    return thread
 
 
 def _setup_ipc_server(database_connection) -> IPCServer:
@@ -1206,6 +1248,7 @@ if __name__ == "__main__":
     worker.main(database_connection)
     ipc_server = _setup_ipc_server(database_connection)
     webhook_listener = _start_webhook_listener()
+    _start_heartbeat()
     _load_pause_until()
 
     if vargs["extension"] is None:

@@ -18,6 +18,27 @@ services:
       - ./resources:/app/resources
     entrypoint: [ "/app/entrypoint.sh" ]
     command: [ "python", "run.py" ]
+    # Opt this container in to autoheal (see the autoheal service below).
+    labels:
+      - autoheal=true
+    # Liveness probe. run.py runs a daemon thread that rewrites
+    # /tmp/publoader_heartbeat every few seconds; we treat a missing or stale
+    # (>60s old) file as "process wedged". This is independent of the webhook
+    # (works even with [GithubWebhook]ENABLED=false) and keeps ticking through
+    # long extension runs, so a busy-but-healthy bot is never falsely restarted.
+    # curl isn't in the image (python:3.10-bullseye), so probe with stdlib only.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import time,os,sys; p='/tmp/publoader_heartbeat'; sys.exit(0 if os.path.exists(p) and time.time()-float(open(p).read() or 0) < 60 else 1)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # Cover entrypoint dep-install + first-deploy extensions bootstrap before
+      # run.py starts writing the heartbeat, so a slow startup isn't flagged.
+      start_period: 120s
 
   publoader-bot:
     # Discord control bot. Runs in its own container so it stays online even
@@ -74,6 +95,26 @@ services:
     depends_on:
       publoader:
         condition: service_started
+
+  autoheal:
+    # Restarts any container marked unhealthy by its Docker healthcheck. The
+    # scheduler self-heals from a hard *crash* (restart: unless-stopped relaunches
+    # the exited container), but a *hung* process never exits, so nothing brings
+    # it back — that's the gap the 27th outage exposed. autoheal watches the
+    # publoader healthcheck (above) and restarts the container when it goes
+    # unhealthy. Scoped to opted-in containers only via the `autoheal=true` label,
+    # so it can't restart the bot/tunnel/watchtower out from under you.
+    image: willfarrell/autoheal:latest
+    container_name: autoheal
+    restart: unless-stopped
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=15
+      # Give a restarted container time to pass its start_period before autoheal
+      # is allowed to act on it again, so a slow boot doesn't cause a restart loop.
+      - AUTOHEAL_START_PERIOD=120
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
   extensions:
