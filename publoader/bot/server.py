@@ -353,10 +353,15 @@ class PubloaderBot(commands.Bot):
                 embed.add_field(name="Scheduled jobs", value=str(len(jobs)))
 
                 if status.get("paused"):
-                    mins = round((status.get("pause_remaining_seconds", 0) or 0) / 60, 1)
+                    remaining = status.get("pause_remaining_seconds")
+                    if status.get("pause_indefinite") or remaining is None:
+                        paused_value = ":pause_button: paused indefinitely (until `/resume`)"
+                    else:
+                        mins = round((remaining or 0) / 60, 1)
+                        paused_value = f":pause_button: resumes in ~{mins} min"
                     embed.add_field(
                         name="Paused",
-                        value=f":pause_button: resumes in ~{mins} min",
+                        value=paused_value,
                         inline=False,
                     )
 
@@ -1321,12 +1326,14 @@ def _register_commands(bot: PubloaderBot) -> None:
 
     @bot.tree.command(
         name="pause",
-        description="Pause scheduled runs, manual runs and workers for N minutes (admin-only).",
+        description="Pause scheduled runs, manual runs and workers (admin-only).",
     )
-    @app_commands.describe(minutes="How long to pause for (1-1440).")
+    @app_commands.describe(
+        minutes="How long to pause for (1-1440). Omit to pause indefinitely until /resume."
+    )
     async def _slash_pause(
         interaction: discord.Interaction,
-        minutes: app_commands.Range[int, 1, 1440],
+        minutes: Optional[app_commands.Range[int, 1, 1440]] = None,
     ):
         if not _is_admin(interaction.user):
             await interaction.response.send_message("Not allowed.", ephemeral=True)
@@ -1338,9 +1345,7 @@ def _register_commands(bot: PubloaderBot) -> None:
         if not _is_admin(ctx.author):
             await ctx.send("Not allowed.")
             return
-        if minutes is None:
-            await ctx.send("Usage: `!pause <minutes>` (1-1440).")
-            return
+        # No argument pauses indefinitely; pass minutes through when supplied.
         await bot._dispatch(ctx, "pause", minutes=minutes)
 
     @bot.tree.command(

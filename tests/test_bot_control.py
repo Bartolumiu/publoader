@@ -285,9 +285,49 @@ def test_pause_sets_deadline(paused_handlers):
 
 def test_pause_rejects_out_of_range(paused_handlers):
     h, _db = paused_handlers
-    assert h["pause"]({"minutes": 0})["ok"] is False
+    assert h["pause"]({"minutes": -5})["ok"] is False
     assert h["pause"]({"minutes": 5000})["ok"] is False
     assert h["pause"]({"minutes": "abc"})["ok"] is False
+
+
+def test_pause_indefinite_with_no_minutes(paused_handlers):
+    h, _db = paused_handlers
+    result = h["pause"]({})
+    assert result["ok"] is True
+    assert result["paused"] is True
+    assert result["indefinite"] is True
+    assert result["resumes_in_seconds"] is None
+    assert run_module._is_paused() is True
+    assert run_module._is_paused_indefinitely() is True
+
+
+def test_pause_indefinite_with_zero_minutes(paused_handlers):
+    h, _db = paused_handlers
+    result = h["pause"]({"minutes": 0})
+    assert result["ok"] is True
+    assert result["indefinite"] is True
+    assert run_module._is_paused_indefinitely() is True
+
+
+def test_status_reports_indefinite_pause(paused_handlers):
+    h, _db = paused_handlers
+    h["pause"]({})
+    status = h["status"]({})
+    assert status["paused"] is True
+    assert status["pause_indefinite"] is True
+    assert status["pause_remaining_seconds"] is None
+
+
+def test_indefinite_pause_persists_and_reloads(paused_handlers, monkeypatch):
+    h, _db = paused_handlers
+    # Reuse one store so the persisted deadline survives the reload.
+    store = _FakeStore()
+    monkeypatch.setattr(run_module, "get_state_store", lambda: store)
+    h["pause"]({})
+    assert store.settings["pause_until"] == "inf"
+    run_module._pause_until = 0.0
+    run_module._load_pause_until()
+    assert run_module._is_paused_indefinitely() is True
 
 
 def test_resume_clears_pause(paused_handlers):

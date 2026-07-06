@@ -78,8 +78,9 @@
       <button onclick="run({force:true})">Force all</button>
       <button onclick="run({clean:true})">Clean run</button>
       <span style="width:14px"></span>
-      <input id="pauseMin" type="number" min="1" max="1440" value="60" style="width:80px">
+      <input id="pauseMin" type="number" min="0" max="1440" value="60" style="width:80px">
       <button onclick="pause()">Pause (min)</button>
+      <button onclick="pause(true)">Pause &#8734;</button>
       <button onclick="post('resume')">Resume</button>
       <span style="width:14px"></span>
       <button onclick="post('reload')">Reload</button>
@@ -186,7 +187,7 @@ function summarize(name, res){
 async function post(name, body){ const r = await apiPost(name, body); summarize(name, r); refreshAll(); return r; }
 async function confirmPost(name, msg, body){ if(!confirm(msg)) return {}; return post(name, body); }
 async function run(opts){ const r = await apiPost("run", opts); summarize("run", r); refreshAll(); }
-async function pause(){ const m = parseInt($("pauseMin").value,10)||60; const r = await apiPost("pause",{minutes:m}); summarize("pause", r); refreshStatus(); }
+async function pause(indefinite){ const m = indefinite ? 0 : (parseInt($("pauseMin").value,10)||60); const r = await apiPost("pause",{minutes:m}); summarize("pause", r); refreshStatus(); }
 
 // ---- renderers ----
 function kv(obj){
@@ -197,7 +198,8 @@ async function refreshStatus(){
   const s = await apiGet("status");
   if(s.ok===false){ $("status").textContent = s.error; return; }
   const paused = s.paused;
-  $("schedState").textContent = paused ? "paused "+Math.ceil((s.pause_remaining_seconds||0)/60)+"m" : "running";
+  const pauseLabel = (s.pause_indefinite || s.pause_remaining_seconds==null) ? "paused ∞" : "paused "+Math.ceil((s.pause_remaining_seconds||0)/60)+"m";
+  $("schedState").textContent = paused ? pauseLabel : "running";
   $("schedState").className = "pill "+(paused?"warn":"ok");
   let html = `<div class="muted">pid ${s.pid} · ${(s.jobs||[]).length} scheduled jobs</div>`;
   if(s.workers && s.workers.length){
