@@ -34,6 +34,29 @@ DISCORD_ALLOWED_CHANNELS=
 DISCORD_ADMIN_USERS=
 DISCORD_ADMIN_ROLES=
 
+[Network]
+# Outgoing-IP rotation to spread MangaDex requests across multiple source IPs
+# and dodge per-IP rate-limit bans. Everything here is optional — leave blank
+# to send from the single default outbound IP (the previous behaviour).
+#
+# Option 1 — proxy pool. Comma/newline-separated proxy URLs; a random one is
+# picked per request. http(s):// works out of the box; socks5:// needs
+# `requests[socks]` (add `PySocks` to requirements). Takes precedence over the
+# source-IP options below when set.
+#   PROXIES=http://user:pass@1.2.3.4:8080, socks5://5.6.7.8:1080
+PROXIES=
+#
+# Option 2 — bind each outgoing connection to a random local source IP. The
+# host must actually own/route these addresses and allow binding to them.
+# A routed IPv6 subnet (CIDR): SOURCE_IP_POOL_SIZE random addresses are drawn
+# from it and rotated. Requires host setup — see docker/README "Outgoing IP
+# rotation".
+SOURCE_IPV6_SUBNET=
+# Explicit source IPs the container already holds (comma/space separated).
+SOURCE_IPS=
+# How many addresses to generate from SOURCE_IPV6_SUBNET.
+SOURCE_IP_POOL_SIZE=64
+
 [Repo]
 REPO_OWNER=publoader
 BASE_REPO_PATH=publoader

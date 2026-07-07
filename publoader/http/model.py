@@ -1,5 +1,6 @@
 import json
 import logging
+import random
 import time
 from datetime import datetime
 
@@ -9,7 +10,17 @@ from publoader import __version__
 from publoader.http.oauth import OAuth2
 from publoader.http.properties import RequestError, http_error_codes
 from publoader.http.response import HTTPResponse
-from publoader.utils.config import config, mangadex_api_url, root_path, upload_retry
+from publoader.http.rotation import apply_ip_rotation
+from publoader.utils.config import (
+    config,
+    mangadex_api_url,
+    outgoing_proxies,
+    outgoing_source_ips,
+    outgoing_source_ipv6_subnet,
+    outgoing_source_pool_size,
+    root_path,
+    upload_retry,
+)
 from publoader.utils.singleton import Singleton
 from publoader.utils.utils import atomic_write_text
 
@@ -24,6 +35,17 @@ class HTTPModel(metaclass=Singleton):
     def __init__(self) -> None:
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": f"publoader/{__version__}"})
+
+        # Optional outgoing-IP rotation to dodge per-IP rate-limit bans. Returns
+        # the proxy pool to rotate per request (empty unless proxy mode is on);
+        # source-address binding, if configured, is mounted onto the session.
+        self._proxy_pool = apply_ip_rotation(
+            self.session,
+            proxies=outgoing_proxies,
+            source_ips=outgoing_source_ips,
+            ipv6_subnet=outgoing_source_ipv6_subnet,
+            pool_size=outgoing_source_pool_size,
+        )
 
         self.upload_retry_total = upload_retry
         self.max_requests = 5
@@ -184,6 +206,11 @@ class HTTPModel(metaclass=Singleton):
             try:
                 run_number += 1
 
+                request_proxies = None
+                if self._proxy_pool:
+                    proxy = random.choice(self._proxy_pool)
+                    request_proxies = {"http": proxy, "https": proxy}
+
                 response = self.session.request(
                     method,
                     route,
@@ -191,6 +218,7 @@ class HTTPModel(metaclass=Singleton):
                     params=params,
                     data=data,
                     files=files,
+                    proxies=request_proxies,
                     timeout=kwargs.get("timeout", self.request_timeout),
                 )
                 logger.debug(
