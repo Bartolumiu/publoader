@@ -12,6 +12,7 @@ import time
 from datetime import time as dtTime, timezone
 from importlib import reload
 from pathlib import Path
+from typing import Optional
 
 from scheduler import Scheduler
 
@@ -68,10 +69,14 @@ _inflight_lock = threading.Lock()
 
 # Pause gate. While `time.time() < _pause_until` the scheduler skips its due
 # jobs and manual /run requests are rejected. Mirrored to the state DB setting
-# `pause_until` so a restart mid-pause still honours it. 0 = not paused.
+# `pause_until` so a restart mid-pause still honours it. 0 = not paused;
+# `float("inf")` = paused indefinitely (until an explicit /resume).
 _PAUSE_SETTING_KEY = "pause_until"
 _pause_lock = threading.Lock()
 _pause_until = 0.0
+# Sentinel deadline for an indefinite pause. Persists to the DB as the string
+# "inf" and round-trips cleanly through float().
+_INDEFINITE_PAUSE = float("inf")
 
 
 def _set_pause_until(epoch: float) -> None:
@@ -112,6 +117,20 @@ def _is_paused() -> bool:
 def _pause_remaining() -> float:
     with _pause_lock:
         return max(0.0, _pause_until - time.time())
+
+
+def _is_paused_indefinitely() -> bool:
+    with _pause_lock:
+        return _pause_until == _INDEFINITE_PAUSE
+
+
+def _pause_remaining_report() -> Optional[int]:
+    """Whole seconds until auto-resume for status payloads. None when paused
+    indefinitely (no deadline), 0 when not paused."""
+    remaining = _pause_remaining()
+    if remaining == _INDEFINITE_PAUSE:
+        return None
+    return int(remaining)
 
 
 def _claim_extensions(names):
@@ -564,7 +583,7 @@ def _setup_ipc_server(database_connection) -> IPCServer:
                 "queued": False,
                 "paused": True,
                 "error": "bot is paused",
-                "resumes_in_seconds": int(_pause_remaining()),
+                "resumes_in_seconds": _pause_remaining_report(),
             }
 
         extensions = req.get("extensions")
@@ -626,7 +645,8 @@ def _setup_ipc_server(database_connection) -> IPCServer:
             "jobs": [str(j) for j in getattr(sched, "jobs", [])] if sched else [],
             "workers": _worker_queue_lengths(database_connection),
             "paused": _is_paused(),
-            "pause_remaining_seconds": int(_pause_remaining()),
+            "pause_remaining_seconds": _pause_remaining_report(),
+            "pause_indefinite": _is_paused_indefinitely(),
         }
 
     def cmd_pull(req):
@@ -1070,6 +1090,18 @@ def _setup_ipc_server(database_connection) -> IPCServer:
 
     def cmd_pause(req):
         minutes = req.get("minutes")
+        # Omitting minutes (or passing 0/null) pauses indefinitely until /resume.
+        if minutes is None or minutes == 0:
+            _set_pause_until(_INDEFINITE_PAUSE)
+            return {
+                "ok": True,
+                "paused": True,
+                "minutes": None,
+                "indefinite": True,
+                "resumes_in_seconds": None,
+                "note": "paused indefinitely; scheduled runs, manual runs and worker "
+                "queue processing stay suspended until /resume.",
+            }
         try:
             minutes = int(minutes)
         except (TypeError, ValueError):
@@ -1082,7 +1114,8 @@ def _setup_ipc_server(database_connection) -> IPCServer:
             "ok": True,
             "paused": True,
             "minutes": minutes,
-            "resumes_in_seconds": int(_pause_remaining()),
+            "indefinite": False,
+            "resumes_in_seconds": _pause_remaining_report(),
             "note": "scheduled runs, manual runs and worker queue processing are all suspended.",
         }
 

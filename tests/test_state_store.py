@@ -92,6 +92,14 @@ def test_pause_flag_ignores_garbage(store):
     assert store.is_paused() is False
 
 
+def test_indefinite_pause_flag(store):
+    # The scheduler persists an indefinite pause as the string "inf"; workers
+    # must read that as "stay paused" rather than falling back to not-paused.
+    store.set_setting("pause_until", "inf")
+    assert store.get_pause_until() == float("inf")
+    assert store.is_paused() is True
+
+
 def test_exists_on_disk(tmp_path):
     db_path = tmp_path / "state.db"
     s = StateStore(db_path)
