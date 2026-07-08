@@ -113,6 +113,49 @@ class RotatingSourceAddressAdapter(HTTPAdapter):
         super().close()
 
 
+def install_global_proxy_rotation(proxy_pool) -> "bool":
+    """Route every ``requests``-based call in this process through a random
+    proxy from ``proxy_pool``, unless the caller set proxies explicitly.
+
+    publoader's extensions run in-process and make their own HTTP requests with
+    their own ``requests``/``cloudscraper`` sessions — nothing is injected into
+    them, so the per-client rotation in HTTPModel never reaches them. Patching
+    ``requests.Session.request`` at the class level is the one hook that covers
+    all of them at once (cloudscraper subclasses ``requests.Session``). Install
+    this once at process startup, before extensions load; forked worker
+    processes inherit the patch.
+
+    Idempotent and a no-op for an empty pool. Returns True if rotation is
+    active afterwards.
+    """
+    pool = [p.strip() for p in (proxy_pool or []) if p and p.strip()]
+    if not pool:
+        return False
+
+    from requests import sessions as _sessions
+
+    original = _sessions.Session.request
+    if getattr(original, "_publoader_proxy_rotation", False):
+        return True
+
+    def request(self, method, url, **kwargs):
+        # Respect an explicit per-request proxy or one set on the session; only
+        # fill in when the caller left it unset.
+        if kwargs.get("proxies") is None and not getattr(self, "proxies", None):
+            proxy = random.choice(pool)
+            kwargs["proxies"] = {"http": proxy, "https": proxy}
+        return original(self, method, url, **kwargs)
+
+    request._publoader_proxy_rotation = True
+    request._publoader_original = original
+    _sessions.Session.request = request
+    logger.info(
+        "Global proxy rotation installed across %d proxies (extensions included).",
+        len(pool),
+    )
+    return True
+
+
 def apply_ip_rotation(
     session,
     *,

@@ -69,9 +69,25 @@ Everything is optional — blank keeps the single-outbound-IP behaviour.
 PROXIES=http://user:pass@1.2.3.4:8080, socks5://5.6.7.8:1080
 ```
 
-A random proxy is picked per request. `http(s)://` works out of the box;
-`socks5://` needs `requests[socks]` (add `PySocks` to `requirements.txt`).
-When `PROXIES` is set it takes precedence over the source-IP options below.
+A random proxy is picked **per request, process-wide**. This is the option to
+use when you need the **extension scrapers** proxied: extensions run in-process
+and make their own `requests`/`cloudscraper` calls, and on startup publoader
+installs a class-level `requests.Session` hook so every one of those calls (plus
+MangaDex uploads and GitHub fetches) goes out through a random proxy from the
+pool. `http(s)://` works out of the box; `socks5://` needs `requests[socks]`
+(add `PySocks` to `requirements.txt`). When `PROXIES` is set it takes precedence
+over the source-IP options below.
+
+An extension that sets its own `session.proxies`, or uses a non-`requests`
+client (`httpx`, `urllib`, raw sockets), is left alone. To force *everything* in
+the container through one proxy regardless of library, set standard proxy env
+vars on the `publoader` service instead (single proxy, no rotation):
+
+```yaml
+    environment:
+      - HTTP_PROXY=http://user:pass@1.2.3.4:8080
+      - HTTPS_PROXY=http://user:pass@1.2.3.4:8080
+```
 
 ### Source-IP rotation over a routed IPv6 subnet
 

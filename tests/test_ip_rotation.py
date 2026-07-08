@@ -9,11 +9,22 @@ import ipaddress
 import pytest
 import requests
 
+from requests import sessions as _sessions
+
 from publoader.http.rotation import (
     RotatingSourceAddressAdapter,
     apply_ip_rotation,
     generate_ipv6_pool,
+    install_global_proxy_rotation,
 )
+
+
+@pytest.fixture
+def restore_session_request():
+    """Undo the global Session.request monkeypatch after a test."""
+    original = _sessions.Session.request
+    yield
+    _sessions.Session.request = original
 
 
 def test_generate_ipv6_pool_within_subnet_and_distinct():
@@ -124,6 +135,77 @@ def test_apply_rotation_disabled_by_default():
     assert pool == []
     # No adapter swap when nothing is configured.
     assert session.get_adapter("https://api.mangadex.org") is default_adapter
+
+
+def test_global_proxy_rotation_injects_proxy(restore_session_request):
+    captured = {}
+
+    def fake_original(self, method, url, **kwargs):
+        captured["proxies"] = kwargs.get("proxies")
+        return "ok"
+
+    # Simulate a stack where an in-process extension calls requests.get.
+    _sessions.Session.request = fake_original
+    assert install_global_proxy_rotation(["http://1.2.3.4:8080"]) is True
+
+    import requests
+
+    result = requests.Session().request("GET", "https://example.test/x")
+    assert result == "ok"
+    assert captured["proxies"] == {
+        "http": "http://1.2.3.4:8080",
+        "https": "http://1.2.3.4:8080",
+    }
+
+
+def test_global_proxy_rotation_respects_explicit_proxies(restore_session_request):
+    captured = {}
+
+    def fake_original(self, method, url, **kwargs):
+        captured["proxies"] = kwargs.get("proxies")
+        return "ok"
+
+    _sessions.Session.request = fake_original
+    install_global_proxy_rotation(["http://1.2.3.4:8080"])
+
+    import requests
+
+    explicit = {"http": "http://9.9.9.9:3128", "https": "http://9.9.9.9:3128"}
+    requests.Session().request("GET", "https://example.test/x", proxies=explicit)
+    assert captured["proxies"] == explicit  # caller's choice preserved
+
+
+def test_global_proxy_rotation_respects_session_proxies(restore_session_request):
+    captured = {}
+
+    def fake_original(self, method, url, **kwargs):
+        captured["proxies"] = kwargs.get("proxies")
+        return "ok"
+
+    _sessions.Session.request = fake_original
+    install_global_proxy_rotation(["http://1.2.3.4:8080"])
+
+    import requests
+
+    s = requests.Session()
+    s.proxies = {"https": "http://7.7.7.7:8080"}
+    s.request("GET", "https://example.test/x")
+    # Session-level proxies set → we don't override (leave requests to merge).
+    assert captured["proxies"] is None
+
+
+def test_global_proxy_rotation_empty_pool_is_noop(restore_session_request):
+    before = _sessions.Session.request
+    assert install_global_proxy_rotation([]) is False
+    assert _sessions.Session.request is before
+
+
+def test_global_proxy_rotation_idempotent(restore_session_request):
+    install_global_proxy_rotation(["http://1.2.3.4:8080"])
+    patched = _sessions.Session.request
+    # Second install doesn't stack another wrapper.
+    assert install_global_proxy_rotation(["http://1.2.3.4:8080"]) is True
+    assert _sessions.Session.request is patched
 
 
 def test_apply_rotation_bad_subnet_is_non_fatal():
