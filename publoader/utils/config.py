@@ -1,5 +1,6 @@
 import configparser
 import logging
+import re
 from calendar import WEDNESDAY
 from datetime import time
 
@@ -159,3 +160,31 @@ if not github_webhook_path.startswith("/"):
 # X-Hub-Signature-256 HMAC of each delivery. The listener refuses to start
 # without one (an unauthenticated update trigger would be a remote-code path).
 github_webhook_secret = _config_get("GithubWebhook", "secret", "") or ""
+
+
+# Outgoing-IP rotation. Spread MangaDex requests across multiple source IPs so
+# no single address trips a per-IP rate-limit ban. All optional; blank = the
+# default single outbound IP. See publoader/http/rotation.py and docker/README.
+# Proxy URLs, comma/newline separated. A random one is used per request.
+outgoing_proxies = [
+    p.strip()
+    for p in re.split(r"[,\n]", _config_get("Network", "proxies", ""))
+    if p.strip()
+]
+# Explicit local source IPs to bind to, comma/space/newline separated.
+outgoing_source_ips = [
+    p.strip()
+    for p in re.split(r"[,\s]+", _config_get("Network", "source_ips", ""))
+    if p.strip()
+]
+# Routed IPv6 subnet (CIDR) to generate rotating source addresses from.
+outgoing_source_ipv6_subnet = _config_get("Network", "source_ipv6_subnet", "").strip()
+
+try:
+    outgoing_source_pool_size = int(
+        _config_get("Network", "source_ip_pool_size", "64") or "64"
+    )
+except ValueError:
+    outgoing_source_pool_size = 64
+if outgoing_source_pool_size < 1:
+    outgoing_source_pool_size = 1

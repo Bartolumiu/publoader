@@ -18,6 +18,23 @@ services:
       - ./resources:/app/resources
     entrypoint: [ "/app/entrypoint.sh" ]
     command: [ "python", "run.py" ]
+    # --- Outgoing-IP rotation (optional) --------------------------------------
+    # Only the app-level config in [Network] is needed for the *proxy pool* mode
+    # — no changes here. The settings below are ONLY for source-IP rotation over
+    # a routed IPv6 subnet ([Network] SOURCE_IPV6_SUBNET): the container must be
+    # allowed to bind arbitrary addresses in the prefix, which needs non-local
+    # bind + an AnyIP local route (added by entrypoint.sh when PUBLOADER_ANYIP_*
+    # are set). Uncomment this block and set the two env vars to your routed /64.
+    # See docker/README "Outgoing IP rotation" for the required host setup.
+    # cap_add:
+    #   - NET_ADMIN
+    # sysctls:
+    #   - net.ipv6.conf.all.disable_ipv6=0
+    #   - net.ipv6.ip_nonlocal_bind=1
+    # environment:
+    #   - PUBLOADER_ANYIP_SUBNET=2001:db8:abcd::/64
+    #   - PUBLOADER_ANYIP_DEV=eth0
+    # --------------------------------------------------------------------------
     # Opt this container in to autoheal (see the autoheal service below).
     labels:
       - autoheal=true
