@@ -17,7 +17,10 @@ from typing import Optional
 from scheduler import Scheduler
 
 from publoader.github_webhook import GithubWebhookListener
-from publoader.http.rotation import install_global_proxy_rotation
+from publoader.http.rotation import (
+    install_global_aiohttp_proxy_rotation,
+    install_global_proxy_rotation,
+)
 from publoader.ipc import IPCServer, ipc_call, is_instance_running
 from publoader.state import get_state_store
 from publoader.updater import PubloaderUpdater
@@ -1282,8 +1285,11 @@ if __name__ == "__main__":
     # Route all in-process HTTP through the proxy pool (if configured) before
     # anything makes a request — this is what proxies the in-process extension
     # scrapers, not just the MangaDex client. Installed before workers fork so
-    # forked children inherit it. No-op when [Network] PROXIES is empty.
+    # forked children inherit it. No-op when [Network] PROXIES is empty. The
+    # requests hook covers requests/cloudscraper (per request); the aiohttp hook
+    # covers aiohttp-based extensions incl. SOCKS (per session, via aiohttp_socks).
     install_global_proxy_rotation(outgoing_proxies)
+    install_global_aiohttp_proxy_rotation(outgoing_proxies)
 
     database_connection = get_database_connection()
     worker.main(database_connection)

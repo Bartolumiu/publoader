@@ -6,5 +6,9 @@ Pillow>=10
 pydantic
 PyGithub
 pymongo
-requests
+requests[socks]
 scheduler
+# SOCKS proxy support for aiohttp-based extensions (aiohttp has no native SOCKS).
+# Pulls in aiohttp; used by the global aiohttp proxy-rotation hook. Harmless when
+# [Network] PROXIES is unset.
+aiohttp_socks

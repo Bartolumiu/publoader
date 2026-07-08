@@ -156,6 +156,65 @@ def install_global_proxy_rotation(proxy_pool) -> "bool":
     return True
 
 
+def install_global_aiohttp_proxy_rotation(proxy_pool) -> "bool":
+    """Route aiohttp ``ClientSession``s through a random proxy from the pool.
+
+    aiohttp is a separate HTTP stack from ``requests`` (some extensions use it)
+    and has **no native SOCKS support**, so a proxy can only be applied via an
+    ``aiohttp_socks`` ProxyConnector supplied when the session is constructed.
+    That means **per-session** rotation — a random proxy per ``ClientSession``,
+    not per request — for socks5://, socks4:// and http(s):// alike. Patching
+    ``ClientSession.__init__`` at the class level is the one hook that reaches
+    every aiohttp-based extension without touching its code.
+
+    No-op (returns False) when the pool is empty or aiohttp / aiohttp_socks
+    aren't installed — nothing in core publoader depends on them; they only
+    arrive alongside an extension that uses aiohttp. Idempotent; install once at
+    startup before extensions load (forked workers inherit the patch).
+    """
+    pool = [p.strip() for p in (proxy_pool or []) if p and p.strip()]
+    if not pool:
+        return False
+
+    try:
+        import aiohttp
+        from aiohttp_socks import ProxyConnector
+    except ImportError:
+        logger.warning(
+            "aiohttp proxy rotation requested but aiohttp/aiohttp_socks are not "
+            "installed; aiohttp-based extensions will NOT be proxied."
+        )
+        return False
+
+    original_init = aiohttp.ClientSession.__init__
+    if getattr(original_init, "_publoader_proxy_rotation", False):
+        return True
+
+    def __init__(self, *args, **kwargs):
+        # Respect an explicitly supplied connector; only inject one when the
+        # caller left it to aiohttp's default (a fresh connector is built per
+        # session, and the session owns/closes it as usual).
+        if kwargs.get("connector") is None:
+            proxy = random.choice(pool)
+            try:
+                kwargs["connector"] = ProxyConnector.from_url(proxy)
+            except Exception as e:
+                logger.error(
+                    "aiohttp proxy connector build failed for %r: %s", proxy, e
+                )
+        original_init(self, *args, **kwargs)
+
+    __init__._publoader_proxy_rotation = True
+    __init__._publoader_original = original_init
+    aiohttp.ClientSession.__init__ = __init__
+    logger.info(
+        "Global aiohttp proxy rotation installed across %d proxies "
+        "(per-session; extensions included).",
+        len(pool),
+    )
+    return True
+
+
 def apply_ip_rotation(
     session,
     *,
