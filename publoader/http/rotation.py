@@ -149,10 +149,14 @@ def install_global_proxy_rotation(proxy_pool) -> "bool":
     request._publoader_proxy_rotation = True
     request._publoader_original = original
     _sessions.Session.request = request
-    logger.info(
-        "Global proxy rotation installed across %d proxies (extensions included).",
-        len(pool),
+    msg = (
+        f"Global proxy rotation installed across {len(pool)} proxies "
+        f"(requests/cloudscraper, per request; extensions included)."
     )
+    logger.info(msg)
+    # Also to stdout so it shows in `docker compose logs` — the publoader logger
+    # only writes to a file.
+    print(msg)
     return True
 
 
@@ -180,10 +184,12 @@ def install_global_aiohttp_proxy_rotation(proxy_pool) -> "bool":
         import aiohttp
         from aiohttp_socks import ProxyConnector
     except ImportError:
-        logger.warning(
+        msg = (
             "aiohttp proxy rotation requested but aiohttp/aiohttp_socks are not "
             "installed; aiohttp-based extensions will NOT be proxied."
         )
+        logger.warning(msg)
+        print(msg)
         return False
 
     original_init = aiohttp.ClientSession.__init__
@@ -207,11 +213,12 @@ def install_global_aiohttp_proxy_rotation(proxy_pool) -> "bool":
     __init__._publoader_proxy_rotation = True
     __init__._publoader_original = original_init
     aiohttp.ClientSession.__init__ = __init__
-    logger.info(
-        "Global aiohttp proxy rotation installed across %d proxies "
-        "(per-session; extensions included).",
-        len(pool),
+    msg = (
+        f"Global aiohttp proxy rotation installed across {len(pool)} proxies "
+        f"(per-session; extensions included)."
     )
+    logger.info(msg)
+    print(msg)
     return True
 
 
