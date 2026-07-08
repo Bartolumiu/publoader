@@ -15,6 +15,7 @@ from publoader.http.rotation import (
     RotatingSourceAddressAdapter,
     apply_ip_rotation,
     generate_ipv6_pool,
+    install_global_aiohttp_proxy_rotation,
     install_global_proxy_rotation,
 )
 
@@ -25,6 +26,16 @@ def restore_session_request():
     original = _sessions.Session.request
     yield
     _sessions.Session.request = original
+
+
+@pytest.fixture
+def restore_aiohttp_init():
+    """Undo the global aiohttp ClientSession.__init__ monkeypatch after a test."""
+    aiohttp = pytest.importorskip("aiohttp")
+    pytest.importorskip("aiohttp_socks")
+    original = aiohttp.ClientSession.__init__
+    yield aiohttp
+    aiohttp.ClientSession.__init__ = original
 
 
 def test_generate_ipv6_pool_within_subnet_and_distinct():
@@ -206,6 +217,59 @@ def test_global_proxy_rotation_idempotent(restore_session_request):
     # Second install doesn't stack another wrapper.
     assert install_global_proxy_rotation(["http://1.2.3.4:8080"]) is True
     assert _sessions.Session.request is patched
+
+
+def test_aiohttp_rotation_injects_socks_connector(restore_aiohttp_init):
+    import asyncio
+
+    from aiohttp_socks import ProxyConnector, ProxyType
+
+    aiohttp = restore_aiohttp_init
+    assert (
+        install_global_aiohttp_proxy_rotation(["socks5://user:pass@1.2.3.4:1080"])
+        is True
+    )
+
+    async def check():
+        session = aiohttp.ClientSession()
+        conn = session.connector
+        assert isinstance(conn, ProxyConnector)
+        assert conn._proxy_host == "1.2.3.4"
+        assert conn._proxy_port == 1080
+        assert conn._proxy_type == ProxyType.SOCKS5
+        await session.close()
+
+    asyncio.run(check())
+
+
+def test_aiohttp_rotation_respects_explicit_connector(restore_aiohttp_init):
+    import asyncio
+
+    aiohttp = restore_aiohttp_init
+    install_global_aiohttp_proxy_rotation(["socks5://1.2.3.4:1080"])
+
+    async def check():
+        own = aiohttp.TCPConnector()
+        session = aiohttp.ClientSession(connector=own)
+        assert session.connector is own  # caller's connector preserved
+        await session.close()
+
+    asyncio.run(check())
+
+
+def test_aiohttp_rotation_empty_pool_is_noop(restore_aiohttp_init):
+    aiohttp = restore_aiohttp_init
+    before = aiohttp.ClientSession.__init__
+    assert install_global_aiohttp_proxy_rotation([]) is False
+    assert aiohttp.ClientSession.__init__ is before
+
+
+def test_aiohttp_rotation_idempotent(restore_aiohttp_init):
+    aiohttp = restore_aiohttp_init
+    install_global_aiohttp_proxy_rotation(["socks5://1.2.3.4:1080"])
+    patched = aiohttp.ClientSession.__init__
+    assert install_global_aiohttp_proxy_rotation(["socks5://1.2.3.4:1080"]) is True
+    assert aiohttp.ClientSession.__init__ is patched
 
 
 def test_apply_rotation_bad_subnet_is_non_fatal():

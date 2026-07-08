@@ -78,16 +78,30 @@ pool. `http(s)://` works out of the box; `socks5://` needs `requests[socks]`
 (add `PySocks` to `requirements.txt`). When `PROXIES` is set it takes precedence
 over the source-IP options below.
 
-An extension that sets its own `session.proxies`, or uses a non-`requests`
-client (`httpx`, `urllib`, raw sockets), is left alone. To force *everything* in
-the container through one proxy regardless of library, set standard proxy env
-vars on the `publoader` service instead (single proxy, no rotation):
+**aiohttp extensions** are covered too, but differently: aiohttp is a separate
+HTTP stack with no native SOCKS support, so publoader installs a second hook on
+`aiohttp.ClientSession.__init__` that gives each session an `aiohttp_socks`
+`ProxyConnector` built from a random proxy in the pool. This works for
+`socks5://`, `socks4://` and `http(s)://` — but rotation is **per session**, not
+per request (a `ClientSession` keeps its proxy for its lifetime). `aiohttp_socks`
+ships in `requirements.txt` for this. An extension that passes its own
+`connector=` is left alone.
+
+An extension that sets its own `session.proxies`/`connector`, or uses yet
+another client (`httpx`, `urllib`, raw sockets), is left alone. To force
+*everything* in the container through one proxy regardless of library, set
+standard proxy env vars on the `publoader` service instead — **single proxy, no
+rotation, and a single value only (not a comma-separated list)**:
 
 ```yaml
     environment:
       - HTTP_PROXY=http://user:pass@1.2.3.4:8080
       - HTTPS_PROXY=http://user:pass@1.2.3.4:8080
 ```
+
+Note: aiohttp ignores these env vars unless a session is created with
+`trust_env=True`, so the `ClientSession` hook above (not env vars) is what
+proxies aiohttp extensions.
 
 ### Source-IP rotation over a routed IPv6 subnet
 
