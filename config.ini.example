@@ -58,6 +58,13 @@ SOURCE_IPV6_SUBNET=
 SOURCE_IPS=
 # How many addresses to generate from SOURCE_IPV6_SUBNET.
 SOURCE_IP_POOL_SIZE=64
+#
+# Hosts that must NEVER be proxied (comma/space separated). The MongoDB host
+# from MONGODB_URI and localhost are excluded automatically, so DB traffic
+# always goes direct; add anything else here (e.g. a TLS cert's OCSP responder).
+# The standard NO_PROXY/no_proxy env vars are honoured too.
+#   NO_PROXY=ocsp.example-ca.com, internal.svc
+NO_PROXY=
 
 [Repo]
 REPO_OWNER=publoader

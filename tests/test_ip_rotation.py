@@ -13,11 +13,14 @@ from requests import sessions as _sessions
 
 from publoader.http.rotation import (
     RotatingSourceAddressAdapter,
+    _host_excluded,
+    _normalise_no_proxy,
     apply_ip_rotation,
     generate_ipv6_pool,
     install_global_aiohttp_proxy_rotation,
     install_global_proxy_rotation,
 )
+from publoader.utils.config import _mongo_hosts
 
 
 @pytest.fixture
@@ -205,6 +208,50 @@ def test_global_proxy_rotation_respects_session_proxies(restore_session_request)
     assert captured["proxies"] is None
 
 
+def test_global_proxy_rotation_skips_excluded_host(restore_session_request):
+    captured = {}
+
+    def fake_original(self, method, url, **kwargs):
+        captured["proxies"] = kwargs.get("proxies")
+        return "ok"
+
+    _sessions.Session.request = fake_original
+    install_global_proxy_rotation(
+        ["http://1.2.3.4:8080"], no_proxy_hosts=["db.example.net"]
+    )
+
+    import requests
+
+    # Excluded host (and its subdomains) go direct...
+    requests.Session().request("GET", "https://db.example.net:27017/x")
+    assert captured["proxies"] is None
+    requests.Session().request("GET", "https://shard0.db.example.net/x")
+    assert captured["proxies"] is None
+    # ...but everything else is still proxied.
+    requests.Session().request("GET", "https://api.mangadex.org/x")
+    assert captured["proxies"] == {
+        "http": "http://1.2.3.4:8080",
+        "https": "http://1.2.3.4:8080",
+    }
+
+
+def test_global_proxy_rotation_no_proxy_from_env(restore_session_request, monkeypatch):
+    captured = {}
+
+    def fake_original(self, method, url, **kwargs):
+        captured["proxies"] = kwargs.get("proxies")
+        return "ok"
+
+    monkeypatch.setenv("NO_PROXY", "internal.example")
+    _sessions.Session.request = fake_original
+    install_global_proxy_rotation(["http://1.2.3.4:8080"])
+
+    import requests
+
+    requests.Session().request("GET", "https://internal.example/x")
+    assert captured["proxies"] is None
+
+
 def test_global_proxy_rotation_empty_pool_is_noop(restore_session_request):
     before = _sessions.Session.request
     assert install_global_proxy_rotation([]) is False
@@ -217,6 +264,44 @@ def test_global_proxy_rotation_idempotent(restore_session_request):
     # Second install doesn't stack another wrapper.
     assert install_global_proxy_rotation(["http://1.2.3.4:8080"]) is True
     assert _sessions.Session.request is patched
+
+
+def test_normalise_no_proxy_dedupes_and_lowercases(monkeypatch):
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    assert _normalise_no_proxy([".Example.com", "example.com", "DB, cache"]) == [
+        "example.com",
+        "db",
+        "cache",
+    ]
+
+
+def test_host_excluded_matches_exact_and_suffix():
+    no_proxy = ["example.com", "db.internal"]
+    assert _host_excluded("https://example.com/x", no_proxy)
+    assert _host_excluded("https://api.example.com/x", no_proxy)  # subdomain
+    assert _host_excluded("mongodb://db.internal:27017", no_proxy)
+    assert not _host_excluded("https://notexample.com/x", no_proxy)
+    assert not _host_excluded("https://other.net/x", no_proxy)
+    assert _host_excluded("https://anything/x", ["*"])  # wildcard disables all
+
+
+@pytest.mark.parametrize(
+    "uri, expected",
+    [
+        ("mongodb://localhost:27017", ["localhost"]),
+        ("mongodb://user:pass@db.example.net:27017/mydb", ["db.example.net"]),
+        (
+            "mongodb://u:p@h1:27017,h2:27018,h3:27019/db?replicaSet=rs0",
+            ["h1", "h2", "h3"],
+        ),
+        ("mongodb+srv://user:pass@cluster0.abcd.mongodb.net/db", ["cluster0.abcd.mongodb.net"]),
+        ("mongodb://[::1]:27017/db", ["::1"]),
+        ("", []),
+    ],
+)
+def test_mongo_hosts_parsing(uri, expected):
+    assert _mongo_hosts(uri) == expected
 
 
 def test_aiohttp_rotation_injects_socks_connector(restore_aiohttp_init):
