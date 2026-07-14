@@ -17,12 +17,63 @@ Both default off, so a stock config keeps the single-outbound-IP behaviour.
 """
 import ipaddress
 import logging
+import os
 import random
+import re
+from urllib.parse import urlsplit
 
 from requests.adapters import HTTPAdapter
 from urllib3 import PoolManager
 
 logger = logging.getLogger("publoader")
+
+
+def _normalise_no_proxy(hosts) -> "list[str]":
+    """Return a de-duped, lower-cased list of no-proxy host patterns.
+
+    Accepts an iterable and/or the standard ``NO_PROXY``/``no_proxy`` env vars
+    (comma-separated), merging both. Entries are hostnames or domain suffixes;
+    a leading dot is stripped so ``.example.com`` and ``example.com`` behave the
+    same (both match the domain and its subdomains).
+    """
+    out: "list[str]" = []
+    seen: "set[str]" = set()
+
+    def add(raw):
+        for part in re.split(r"[,\s]+", str(raw or "")):
+            part = part.strip().lower().lstrip(".")
+            if part and part not in seen:
+                seen.add(part)
+                out.append(part)
+
+    for h in hosts or []:
+        add(h)
+    add(os.environ.get("NO_PROXY", ""))
+    add(os.environ.get("no_proxy", ""))
+    return out
+
+
+def _host_excluded(url, no_proxy) -> "bool":
+    """True if ``url``'s host should bypass the proxy per the no-proxy list.
+
+    Matches an exact host, or a domain suffix (``example.com`` matches
+    ``db.example.com``). ``*`` disables proxying entirely, mirroring the
+    conventional ``NO_PROXY=*``.
+    """
+    if not no_proxy:
+        return False
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    for pattern in no_proxy:
+        if pattern == "*":
+            return True
+        if host == pattern or host.endswith("." + pattern):
+            return True
+    return False
 
 
 def generate_ipv6_pool(subnet: str, count: int) -> "list[str]":
@@ -113,7 +164,7 @@ class RotatingSourceAddressAdapter(HTTPAdapter):
         super().close()
 
 
-def install_global_proxy_rotation(proxy_pool) -> "bool":
+def install_global_proxy_rotation(proxy_pool, no_proxy_hosts=None) -> "bool":
     """Route every ``requests``-based call in this process through a random
     proxy from ``proxy_pool``, unless the caller set proxies explicitly.
 
@@ -125,12 +176,21 @@ def install_global_proxy_rotation(proxy_pool) -> "bool":
     this once at process startup, before extensions load; forked worker
     processes inherit the patch.
 
+    ``no_proxy_hosts`` names hosts that must NEVER be proxied — chiefly the
+    MongoDB host. The DB driver (pymongo) uses raw sockets and isn't touched by
+    this patch, but ``pymongo[ocsp]`` pulls in ``requests`` and makes OCSP
+    responder calls over it during TLS handshakes, so a stray requests-based
+    call toward the DB (or its cert's OCSP responder) would otherwise be
+    proxied. The standard ``NO_PROXY``/``no_proxy`` env vars are merged in too.
+
     Idempotent and a no-op for an empty pool. Returns True if rotation is
     active afterwards.
     """
     pool = [p.strip() for p in (proxy_pool or []) if p and p.strip()]
     if not pool:
         return False
+
+    no_proxy = _normalise_no_proxy(no_proxy_hosts)
 
     from requests import sessions as _sessions
 
@@ -139,9 +199,13 @@ def install_global_proxy_rotation(proxy_pool) -> "bool":
         return True
 
     def request(self, method, url, **kwargs):
-        # Respect an explicit per-request proxy or one set on the session; only
-        # fill in when the caller left it unset.
-        if kwargs.get("proxies") is None and not getattr(self, "proxies", None):
+        # Respect an explicit per-request proxy or one set on the session, and
+        # never proxy an excluded host (e.g. the DB); only fill in otherwise.
+        if (
+            kwargs.get("proxies") is None
+            and not getattr(self, "proxies", None)
+            and not _host_excluded(url, no_proxy)
+        ):
             proxy = random.choice(pool)
             kwargs["proxies"] = {"http": proxy, "https": proxy}
         return original(self, method, url, **kwargs)
@@ -149,9 +213,10 @@ def install_global_proxy_rotation(proxy_pool) -> "bool":
     request._publoader_proxy_rotation = True
     request._publoader_original = original
     _sessions.Session.request = request
+    excluded = f"; {len(no_proxy)} host(s) excluded" if no_proxy else ""
     msg = (
         f"Global proxy rotation installed across {len(pool)} proxies "
-        f"(requests/cloudscraper, per request; extensions included)."
+        f"(requests/cloudscraper, per request; extensions included){excluded}."
     )
     logger.info(msg)
     # Also to stdout so it shows in `docker compose logs` — the publoader logger

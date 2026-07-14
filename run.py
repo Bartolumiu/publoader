@@ -35,6 +35,7 @@ from publoader.utils.config import (
     github_webhook_path,
     github_webhook_port,
     github_webhook_secret,
+    no_proxy_hosts,
     outgoing_proxies,
 )
 from publoader.utils.utils import (
@@ -1288,7 +1289,9 @@ if __name__ == "__main__":
     # forked children inherit it. No-op when [Network] PROXIES is empty. The
     # requests hook covers requests/cloudscraper (per request); the aiohttp hook
     # covers aiohttp-based extensions incl. SOCKS (per session, via aiohttp_socks).
-    install_global_proxy_rotation(outgoing_proxies)
+    # no_proxy_hosts keeps DB traffic direct — pymongo[ocsp] makes OCSP calls over
+    # requests during TLS handshakes, which the hook would otherwise proxy.
+    install_global_proxy_rotation(outgoing_proxies, no_proxy_hosts=no_proxy_hosts)
     install_global_aiohttp_proxy_rotation(outgoing_proxies)
 
     database_connection = get_database_connection()

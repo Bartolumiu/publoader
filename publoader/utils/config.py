@@ -188,3 +188,46 @@ except ValueError:
     outgoing_source_pool_size = 64
 if outgoing_source_pool_size < 1:
     outgoing_source_pool_size = 1
+
+
+def _mongo_hosts(uri: str) -> "list[str]":
+    """Extract host name(s) from a MongoDB connection string, no DNS lookups.
+
+    Handles ``mongodb://`` and ``mongodb+srv://``, optional ``user:pass@``
+    userinfo, comma-separated replica-set members, ports, and bracketed IPv6
+    literals. Returns lower-cased hosts (empty list for a blank/garbled URI).
+    """
+    if not uri:
+        return []
+    rest = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", uri.strip())
+    # Only the host section: everything before the first '/' or '?'.
+    hostpart = re.split(r"[/?]", rest, maxsplit=1)[0]
+    if "@" in hostpart:  # strip userinfo
+        hostpart = hostpart.rsplit("@", 1)[1]
+    hosts = []
+    for node in hostpart.split(","):
+        node = node.strip()
+        if not node:
+            continue
+        if node.startswith("["):  # [::1]:27017
+            host = node[1:].split("]", 1)[0]
+        else:
+            host = node.split(":", 1)[0]
+        host = host.strip().lower()
+        if host:
+            hosts.append(host)
+    return hosts
+
+
+# Hosts that must NEVER be routed through the outgoing proxy pool. The MongoDB
+# host(s) head the list — database traffic must go direct (see
+# publoader/http/rotation.py). localhost is always included so in-process/IPC
+# HTTP stays local, and users can add more (e.g. a cert's OCSP responder) via
+# [Network] no_proxy. Merged with the standard NO_PROXY env var in rotation.py.
+no_proxy_hosts = ["localhost", "127.0.0.1", "::1"]
+no_proxy_hosts += _mongo_hosts(_config_get("Credentials", "mongodb_uri", ""))
+no_proxy_hosts += [
+    p.strip()
+    for p in re.split(r"[,\s]+", _config_get("Network", "no_proxy", ""))
+    if p.strip()
+]
