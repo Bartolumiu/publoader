@@ -287,6 +287,217 @@ def install_global_aiohttp_proxy_rotation(proxy_pool) -> "bool":
     return True
 
 
+# ---------------------------------------------------------------------------
+# Extension header spoofing
+# ---------------------------------------------------------------------------
+#
+# The MangaDex client (HTTPModel) identifies honestly as ``publoader/<version>``
+# — that is the courteous, expected identity for our own API traffic and MUST
+# NOT be spoofed. The *extensions*, however, scrape third-party sites that fend
+# off bots by fingerprinting the default ``python-requests/x.y`` (or bare
+# aiohttp) User-Agent. Presenting a coherent, real-browser header set makes each
+# extension session look like an ordinary user's browser tab.
+#
+# Each profile below is internally consistent: the User-Agent, the ``Sec-CH-UA``
+# client-hint trio and the platform all describe the *same* browser/OS, because
+# a mismatched set (e.g. a Chrome UA with a Firefox-shaped header list) is itself
+# a bot tell. The MangaDex session opts out via the ``_publoader_no_spoof``
+# marker (see HTTPModel), so this never touches our first-party traffic.
+
+_BROWSER_PROFILES = (
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Sec-CH-UA": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Windows"',
+    },
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Sec-CH-UA": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"macOS"',
+    },
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) "
+            "Gecko/20100101 Firefox/133.0"
+        ),
+        # Firefox does not send Sec-CH-UA client hints.
+    },
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) "
+            "Gecko/20100101 Firefox/133.0"
+        ),
+    },
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/18.1 Safari/605.1.15"
+        ),
+        # Safari does not send Sec-CH-UA client hints either.
+    },
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
+        ),
+        "Sec-CH-UA": '"Microsoft Edge";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Windows"',
+    },
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+        ),
+        "Sec-CH-UA": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "Sec-CH-UA-Mobile": "?1",
+        "Sec-CH-UA-Platform": '"Android"',
+    },
+)
+
+# Headers common to every profile — a normal browser sends these on essentially
+# every navigation regardless of engine.
+_COMMON_SPOOF_HEADERS = {
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+}
+
+
+def random_browser_headers() -> "dict":
+    """Return a coherent, real-browser header set for one spoofed session.
+
+    Combines a randomly chosen browser/OS profile with the common navigation
+    headers. Every returned dict is self-consistent (UA matches the client-hint
+    headers), so a site fingerprinting the combination sees a plausible browser.
+    """
+    profile = random.choice(_BROWSER_PROFILES)
+    return {**_COMMON_SPOOF_HEADERS, **profile}
+
+
+def install_global_header_spoofing(enabled: "bool" = True) -> "bool":
+    """Make every in-process ``requests``/``cloudscraper`` session present as a
+    real browser, so extension scrapers dodge default-User-Agent bot filters.
+
+    Like the proxy hook, this patches ``requests.Session.request`` at the class
+    level — the single seam that reaches every extension without touching its
+    code. The first request a session makes picks one browser profile and pins
+    it onto ``session.headers`` (via ``setdefault``, so any header the extension
+    set itself always wins); every later request from that same session reuses
+    it. Pinning per session — rather than randomising per request — is the point:
+    a real user's browser keeps a stable identity for the life of a session, and
+    flipping User-Agent between requests would itself look automated.
+
+    Two sessions are left strictly alone: any marked ``_publoader_no_spoof``
+    (the MangaDex client, which must stay ``publoader/<version>``), and any that
+    already carries our spoof (idempotent per session). Install once at startup
+    before extensions load; forked workers inherit the patch. No-op when
+    disabled. Returns True if spoofing is active afterwards.
+    """
+    if not enabled:
+        return False
+
+    from requests import sessions as _sessions
+    from requests.utils import default_headers as _requests_default_headers
+
+    # requests pre-seeds every Session with User-Agent (``python-requests/x``),
+    # Accept, Accept-Encoding and Connection. Those library defaults are exactly
+    # the bot tells we want to overwrite — but a value the *extension* set is
+    # not, so we replace a header only when it is still at the library default
+    # (or absent), and leave anything customised alone.
+    _lib_defaults = _requests_default_headers()
+
+    original = _sessions.Session.request
+    if getattr(original, "_publoader_header_spoof", False):
+        return True
+
+    def request(self, method, url, **kwargs):
+        if not getattr(self, "_publoader_no_spoof", False) and not getattr(
+            self, "_publoader_spoof_applied", False
+        ):
+            for key, value in random_browser_headers().items():
+                current = self.headers.get(key)
+                if current is None or current == _lib_defaults.get(key):
+                    self.headers[key] = value
+            self._publoader_spoof_applied = True
+        return original(self, method, url, **kwargs)
+
+    request._publoader_header_spoof = True
+    request._publoader_original = original
+    _sessions.Session.request = request
+    msg = (
+        "Global header spoofing installed (requests/cloudscraper; per session; "
+        "extensions present as real browsers, MangaDex client exempt)."
+    )
+    logger.info(msg)
+    print(msg)
+    return True
+
+
+def install_global_aiohttp_header_spoofing(enabled: "bool" = True) -> "bool":
+    """Give every aiohttp ``ClientSession`` real-browser default headers.
+
+    aiohttp is a separate HTTP stack from ``requests`` (some extensions use it),
+    so it needs its own hook. Patching ``ClientSession.__init__`` injects a
+    randomly chosen browser profile as the session's default headers — one
+    identity per session, mirroring the requests hook. Any header the caller
+    passed to the constructor wins over ours (caller headers layer on top).
+
+    No MangaDex traffic goes through aiohttp, so there is no opt-out to honour
+    here. No-op (returns False) when disabled or aiohttp isn't installed —
+    nothing in core publoader depends on it; it only arrives with an extension.
+    Idempotent; install once at startup before extensions load.
+    """
+    if not enabled:
+        return False
+
+    try:
+        import aiohttp
+    except ImportError:
+        return False
+
+    original_init = aiohttp.ClientSession.__init__
+    if getattr(original_init, "_publoader_header_spoof", False):
+        return True
+
+    def __init__(self, *args, **kwargs):
+        # Layer our browser defaults *under* any headers the caller supplied,
+        # so an extension that sets its own headers is never overridden.
+        spoofed = random_browser_headers()
+        caller_headers = kwargs.get("headers")
+        if caller_headers:
+            spoofed.update(dict(caller_headers))
+        kwargs["headers"] = spoofed
+        original_init(self, *args, **kwargs)
+
+    __init__._publoader_header_spoof = True
+    __init__._publoader_original = original_init
+    aiohttp.ClientSession.__init__ = __init__
+    msg = (
+        "Global aiohttp header spoofing installed (per session; extensions "
+        "present as real browsers)."
+    )
+    logger.info(msg)
+    print(msg)
+    return True
+
+
 def apply_ip_rotation(
     session,
     *,

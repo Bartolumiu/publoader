@@ -35,6 +35,10 @@ class HTTPModel(metaclass=Singleton):
     def __init__(self) -> None:
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": f"publoader/{__version__}"})
+        # Our own MangaDex traffic identifies honestly as publoader; opt it out
+        # of the browser-header spoofing that the extension scrapers get (see
+        # install_global_header_spoofing in http/rotation.py).
+        self.session._publoader_no_spoof = True
 
         # Optional outgoing-IP rotation to dodge per-IP rate-limit bans. Returns
         # the proxy pool to rotate per request (empty unless proxy mode is on);

@@ -18,7 +18,9 @@ from scheduler import Scheduler
 
 from publoader.github_webhook import GithubWebhookListener
 from publoader.http.rotation import (
+    install_global_aiohttp_header_spoofing,
     install_global_aiohttp_proxy_rotation,
+    install_global_header_spoofing,
     install_global_proxy_rotation,
 )
 from publoader.ipc import IPCServer, ipc_call, is_instance_running
@@ -37,6 +39,7 @@ from publoader.utils.config import (
     github_webhook_secret,
     no_proxy_hosts,
     outgoing_proxies,
+    spoof_extension_headers,
 )
 from publoader.utils.utils import (
     get_current_datetime,
@@ -1293,6 +1296,14 @@ if __name__ == "__main__":
     # requests during TLS handshakes, which the hook would otherwise proxy.
     install_global_proxy_rotation(outgoing_proxies, no_proxy_hosts=no_proxy_hosts)
     install_global_aiohttp_proxy_rotation(outgoing_proxies)
+
+    # Make the in-process extension scrapers present as real browsers (a fresh
+    # browser identity per session) so third-party sites don't reject the
+    # default python-requests/aiohttp User-Agent. Installed alongside the proxy
+    # hooks, before workers fork. The MangaDex client stays honest as
+    # publoader/<version> (its session is marked _publoader_no_spoof).
+    install_global_header_spoofing(spoof_extension_headers)
+    install_global_aiohttp_header_spoofing(spoof_extension_headers)
 
     database_connection = get_database_connection()
     worker.main(database_connection)
