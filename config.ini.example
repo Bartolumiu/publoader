@@ -59,6 +59,14 @@ SOURCE_IPS=
 # How many addresses to generate from SOURCE_IPV6_SUBNET.
 SOURCE_IP_POOL_SIZE=64
 #
+# Extension header spoofing. The in-process extension scrapers present as a real
+# browser (a fresh, self-consistent User-Agent + client-hint header set per
+# session) so third-party sites don't reject the default python-requests/aiohttp
+# User-Agent. On by default; set to false to send each extension's native
+# User-Agent instead. The MangaDex client is unaffected — it always identifies
+# honestly as publoader/<version>.
+SPOOF_EXTENSION_HEADERS=true
+#
 # Hosts that must NEVER be proxied (comma/space separated). The MongoDB host
 # from MONGODB_URI and localhost are excluded automatically, so DB traffic
 # always goes direct; add anything else here (e.g. a TLS cert's OCSP responder).

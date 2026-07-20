@@ -189,6 +189,14 @@ except ValueError:
 if outgoing_source_pool_size < 1:
     outgoing_source_pool_size = 1
 
+# Whether the in-process extension scrapers spoof real-browser headers (a fresh
+# browser identity per session) to dodge default-User-Agent bot filters. The
+# MangaDex client always stays honest as publoader/<version> regardless. On by
+# default; set to a falsey value to send extensions' native User-Agent instead.
+spoof_extension_headers = (
+    _config_get("Network", "spoof_extension_headers", "true") or "true"
+).strip().lower() not in ("0", "false", "no", "off", "")
+
 
 def _mongo_hosts(uri: str) -> "list[str]":
     """Extract host name(s) from a MongoDB connection string, no DNS lookups.
