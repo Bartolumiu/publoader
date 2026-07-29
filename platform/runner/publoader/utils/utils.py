@@ -26,6 +26,7 @@ logger = logging.getLogger("publoader")
 root_path = Path(".")
 
 _bundle_dir: Optional[Path] = None
+_platform_manga_id_map: Optional[dict] = None
 
 
 def set_bundle_dir(path: Union[str, Path]) -> None:
@@ -33,6 +34,19 @@ def set_bundle_dir(path: Union[str, Path]) -> None:
     global _bundle_dir, root_path
     _bundle_dir = Path(path).resolve()
     root_path = _bundle_dir
+
+
+def set_platform_manga_id_map(manga_map: Optional[dict]) -> None:
+    """Install the control plane's tracked-manga map as the authoritative one.
+
+    The database, not a file committed to the bundle, is the source of truth
+    for which series an extension tracks. Titles auto-tracked since the bundle
+    was published therefore reach the extension without republishing it. An
+    empty or missing map leaves the bundle's own file in charge, so an
+    extension is never starved by a control plane that has nothing to say.
+    """
+    global _platform_manga_id_map
+    _platform_manga_id_map = manga_map or None
 
 
 def resolve_bundle_path(path: Union[str, Path]) -> Path:
@@ -78,7 +92,20 @@ def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None
 
 
 def open_manga_id_map(manga_map_path: Path) -> dict:
-    """Open external id to mangadex id map."""
+    """Open external id to mangadex id map.
+
+    Every call is served the control plane's map when it sent one, whatever
+    filename the extension asked for: an extension has exactly one tracked
+    map, and the database is authoritative for it. The requested path is
+    logged so the substitution is visible in the job's logs.
+    """
+    if _platform_manga_id_map is not None:
+        logger.info(
+            f"Using the platform-provided manga id map "
+            f"({len(_platform_manga_id_map)} titles) in place of {manga_map_path}."
+        )
+        return _platform_manga_id_map
+
     manga_map_path = resolve_bundle_path(manga_map_path)
     try:
         with open(manga_map_path, "r") as manga_map_fp:

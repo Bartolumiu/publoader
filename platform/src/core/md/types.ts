@@ -39,6 +39,12 @@ export interface MdChapter {
     translatedLanguage: string;
     externalUrl: string | null;
     version: number;
+    /**
+     * ISO-8601 creation time. Load-bearing for duplicate resolution: when the
+     * same chapter exists twice on MangaDex the oldest one is kept, so this
+     * decides which id survives. Empty string when MangaDex omitted it.
+     */
+    createdAt: string;
   };
   relationships: { id: string; type: string }[];
 }
@@ -48,6 +54,11 @@ export interface MdManga {
   attributes: {
     title: Record<string, string>;
     altTitles: Record<string, string>[];
+    /**
+     * Drives the "{lang}-ro" romanised-title fallback in format_title. Optional
+     * so fixtures and mocks need not spell it out; MdClient always populates it.
+     */
+    originalLanguage?: string | null;
   };
 }
 

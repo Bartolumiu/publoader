@@ -13,10 +13,10 @@
 # Build context is platform/ (see platform/.dockerignore):
 #   docker build -f platform/docker/worker/Dockerfile -t publoader/worker:local platform
 #
-# Base pinning: see the long note in docker/core/Dockerfile. The digest below
-# is the SAME PLACEHOLDER and must be re-pinned the same way. Keeping core and
-# worker on one base digest is deliberate — one CVE sweep, one re-pin.
-ARG NODE_IMAGE=node:24-bookworm-slim@sha256:0f6b6e0f1a1d1a3f9a5b7e3c9a2c4d5e6f70819293a4b5c6d7e8f90a1b2c3d4e5
+# Base pinning: see the long note in docker/core/Dockerfile. This is the SAME
+# digest and must be refreshed together with it — keeping core and worker on
+# one base is deliberate: one CVE sweep, one re-pin, one thing to verify.
+ARG NODE_IMAGE=node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
 ARG PNPM_VERSION=10.12.1
 
 

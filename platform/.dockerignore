@@ -25,6 +25,11 @@ test
 docker
 .dockerignore
 
+# …except the staged extension requirements, which the worker image installs
+# at build time (ARG EXTENSIONS_DIR in docker/worker/Dockerfile). Without this
+# re-inclusion the COPY has nothing to copy and the build fails.
+!docker/worker/extensions
+
 # VCS / editor / CI noise.
 .git
 .gitignore
@@ -38,6 +43,16 @@ docker
 .env
 .env.*
 !.env.example
+
+# Python build artefacts from running the runner shim locally. Host-compiled
+# .pyc files must never ship in the worker image: they are keyed to the host's
+# interpreter, and the image's read-only rootfs cannot replace a stale one.
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.venv
+venv
 
 # Local scratch.
 *.log

@@ -137,8 +137,14 @@ export class DiscordNotifier {
     return batches;
   }
 
-  /** Post embeds to every configured webhook. Never throws. */
-  async send(inputs: DiscordEmbedInput[]): Promise<void> {
+  /**
+   * Post one embed, or a batch, to every configured webhook. Never throws.
+   *
+   * The single-embed form is what TitleService's `TitleNotifier` calls, so this
+   * signature must keep accepting a bare `{title, description, colour?}`.
+   */
+  async send(input: DiscordEmbedInput | DiscordEmbedInput[]): Promise<void> {
+    const inputs = Array.isArray(input) ? input : [input];
     if (this.urls.length === 0 || inputs.length === 0) return;
 
     const batches = DiscordNotifier.batch(inputs.map(DiscordNotifier.normalise));

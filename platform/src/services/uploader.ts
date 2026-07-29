@@ -9,12 +9,16 @@ import { SettingsStore } from "../core/store/settings.js";
 import { MdClient } from "../core/md/client.js";
 import { DiscordNotifier } from "../core/md/webhook.js";
 import { UploadTaskWorkers } from "../core/md/taskWorkers.js";
+import { TitleService } from "../core/md/titleService.js";
 
 /**
  * core-uploader: the only process that talks to MangaDex with write
  * credentials. It drains the UploadTask queues in a fixed order — removals
  * first, so a chapter that was deleted upstream never races the re-upload of
  * its replacement — and leaves task bookkeeping to UploadTaskStore.
+ *
+ * Title creation for untracked series lives here for the same reason: this is
+ * the only process holding MangaDex write credentials.
  */
 
 /** Long enough for a full page set at the MangaDex ratelimit. */
@@ -31,6 +35,7 @@ const settings = new SettingsStore(prisma);
 const md = new MdClient(config, prisma, log);
 const notifier = DiscordNotifier.fromConfig(config, log);
 const workers = new UploadTaskWorkers({ prisma, md, notifier, config, log });
+const titles = new TitleService(prisma, md, notifier, log);
 
 let running = true;
 const stop = (signal: string) => {
@@ -92,6 +97,14 @@ while (running) {
     for (const kind of KIND_ORDER) {
       if (!running) break;
       processed += await drain(kind);
+    }
+
+    // Title creation is its own MangaDex-facing pass; a failure there must not
+    // cost us the queue drain we just did, so it gets its own guard.
+    try {
+      await titles.tick();
+    } catch (err) {
+      log.error({ err }, "title service tick failed");
     }
 
     await workers.flushNotifications();

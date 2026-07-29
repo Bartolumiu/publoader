@@ -3,6 +3,11 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { Manifest } from "../contracts/manifest.js";
 import type { ResultEnvelope } from "../contracts/envelope.js";
 
+/**
+ * Where a worker looks for the control plane when CORE_URL (config.coreUrl) is
+ * unset. Workers are expected to run on hosts the operator does not control,
+ * so the default is the public deployment rather than a LAN address.
+ */
 export const DEFAULT_CORE_URL = "https://publoader.ardax.dev";
 
 /** A job as handed out by POST /api/v1/worker/lease. */
@@ -21,6 +26,14 @@ export interface LeasedJob {
   timeoutSeconds: number;
   manifest: Manifest | null;
   postedChapterIds: string[];
+  /**
+   * Runtime config from the core's database, not from files in the bundle.
+   * The tracked-manga map arrives in the legacy `{mdMangaId: [externalIds]}`
+   * shape so titles auto-tracked since the bundle was published reach the
+   * extension without republishing it.
+   */
+  mangaIdMap: Record<string, string[]>;
+  overrideOptions: Record<string, unknown>;
 }
 
 export interface LeaseGrant {

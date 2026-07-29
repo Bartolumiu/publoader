@@ -14,6 +14,11 @@
 # Config: copy .env.example to .env in this directory. Docker secrets are
 # supported for every credential — see the note above `secrets:` at the end.
 
+# Without this the project is named after its directory ("core"), which is
+# meaningless in `docker compose ls` and collides with any other stack that
+# happens to live in a directory called core.
+name: publoader-core
+
 # --- shared hardening -------------------------------------------------------
 # Applied to every application service. Extracted to an anchor so the posture
 # is defined once and a service cannot quietly drift from it; per-service

@@ -513,6 +513,7 @@ export class MdClient implements MdExtendedApi {
         translatedLanguage: str("translatedLanguage") ?? "",
         externalUrl: str("externalUrl"),
         version: typeof version === "number" ? version : 1,
+        createdAt: MdClient.createdAt(entity),
       },
       relationships: (entity.relationships ?? []).map((rel) => ({ id: rel.id, type: rel.type })),
     };
@@ -522,12 +523,14 @@ export class MdClient implements MdExtendedApi {
     const attrs = entity.attributes ?? {};
     const title = attrs.title;
     const altTitles = attrs.altTitles;
+    const originalLanguage = attrs.originalLanguage;
     return {
       id: entity.id,
       attributes: {
         title:
           title !== null && typeof title === "object" ? (title as Record<string, string>) : {},
         altTitles: Array.isArray(altTitles) ? (altTitles as Record<string, string>[]) : [],
+        originalLanguage: typeof originalLanguage === "string" ? originalLanguage : null,
       },
     };
   }
@@ -742,6 +745,42 @@ export class MdClient implements MdExtendedApi {
     const response = await this.request("PUT", `${this.config.mdApiUrl}/chapter/${chapterId}`, {
       json: payload,
     });
+    return response.status === 200;
+  }
+
+  /**
+   * POST /manga leaves the title in the `draft` state; it only becomes visible
+   * once commitMangaDraft publishes it, so the two are always used as a pair.
+   */
+  async createMangaDraft(payload: {
+    title: Record<string, string>;
+    originalLanguage: string;
+    status: string;
+    contentRating: string;
+    links?: Record<string, string>;
+  }): Promise<{ id: string; version: number }> {
+    const response = await this.request("POST", `${this.config.mdApiUrl}/manga`, {
+      json: payload,
+      tries: 1,
+    });
+    const entity = response.data?.data;
+    if (entity === null || typeof entity !== "object") {
+      throw new MdRequestError("manga draft response carried no data");
+    }
+    const typed = entity as MdEntity;
+    if (typeof typed.id !== "string") {
+      throw new MdRequestError("manga draft response carried no id");
+    }
+    const version = typed.attributes?.version;
+    return { id: typed.id, version: typeof version === "number" ? version : 1 };
+  }
+
+  async commitMangaDraft(mangaId: string, version: number): Promise<boolean> {
+    const response = await this.request(
+      "POST",
+      `${this.config.mdApiUrl}/manga/draft/${mangaId}/commit`,
+      { json: { version } },
+    );
     return response.status === 200;
   }
 

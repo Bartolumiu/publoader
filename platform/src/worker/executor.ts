@@ -68,13 +68,16 @@ interface RunnerInvocation {
 }
 
 /**
- * Locate runner.py. In the built image the compiled agent sits at
- * dist/src/worker/ and runner/ is copied to dist/runner/; running straight
- * from source (tsx) the same relative walk lands on platform/runner/. Both are
- * probed, and RUNNER_PATH overrides either.
+ * Locate runner.py.
+ *
+ * Two layouts are probed relative to this module: runner/ sitting beside dist/
+ * (what docker/worker/Dockerfile builds, where the agent runs from
+ * /app/dist/src/worker and the shim lives at /app/runner), and runner/ one
+ * level up from src/ (running straight from source under tsx). Either env var
+ * overrides the probe — PUBLOADER_RUNNER is the name the worker image sets.
  */
 export async function resolveRunnerPath(): Promise<string> {
-  const override = process.env["RUNNER_PATH"];
+  const override = process.env["RUNNER_PATH"] ?? process.env["PUBLOADER_RUNNER"];
   if (override) return override;
   const here = fileURLToPath(new URL(".", import.meta.url));
   const candidates = [
@@ -137,6 +140,11 @@ export class JobExecutor {
             postedChapterIds: job.postedChapterIds ?? [],
             manifest: job.manifest,
             timeoutSeconds: job.timeoutSeconds,
+            // Database-sourced runtime config. The runner materialises
+            // mangaIdMap into the workdir and serves it to the extension in
+            // place of the bundle's own manga_id_map.json.
+            mangaIdMap: job.mangaIdMap ?? {},
+            overrideOptions: job.overrideOptions ?? {},
           },
           null,
           2,

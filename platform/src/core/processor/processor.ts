@@ -1,7 +1,7 @@
 import { Prisma, type PrismaClient, type UploadTaskKind } from "@prisma/client";
 import type { Logger } from "../../logging.js";
 import { ResultEnvelope } from "../../contracts/envelope.js";
-import type { MangaRecord } from "../../contracts/records.js";
+import { OverrideOptions, type MangaRecord } from "../../contracts/records.js";
 import { Manifest } from "../../contracts/manifest.js";
 import { chapterFromRecord, type Chapter, type MdApi, type MdChapter } from "../md/types.js";
 import { ResultStore } from "../store/results.js";
@@ -41,11 +41,16 @@ interface ClaimedRun {
   kind: "UPDATE" | "CLEAN" | "FORCE";
 }
 
-interface MergedResults {
+export interface MergedResults {
   updatedChapters: Chapter[];
   /** null when any segment declined to publish a full listing. */
   allChapters: Chapter[] | null;
   untrackedManga: MangaRecord[];
+  /**
+   * As reported by the workers. ADVISORY ONLY — the database is the source of
+   * truth for both of these and processRun replaces them before use. A worker
+   * runs a pinned bundle whose view of configuration can be arbitrarily stale.
+   */
   trackedMangadexIds: string[];
   overrideOptions: OverrideOptionsLike;
   languages: string[];
@@ -146,6 +151,16 @@ export class RunProcessor {
     }
 
     const merged = mergeEnvelopes(envelopes, run.extension);
+    // Configuration authority lives in the database, not in worker output.
+    // Override options come from extension_configs, and the tracked-manga set
+    // is the union of what the database knows (including titles auto-created
+    // since this run started) with what the worker reported.
+    merged.overrideOptions = await this.loadOverrideOptions(run.extension, log);
+    merged.trackedMangadexIds = await this.authoritativeTrackedIds(
+      run.extension,
+      merged.trackedMangadexIds,
+    );
+
     const manifest = await this.loadManifest(run.bundleSha256);
     const groupId = merged.groupId ?? manifest?.mangadex_group_id ?? null;
     if (!groupId) {
@@ -155,12 +170,7 @@ export class RunProcessor {
     const removalMode: RemovalMode =
       manifest?.chapter_removal_mode ?? (await this.settings.getRemovalMode());
 
-    if (merged.untrackedManga.length > 0) {
-      log.info(
-        { untracked: merged.untrackedManga.length },
-        "manga on the publisher that are not tracked on MangaDex",
-      );
-    }
+    await this.persistUntrackedManga(run.extension, merged.untrackedManga, log);
 
     const updatedByManga = groupByMdManga(merged.updatedChapters);
     const allByManga = merged.allChapters === null ? null : groupByMdManga(merged.allChapters);
@@ -242,14 +252,21 @@ export class RunProcessor {
       );
     }
 
-    totals.remove += await this.removeUntrackedManga(
-      chaptersOnMdByManga,
-      trackedIds,
-      run.extension,
-      groupId,
-      removalMode,
-      log,
-    );
+    // "Untracked" is derived from the union of every segment's tracked ids, so
+    // a segment that never committed could make a perfectly tracked manga look
+    // orphaned. Only run the pass on a complete picture.
+    if (missingJobs === 0) {
+      totals.remove += await this.removeUntrackedManga(
+        chaptersOnMdByManga,
+        trackedIds,
+        run.extension,
+        groupId,
+        removalMode,
+        log,
+      );
+    } else {
+      log.warn({ missingJobs }, "skipping untracked-manga cleanup: incomplete segment coverage");
+    }
 
     if (run.kind === "CLEAN" && allByManga !== null) {
       totals.remove += await this.removeMangaWithoutExternalChapters(
@@ -306,6 +323,93 @@ export class RunProcessor {
     if (!bundle) return null;
     const parsed = Manifest.safeParse(bundle.manifest);
     return parsed.success ? parsed.data : null;
+  }
+
+  // -- configuration (database is the source of truth) ----------------------
+
+  /**
+   * Override options as the operator has them, NOT as the worker reported
+   * them. A worker executes a pinned bundle and its copy of the config can be
+   * arbitrarily old; worse, override options decide what counts as a duplicate
+   * and which languages may stay on MangaDex, so taking them from worker
+   * output would let a compromised worker steer deletions.
+   */
+  private async loadOverrideOptions(extension: string, log: Logger): Promise<OverrideOptionsLike> {
+    const row = await this.prisma.extensionConfig.findUnique({ where: { extension } });
+    if (!row) return {};
+
+    const parsed = OverrideOptions.safeParse(row.overrideOptions);
+    if (!parsed.success) {
+      log.error({ err: parsed.error.message }, "extension config override options are invalid");
+      return {};
+    }
+    return parsed.data as OverrideOptionsLike;
+  }
+
+  /**
+   * The tracked MangaDex manga for this extension: everything in tracked_manga
+   * plus whatever the worker reported. The union matters in both directions —
+   * the database may hold titles auto-created after the worker started, and
+   * the worker may know of manga that have not been recorded yet. Anything
+   * missing from this set is treated as untracked and its chapters removed, so
+   * it errs towards including too much.
+   */
+  private async authoritativeTrackedIds(
+    extension: string,
+    reportedByWorkers: string[],
+  ): Promise<string[]> {
+    const rows = await this.prisma.trackedManga.findMany({
+      where: { extension },
+      select: { mdMangaId: true },
+      distinct: ["mdMangaId"],
+    });
+    return [...new Set([...rows.map((row) => row.mdMangaId), ...reportedByWorkers])];
+  }
+
+  /**
+   * Untracked manga are queued for the title service, which creates the
+   * MangaDex title and records it in tracked_manga. Anything already tracked
+   * for this extension is dropped: the worker only knows the manga has no
+   * MangaDex id in ITS config copy, which is exactly the state a
+   * just-auto-created title leaves behind.
+   */
+  private async persistUntrackedManga(
+    extension: string,
+    untracked: MangaRecord[],
+    log: Logger,
+  ): Promise<void> {
+    if (untracked.length === 0) return;
+
+    const mangaIds = [...new Set(untracked.map((manga) => manga.mangaId))];
+    const tracked = await this.prisma.trackedManga.findMany({
+      where: { extension, mangaId: { in: mangaIds } },
+      select: { mangaId: true },
+    });
+    const trackedIds = new Set(tracked.map((row) => row.mangaId));
+
+    const rows = untracked
+      .filter((manga) => !trackedIds.has(manga.mangaId))
+      .map((manga) => ({
+        extension,
+        mangaId: manga.mangaId,
+        mangaName: manga.mangaName,
+        mangaLanguage: manga.mangaLanguage,
+        mangaUrl: manga.mangaUrl,
+        state: "NEW" as const,
+      }));
+    if (rows.length === 0) {
+      log.info({ untracked: untracked.length }, "all untracked manga are already tracked");
+      return;
+    }
+
+    // skipDuplicates on (extension, mangaId, mangaLanguage): a manga already
+    // queued keeps its existing row, including any state the title service
+    // has moved it to.
+    const created = await this.prisma.untrackedManga.createMany({ data: rows, skipDuplicates: true });
+    log.info(
+      { reported: untracked.length, queued: created.count },
+      "queued untracked manga for title creation",
+    );
   }
 
   // -- MangaDex helpers -----------------------------------------------------

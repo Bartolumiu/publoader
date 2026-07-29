@@ -13,18 +13,20 @@
 # moving target, and an unpinned base means two builds of the same commit can
 # ship different userlands (§8 "supply chain": base images pinned by digest).
 #
-# !! THE DIGEST BELOW IS A PLACEHOLDER recorded when this file was written. !!
-# Re-pin it before the first real build — the build FAILS LOUDLY on a digest
-# that does not exist, it will not silently fall back to the tag:
+# The digest below is the multi-arch index digest of node:24-bookworm-slim as
+# of 2026-07-29 (it therefore builds on both amd64 and arm64). It goes stale as
+# soon as the tag moves, which is the point — refresh it deliberately, on a
+# schedule and for CVE fixes, so the change appears in a diff and gets reviewed:
 #
 #   docker pull node:24-bookworm-slim
-#   docker inspect --format='{{index .RepoDigests 0}}' node:24-bookworm-slim
+#   docker buildx imagetools inspect node:24-bookworm-slim   # take "Digest:"
 #
-# Paste the result as NODE_IMAGE below. To build before re-pinning (dev only):
+# Paste the result as NODE_IMAGE below and update the worker and mock-md
+# Dockerfiles to match. A digest that no longer exists fails the build loudly;
+# it never silently falls back to the tag. To build unpinned (dev only):
 #   docker build --build-arg NODE_IMAGE=node:24-bookworm-slim ...
-# Re-pin deliberately on each base refresh so the change shows up in review.
 # ---------------------------------------------------------------------------
-ARG NODE_IMAGE=node:24-bookworm-slim@sha256:0f6b6e0f1a1d1a3f9a5b7e3c9a2c4d5e6f70819293a4b5c6d7e8f90a1b2c3d4e5
+ARG NODE_IMAGE=node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
 
 # pnpm version is pinned for the same reason the lockfile is: the resolver
 # version is part of the build's reproducibility.
@@ -89,8 +91,13 @@ FROM build AS migrate
 RUN groupadd --gid 10001 publoader && \
     useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin publoader && \
     chown -R publoader:publoader /build
+# The user has no home directory; point HOME at the tmpfs so any tool that
+# insists on a cache dir has a writable one under `read_only: true`.
+ENV HOME=/tmp
 USER 10001:10001
-ENTRYPOINT ["pnpm", "exec", "prisma"]
+# The .bin shim rather than `pnpm exec`, so running a migration does not drag
+# the package manager (and its own state directories) into the container.
+ENTRYPOINT ["./node_modules/.bin/prisma"]
 CMD ["migrate", "deploy"]
 
 

@@ -89,8 +89,12 @@ export interface ChapterCardOptions {
   footerNote?: string | null;
 }
 
+/** DejaVu Sans Mono's fixed advance, in 1/1000 em. */
+const MONO_ADVANCE = 602;
+
 /** Approximate rendered width of `text` in logical units. */
-function advance(text: string, fontSize: number, bold = false): number {
+function advance(text: string, fontSize: number, bold = false, mono = false): number {
+  if (mono) return ([...text].length * MONO_ADVANCE * fontSize) / 1000;
   let units = 0;
   for (const char of text) {
     const code = char.codePointAt(0) ?? 32;
@@ -158,7 +162,7 @@ function wrapChars(text: string, fontSize: number, maxW: number, maxLines: numbe
   const lines: string[] = [];
   let current = "";
   for (const char of text || "") {
-    if (advance(current + char, fontSize) <= maxW || !current) {
+    if (advance(current + char, fontSize, false, true) <= maxW || !current) {
       current += char;
     } else {
       lines.push(current);
@@ -170,7 +174,7 @@ function wrapChars(text: string, fontSize: number, maxW: number, maxLines: numbe
   if (lines.length > maxLines) {
     lines.length = maxLines;
     let tail = lines[maxLines - 1] ?? "";
-    while (tail && advance(`${tail}…`, fontSize) > maxW) tail = tail.slice(0, -1);
+    while (tail && advance(`${tail}…`, fontSize, false, true) > maxW) tail = tail.slice(0, -1);
     lines[maxLines - 1] = `${tail}…`;
   }
   return lines.length > 0 ? lines : [""];
@@ -443,7 +447,7 @@ export function buildChapterCardSvg(opts: ChapterCardOptions): string {
       }),
     );
     y += 15 * 1.2 + 12;
-    const widest = Math.max(...urlLines.map((line) => advance(line, urlSize)));
+    const widest = Math.max(...urlLines.map((line) => advance(line, urlSize, false, true)));
     parts.push(rect(CONTENT_L, y, Math.min(CONTENT_W, widest + urlPadX * 2), urlPillH, ORANGE_SOFT, 10));
     urlLines.forEach((line, i) => {
       parts.push(

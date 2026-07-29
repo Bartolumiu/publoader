@@ -399,6 +399,23 @@ def main() -> int:
 
         compat_utils.set_bundle_dir(bundle_dir)
 
+        # Runtime config is delivered by the control plane, not read from JSON
+        # files baked into the bundle. The map is also written to the workdir
+        # so an extension that opens the file directly, rather than through
+        # open_manga_id_map, still sees the authoritative copy.
+        manga_id_map = job.get("mangaIdMap") or {}
+        map_file = Path(args.job).resolve().parent.joinpath("manga_id_map.json")
+        map_file.write_text(
+            json.dumps(manga_id_map, ensure_ascii=False), encoding="utf-8"
+        )
+        if manga_id_map:
+            compat_utils.set_platform_manga_id_map(manga_id_map)
+            _log(f"using platform manga id map ({len(manga_id_map)} titles)")
+        else:
+            # An empty map means the control plane has nothing tracked yet;
+            # falling back to the bundle's own file beats running blind.
+            _log("platform sent an empty manga id map; falling back to the bundle's")
+
         # Import failures — a missing dependency, a syntax error, a bundle
         # whose entrypoint does not match its manifest — are properties of the
         # bundle, so retrying the same pinned sha256 would fail identically.

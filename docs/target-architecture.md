@@ -332,7 +332,49 @@ unmodified inside the worker's Python runner shim. What changes around it:
 - mangaplus ships as the reference migrated extension; its manifest already
   conforms.
 
-## 12. Follow-ups explicitly out of v1 scope
+## 12. Database-authoritative configuration (no JSON config files)
+
+Operator directive: runtime configuration lives in PostgreSQL, not files.
+
+- `TrackedManga` replaces `manga_id_map.json` as the source of truth for the
+  external-id → MangaDex-title map; `ExtensionConfig` replaces
+  `override_options.json`. Bundle publishing seeds both **once** from the
+  bundle's data files (migration convenience); afterwards the DB wins and is
+  edited via the admin API/CLI.
+- Workers receive the map and override options in the lease payload; the
+  runner's `open_manga_id_map` compat shim serves the platform-provided map,
+  so extensions pick up newly tracked titles without a bundle republish.
+- The processor ignores worker-supplied override options entirely and reads
+  them from `ExtensionConfig` — config can never be injected through a result
+  envelope.
+- Platform configuration is environment/Docker-secrets only (`VAR` or
+  `VAR_FILE`); `manifest.json` remains as the *package descriptor* whose
+  policy fields are enforced (it is metadata about code, not runtime config).
+
+## 13. Automated untracked-series pipeline
+
+When an extension reports manga it doesn't have a MangaDex mapping for:
+
+1. The processor persists them durably (`UntrackedManga`, deduped on
+   extension+id+language, state `NEW`).
+2. The **TitleService** (runs inside core-uploader — the MD-credential holder)
+   picks up `NEW` rows: if the extension manifest sets
+   `auto_create_titles: true`, it creates a MangaDex title draft
+   (`POST /manga` with `title_defaults` from the manifest) and commits it
+   (`POST /manga/draft/{id}/commit`); otherwise rows wait for operator
+   approval (`POST /api/v1/admin/untracked/:id/approve`, or `skip`).
+   Creation is CAS-claimed (`NEW → CREATING`) so replicas never double-create,
+   with attempts capped and failures parked in `FAILED` for triage.
+3. The new mapping is written to `TrackedManga` (source `auto` or
+   `operator:<actor>`), which immediately flows to workers via the lease
+   payload — the next run uploads the series' chapters.
+4. Discord receives an embed per batch linking every created title
+   (`https://mangadex.org/title/<id>`) with the source URL and extension.
+
+Workers only *report* candidates (validated, quarantine-able data); title
+creation authority stays in the core.
+
+## 14. Follow-ups explicitly out of v1 scope
 
 Verification re-runs / quorum for community workers; per-extension micro-VM or
 gVisor isolation; object-storage artifact backend + GC service; Kubernetes

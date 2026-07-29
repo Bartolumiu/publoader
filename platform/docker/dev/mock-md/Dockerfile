@@ -3,10 +3,10 @@
 # Mock MangaDex API for the local e2e stack. One file, no dependencies, no
 # install step — copy and run. Build context is this directory.
 #
-# Same base digest as the real images so the dev stack does not pull an extra
-# base layer (see docker/core/Dockerfile for the re-pin instructions; the
-# digest below is the SAME PLACEHOLDER).
-ARG NODE_IMAGE=node:24-bookworm-slim@sha256:0f6b6e0f1a1d1a3f9a5b7e3c9a2c4d5e6f70819293a4b5c6d7e8f90a1b2c3d4e5
+# Same base digest as the real images so the dev stack pulls no extra base
+# layer (see docker/core/Dockerfile for the refresh instructions — this digest
+# must be updated together with the other two).
+ARG NODE_IMAGE=node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
 FROM ${NODE_IMAGE}
 
 WORKDIR /app

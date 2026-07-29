@@ -1,0 +1,295 @@
+# Local end-to-end stack: the whole system on one machine, with MangaDex faked.
+#
+#   docker compose -f platform/docker/dev/docker-compose.yml up -d --build
+#   curl -s -H 'authorization: Bearer dev-admin' \
+#        http://127.0.0.1:8100/api/v1/admin/workers | jq
+#   curl -s http://mock-md.../_test/uploads          # see docs/deployment.md
+#   docker compose -f platform/docker/dev/docker-compose.yml down -v
+#
+# What it proves that unit tests cannot: a real Postgres, real leases expiring
+# in real time, two independent workers competing for jobs over HTTP, and the
+# uploader driving an actual MangaDex-shaped API. Kill worker-a mid-job and
+# watch worker-b pick the job up — that is the failover test in
+# docs/deployment.md, and it runs here in about two minutes.
+#
+# THIS STACK IS NOT SECURE AND IS NOT MEANT TO BE. The admin token is
+# "dev-admin", the database password is "dev", enrollment is automated, and the
+# API is published on the loopback interface. Never run it on a host that
+# accepts traffic from anywhere else.
+#
+# The hardening (read_only, cap_drop, non-root) is kept identical to production
+# on purpose: a container that only works when writable should fail here, on a
+# laptop, and not on the night of the deploy.
+
+x-app-security: &app-security
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=256m
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+x-core-build: &core-build
+  image: publoader/core:dev
+  build:
+    context: ../..
+    dockerfile: docker/core/Dockerfile
+
+# Everything points at the mock instead of MangaDex. The credentials are
+# nonsense because the mock accepts anything — and because a dev stack that
+# holds real MangaDex credentials will eventually upload to real MangaDex.
+x-dev-env: &dev-env
+  DATABASE_URL: postgresql://publoader:dev@postgres:5432/publoader?schema=public&connection_limit=5
+  LOG_LEVEL: ${LOG_LEVEL:-debug}
+  MANGADEX_API_URL: http://mock-md:8200
+  MANGADEX_AUTH_URL: http://mock-md:8200/realms/mangadex/protocol/openid-connect
+  MANGADEX_USERNAME: dev
+  MANGADEX_PASSWORD: dev
+  MANGADEX_CLIENT_ID: dev-client
+  MANGADEX_CLIENT_SECRET: dev-secret
+  # No artificial delay against a local mock: an e2e run should take seconds,
+  # not minutes.
+  MANGADEX_RATELIMIT_MS: "0"
+  # Short lease and fast sweeps so lease expiry and reassignment are
+  # observable within a test's patience rather than after five minutes.
+  LEASE_TTL_SECONDS: "30"
+  SWEEP_INTERVAL_SECONDS: "5"
+  SCHEDULER_INTERVAL_SECONDS: "5"
+  RETRY_BASE_SECONDS: "5"
+  RETRY_MAX_SECONDS: "60"
+  LEASE_POLL_WAIT_SECONDS: "10"
+
+services:
+  # --- postgres -------------------------------------------------------------
+  # Throwaway. tmpfs-backed so each `down -v` genuinely starts clean and the
+  # test suite is not debugging yesterday's rows.
+  postgres:
+    image: postgres:16.9-bookworm
+    environment:
+      POSTGRES_USER: publoader
+      POSTGRES_DB: publoader
+      POSTGRES_PASSWORD: dev
+    tmpfs:
+      - /var/lib/postgresql/data:size=1g
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U publoader -d publoader"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    mem_limit: 1g
+    # Published on loopback only, for psql from a test driver or for poking at
+    # state when something fails. Never bind 0.0.0.0 here.
+    ports:
+      - "127.0.0.1:55432:5432"
+
+  # --- migrate --------------------------------------------------------------
+  # Dev uses `db push` rather than `migrate deploy`: this database is created
+  # and destroyed constantly, and pushing the schema directly means the stack
+  # works before the migration history exists and never needs a shadow
+  # database. Production does the opposite (versioned migrations, no schema
+  # inference) — see docker/core/docker-compose.yml.
+  #
+  # The partial unique index is then applied by hand because Prisma cannot
+  # express it declaratively (see the comment on ResultSubmission in
+  # schema.prisma). Without it, "one COMMITTED result per job" is enforced only
+  # by application logic, which is exactly the invariant e2e should be testing
+  # against the real constraint.
+  migrate:
+    <<: *core-build
+    build:
+      context: ../..
+      dockerfile: docker/core/Dockerfile
+      target: migrate
+    image: publoader/core-migrate:dev
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://publoader:dev@postgres:5432/publoader?schema=public
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        ./node_modules/.bin/prisma db push --skip-generate --accept-data-loss
+        echo "CREATE UNIQUE INDEX IF NOT EXISTS result_committed_one_per_job ON result_submissions (job_id) WHERE state = 'COMMITTED';" \
+          | ./node_modules/.bin/prisma db execute --url "$$DATABASE_URL" --stdin
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # --- mock-md --------------------------------------------------------------
+  # Stands in for both api.mangadex.org and auth.mangadex.org. Records every
+  # write so a test can assert what the uploader actually did — GET
+  # /_test/uploads is the assertion surface, POST /_test/seed the fixture one.
+  mock-md:
+    build:
+      context: ./mock-md
+    image: publoader/mock-md:dev
+    restart: unless-stopped
+    expose:
+      - "8200"
+    # Published so a test driver on the host can seed fixtures and read back
+    # what was uploaded without going through a container.
+    ports:
+      - "127.0.0.1:8200:8200"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+
+  # --- core-api -------------------------------------------------------------
+  # The one service published to the host in this stack, on loopback, so test
+  # drivers and curl can reach the admin API. Production publishes nothing and
+  # is reached only through the cloudflared tunnel.
+  core-api:
+    <<: [*app-security, *core-build]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *dev-env
+      PORT: "8100"
+      HOST: 0.0.0.0
+      # Fixed and obviously fake, so it can be hardcoded in test drivers and so
+      # nobody mistakes this stack for something to expose.
+      ADMIN_TOKEN: ${DEV_ADMIN_TOKEN:-dev-admin}
+    ports:
+      - "127.0.0.1:8100:8100"
+    command: ["node", "dist/src/services/api.js"]
+    mem_limit: 512m
+
+  # --- dev-bootstrap --------------------------------------------------------
+  # Mints one enrollment token per worker and drops it in a shared volume, so
+  # `up` yields a live two-worker fleet with no manual step. Exits 0; the
+  # workers wait for that. See bootstrap.mjs for why this is dev-only.
+  dev-bootstrap:
+    <<: *core-build
+    restart: "no"
+    depends_on:
+      core-api:
+        condition: service_started
+    environment:
+      CORE_URL: http://core-api:8100
+      ADMIN_TOKEN: ${DEV_ADMIN_TOKEN:-dev-admin}
+      BOOTSTRAP_DIR: /bootstrap
+      BOOTSTRAP_WORKERS: a,b
+    volumes:
+      # A script, not configuration — no service in any stack mounts a config
+      # file. Everything configurable is an env var or a Docker secret, and
+      # runtime settings live in Postgres.
+      - ./bootstrap.mjs:/bootstrap.mjs:ro
+      - enroll-tokens:/bootstrap
+    # Root because the shared volume is root-owned on creation and this
+    # container has to create files in it. It runs for two seconds, writes two
+    # disposable tokens, and exits — the tradeoff is bounded and dev-only.
+    user: root
+    command: ["node", "/bootstrap.mjs"]
+
+  # --- core-scheduler / core-processor / core-uploader ----------------------
+  # Same code and same commands as production; only the environment differs.
+  core-scheduler:
+    <<: [*app-security, *core-build]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *dev-env
+    command: ["node", "dist/src/services/scheduler.js"]
+    healthcheck:
+      disable: true
+    mem_limit: 384m
+
+  core-processor:
+    <<: [*app-security, *core-build]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mock-md:
+        condition: service_healthy
+    environment:
+      <<: *dev-env
+    command: ["node", "dist/src/services/processor.js"]
+    healthcheck:
+      disable: true
+    mem_limit: 512m
+
+  core-uploader:
+    <<: [*app-security, *core-build]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mock-md:
+        condition: service_healthy
+    environment:
+      <<: *dev-env
+    command: ["node", "dist/src/services/uploader.js"]
+    healthcheck:
+      disable: true
+    mem_limit: 512m
+
+  # --- worker-a / worker-b --------------------------------------------------
+  # Two independent agents, built from the real worker image, talking to
+  # core-api over plain HTTP on the compose network (no TLS here because there
+  # is no tunnel and nothing leaves the host).
+  #
+  # Two of them, not one, because the interesting bugs are the concurrent ones:
+  # double-leasing the same job, a lease expiring into a second worker while
+  # the first is still running, two envelopes racing for the same job. One
+  # worker never exercises any of that.
+  #
+  # Each has its OWN state volume — sharing one would let them share a worker
+  # identity, which is precisely the thing the token model forbids.
+  worker-a: &dev-worker
+    image: publoader/worker:dev
+    build:
+      context: ../..
+      dockerfile: docker/worker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      dev-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      CORE_URL: http://core-api:8100
+      WORKER_NAME: worker-a
+      # Read from the file the bootstrap wrote; config.ts resolves <VAR>_FILE
+      # for any variable, which is the same mechanism Docker secrets use in
+      # production.
+      ENROLL_TOKEN_FILE: /bootstrap/enroll-a
+      WORKER_STATE_PATH: /var/lib/publoader-worker
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+    volumes:
+      - worker-a-state:/var/lib/publoader-worker
+      - enroll-tokens:/bootstrap:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=1g
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    pids_limit: 512
+    # Short, so `docker compose kill worker-a` in the failover test is abrupt
+    # in the same way a real crash is.
+    stop_grace_period: 10s
+
+  worker-b:
+    <<: *dev-worker
+    environment:
+      CORE_URL: http://core-api:8100
+      WORKER_NAME: worker-b
+      ENROLL_TOKEN_FILE: /bootstrap/enroll-b
+      WORKER_STATE_PATH: /var/lib/publoader-worker
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+    volumes:
+      - worker-b-state:/var/lib/publoader-worker
+      - enroll-tokens:/bootstrap:ro
+
+volumes:
+  # Deliberately no postgres volume: the database is tmpfs, so `down` really
+  # does reset the world.
+  enroll-tokens: {}
+  worker-a-state: {}
+  worker-b-state: {}
