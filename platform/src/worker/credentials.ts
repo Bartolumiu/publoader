@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import type { Logger } from "../logging.js";
@@ -50,6 +50,35 @@ export class CredentialStore {
     await chmod(tmp, 0o600);
     await rename(tmp, this.path);
   }
+
+  /**
+   * Prove the state directory is writable BEFORE enrolling.
+   *
+   * Enrollment spends a single-use token, so a host that enrolls and then
+   * cannot persist the result is permanently bricked: every restart re-enrolls
+   * with a token the core has already consumed and gets 403 forever. That was a
+   * real failure here — a full disk (ENOSPC) on the first credential write —
+   * and the symptom (endless "invalid, expired, or used enrollment token")
+   * pointed at the token rather than at the disk. Checking first turns an
+   * unrecoverable state into a startup error naming the actual problem.
+   */
+  async assertWritable(): Promise<void> {
+    const dir = dirname(this.path);
+    const probe = `${this.path}.probe`;
+    try {
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      await writeFile(probe, "ok", { mode: 0o600 });
+      await rm(probe, { force: true });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+      throw new Error(
+        `worker state directory ${dir} is not writable (${code}). ` +
+          "Enrollment would consume its single-use token and then fail to save " +
+          "the credential, so it is refused. Fix the volume (disk space, " +
+          "permissions, or a read-only mount) and restart.",
+      );
+    }
+  }
 }
 
 /**
@@ -97,6 +126,8 @@ export async function ensureCredentials(opts: {
   }
 
   const name = config.workerName ?? hostname();
+  // Check before spending the token, not after: see assertWritable().
+  await store.assertWritable();
   log.info({ name }, "enrolling with core");
   const result = await api.enroll({
     enrollToken: config.enrollToken,
@@ -110,7 +141,18 @@ export async function ensureCredentials(opts: {
     enrolledAt: new Date().toISOString(),
   };
   api.setToken(creds.workerToken);
-  await store.save(creds);
+  try {
+    await store.save(creds);
+  } catch (err) {
+    // The token is spent and the credential is lost: retrying cannot recover,
+    // so say so rather than letting the agent loop on 403s.
+    log.fatal(
+      { err, workerId: creds.workerId },
+      "enrolled but could not persist credentials; the enrollment token is now " +
+        "spent. Fix the state volume and enroll again with a NEW token.",
+    );
+    throw err;
+  }
   log.info({ workerId: creds.workerId, trust: creds.trust }, "enrolled");
   return creds;
 }

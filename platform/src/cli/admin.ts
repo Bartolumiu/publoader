@@ -818,6 +818,206 @@ bundle
     });
   });
 
+// ---- client tokens ----
+const tokens = program
+  .command("tokens")
+  .description("scoped per-client API credentials (pa_…)");
+
+tokens
+  .command("scopes")
+  .description("the scope taxonomy and the recommended set per client")
+  .action(async () => {
+    const res = await api<{ scopes: string[]; presets: Record<string, string[]> }>(
+      "/api/v1/admin/tokens/scopes",
+    );
+    console.log("scopes:");
+    for (const scope of res.scopes) console.log(`  ${scope}`);
+    console.log("");
+    console.log("presets:");
+    kv(Object.fromEntries(Object.entries(res.presets).map(([k, v]) => [k, v.join(",")])));
+  });
+
+tokens
+  .command("list")
+  .description("issued tokens (metadata only — secrets are unrecoverable)")
+  .action(async () => {
+    const res = await api<{ tokens: Record<string, unknown>[] }>("/api/v1/admin/tokens");
+    table(res.tokens, [
+      { header: "ID", get: (t) => t["id"] },
+      { header: "NAME", get: (t) => t["name"] },
+      { header: "SCOPES", get: (t) => (t["scopes"] as string[]).join(",") },
+      { header: "CREATED BY", get: (t) => t["createdBy"] },
+      { header: "LAST USED", get: (t) => (t["lastUsedAt"] ? ago(t["lastUsedAt"]) : "never") },
+      { header: "EXPIRES", get: (t) => t["expiresAt"] ?? "never" },
+      { header: "REVOKED", get: (t) => (t["revoked"] ? "yes" : "no") },
+    ], "no client tokens issued");
+  });
+
+tokens
+  .command("create")
+  .description("mint a client token with exactly the scopes it needs")
+  .requiredOption("--name <name>", "which client this is for, e.g. discord-bot")
+  .requiredOption("--scopes <list>", "comma-separated scopes, or a preset name from `tokens scopes`")
+  .option("--ttl-days <n>", "expire after N days (omit for no expiry)")
+  .action(async (opts: { name: string; scopes: string; ttlDays?: string }) => {
+    const scopes = opts.scopes
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (scopes.length === 0) fail("--scopes must list at least one scope");
+    const json: Record<string, unknown> = { name: opts.name, scopes };
+    if (opts.ttlDays !== undefined) {
+      const days = Number(opts.ttlDays);
+      if (!Number.isInteger(days) || days < 1 || days > 3650) {
+        fail("--ttl-days must be an integer between 1 and 3650");
+      }
+      json["ttlDays"] = days;
+    }
+    const res = await api<{ id: string; name: string; scopes: string[]; expiresAt: string | null; token: string }>(
+      "/api/v1/admin/tokens",
+      { method: "POST", json },
+    );
+    kv({
+      id: res.id,
+      name: res.name,
+      scopes: res.scopes.join(","),
+      expiresAt: res.expiresAt ?? "never",
+      token: res.token,
+    });
+    console.log("");
+    console.log("This token is shown once and cannot be recovered. To rotate: create the");
+    console.log("replacement, update the client, then `tokens revoke` the old id.");
+  });
+
+tokens
+  .command("revoke <id>")
+  .description("invalidate a client token immediately")
+  .action(async (id: string) => {
+    await api(`/api/v1/admin/tokens/${id}/revoke`, { method: "POST" });
+    ok(`token ${id} revoked`);
+  });
+
+// ---- upload-task queues ----
+const queues = program
+  .command("queues")
+  .description("MangaDex upload task queues");
+
+queues
+  .command("list")
+  .description("queued upload tasks and the depth summary")
+  .option("--kind <kind>", "UPLOAD | EDIT | DELETE | UNAVAILABLE")
+  .option("--state <state>", "PENDING | LEASED | DONE | FAILED | DEAD_LETTER")
+  .option("--limit <n>", "how many rows", "100")
+  .action(async (opts: { kind?: string; state?: string; limit: string }) => {
+    const kind = opts.kind?.toUpperCase();
+    const taskState = opts.state?.toUpperCase();
+    const kinds = ["UPLOAD", "EDIT", "DELETE", "UNAVAILABLE"];
+    const states = ["PENDING", "LEASED", "DONE", "FAILED", "DEAD_LETTER"];
+    if (kind && !kinds.includes(kind)) fail(`--kind must be one of ${kinds.join(", ")}`);
+    if (taskState && !states.includes(taskState)) fail(`--state must be one of ${states.join(", ")}`);
+    const res = await api<{
+      tasks: Record<string, unknown>[];
+      counts: { kind: string; state: string; count: number }[];
+    }>("/api/v1/admin/upload-tasks", { query: { kind, state: taskState, limit: opts.limit } });
+
+    console.log("depth by kind and state:");
+    table(res.counts, [
+      { header: "KIND", get: (c) => c.kind },
+      { header: "STATE", get: (c) => c.state },
+      { header: "COUNT", get: (c) => c.count },
+    ], "no upload tasks have ever been queued");
+    console.log("");
+    table(res.tasks, [
+      { header: "ID", get: (t) => t["id"] },
+      { header: "KIND", get: (t) => t["kind"] },
+      { header: "STATE", get: (t) => t["state"] },
+      { header: "DEDUPE KEY", get: (t) => t["dedupeKey"] },
+      { header: "ATTEMPTS", get: (t) => `${t["attempt"]}/${t["maxAttempts"]}` },
+      { header: "NOT BEFORE", get: (t) => t["notBefore"] },
+      { header: "ERROR", get: (t) => String(t["lastError"] ?? "").slice(0, 60) || "-" },
+    ], "no upload tasks match that filter");
+  });
+
+queues
+  .command("retry <id>")
+  .description("requeue a failed or dead-lettered upload task with a fresh attempt budget")
+  .action(async (id: string) => {
+    await api(`/api/v1/admin/upload-tasks/${id}/retry`, { method: "POST" });
+    ok(`upload task ${id} requeued`);
+  });
+
+queues
+  .command("cancel <id>")
+  .description("drop an upload task without sending it to MangaDex")
+  .action(async (id: string) => {
+    await api(`/api/v1/admin/upload-tasks/${id}/cancel`, { method: "POST" });
+    ok(`upload task ${id} cancelled`);
+  });
+
+queues
+  .command("requeue-stale")
+  .description("reclaim upload tasks whose lease expired (crashed uploader)")
+  .action(async () => {
+    const res = await api<{ requeued: number }>("/api/v1/admin/upload-tasks/requeue-stale", {
+      method: "POST",
+    });
+    ok(`${res.requeued} stale lease(s) requeued`);
+  });
+
+// ---- merged error feed ----
+program
+  .command("errors")
+  .description("dead-lettered jobs, failed upload tasks, and quarantined submissions, newest first")
+  .option("--limit <n>", "how many rows", "50")
+  .action(async (opts: { limit: string }) => {
+    const res = await api<{
+      errors: { at: string; kind: string; subject: string; message: string; id: string }[];
+    }>("/api/v1/admin/errors", { query: { limit: opts.limit } });
+    table(res.errors, [
+      { header: "WHEN", get: (e) => e.at },
+      { header: "KIND", get: (e) => e.kind },
+      { header: "ID", get: (e) => e.id },
+      { header: "SUBJECT", get: (e) => e.subject.slice(0, 50) },
+      { header: "MESSAGE", get: (e) => e.message.slice(0, 80) || "-" },
+    ], "nothing has failed");
+    console.log("");
+    console.log("Container logs are not aggregated here — use `docker compose logs` on the host.");
+  });
+
+// ---- MangaDex session ----
+const mangadex = program
+  .command("mangadex")
+  .description("the platform's saved MangaDex session");
+
+mangadex
+  .command("auth")
+  .description("whether the saved session is still usable (never prints tokens)")
+  .action(async () => {
+    const res = await api<{
+      hasAccess: boolean;
+      hasRefresh: boolean;
+      expiresAt: string | null;
+      expired: boolean;
+      expiresInSeconds: number | null;
+    }>("/api/v1/admin/mangadex/auth");
+    kv({
+      accessToken: res.hasAccess ? "saved" : "absent",
+      refreshToken: res.hasRefresh ? "saved" : "absent",
+      expiresAt: res.expiresAt ?? "unknown",
+      expired: res.expired,
+      expiresIn:
+        res.expiresInSeconds === null ? "unknown" : `${Math.round(res.expiresInSeconds / 60)}m`,
+    });
+  });
+
+mangadex
+  .command("clear-auth")
+  .description("forget the saved session so the next upload re-authenticates")
+  .action(async () => {
+    await api("/api/v1/admin/mangadex/auth/clear", { method: "POST" });
+    ok("saved MangaDex session cleared; the next upload authenticates from configured credentials");
+  });
+
 // ---- observability ----
 program
   .command("stats")

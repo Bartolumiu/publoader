@@ -459,6 +459,36 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     expect(styles.headers["content-type"]).toContain("text/css");
   });
 
+  it("names every operator section it can render, including the new ones", async () => {
+    // The views are built client-side, so the HTML shell names them in its
+    // <noscript> fallback and app.js registers them as tabs. Both halves are
+    // asserted: a section present in one and missing from the other is either an
+    // unreachable view or a tab that renders nothing.
+    const page = await app.inject({ method: "GET", url: "/dash" });
+    const script = await app.inject({ method: "GET", url: "/dash/app.js" });
+
+    for (const section of ["Queues", "Errors", "Tokens"]) {
+      expect(page.body, `${section} should be named in the served HTML`).toContain(section);
+      expect(script.body, `${section} should be a registered tab`).toContain(`"${section}"`);
+    }
+    // Credential minting and account administration are owner-gated in the UI.
+    expect(script.body).toContain('["tokens", "Tokens", { owner: true }]');
+    expect(script.body).toContain('["users", "Users", { owner: true }]');
+
+    // The controls behind those views must exist too — a tab with no endpoint
+    // wired to it is the failure mode this catches.
+    for (const call of [
+      "/upload-tasks",
+      "/upload-tasks/requeue-stale",
+      "/errors?limit=",
+      "/mangadex/auth",
+      "/mangadex/auth/clear",
+      "/tokens/scopes",
+    ]) {
+      expect(script.body, `${call} should be called by the dashboard`).toContain(call);
+    }
+  });
+
   it("does not let the root mount shadow the internal endpoints", async () => {
     expect((await app.inject({ method: "GET", url: "/healthz" })).json()).toMatchObject({ ok: true });
     expect((await app.inject({ method: "GET", url: "/metrics" })).headers["content-type"]).toContain("text/plain");

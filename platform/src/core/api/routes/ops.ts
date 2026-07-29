@@ -26,6 +26,24 @@ const MD_ACCESS_KEY = "mdauth_access";
 const MD_REFRESH_KEY = "mdauth_refresh";
 
 /**
+ * Validate, answering 400 instead of 500.
+ *
+ * A bare `schema.parse` throws a ZodError, which the server's error handler
+ * reports as "internal error" — actively misleading for a caller who mistyped a
+ * filter. The filters here are the ones an operator types by hand, so they get
+ * a real answer. `statusCode` is what the handler keys off.
+ */
+function parseOrThrow<T>(schema: z.ZodType<T>, value: unknown): T {
+  const result = schema.safeParse(value);
+  if (result.success) return result.data;
+  const issue = result.error.issues[0];
+  const where = issue && issue.path.length > 0 ? issue.path.join(".") : "request";
+  throw Object.assign(new Error(`invalid ${where}: ${issue?.message ?? "validation failed"}`), {
+    statusCode: 400,
+  });
+}
+
+/**
  * `exp` from a JWT payload, WITHOUT verifying the signature.
  *
  * Verification would need MangaDex's signing keys and would prove nothing we
@@ -83,13 +101,14 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
      * identifies the chapter well enough to find it on MangaDex.
      */
     scope.get("/api/v1/admin/upload-tasks", { preHandler: requireScope("runs:read") }, async (req) => {
-      const query = z
-        .object({
+      const query = parseOrThrow(
+        z.object({
           kind: z.enum(UPLOAD_TASK_KINDS).optional(),
           state: z.enum(UPLOAD_TASK_STATES).optional(),
           limit: z.coerce.number().int().min(1).max(500).default(100),
-        })
-        .parse(req.query ?? {});
+        }),
+        req.query ?? {},
+      );
 
       const [tasks, counts] = await Promise.all([
         ctx.prisma.uploadTask.findMany({
@@ -127,7 +146,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
      * hiccup.
      */
     scope.post("/api/v1/admin/upload-tasks/:id/retry", { preHandler: requireScope("runs:write") }, async (req, reply) => {
-      const { id } = taskId.parse(req.params);
+      const { id } = parseOrThrow(taskId, req.params);
       const res = await ctx.prisma.uploadTask.updateMany({
         where: { id, state: { in: ["DEAD_LETTER", "FAILED"] } },
         data: {
@@ -163,7 +182,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
      * lost result. The lease has to expire (or the task fail) first.
      */
     scope.post("/api/v1/admin/upload-tasks/:id/cancel", { preHandler: requireScope("runs:write") }, async (req, reply) => {
-      const { id } = taskId.parse(req.params);
+      const { id } = parseOrThrow(taskId, req.params);
       const note = `cancelled by operator (${actor(req)}) at ${new Date().toISOString()}; never sent to MangaDex`;
       const res = await ctx.prisma.uploadTask.updateMany({
         where: { id, state: { in: ["PENDING", "FAILED", "DEAD_LETTER"] } },
@@ -253,9 +272,10 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
      * filter on different state sets.
      */
     scope.get("/api/v1/admin/errors", { preHandler: requireScope("runs:read") }, async (req) => {
-      const query = z
-        .object({ limit: z.coerce.number().int().min(1).max(200).default(50) })
-        .parse(req.query ?? {});
+      const query = parseOrThrow(
+        z.object({ limit: z.coerce.number().int().min(1).max(200).default(50) }),
+        req.query ?? {},
+      );
 
       const [jobs, tasks, submissions] = await Promise.all([
         ctx.prisma.job.findMany({

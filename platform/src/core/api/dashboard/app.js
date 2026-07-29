@@ -486,6 +486,89 @@ async function viewOverview() {
         text: `${stats.quarantined} quarantined result submission(s).`,
       }),
     ),
+    await mangadexCard(),
+  );
+}
+
+/** Human-readable countdown; negative means the deadline has already passed. */
+function duration(seconds) {
+  const abs = Math.abs(Math.round(seconds));
+  const parts =
+    abs < 60
+      ? `${abs}s`
+      : abs < 3600
+        ? `${Math.floor(abs / 60)}m ${abs % 60}s`
+        : abs < 86_400
+          ? `${Math.floor(abs / 3600)}h ${Math.floor((abs % 3600) / 60)}m`
+          : `${Math.floor(abs / 86_400)}d ${Math.floor((abs % 86_400) / 3600)}h`;
+  return seconds < 0 ? `${parts} ago` : `in ${parts}`;
+}
+
+/**
+ * MangaDex session state. Rendered inside the Overview because "is the upload
+ * side authenticated?" belongs next to the queue depths — an expired session is
+ * why the upload queue stops draining.
+ *
+ * A 403 here is expected for a narrowly-scoped credential, so it degrades to a
+ * note instead of failing the whole Overview.
+ */
+async function mangadexCard() {
+  let auth;
+  try {
+    auth = await api("/mangadex/auth", { quiet: true });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) throw err;
+    return card(
+      "MangaDex session",
+      el("p", { class: "dim", text: `Not available: ${err.message}` }),
+    );
+  }
+
+  const status = !auth.hasAccess
+    ? "no saved session"
+    : auth.expired
+      ? "expired"
+      : auth.expiresInSeconds === null
+        ? "saved, expiry unknown"
+        : "active";
+
+  return card(
+    "MangaDex session",
+    row(
+      chip(status === "active" ? "ACTIVE" : status === "expired" ? "FAILED" : "pending"),
+      el("span", {
+        class: "dim",
+        text:
+          auth.expiresInSeconds === null
+            ? auth.hasAccess
+              ? "Access token present; its expiry could not be read."
+              : "The next upload will authenticate from the configured credentials."
+            : `Access token expires ${duration(auth.expiresInSeconds)} (${fmtTime(auth.expiresAt)}).`,
+      }),
+    ),
+    el("p", {
+      class: "dim",
+      text: `Refresh token ${auth.hasRefresh ? "present" : "absent"}. Tokens are never shown here.`,
+    }),
+    row(
+      el("button", {
+        type: "button",
+        class: "danger",
+        text: "Clear saved session",
+        onclick: () => {
+          if (
+            !confirmDestructive(
+              "Forget the saved MangaDex session?\n\nThe next upload re-authenticates from the configured " +
+                "credentials. In-flight uploads may fail once and retry. This does not revoke anything on " +
+                "MangaDex's side.",
+            )
+          ) {
+            return;
+          }
+          void act("mangadex_auth.clear", () => api("/mangadex/auth/clear", { method: "POST", body: {} }));
+        },
+      }),
+    ),
   );
 }
 
@@ -1040,6 +1123,195 @@ async function openRun(runId) {
   );
 }
 
+// ---------------------------------------------------------------------- queues
+
+const UPLOAD_TASK_KINDS = ["UPLOAD", "EDIT", "DELETE", "UNAVAILABLE"];
+const UPLOAD_TASK_STATES = ["PENDING", "LEASED", "DONE", "FAILED", "DEAD_LETTER"];
+
+/**
+ * The MangaDex upload queues — the replacement for the legacy `queue_peek` and
+ * `queue_clear` IPC commands, and for `restart_workers`: nothing here restarts a
+ * process, because every unit of work is a durable row that can be requeued.
+ */
+async function viewQueues() {
+  const kind = state.queueKind || "";
+  const taskState = state.queueState || "";
+  const query = new URLSearchParams({ limit: "200" });
+  if (kind) query.set("kind", kind);
+  if (taskState) query.set("state", taskState);
+  const { tasks, counts } = await api(`/upload-tasks?${query}`);
+
+  const filter = (id, label, values, current, key) =>
+    el(
+      "span",
+      { class: "row tight" },
+      el("label", { for: id, text: label }),
+      el(
+        "select",
+        {
+          id,
+          onchange: (event) => {
+            state[key] = event.target.value;
+            void renderTab();
+          },
+        },
+        el("option", { value: "", text: "all", selected: current === "" }),
+        values.map((value) => el("option", { value, text: value, selected: value === current })),
+      ),
+    );
+
+  const summary = card(
+    "Depth by kind and state",
+    counts.length
+      ? el(
+          "div",
+          { class: "grid" },
+          counts
+            .slice()
+            .sort((a, b) => a.kind.localeCompare(b.kind) || a.state.localeCompare(b.state))
+            .map((entry) =>
+              el(
+                "div",
+                { class: "stat" },
+                el("div", { class: "n", text: String(entry.count) }),
+                el("div", { class: "k" }, `${entry.kind} · `, chip(entry.state)),
+              ),
+            ),
+        )
+      : el("p", { class: "dim", text: "No upload tasks have ever been queued." }),
+    row(
+      filter("queue-kind", "Kind", UPLOAD_TASK_KINDS, kind, "queueKind"),
+      filter("queue-state", "State", UPLOAD_TASK_STATES, taskState, "queueState"),
+      el("button", {
+        type: "button",
+        text: "Requeue stale leases",
+        onclick: () =>
+          act("upload_task.requeue_stale", async () => {
+            const res = await api("/upload-tasks/requeue-stale", { method: "POST", body: {} });
+            toast(`${res.requeued} stale lease(s) requeued`);
+            return res;
+          }),
+      }),
+    ),
+    el("p", {
+      class: "dim",
+      text:
+        "Requeueing stale leases only touches tasks whose lease has already expired — a task a live uploader " +
+        "still holds is left alone.",
+    }),
+  );
+
+  const rows = tasks.map((task) => {
+    const retryable = task.state === "FAILED" || task.state === "DEAD_LETTER";
+    const cancellable = task.state === "PENDING" || retryable;
+    return [
+      task.kind,
+      chip(task.state),
+      el("code", { text: task.dedupeKey }),
+      `${task.attempt}/${task.maxAttempts}`,
+      fmtTime(task.notBefore),
+      truncate(task.lastError, 160),
+      [
+        el("button", {
+          type: "button",
+          class: retryable ? "primary" : null,
+          text: "Retry",
+          disabled: !retryable,
+          title: retryable ? "Requeue now with a fresh attempt budget" : `${task.state} tasks cannot be retried`,
+          onclick: () =>
+            act("upload_task.retry", () => api(`/upload-tasks/${task.id}/retry`, { method: "POST", body: {} })),
+        }),
+        el("button", {
+          type: "button",
+          class: "danger",
+          text: "Cancel",
+          disabled: !cancellable,
+          title:
+            task.state === "LEASED"
+              ? "An uploader holds this task; requeue stale leases first"
+              : cancellable
+                ? "Drop this task without sending it to MangaDex"
+                : `${task.state} tasks cannot be cancelled`,
+          onclick: () => {
+            if (
+              !confirmDestructive(
+                `Cancel this ${task.kind} task?\n\n${task.dedupeKey}\n\nIt will never be sent to MangaDex. ` +
+                  "This cannot be undone from here.",
+              )
+            ) {
+              return;
+            }
+            void act("upload_task.cancel", () =>
+              api(`/upload-tasks/${task.id}/cancel`, { method: "POST", body: {} }),
+            );
+          },
+        }),
+      ],
+    ];
+  });
+
+  return el(
+    "div",
+    {},
+    summary,
+    card(
+      null,
+      table(["Kind", "State", "Dedupe key", "Attempts", "Not before", "Last error", ""], rows),
+    ),
+  );
+}
+
+// ---------------------------------------------------------------------- errors
+
+/**
+ * Everything that failed, newest first, across dead-lettered jobs, failed upload
+ * tasks, and quarantined submissions. This is the answer to "what broke?" that
+ * used to be the legacy `logs` command; container logs are still `docker logs`,
+ * because they describe processes rather than platform state.
+ */
+async function viewErrors() {
+  const limit = state.errorLimit || 50;
+  const { errors } = await api(`/errors?limit=${limit}`);
+
+  const select = el(
+    "select",
+    {
+      id: "error-limit",
+      "aria-label": "Number of errors",
+      onchange: (event) => {
+        state.errorLimit = Number(event.target.value);
+        void renderTab();
+      },
+    },
+    [25, 50, 100, 200].map((value) =>
+      el("option", { value: String(value), text: String(value), selected: value === limit }),
+    ),
+  );
+
+  const rows = errors.map((entry) => [
+    fmtTime(entry.at),
+    chip(entry.kind.split(":")[1] || entry.kind),
+    el("div", {}, el("div", { text: entry.subject }), el("div", { class: "dim", text: entry.kind })),
+    truncate(entry.message, 300) || "—",
+  ]);
+
+  return el(
+    "div",
+    {},
+    card(
+      "Recent failures",
+      el("p", {
+        class: "dim",
+        text:
+          "Dead-lettered jobs, failed upload tasks, and quarantined submissions in one list. Retry actions live " +
+          "in Runs (jobs) and Queues (upload tasks); container logs are on the host, via docker logs.",
+      }),
+      row(el("label", { for: "error-limit", text: "Rows" }), select),
+    ),
+    card(null, table(["When", "State", "Subject", "Message"], rows)),
+  );
+}
+
 // ------------------------------------------------------------------- untracked
 
 const UNTRACKED_STATES = ["NEW", "CREATING", "CREATED", "TRACKED", "FAILED", "SKIPPED"];
@@ -1373,6 +1645,234 @@ function passwordDialog(user, reload) {
           },
         }),
         el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+      ),
+    ),
+  );
+}
+
+// ---------------------------------------------------------------------- tokens
+
+/**
+ * Scoped per-client credentials (`pa_…`). OWNER-only, because minting a token
+ * can grant any scope — the server enforces that on every endpoint here, so a
+ * hidden tab is a convenience, not the control.
+ *
+ * The secret is shown exactly once, in a modal, and there is no endpoint that
+ * can reveal it again; that is why the copy button and the warning are not
+ * optional polish.
+ */
+async function viewTokens() {
+  const [{ scopes, presets }, { tokens }] = await Promise.all([
+    api("/tokens/scopes"),
+    api("/tokens"),
+  ]);
+
+  const reload = async () => {
+    $("view").replaceChildren(await viewTokens());
+  };
+
+  const name = el("input", { id: "token-name", type: "text", maxlength: "128", placeholder: "discord-bot" });
+  const ttl = el("input", {
+    id: "token-ttl",
+    type: "number",
+    min: "1",
+    max: "3650",
+    placeholder: "never expires",
+  });
+
+  // Grouped by area so "everything runs-related" is one glance rather than a
+  // scan of a flat 15-item list.
+  const boxes = new Map();
+  const areas = new Map();
+  for (const scope of scopes) {
+    const area = scope.split(":")[0];
+    if (!areas.has(area)) areas.set(area, []);
+    areas.get(area).push(scope);
+  }
+
+  const scopeGroups = el(
+    "div",
+    { class: "grid" },
+    [...areas].map(([area, list]) =>
+      el(
+        "div",
+        { class: "stat" },
+        el("div", { class: "k", text: area }),
+        list.map((scope) => {
+          const box = el("input", { type: "checkbox", id: `scope-${scope}`, value: scope });
+          boxes.set(scope, box);
+          return el("div", { class: "row tight" }, box, el("label", { for: `scope-${scope}`, text: scope }));
+        }),
+      ),
+    ),
+  );
+
+  const setScopes = (wanted) => {
+    const set = new Set(wanted);
+    for (const [scope, box] of boxes) box.checked = set.has(scope);
+  };
+
+  const presetRow = row(
+    el("span", { class: "dim", text: "Presets:" }),
+    Object.entries(presets).map(([preset, list]) =>
+      el("button", {
+        type: "button",
+        text: preset,
+        title: list.join(", "),
+        onclick: () => {
+          setScopes(list);
+          toast(`${preset}: ${list.length} scope(s) selected`);
+        },
+      }),
+    ),
+    el("button", { type: "button", text: "clear", onclick: () => setScopes([]) }),
+  );
+
+  const mint = card(
+    "Mint a client token",
+    el("p", {
+      class: "dim",
+      text:
+        "One token per client, carrying only the scopes that client needs — a leaked credential is then confined " +
+        "to its area. No token can mint another token or manage accounts, however broadly it is scoped.",
+    }),
+    row(
+      el("label", { for: "token-name", text: "Client name" }),
+      name,
+      el("label", { for: "token-ttl", text: "Expires after (days)" }),
+      ttl,
+    ),
+    presetRow,
+    scopeGroups,
+    row(
+      el("button", {
+        type: "button",
+        class: "primary",
+        text: "Mint token",
+        onclick: async () => {
+          const chosen = [...boxes].filter(([, box]) => box.checked).map(([scope]) => scope);
+          if (!name.value.trim()) return toast("give the token a name first", false);
+          if (!chosen.length) return toast("select at least one scope", false);
+          const days = ttl.value === "" ? undefined : Number(ttl.value);
+          if (days !== undefined && (!Number.isInteger(days) || days < 1 || days > 3650)) {
+            return toast("expiry must be between 1 and 3650 days", false);
+          }
+          const minted = await act(
+            "api_token.mint",
+            () =>
+              api("/tokens", {
+                method: "POST",
+                body: { name: name.value.trim(), scopes: chosen, ...(days ? { ttlDays: days } : {}) },
+              }),
+            { refresh: false },
+          );
+          if (minted) {
+            showMintedToken(minted);
+            name.value = "";
+            ttl.value = "";
+            setScopes([]);
+            await reload();
+          }
+        },
+      }),
+    ),
+  );
+
+  const tokenState = (token) => {
+    if (token.revoked) return "REVOKED";
+    if (token.expiresAt && new Date(token.expiresAt) <= new Date()) return "FAILED";
+    return "ACTIVE";
+  };
+
+  const rows = tokens.map((token) => [
+    el(
+      "div",
+      {},
+      el("div", { text: token.name }),
+      el("div", { class: "dim", text: token.id }),
+    ),
+    chip(tokenState(token)),
+    el("div", { class: "row tight" }, token.scopes.map((scope) => chip(scope))),
+    token.createdBy,
+    fmtTime(token.createdAt),
+    token.lastUsedAt ? ago(token.lastUsedAt) : "never",
+    token.expiresAt ? fmtTime(token.expiresAt) : "never",
+    [
+      token.revoked
+        ? null
+        : el("button", {
+            type: "button",
+            class: "danger",
+            text: "Revoke",
+            onclick: () => {
+              if (
+                !confirmDestructive(
+                  `Revoke "${token.name}"? It stops working immediately and cannot be restored — ` +
+                    "rotation means minting a replacement first.",
+                )
+              ) {
+                return;
+              }
+              void act("api_token.revoke", () => api(`/tokens/${token.id}/revoke`, { method: "POST", body: {} }), {
+                refresh: false,
+              }).then(reload);
+            },
+          }),
+    ].filter(Boolean),
+  ]);
+
+  return el(
+    "div",
+    {},
+    mint,
+    card(
+      "Issued tokens",
+      el("p", {
+        class: "dim",
+        text: "Last-used is throttled to one write per token per minute, so treat it as approximate.",
+      }),
+      table(
+        ["Client", "State", "Scopes", "Created by", "Created", "Last used", "Expires", ""],
+        rows,
+      ),
+    ),
+  );
+}
+
+function showMintedToken(minted) {
+  const secret = el("pre", { text: minted.token });
+  openModal(
+    `Client token · ${minted.name}`,
+    el(
+      "div",
+      {},
+      el("p", {
+        class: "error",
+        text:
+          "Shown once. Nothing can reveal it again — copy it now and hand it over through a private channel. " +
+          "If you lose it, revoke this token and mint another.",
+      }),
+      secret,
+      el("p", { class: "dim", text: `Scopes: ${minted.scopes.join(", ")}` }),
+      el("p", {
+        class: "dim",
+        text: minted.expiresAt ? `Expires ${fmtTime(minted.expiresAt)}.` : "Does not expire.",
+      }),
+      row(
+        el("button", {
+          type: "button",
+          class: "primary",
+          text: "Copy token",
+          onclick: async () => {
+            try {
+              await navigator.clipboard.writeText(minted.token);
+              toast("copied to clipboard");
+            } catch {
+              toast("clipboard blocked — select the text manually", false);
+            }
+          },
+        }),
+        el("button", { type: "button", text: "Done", onclick: closeModal }),
       ),
     ),
   );

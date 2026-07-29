@@ -18,6 +18,20 @@
     </header>
 
     <main>
+      <!-- Every view is built client-side, so with scripting off the page would
+           otherwise be blank. Naming the sections here tells an operator what
+           they are missing rather than leaving them to guess. -->
+      <noscript>
+        <div class="card">
+          <h2>JavaScript required</h2>
+          <p>
+            The control plane renders its sections in the browser: Overview, Workers, Extensions,
+            Runs, Queues, Errors, Untracked, Quarantine, Audit, Users, and Tokens. Enable scripting
+            for this origin, or use the <code>publoader-admin</code> CLI instead.
+          </p>
+        </div>
+      </noscript>
+
       <section id="login" class="login" hidden>
         <div class="card">
           <h2>Sign in</h2>
