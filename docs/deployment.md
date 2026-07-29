@@ -910,3 +910,39 @@ The reason names the variable to set — usually `DISCORD_ADMIN_USERS` or
 **The bot cannot reach Discord.** It carries the same public-resolver override
 as the MangaDex-facing services (the `x-public-dns` anchor) because this host's
 LAN resolver filters. Remove it if your network does not.
+
+## Publishing extension code
+
+Extensions ship as content-addressed bundles, separately from the core image.
+Publishing one is what makes the running system use new extension code: the
+scheduler pins each job to the latest published bundle for that extension, so the
+next run picks it up with no restart and no deploy.
+
+**By hand**, from a checkout:
+
+```bash
+publoader-admin bundle publish src/mangaplus --source-commit "$(git rev-parse HEAD)"
+publoader-admin extensions list
+```
+
+**From CI** — the recommended arrangement. A GitHub Actions workflow runs that
+same command with a token minted for nothing else:
+
+```bash
+publoader-admin tokens create --name ci-extensions --scopes bundles:write
+```
+
+The build happens on the runner, which already has a checkout and a package
+manager, and core-api needs no GitHub credential and no compiler. Workflow in
+`docs/webhooks.md` §6.
+
+**From a GitHub push webhook** — the zero-CI option. `POST /webhook` verifies an
+HMAC, downloads the repo at the pushed commit, and publishes a bundle per changed
+extension. It puts a GitHub token and esbuild inside core-api, cannot install
+third-party dependencies, and inherits GitHub's ~10-second delivery timeout (so a
+slow-but-successful delivery can be logged red). Set it up only if you have no
+CI, and read `docs/webhooks.md` first — including §6, which argues against it.
+
+Note what none of these do: **core itself is never deployed this way.** A push to
+the core repo is acknowledged and does nothing. Core is an image, rolled out with
+`./scripts/publoader prod upgrade <tag>` (see §Upgrading above).

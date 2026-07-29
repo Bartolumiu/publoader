@@ -157,13 +157,13 @@ async function publishOne(
   try {
     const files = extractSubtree(archive, extensionRepoPath(extension), workDir);
     if (files === 0) {
-      // Every path of the extension was removed by this push. Bundles are
-      // never deleted by a webhook — yanking a live extension on the strength
-      // of an unauthenticated-shaped trigger is not a decision to automate.
+      // Every path of the extension was removed by this push. Nothing is taken
+      // out of rotation here — retiring a live extension on the strength of a
+      // push payload is not a decision to automate.
       return {
         extension,
         status: "skipped",
-        detail: `src/${extension} is not present at ${commit}; if it was deleted, yank it with \`publoader-admin bundle yank\``,
+        detail: `src/${extension} is not present at ${commit}; if it was deleted, take it out of rotation with \`publoader-admin extensions disable ${extension}\``,
       };
     }
 
