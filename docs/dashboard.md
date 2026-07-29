@@ -141,15 +141,17 @@ curl -sX POST "$API/api/v1/admin/extensions/mangaplus/tracked/batch" \
   -d '{"dryRun": true, "text": "12345,4f1de6a2-f0c5-4ac5-bce5-02c7dbb67deb"}'
 ```
 
-One asymmetry to know about: **a server-side dry run covers additions and
-repoints, not removals.** It evaluates `set` (and `text`) and ignores `remove`,
-so a `dryRun` request that names rows to delete reports `removed: 0` — it is not
-telling you the deletion will not happen. The dashboard fills that gap itself:
-in "Remove" mode it previews from the map it already has loaded, which is the
-same judgement the server makes (present → `removed`, absent → `not_found`,
-no `tracked:write` → `rejected_needs_write`). If you are driving the API
-directly, treat a removal batch as unpreviewable and check the row count
-yourself.
+The preview covers **additions, repoints and removals** — every row is judged
+exactly as the real batch would judge it, and the write transaction is skipped
+entirely. Both dashboard modes go through it, so there is no second
+implementation of the rules to drift out of step.
+
+Worth knowing what this replaced, because the old shape is a trap worth
+recognising if you see it elsewhere: the dry run used to apply the batch for real
+and then delete the rows it had inserted. That undid the additions and left every
+*repoint* in place — so previewing a paste could silently redirect a series'
+uploads to a different MangaDex title, and the uncommitted mappings were briefly
+visible to the scheduler. A preview that writes is not a preview.
 
 A preview leaves no audit entry, because nothing happened. A real batch leaves
 one (`tracked_manga.batch`) with the counts.

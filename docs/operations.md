@@ -111,11 +111,8 @@ is the round trip, with no file in git and no shell on the host.
 
 **Always dry-run a paste you did not generate yourself.** The preview reports
 what every line would do — added, updated (with the previous target), unchanged,
-or rejected — and writes nothing. Note that `dryRun` evaluates the additions and
-repoints only: it **ignores `remove`**, so a removal batch comes back
-`removed: 0` whether or not it would delete anything. The dashboard previews
-removals itself from the map it has loaded; if you are driving the API directly,
-capture the row list first and check it afterwards.
+removed, or rejected — and writes nothing, because the store skips its write
+transaction rather than applying and undoing.
 
 ```bash
 padmin tracked list mangaplus > /tmp/before.txt

@@ -137,8 +137,30 @@ FROM ${NODE_IMAGE} AS runtime
 # guess being right. ca-certificates is needed for outbound TLS (MangaDex,
 # Discord webhooks, Atlas during a migration).
 RUN apt-get update \
- && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && apt-get install -y --no-install-recommends openssl ca-certificates curl gnupg \
+ # postgresql-client-16 specifically, from PGDG: Debian bookworm ships client 15,
+ # and pg_dump REFUSES to dump a newer server ("aborting because of server
+ # version mismatch"), so the default package would give a backup button that
+ # always fails against our Postgres 16.
+ && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+      | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
+ && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-client-16 \
+ && apt-get purge -y curl gnupg && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
+
+# postgresql-client is here for ONE reason: the dashboard's backup button, which
+# streams `pg_dump` to the operator. Without it that button answers 503 and a
+# backup means shelling onto the host, which defeats the point of the dashboard.
+#
+# The trade-off was considered rather than assumed. It adds no listener and no
+# privilege: the route is behind the strictest guard in the system (OWNER role
+# AND users:admin, which excludes every API token however scoped), and anyone
+# who can already execute code in this container holds DATABASE_URL and can read
+# the same rows over SQL. So pg_dump grants an attacker nothing they lacked; it
+# only costs image size and the CVE surface of one well-maintained package.
 
 # uid 10001 is fixed and high on purpose: it collides with no distro account,
 # and named volumes/bind mounts on the host can be chowned to a stable number.

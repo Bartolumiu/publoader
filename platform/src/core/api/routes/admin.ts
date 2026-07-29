@@ -473,10 +473,14 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           // Same judgement, no writes — the store skips its write transaction.
           //
           // This used to apply the batch for real and then delete the rows it had
-          // added. That was not a preview: it left every REPOINTED mapping
-          // changed (the undo only covered inserts), so previewing a paste could
-          // silently send a series' uploads to a different MangaDex title, and it
-          // made uncommitted mappings briefly visible to the scheduler.
+          // added. That was not a preview. The undo only covered inserts, so a
+          // REPOINTED mapping stayed repointed — previewing a paste could
+          // silently send a series' uploads to a different MangaDex title — and
+          // the update also stamped `source` to the preview's own value, losing
+          // the record of who established the mapping. It additionally made
+          // uncommitted rows briefly visible to the scheduler. (The cleanup
+          // could not itself delete a pre-existing row: it filtered on the ids
+          // it had just added, and a repointed id was never in that set.)
           const preview = await ctx.trackedManga.applyBatch(
             name,
             { set, remove: body.remove },

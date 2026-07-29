@@ -1294,7 +1294,7 @@ async function extensionDetail(name) {
     schedules ? scheduleCard(name, schedules) : null,
     config ? configCard(name, config) : null,
     trackedCard(name, tracked.tracked, reload),
-    bulkCurationCard(name, tracked.tracked, reload),
+    bulkCurationCard(name, reload),
   );
 }
 
@@ -1659,7 +1659,7 @@ function trackedCard(name, tracked, reload) {
  * against a per-row verdict rather than against their own reading of the paste.
  * "Apply" only exists once a preview has come back.
  */
-function bulkCurationCard(name, tracked, reload) {
+function bulkCurationCard(name, reload) {
   const encoded = encodeURIComponent(name);
   const canWrite = can("tracked:write");
 
@@ -1747,68 +1747,31 @@ function bulkCurationCard(name, tracked, reload) {
   };
 
   /**
-   * Removals are judged here rather than by a dry run, because the batch
-   * endpoint's dry run deliberately ignores `remove`. The judgement is not a
-   * guess: the whole current map is in hand, so "exists → removed, absent →
-   * not_found" is exactly what the server will decide, and the scope check is
-   * the same one `applyBatch` applies.
+   * The request body for the current mode. Removal takes one external id per
+   * line, so the `#`-comment convention is honoured here too — a contributor who
+   * learned it from the paste box should not find it silently ignored.
    */
-  const previewRemoval = (ids) => {
-    const present = new Set(tracked.map((item) => item.mangaId));
-    const seen = new Set();
-    const results = [];
-    for (const id of ids) {
-      if (seen.has(id)) continue;
-      seen.add(id);
-      if (!canWrite) {
-        results.push({ mangaId: id, outcome: "rejected_needs_write", detail: "removing a mapping needs scope tracked:write" });
-      } else if (!present.has(id)) {
-        results.push({ mangaId: id, outcome: "not_found", detail: "not in this extension's map" });
-      } else {
-        results.push({
-          mangaId: id,
-          mdMangaId: tracked.find((item) => item.mangaId === id)?.mdMangaId,
-          outcome: "removed",
-        });
-      }
-    }
-    const count = (outcome) => results.filter((r) => r.outcome === outcome).length;
-    return {
-      added: 0,
-      updated: 0,
-      unchanged: 0,
-      removed: count("removed"),
-      failed: count("not_found") + count("rejected_needs_write"),
-      results,
-    };
-  };
+  const payload = () =>
+    mode.value === "remove"
+      ? {
+          remove: text.value
+            .split(/\r?\n/)
+            .map((line) => line.split("#")[0].trim())
+            .filter(Boolean),
+        }
+      : { text: text.value };
 
-  const removalIds = () =>
-    text.value
-      .split(/\r?\n/)
-      .map((line) => line.split("#")[0].trim())
-      .filter(Boolean);
-
+  /**
+   * Both modes preview through the server's own dry run, including removals.
+   *
+   * Judging removals in the browser would mean a second implementation of a rule
+   * the store already owns, and the two would drift. Asking the server means the
+   * preview is by construction the same judgement the apply will make.
+   */
   const runPreview = async () => {
     clear();
     if (!text.value.trim()) return toast("paste something first", false);
-
-    if (mode.value === "remove") {
-      const ids = removalIds();
-      renderSummary(previewRemoval(ids), [], async () => {
-        const applied = await act(
-          "tracked_manga.batch",
-          () => api(`/extensions/${encoded}/tracked/batch`, { method: "POST", body: { remove: ids } }),
-          { refresh: false },
-        );
-        if (applied) {
-          clear();
-          text.value = "";
-          await reload();
-        }
-      });
-      return;
-    }
+    const body = payload();
 
     // Not wrapped in `act`: a preview is not an outcome, and "ok" toasted over a
     // table that says three rows were rejected is actively misleading.
@@ -1816,17 +1779,18 @@ function bulkCurationCard(name, tracked, reload) {
     try {
       dry = await api(`/extensions/${encoded}/tracked/batch`, {
         method: "POST",
-        body: { text: text.value, dryRun: true },
+        body: { ...body, dryRun: true },
       });
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return;
       preview.replaceChildren(el("p", { class: "error", text: `Preview failed: ${err.message}` }));
       return;
     }
+
     renderSummary(dry, dry.parseErrors || [], async () => {
       const applied = await act(
         "tracked_manga.batch",
-        () => api(`/extensions/${encoded}/tracked/batch`, { method: "POST", body: { text: text.value } }),
+        () => api(`/extensions/${encoded}/tracked/batch`, { method: "POST", body }),
         { refresh: false },
       );
       if (applied) {
