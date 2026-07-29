@@ -58,7 +58,7 @@ export class BundleStore {
         sha256,
         manifest: manifest as object,
         sourceCommit: opts.sourceCommit ?? null,
-        data: new Uint8Array(opts.zipData),
+        archive: new Uint8Array(opts.zipData),
       },
       // Same extension+version republished with different content: replace,
       // new sha becomes the pin for future jobs (old jobs keep their pin but
@@ -68,7 +68,7 @@ export class BundleStore {
         sha256,
         manifest: manifest as object,
         sourceCommit: opts.sourceCommit ?? null,
-        data: new Uint8Array(opts.zipData),
+        archive: new Uint8Array(opts.zipData),
         yanked: false,
       },
     });

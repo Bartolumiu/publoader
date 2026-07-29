@@ -68,6 +68,12 @@ enum UploadTaskKind {
   UNAVAILABLE
 }
 
+enum UploadOutcome {
+  COMMITTING
+  COMMITTED
+  FAILED
+}
+
 enum UploadTaskState {
   PENDING
   LEASED
@@ -82,7 +88,7 @@ model Worker {
   tokenHash       String       @unique @map("token_hash")
   status          WorkerStatus @default(ACTIVE)
   trust           TrustTier    @default(COMMUNITY)
-  capabilities    Json         @default("{}")
+  extensions      String[]     @default([])
   lastHeartbeatAt DateTime?    @map("last_heartbeat_at")
   agentVersion    String?      @map("agent_version")
   createdAt       DateTime     @default(now()) @map("created_at")
@@ -141,7 +147,7 @@ model Job {
   segmentIndex     Int         @default(0) @map("segment_index")
   segmentTotal     Int         @default(1) @map("segment_total")
   segmentKey       String?     @map("segment_key")
-  segmentMangaIds  Json?       @map("segment_manga_ids")
+  segmentMangaIds  String[]    @default([]) @map("segment_manga_ids")
   minTrust         TrustTier   @default(COMMUNITY) @map("min_trust")
   state            JobState    @default(PENDING)
   attempt          Int         @default(0)
@@ -188,7 +194,7 @@ model Artifact {
   sha256      String
   size        Int
   contentType String    @map("content_type")
-  data        Bytes
+  content     Bytes
   jobId       String?   @map("job_id")
   workerId    String?   @map("worker_id")
   expiresAt   DateTime? @map("expires_at")
@@ -206,7 +212,7 @@ model Bundle {
   sha256       String   @unique
   manifest     Json
   sourceCommit String?  @map("source_commit")
-  data         Bytes
+  archive      Bytes
   yanked       Boolean  @default(false)
   publishedAt  DateTime @default(now()) @map("published_at")
 
@@ -243,7 +249,7 @@ model UploadedChapter {
   mdMangaId       String?  @map("md_manga_id")
   chapterLanguage String?  @map("chapter_language")
   chapterNumber   String?  @map("chapter_number")
-  data            Json
+  chapter         Json
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
@@ -266,7 +272,7 @@ model UploadedId {
 model EditedChapter {
   id           String   @id @default(uuid())
   mdChapterId  String   @unique @map("md_chapter_id")
-  data         Json
+  chapter      Json
   edits        Json     @default("[]")
   lastEditedAt DateTime @default(now()) @map("last_edited_at")
   createdAt    DateTime @default(now()) @map("created_at")
@@ -277,7 +283,7 @@ model EditedChapter {
 model UnavailableChapter {
   id            String   @id @default(uuid())
   mdChapterId   String   @unique @map("md_chapter_id")
-  data          Json
+  chapter       Json
   unavailableAt DateTime @default(now()) @map("unavailable_at")
 
   @@map("unavailable_chapters")
@@ -285,14 +291,14 @@ model UnavailableChapter {
 
 model UploadLog {
   id          String   @id @default(uuid())
-  dedupeKey   String   @map("dedupe_key")
-  mdChapterId String?  @map("md_chapter_id")
-  outcome     String
+  dedupeKey   String        @map("dedupe_key")
+  mdChapterId String?       @map("md_chapter_id")
+  outcome     UploadOutcome
   detail      String?
   createdAt   DateTime @default(now()) @map("created_at")
 
   @@index([dedupeKey])
-  @@map("upload_log")
+  @@map("upload_logs")
 }
 
 enum UntrackedState {
@@ -412,6 +418,27 @@ model AdminSession {
   @@index([userId])
   @@index([expiresAt])
   @@map("admin_sessions")
+}
+
+// Scoped per-client API tokens (`pa_…`, hashed at rest). Blast-radius
+// containment: each machine client (Discord bot, CI publisher, scripts) gets
+// its own token carrying only the scopes it needs, so one exposed credential
+// affects one area — never the whole system. The env ADMIN_TOKEN remains the
+// break-glass root ("*") and should live in a vault, not in clients.
+model ApiToken {
+  id         String    @id @default(uuid())
+  name       String
+  tokenHash  String    @unique @map("token_hash")
+  /** Scopes, e.g. ["runs:write","workers:read"]. */
+  scopes     String[]
+  createdBy  String    @map("created_by")
+  expiresAt  DateTime? @map("expires_at")
+  revoked    Boolean   @default(false)
+  lastUsedAt DateTime? @map("last_used_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  @@map("api_tokens")
 }
 
 model AuditEvent {

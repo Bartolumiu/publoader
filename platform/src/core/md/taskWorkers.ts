@@ -93,7 +93,7 @@ export class UploadTaskWorkers {
     if (!mdGroupId) throw new TaskError("upload task has no mdGroupId");
 
     const prior = await prisma.uploadLog.findFirst({
-      where: { dedupeKey: task.dedupeKey, outcome: "committed", NOT: { mdChapterId: null } },
+      where: { dedupeKey: task.dedupeKey, outcome: "COMMITTED", NOT: { mdChapterId: null } },
       orderBy: { createdAt: "desc" },
     });
     if (prior?.mdChapterId) {
@@ -112,7 +112,7 @@ export class UploadTaskWorkers {
       );
     }
 
-    await prisma.uploadLog.create({ data: { dedupeKey: task.dedupeKey, outcome: "committing" } });
+    await prisma.uploadLog.create({ data: { dedupeKey: task.dedupeKey, outcome: "COMMITTING" } });
 
     // MangaDex allows one open upload session per account.
     const existingSession = await md.currentUploadSession();
@@ -149,7 +149,7 @@ export class UploadTaskWorkers {
       const message = errorMessage(err);
       await this.safeDeleteSession(session.id, log);
       await prisma.uploadLog.create({
-        data: { dedupeKey: task.dedupeKey, outcome: "failed", detail: message.slice(0, 4000) },
+        data: { dedupeKey: task.dedupeKey, outcome: "FAILED", detail: message.slice(0, 4000) },
       });
       metrics.uploadsTotal.inc({ outcome: "upload_failed" });
       this.queue("Upload", chapter, null, false, message);
@@ -157,7 +157,7 @@ export class UploadTaskWorkers {
     }
 
     await prisma.uploadLog.create({
-      data: { dedupeKey: task.dedupeKey, mdChapterId, outcome: "committed" },
+      data: { dedupeKey: task.dedupeKey, mdChapterId, outcome: "COMMITTED" },
     });
     if (mdChapterId) await this.recordUploadedChapter(chapter, mdChapterId);
     await this.deleteArtifacts(chapter.imageArtifacts);
@@ -178,7 +178,7 @@ export class UploadTaskWorkers {
       if (!row) throw new TaskError(`artifact ${id} referenced by the chapter is missing`);
       // MangaDex echoes the filename back as originalFileName, and page order is
       // rebuilt from it — so the name must be the page's index and nothing else.
-      return { name: String(index), data: Buffer.from(row.data) };
+      return { name: String(index), data: Buffer.from(row.content) };
     });
   }
 
@@ -306,11 +306,11 @@ export class UploadTaskWorkers {
       new: payload,
     } as unknown as Prisma.InputJsonValue);
 
-    const data = toJson({ ...chapter, mdChapterId });
+    const snapshot = toJson({ ...chapter, mdChapterId });
     await prisma.editedChapter.upsert({
       where: { mdChapterId },
-      create: { mdChapterId, data, edits },
-      update: { data, edits, lastEditedAt: new Date() },
+      create: { mdChapterId, chapter: snapshot, edits },
+      update: { chapter: snapshot, edits, lastEditedAt: new Date() },
     });
   }
 
@@ -480,15 +480,15 @@ export class UploadTaskWorkers {
     chapter: Chapter,
     detail: MdChapterDetail | null,
   ): Promise<void> {
-    const data = toJson({
+    const snapshot = toJson({
       ...chapter,
       mdChapterId,
       ...(detail ? { mdAttributes: detail.attributes } : {}),
     });
     await this.deps.prisma.unavailableChapter.upsert({
       where: { mdChapterId },
-      create: { mdChapterId, data },
-      update: { data, unavailableAt: new Date() },
+      create: { mdChapterId, chapter: snapshot },
+      update: { chapter: snapshot, unavailableAt: new Date() },
     });
     await this.deps.prisma.uploadedChapter.deleteMany({ where: { mdChapterId } });
   }
@@ -498,14 +498,14 @@ export class UploadTaskWorkers {
   private async recordUploadedChapter(chapter: Chapter, mdChapterId: string): Promise<void> {
     const { prisma } = this.deps;
     const extension = chapter.extensionName ?? "";
-    const data = toJson({ ...chapter, mdChapterId });
+    const snapshot = toJson({ ...chapter, mdChapterId });
     const fields = {
       extension,
       chapterId: chapter.chapterId,
       mdMangaId: chapter.mdMangaId,
       chapterLanguage: chapter.chapterLanguage,
       chapterNumber: chapter.chapterNumber,
-      data,
+      chapter: snapshot,
     };
 
     await prisma.uploadedChapter.upsert({

@@ -47,7 +47,7 @@ export class WorkerStore {
   async enroll(opts: {
     enrollToken: string;
     name: string;
-    capabilities?: unknown;
+    extensions?: string[];
     agentVersion?: string;
   }): Promise<{ workerId: string; workerToken: string; trust: TrustTier } | null> {
     const tokenHash = hashToken(opts.enrollToken);
@@ -61,7 +61,7 @@ export class WorkerStore {
         name: opts.name.slice(0, 128),
         tokenHash: hashToken(workerToken),
         trust: row.trust,
-        capabilities: (opts.capabilities as object) ?? {},
+        extensions: opts.extensions ?? [],
         agentVersion: opts.agentVersion ?? null,
         lastHeartbeatAt: new Date(),
       },

@@ -155,7 +155,7 @@ export class JobExecutor {
             segmentIndex: job.segmentIndex,
             segmentTotal: job.segmentTotal,
             segmentKey: job.segmentKey,
-            segmentMangaIds: job.segmentMangaIds ?? [],
+            segmentMangaIds: job.segmentMangaIds,
             postedChapterIds: job.postedChapterIds ?? [],
             manifest: job.manifest,
             timeoutSeconds: job.timeoutSeconds,

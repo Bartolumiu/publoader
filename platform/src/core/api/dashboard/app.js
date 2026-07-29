@@ -471,7 +471,7 @@ async function viewWorkers() {
     worker.trust,
     ago(worker.lastHeartbeatAt),
     worker.agentVersion,
-    (worker.capabilities && worker.capabilities.extensions || []).join(", ") || "any",
+    (worker.extensions || []).join(", ") || "any",
     [
       lifecycle(worker, "drain", "Drain", false),
       lifecycle(worker, "activate", "Activate", false),

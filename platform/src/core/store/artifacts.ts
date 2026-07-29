@@ -42,7 +42,7 @@ export class ArtifactStore {
         contentType: opts.contentType,
         // Prisma v6 Bytes columns take Uint8Array (Buffer's SharedArrayBuffer
         // possibility makes it incompatible as-typed).
-        data: new Uint8Array(opts.data),
+        content: new Uint8Array(opts.data),
         jobId: opts.jobId ?? null,
         workerId: opts.workerId ?? null,
         expiresAt: new Date(Date.now() + DEFAULT_TTL_HOURS * 3600 * 1000),

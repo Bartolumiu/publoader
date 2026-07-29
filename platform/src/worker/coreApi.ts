@@ -239,7 +239,7 @@ export class CoreApiClient {
         body: JSON.stringify({
           enrollToken: opts.enrollToken,
           name: opts.name,
-          capabilities: opts.extensions ? { extensions: opts.extensions } : {},
+          extensions: opts.extensions ?? [],
           agentVersion: this.agentVersion,
         }),
       }),

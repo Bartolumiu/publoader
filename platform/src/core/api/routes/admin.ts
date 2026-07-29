@@ -59,7 +59,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           name: w.name,
           status: w.status,
           trust: w.trust,
-          capabilities: w.capabilities,
+          extensions: w.extensions,
           lastHeartbeatAt: w.lastHeartbeatAt,
           agentVersion: w.agentVersion,
           createdAt: w.createdAt,

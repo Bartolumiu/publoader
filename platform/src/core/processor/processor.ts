@@ -443,18 +443,18 @@ export class RunProcessor {
     for (const chapter of chapters) {
       if (!chapter.mdChapterId) continue;
 
-      const data = {
+      const fields = {
         extension,
         chapterId: chapter.chapterId,
         mdMangaId: chapter.mdMangaId,
         chapterLanguage: chapter.chapterLanguage,
         chapterNumber: chapter.chapterNumber,
-        data: chapter as unknown as Prisma.InputJsonValue,
+        chapter: chapter as unknown as Prisma.InputJsonValue,
       };
       await this.prisma.uploadedChapter.upsert({
         where: { mdChapterId: chapter.mdChapterId },
-        create: { mdChapterId: chapter.mdChapterId, ...data },
-        update: data,
+        create: { mdChapterId: chapter.mdChapterId, ...fields },
+        update: fields,
       });
 
       // uploaded_ids is insert-only: the FIRST MangaDex chapter an extension

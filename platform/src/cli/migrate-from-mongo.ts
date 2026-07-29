@@ -178,7 +178,7 @@ async function migrateUploaded(db: Db, prisma: PrismaClient): Promise<Counts> {
         mdMangaId: str(d["md_manga_id"]),
         chapterLanguage: str(d["chapter_language"]),
         chapterNumber: str(d["chapter_number"]),
-        data: asRecord(d) as Prisma.InputJsonValue,
+        chapter: asRecord(d) as Prisma.InputJsonValue,
         createdAt: date(d["chapter_lookup"]) ?? new Date(),
       }));
     counts.skipped += docs.length - rows.length;
@@ -199,7 +199,7 @@ async function migrateUploaded(db: Db, prisma: PrismaClient): Promise<Counts> {
               mdMangaId: row.mdMangaId,
               chapterLanguage: row.chapterLanguage,
               chapterNumber: row.chapterNumber,
-              data: row.data,
+              chapter: row.chapter,
             },
           });
         }
@@ -274,7 +274,7 @@ async function migrateEdited(db: Db, prisma: PrismaClient): Promise<Counts> {
           {
             id: randomUUID(),
             mdChapterId,
-            data: full as Prisma.InputJsonValue,
+            chapter: full as Prisma.InputJsonValue,
             edits,
             lastEditedAt: date(d["last_edited_at"]) ?? new Date(),
           },
@@ -287,7 +287,7 @@ async function migrateEdited(db: Db, prisma: PrismaClient): Promise<Counts> {
         if (REFRESH) {
           await prisma.editedChapter.updateMany({
             where: { mdChapterId },
-            data: { data: full as Prisma.InputJsonValue, edits },
+            data: { chapter: full as Prisma.InputJsonValue, edits },
           });
         }
       }
@@ -314,7 +314,7 @@ async function migrateUnavailable(db: Db, prisma: PrismaClient): Promise<Counts>
       rows.push({
         id: randomUUID(),
         mdChapterId,
-        data: asRecord(d) as Prisma.InputJsonValue,
+        chapter: asRecord(d) as Prisma.InputJsonValue,
         unavailableAt: date(d["unavailable_at"]) ?? new Date(),
       });
     }
@@ -397,7 +397,7 @@ async function migrateImages(
           sha256: createHash("sha256").update(data).digest("hex"),
           size: data.length,
           contentType: sniffContentType(data),
-          data: new Uint8Array(data),
+          content: new Uint8Array(data),
         },
       });
     }

@@ -10,7 +10,7 @@ import { hashToken } from "../../store/workers.js";
 const EnrollBody = z.object({
   enrollToken: z.string().min(8).max(256),
   name: z.string().min(1).max(128),
-  capabilities: z.object({ extensions: z.array(z.string()).optional() }).partial().default({}),
+  extensions: z.array(z.string().max(128)).max(256).default([]),
   agentVersion: z.string().max(64).optional(),
 });
 
@@ -95,14 +95,14 @@ export function registerWorkerRoutes(app: FastifyInstance, ctx: AppContext): voi
         body.data.waitSeconds ?? ctx.config.leasePollWaitSeconds,
         ctx.config.leasePollWaitSeconds,
       );
-      const capabilities = worker.capabilities as { extensions?: string[] };
+      const capable = worker.extensions;
       const requested = body.data.extensions;
       // A worker may narrow, never widen, its registered capability set.
       const extensions =
-        capabilities.extensions && capabilities.extensions.length > 0
+        capable.length > 0
           ? requested
-            ? requested.filter((e) => capabilities.extensions!.includes(e))
-            : capabilities.extensions
+            ? requested.filter((e) => capable.includes(e))
+            : capable
           : requested;
 
       const deadline = Date.now() + waitSeconds * 1000;
@@ -158,7 +158,7 @@ export function registerWorkerRoutes(app: FastifyInstance, ctx: AppContext): voi
               segmentIndex: claimed.job.segmentIndex,
               segmentTotal: claimed.job.segmentTotal,
               segmentKey: claimed.job.segmentKey,
-              segmentMangaIds: claimed.job.segmentMangaIds ?? [],
+              segmentMangaIds: claimed.job.segmentMangaIds,
               timeoutSeconds: claimed.job.timeoutSeconds,
               manifest: bundle?.manifest ?? null,
               postedChapterIds,
@@ -248,7 +248,7 @@ export function registerWorkerRoutes(app: FastifyInstance, ctx: AppContext): voi
         .header("x-bundle-sha256", bundle.sha256)
         .header("x-bundle-extension", bundle.extension)
         .header("x-bundle-version", bundle.version)
-        .send(Buffer.from(bundle.data));
+        .send(Buffer.from(bundle.archive));
     });
   });
 }
