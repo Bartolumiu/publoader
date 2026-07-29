@@ -25,6 +25,15 @@ export const SCOPES = [
   "enroll:write",
   "extensions:read",
   "extensions:write",
+  // Series-map curation, deliberately separate from extensions:write (which can
+  // pause an extension, rewrite its config and trigger clean runs).
+  "tracked:read",
+  // Append-only: create mappings that do not exist yet. Safe to hand out —
+  // the worst case is a wrong new mapping, which is visible and reversible.
+  "tracked:append",
+  // Modify and delete existing mappings. Un-tracking a series silently stops
+  // its uploads, so this stays with operators.
+  "tracked:write",
   "bundles:read",
   "bundles:write",
   "untracked:read",
@@ -84,14 +93,30 @@ export function hasScope(principal: Principal, required: Scope): boolean {
     if (held === WILDCARD || held === required) return true;
     const [area, verb] = held.split(":");
     if (verb === "write" && required === `${area}:read`) return true;
+    // Full write over an area subsumes appending to it.
+    if (verb === "write" && required === `${area}:append`) return true;
+    if (verb === "append" && required === `${area}:read`) return true;
   }
   return false;
 }
 
 /** Scope set for a dashboard session, by role. */
-export function scopesForRole(role: "OWNER" | "ADMIN"): string[] {
+export function scopesForRole(role: "OWNER" | "ADMIN" | "CONTRIBUTOR"): string[] {
   if (role === "OWNER") return [WILDCARD];
-  // Everything an operator needs day to day, minus account administration.
+  if (role === "CONTRIBUTOR") {
+    // Everything needed to do the job and nothing else: see the catalogue,
+    // add mappings, work the untracked queue. No runs, workers, credentials,
+    // settings or bundles.
+    return [
+      "extensions:read",
+      "tracked:read",
+      "tracked:append",
+      "untracked:read",
+      "untracked:write",
+      "stats:read",
+    ];
+  }
+  // ADMIN: everything an operator needs day to day, minus account administration.
   return SCOPES.filter((s) => s !== "users:admin");
 }
 
@@ -116,4 +141,6 @@ export const SCOPE_PRESETS: Record<string, Scope[]> = {
   "ci-publisher": ["bundles:write"],
   monitoring: ["stats:read", "audit:read"],
   "worker-enroller": ["enroll:write", "workers:read"],
+  // For a bot or script that only curates the series map.
+  curator: ["extensions:read", "tracked:append", "untracked:read", "untracked:write"],
 };

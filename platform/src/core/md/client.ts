@@ -585,6 +585,25 @@ export class MdClient implements MdExtendedApi {
     return out;
   }
 
+  /**
+   * GET /manga?title=… — used by the title pipeline to check whether a series
+   * already exists on MangaDex before creating a new entry for it. Creating a
+   * duplicate title is the one mistake here that other people have to clean up,
+   * so this call is worth making every time.
+   */
+  async searchManga(title: string, limit = 5): Promise<MdManga[]> {
+    const trimmed = title.trim();
+    if (trimmed.length === 0) return [];
+    const response = await this.request("GET", "manga", {
+      params: { title: trimmed, limit, "order[relevance]": "desc" },
+      successfulCodes: [404],
+    });
+    if (response.status !== 200 || !response.data) return [];
+    const data = response.data["data"];
+    if (!Array.isArray(data)) return [];
+    return data.map((entity) => MdClient.toManga(entity as MdEntity));
+  }
+
   /** Port of fetch_aggregate — returns the `volumes` object, or null on error. */
   async mangaAggregate(mangaId: string, groupId: string): Promise<unknown> {
     const params: Record<string, string | string[]> = {};

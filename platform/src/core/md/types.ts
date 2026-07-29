@@ -2,8 +2,12 @@ import type { ChapterRecord } from "../../contracts/records.js";
 
 /**
  * Internal canonical chapter shape — the platform-side mirror of the Python
- * `Chapter` dataclass. This is what lives in UploadTask.chapter and
- * UploadedChapter.data (JSONB), and what the processor/uploader pass around.
+ * `Chapter` dataclass, and what the processor/uploader pass around.
+ *
+ * On its way to storage it splits two ways, both via src/core/md/chapterRows.ts:
+ * the four chapter history tables hold it in typed columns, while the transient
+ * UploadTask.chapter queue payload stays JSONB (it carries per-kind sidecars
+ * like `payload` and `unavailableAt` that are not part of this shape).
  */
 export interface Chapter {
   chapterLookup: string | null;
@@ -74,6 +78,11 @@ export interface MdApi {
   chaptersByIds(ids: string[]): Promise<MdChapter[]>;
   /** GET /manga?ids[]=… lookups. */
   mangaByIds(ids: string[]): Promise<MdManga[]>;
+  /**
+   * Search titles by name. Used before auto-creating a title, so an existing
+   * MangaDex entry is mapped rather than duplicated.
+   */
+  searchManga(title: string, limit?: number): Promise<MdManga[]>;
   /** GET /manga/{id}/aggregate for volume backfill. */
   mangaAggregate(mangaId: string, groupId: string): Promise<unknown>;
   /** Upload-session lifecycle. */

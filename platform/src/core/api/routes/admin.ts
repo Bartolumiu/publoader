@@ -2,6 +2,8 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook, requireScope } from "../auth.js";
+import { hasScope } from "../scopes.js";
+import { MAX_BATCH_ROWS, parsePairs } from "../../store/trackedManga.js";
 import { sessionAuthenticator } from "../session.js";
 import { Manifest, EXTENSION_NAME_RE } from "../../../contracts/manifest.js";
 import { VALID_REMOVAL_MODES } from "../../store/settings.js";
@@ -337,7 +339,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     );
 
     // ---- tracked manga & extension config (DB is the config authority) ----
-    scope.get("/api/v1/admin/extensions/:name/tracked", { preHandler: requireScope("extensions:read") }, async (req, reply) => {
+    scope.get("/api/v1/admin/extensions/:name/tracked", { preHandler: requireScope("tracked:read") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
       const rows = await ctx.prisma.trackedManga.findMany({
@@ -347,12 +349,26 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { tracked: rows };
     });
 
-    scope.put("/api/v1/admin/extensions/:name/tracked", { preHandler: requireScope("extensions:write") }, async (req, reply) => {
+    scope.put("/api/v1/admin/extensions/:name/tracked", { preHandler: requireScope("tracked:append") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
       const body = z
         .object({ mangaId: z.string().min(1).max(512), mdMangaId: z.string().uuid() })
         .parse(req.body);
+      // Reachable with tracked:append, which must not be able to repoint an
+      // existing series at a different title — that is an edit, and a silent one.
+      const existing = await ctx.prisma.trackedManga.findUnique({
+        where: { extension_mangaId: { extension: name, mangaId: body.mangaId } },
+      });
+      if (
+        existing &&
+        existing.mdMangaId !== body.mdMangaId &&
+        !hasScope(req.principal!, "tracked:write")
+      ) {
+        return reply.code(403).send({
+          error: `${body.mangaId} is already mapped to ${existing.mdMangaId}; changing an existing mapping needs scope tracked:write`,
+        });
+      }
       await ctx.prisma.trackedManga.upsert({
         where: { extension_mangaId: { extension: name, mangaId: body.mangaId } },
         create: { extension: name, ...body, source: actor(req) },
@@ -362,7 +378,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { ok: true };
     });
 
-    scope.delete("/api/v1/admin/extensions/:name/tracked/:mangaId", { preHandler: requireScope("extensions:write") }, async (req) => {
+    scope.delete("/api/v1/admin/extensions/:name/tracked/:mangaId", { preHandler: requireScope("tracked:write") }, async (req) => {
       const { name, mangaId } = req.params as { name: string; mangaId: string };
       const res = await ctx.prisma.trackedManga.deleteMany({
         where: { extension: name, mangaId },
@@ -370,6 +386,74 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       await ctx.audit.record(actor(req), "tracked_manga.remove", `${name}:${mangaId}`);
       return { ok: true, removed: res.count > 0 };
     });
+
+    /**
+     * Bulk curation. `set` adds (or, with tracked:write, repoints) mappings and
+     * `remove` deletes them; `text` accepts the pasted `externalId,titleId`
+     * format so nobody has to build JSON by hand. Rows are judged individually
+     * and reported individually — a contributor pasting 200 lines needs to know
+     * which three were wrong.
+     */
+    scope.post(
+      "/api/v1/admin/extensions/:name/tracked/batch",
+      { preHandler: requireScope("tracked:append") },
+      async (req, reply) => {
+        const { name } = req.params as { name: string };
+        if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
+        const body = z
+          .object({
+            set: z
+              .array(z.object({ mangaId: z.string().min(1).max(512), mdMangaId: z.string() }))
+              .max(MAX_BATCH_ROWS)
+              .optional(),
+            remove: z.array(z.string().min(1).max(512)).max(MAX_BATCH_ROWS).optional(),
+            /** Pasted lines: `externalId,mdMangaId` (order-insensitive). */
+            text: z.string().max(512 * 1024).optional(),
+            /** Report what would happen without writing anything. */
+            dryRun: z.boolean().default(false),
+          })
+          .parse(req.body ?? {});
+
+        const parsed = body.text ? parsePairs(body.text) : { rows: [], errors: [] };
+        const set = [...(body.set ?? []), ...parsed.rows];
+        if (set.length + (body.remove?.length ?? 0) === 0 && parsed.errors.length === 0) {
+          return reply.code(400).send({ error: "nothing to do: provide set, remove, or text" });
+        }
+        if (set.length > MAX_BATCH_ROWS) {
+          return reply.code(413).send({ error: `at most ${MAX_BATCH_ROWS} rows per batch` });
+        }
+
+        const canWrite = hasScope(req.principal!, "tracked:write");
+        if (body.dryRun) {
+          // Same judgement, no writes: the dashboard previews a paste with this.
+          const preview = await ctx.trackedManga.applyBatch(
+            name,
+            { set, remove: [] },
+            { canWrite, source: "dry-run" },
+          );
+          // Undo anything the preview created.
+          const added = preview.results.filter((r) => r.outcome === "added").map((r) => r.mangaId);
+          if (added.length > 0) {
+            await ctx.prisma.trackedManga.deleteMany({
+              where: { extension: name, mangaId: { in: added }, source: "dry-run" },
+            });
+          }
+          return { dryRun: true, parseErrors: parsed.errors, ...preview };
+        }
+
+        const summary = await ctx.trackedManga.applyBatch(name, { set, remove: body.remove }, {
+          canWrite,
+          source: actor(req),
+        });
+        await ctx.audit.record(actor(req), "tracked_manga.batch", name, {
+          added: summary.added,
+          updated: summary.updated,
+          removed: summary.removed,
+          failed: summary.failed,
+        });
+        return { dryRun: false, parseErrors: parsed.errors, ...summary };
+      },
+    );
 
     scope.get("/api/v1/admin/extensions/:name/config", { preHandler: requireScope("extensions:read") }, async (req, reply) => {
       const { name } = req.params as { name: string };

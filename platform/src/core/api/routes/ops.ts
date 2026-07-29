@@ -1,11 +1,19 @@
 // Not self-registering: server.ts is owned elsewhere, so the integrator wires
 // this module in with `registerOpsRoutes(app, ctx)` next to the other route
 // modules.
+import { spawn } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { Prisma } from "@prisma/client";
+import AdmZip from "adm-zip";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook, requireScope } from "../auth.js";
+import { hasScope } from "../scopes.js";
 import { sessionAuthenticator } from "../session.js";
+import { EXTENSION_NAME_RE, Manifest } from "../../../contracts/manifest.js";
 
 /**
  * Operational visibility and triage that the legacy Discord IPC commands used
@@ -14,12 +22,24 @@ import { sessionAuthenticator } from "../session.js";
  * (`mdauth_status` / `logout`), and a merged error feed standing in for `logs`.
  *
  * The through-line is that an operator should never need a shell on the core
- * container to answer "what is stuck and why". Container logs stay where they
- * are — `docker logs` — because they describe processes, not platform state.
+ * container to answer "what is stuck and why" — or, since the dashboard grew
+ * schema status, backups and the Activity feed, to *fix* it either. Container
+ * stdout stays where it is (`docker logs`) because it describes processes; every
+ * application-level event is a row, and rows are what this module serves.
  */
 
 const UPLOAD_TASK_KINDS = ["UPLOAD", "EDIT", "DELETE", "UNAVAILABLE"] as const;
 const UPLOAD_TASK_STATES = ["PENDING", "LEASED", "DONE", "FAILED", "DEAD_LETTER"] as const;
+
+/** Bundle preflight bodies are the same zip the publish route takes. */
+const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * How far back the Activity feed and the audit search will look by default.
+ * A bounded window is what keeps a substring search over `audit_events`
+ * predictable without a full-text index (see the audit search route).
+ */
+const DEFAULT_WINDOW_HOURS = 72;
 
 /** Settings keys written by MdClient; read-only here (see core/md/client.ts). */
 const MD_ACCESS_KEY = "mdauth_access";

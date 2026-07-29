@@ -7,6 +7,7 @@ import { MdClient } from "../core/md/client.js";
 import { RunProcessor } from "../core/processor/processor.js";
 import { SettingsStore } from "../core/store/settings.js";
 import { UploadTaskStore } from "../core/store/uploadTasks.js";
+import { startMetricsServer } from "../core/observability/metricsServer.js";
 
 /**
  * core-processor: drains runs that finished ingestion into MangaDex work.
@@ -33,6 +34,16 @@ const stop = () => {
 process.on("SIGTERM", stop);
 process.on("SIGINT", stop);
 
+// Before the loop, so a port clash fails the deploy instead of leaving the
+// service unmonitored. Serves this process's registry — the upload-task depths
+// published below were previously recorded into a registry nothing could read.
+const metricsServer = await startMetricsServer({
+  service: "core-processor",
+  log,
+  prisma,
+  defaultPort: 8102,
+});
+
 log.info("core-processor started");
 while (running) {
   try {
@@ -54,5 +65,6 @@ while (running) {
   await sleep(INTERVAL_SECONDS * 1000);
 }
 
+await metricsServer.close();
 await prisma.$disconnect();
 log.info("core-processor stopped");

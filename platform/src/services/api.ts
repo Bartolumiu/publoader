@@ -6,6 +6,7 @@ import { buildServer } from "../core/api/server.js";
 import { MdClient } from "../core/md/client.js";
 import { DiscordNotifier } from "../core/md/webhook.js";
 import { TitleService } from "../core/md/titleService.js";
+import { startMetricsServer } from "../core/observability/metricsServer.js";
 
 const config = loadConfig();
 const log = createLogger("core-api", config.logLevel);
@@ -41,9 +42,30 @@ const seedOwner = async (): Promise<void> => {
   );
 };
 
+/**
+ * Metrics live on a SECOND, internal-only port — never on the public one.
+ *
+ * `config.port` is what the Cloudflare tunnel's Public Hostname points at, and
+ * cloudflared forwards every path on that hostname. A /metrics route on that
+ * port is therefore world-readable at https://<hostname>/metrics unless an edge
+ * rule happens to block it, and it names every extension, queue depth, worker
+ * and failure count. Edge rules are one forgotten click away from being absent;
+ * a separate port that nothing routes to is not.
+ *
+ * /healthz and /readyz stay on both ports: they return a bare boolean, and the
+ * container healthcheck plus compose `depends_on` already use the public one.
+ */
+const metricsServer = await startMetricsServer({
+  service: "core-api",
+  log,
+  prisma,
+  defaultPort: 8104,
+});
+
 const shutdown = async (signal: string) => {
   log.info({ signal }, "shutting down");
   await server.close();
+  await metricsServer.close();
   await prisma.$disconnect();
   process.exit(0);
 };

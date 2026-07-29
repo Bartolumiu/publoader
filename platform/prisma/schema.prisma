@@ -477,6 +477,10 @@ model Setting {
 enum AdminRole {
   OWNER
   ADMIN
+  /// Curates the series map and triages untracked series. Can ADD mappings but
+  /// not change or remove existing ones, and cannot reach runs, workers,
+  /// credentials or settings. This is the role to hand a community contributor.
+  CONTRIBUTOR
 }
 
 // Dashboard operator accounts. ALL auth state lives in Postgres: accounts,

@@ -37,8 +37,6 @@ export class SchedulerService {
 
   /** One scheduler tick. Exposed for tests; the service loop calls it forever. */
   async tick(now = new Date()): Promise<void> {
-    metrics.schedulerLagSeconds.set(0);
-
     if (await this.settings.isPaused()) {
       this.log.debug("scheduler paused; skipping slot creation");
     } else {
@@ -71,7 +69,6 @@ export class SchedulerService {
     if (sweptTasks > 0) {
       this.log.warn({ count: sweptTasks }, "requeued expired upload-task leases");
     }
-    await this.updateQueueMetrics();
   }
 
   private async createDueRuns(now: Date): Promise<void> {
@@ -170,18 +167,4 @@ export class SchedulerService {
     return { runId: run.id, created, segments: Math.max(1, segments.length) };
   }
 
-  private async updateQueueMetrics(): Promise<void> {
-    const jobCounts = await this.prisma.job.groupBy({ by: ["state"], _count: true });
-    for (const row of jobCounts) {
-      metrics.jobQueueDepth.set({ state: row.state }, row._count);
-    }
-    const depths = await this.uploadTasks.depths();
-    for (const d of depths) {
-      metrics.uploadTasks.set({ kind: d.kind, state: d.state }, d.count);
-    }
-    const workerCounts = await this.prisma.worker.groupBy({ by: ["status"], _count: true });
-    for (const row of workerCounts) {
-      metrics.workersByStatus.set({ status: row.status }, row._count);
-    }
-  }
 }

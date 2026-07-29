@@ -10,6 +10,7 @@ import { MdClient } from "../core/md/client.js";
 import { DiscordNotifier } from "../core/md/webhook.js";
 import { UploadTaskWorkers } from "../core/md/taskWorkers.js";
 import { TitleService } from "../core/md/titleService.js";
+import { startMetricsServer } from "../core/observability/metricsServer.js";
 
 /**
  * core-uploader: the only process that talks to MangaDex with write
@@ -81,6 +82,16 @@ async function publishDepths(): Promise<void> {
   }
 }
 
+// Before the loop, so a port clash fails the deploy instead of leaving the
+// service unmonitored. This endpoint is where `publoader_upload_tasks` becomes
+// scrapeable — a stalled upload queue was previously invisible.
+const metricsServer = await startMetricsServer({
+  service: "core-uploader",
+  log,
+  prisma,
+  defaultPort: 8103,
+});
+
 log.info({ kinds: KIND_ORDER, discord: notifier.enabled }, "core-uploader started");
 
 while (running) {
@@ -118,5 +129,6 @@ while (running) {
 }
 
 await workers.flushNotifications();
+await metricsServer.close();
 await prisma.$disconnect();
 log.info("core-uploader stopped");

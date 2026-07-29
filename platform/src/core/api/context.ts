@@ -11,6 +11,7 @@ import { IngestService } from "../ingest/ingest.js";
 import { SchedulerService } from "../scheduler/service.js";
 import type { TitleService } from "../md/titleService.js";
 import { ApiTokenStore } from "../store/apiTokens.js";
+import { TrackedMangaStore } from "../store/trackedManga.js";
 import { RateLimiter } from "./ratelimit.js";
 import { deriveSigningKey } from "./session.js";
 import { AdminUserStore } from "../store/adminUsers.js";
@@ -28,6 +29,7 @@ export interface AppContext {
   audit: AuditLog;
   /** Scoped per-client `pa_…` credentials. */
   apiTokens: ApiTokenStore;
+  trackedManga: TrackedMangaStore;
   ingest: IngestService;
   scheduler: SchedulerService;
   /** Present when this instance holds MangaDex credentials (api + uploader). */
@@ -57,6 +59,7 @@ export function buildContext(prisma: PrismaClient, config: Config, log: Logger):
     uploadTasks: new UploadTaskStore(prisma),
     audit: new AuditLog(prisma),
     apiTokens: new ApiTokenStore(prisma),
+    trackedManga: new TrackedMangaStore(prisma),
     ingest: new IngestService(prisma, jobs, log),
     scheduler: new SchedulerService(prisma, log, retry),
     // Enrollment is rare: keep it tight (5 attempts, refill 1/min per IP).

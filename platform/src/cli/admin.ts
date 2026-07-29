@@ -13,10 +13,9 @@
  *   USER                  sent as X-Actor so the audit trail names a human
  */
 import { Command } from "commander";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import AdmZip from "adm-zip";
+import { readFileSync, statSync } from "node:fs";
+import { resolve } from "node:path";
+import { BundleBuildError, buildExtensionBundle } from "../core/webhooks/bundleBuilder.js";
 
 const DEFAULT_API_URL = "https://publoader.ardax.dev";
 
@@ -629,127 +628,6 @@ removalMode
 // ---- bundles ----
 const bundle = program.command("bundle").description("extension bundle publishing");
 
-/** Never shipped in a bundle: build inputs and caches, not the program. */
-const ZIP_EXCLUDED = new Set(["__pycache__", ".git", "node_modules", "dist", ".turbo"]);
-
-/** Zip every file under `dir` with paths relative to it, so manifest.json is at the root. */
-function zipDirectory(dir: string): Buffer {
-  const zip = new AdmZip();
-  const walk = (current: string, prefix: string): void => {
-    for (const entry of readdirSync(current, { withFileTypes: true }).sort((a, b) =>
-      a.name.localeCompare(b.name),
-    )) {
-      if (ZIP_EXCLUDED.has(entry.name)) continue;
-      const full = join(current, entry.name);
-      if (entry.isDirectory()) walk(full, `${prefix}${entry.name}/`);
-      else if (entry.isFile()) zip.addFile(`${prefix}${entry.name}`, readFileSync(full));
-    }
-  };
-  walk(dir, "");
-  return zip.toBuffer();
-}
-
-/** What esbuild's `build` looks like to us. See buildEntrypoint for why it is typed here. */
-interface EsbuildModule {
-  build(options: Record<string, unknown>): Promise<{ errors: { text: string }[] }>;
-}
-
-/**
- * A bundle ships ONE self-contained ESM file. When the extension directory has
- * TypeScript sources (or a package.json build script implying a toolchain),
- * esbuild produces that file here, at publish time, on the operator's machine
- * — never on a worker. Workers receive pre-built, content-addressed code and
- * have no compiler, no package manager, and no reason to acquire either.
- *
- * `external: []` means dependencies are inlined: what the sha256 pins is the
- * complete program, so a worker's execution cannot be changed by anything
- * resolving differently later.
- */
-async function buildEntrypoint(root: string, source: string, outFile: string): Promise<void> {
-  let esbuild: EsbuildModule;
-  try {
-    // Resolved at run time so the CLI still works for plain-.mjs extensions on
-    // an install without esbuild (it is a devDependency, not a runtime one).
-    const specifier = "esbuild";
-    esbuild = (await import(specifier)) as EsbuildModule;
-  } catch {
-    return fail(
-      `${source} needs a build step but esbuild is not installed. ` +
-        "Run `pnpm install` in platform/, or ship a prebuilt index.mjs instead.",
-    );
-  }
-  console.log(`building ${source} -> index.mjs (esbuild)`);
-  const result = await esbuild.build({
-    entryPoints: [join(root, source)],
-    outfile: outFile,
-    bundle: true,
-    format: "esm",
-    platform: "node",
-    target: "node24",
-    external: [],
-    sourcemap: false,
-    logLevel: "silent",
-  });
-  if (result.errors.length > 0) {
-    fail(`esbuild failed:\n${result.errors.map((e) => `  ${e.text}`).join("\n")}`);
-  }
-}
-
-/** The TS entrypoint to build, or null when the directory is already plain ESM. */
-function detectSourceEntrypoint(root: string): string | null {
-  for (const candidate of ["index.ts", join("src", "index.ts")]) {
-    if (existsSync(join(root, candidate))) return candidate;
-  }
-  const pkgPath = join(root, "package.json");
-  if (existsSync(pkgPath)) {
-    try {
-      const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
-        scripts?: Record<string, string>;
-        main?: string;
-      };
-      if (pkg.scripts?.["build"]) {
-        const main = pkg.main ?? "index.ts";
-        if (existsSync(join(root, main))) return main;
-        fail(`package.json declares a build script but ${main} does not exist`);
-      }
-    } catch (err) {
-      if (err instanceof Error && err.message.includes("build script")) throw err;
-      // An unparseable package.json is not our problem unless it claimed a build.
-    }
-  }
-  return null;
-}
-
-/**
- * Stage what actually gets zipped: the built index.mjs, a manifest whose
- * entrypoint points at it, and the declared data files. Source, tests,
- * node_modules and lockfiles are deliberately left behind — a bundle is the
- * program, not the project.
- */
-function stageBuiltBundle(
-  root: string,
-  manifest: Record<string, unknown>,
-  builtFile: string,
-): string {
-  const staging = mkdtempSync(join(tmpdir(), "publoader-bundle-"));
-  copyFileSync(builtFile, join(staging, "index.mjs"));
-  writeFileSync(
-    join(staging, "manifest.json"),
-    JSON.stringify({ ...manifest, entrypoint: "index.mjs" }, null, 2) + "\n",
-  );
-  const dataFiles = (manifest["data_files"] as Record<string, string> | undefined) ?? {};
-  for (const relative of Object.values(dataFiles)) {
-    const from = join(root, relative);
-    if (!existsSync(from)) {
-      fail(`manifest data_files references ${relative}, which is not in ${root}`);
-    }
-    const to = join(staging, relative);
-    mkdirSync(dirname(to), { recursive: true });
-    copyFileSync(from, to);
-  }
-  return staging;
-}
-
 bundle
   .command("publish <dir>")
   .description("build (if needed), zip, and publish an extension as a content-addressed bundle")
@@ -766,36 +644,19 @@ bundle
     } catch {
       fail(`${root} does not exist`);
     }
-    // Validate locally so an operator gets an immediate, obvious error rather
-    // than a 422 after uploading tens of megabytes.
-    let manifest: Record<string, unknown> & { name?: string; version?: string };
+    // The same build+zip the GitHub push webhook runs (core/webhooks/
+    // bundleBuilder.ts), so both publish paths produce identical bytes — and so
+    // an operator gets an immediate, obvious error rather than a 422 after
+    // uploading tens of megabytes.
+    let built;
     try {
-      manifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
+      built = await buildExtensionBundle(root);
     } catch (err) {
-      return fail(`${join(root, "manifest.json")} missing or unreadable: ${(err as Error).message}`);
+      if (err instanceof BundleBuildError) return fail(err.message);
+      throw err;
     }
-    if (!manifest.name || !manifest.version) {
-      fail("manifest.json must declare both `name` and `version`");
-    }
-
-    const source = detectSourceEntrypoint(root);
-    let zipData: Buffer;
-    let staging: string | null = null;
-    try {
-      if (source === null) {
-        // Plain ESM (or a legacy python bundle): ship the directory as-is.
-        zipData = zipDirectory(root);
-      } else {
-        staging = mkdtempSync(join(tmpdir(), "publoader-build-"));
-        const builtFile = join(staging, "index.mjs");
-        await buildEntrypoint(root, source, builtFile);
-        const publishDir = stageBuiltBundle(root, manifest, builtFile);
-        zipData = zipDirectory(publishDir);
-        rmSync(publishDir, { recursive: true, force: true });
-      }
-    } finally {
-      if (staging) rmSync(staging, { recursive: true, force: true });
-    }
+    const { zipData, manifest } = built;
+    if (built.builtFrom) console.log(`built ${built.builtFrom} -> index.mjs (esbuild)`);
 
     console.log(
       `publishing ${manifest.name}@${manifest.version} (${(zipData.length / 1024).toFixed(1)} KiB)`,

@@ -6,7 +6,9 @@ import {
   chapterFromColumns,
   chapterFromJson,
   chapterToColumns,
+  chapterToTaskPayload,
   residualJsonKeys,
+  taskPayloadSidecarKeys,
   uploadedChapterColumns,
 } from "../../src/core/md/chapterRows.js";
 import type { Chapter } from "../../src/core/md/types.js";
@@ -144,6 +146,70 @@ describe("chapterFromJson / residualJsonKeys", () => {
   });
 
   it("lists exactly the Chapter keys that have a column", () => {
+    // Guards the mapping against a field being added to Chapter and silently
+    // becoming residue instead of a column.
+    const chapterKeys = Object.keys(full).filter((key) => key !== "imageArtifacts");
+    expect([...CHAPTER_JSON_KEYS].sort()).toEqual(chapterKeys.sort());
+  });
+});
+
+describe("chapterToTaskPayload", () => {
+  const artifacts = ["dddd1111-2222-4333-8444-555555555555"];
+
+  it("carries an EDIT task's payload and oldInfo through", () => {
+    // Regression: these were projected away, so every migrated `to_edit`
+    // document reached the uploader without the MangaDex PUT body and
+    // dead-lettered on "edit task has no payload".
+    const legacy = {
+      ...full,
+      payload: { title: "New", chapter: "12", version: 4 },
+      oldInfo: { title: "Old" },
+      _id: "6959307522f8bdc1f027c7f3",
+      images: ["deadbeefdeadbeefdeadbeef"],
+    };
+
+    const payload = chapterToTaskPayload(legacy, artifacts);
+
+    expect(payload["payload"]).toEqual({ title: "New", chapter: "12", version: 4 });
+    expect(payload["oldInfo"]).toEqual({ title: "Old" });
+    // taskWorkers reads the chapter and the sidecars off the same document.
+    expect(chapterFromJson(payload)).toEqual({ ...full, imageArtifacts: artifacts });
+  });
+
+  it("carries an UNAVAILABLE task's unavailableAt through", () => {
+    const payload = chapterToTaskPayload({ ...full, unavailableAt: "2026-07-03T10:00:00.000Z" }, []);
+    expect(payload["unavailableAt"]).toBe("2026-07-03T10:00:00.000Z");
+  });
+
+  it("carries a sidecar nobody has thought of yet", () => {
+    // The reason this is residue-based and not an allowlist.
+    const payload = chapterToTaskPayload({ ...full, futureField: { a: 1 } }, []);
+    expect(payload["futureField"]).toEqual({ a: 1 });
+  });
+
+  it("drops the Mongo id and the superseded GridFS image list", () => {
+    const payload = chapterToTaskPayload({ _id: "abc", images: ["x"] }, artifacts);
+    expect(payload).not.toHaveProperty("_id");
+    expect(payload).not.toHaveProperty("images");
+    expect(payload["imageArtifacts"]).toEqual(artifacts);
+  });
+
+  it("normalises every chapter key to present-or-null", () => {
+    const payload = chapterToTaskPayload({ chapterNumber: "12" }, []);
+    for (const key of CHAPTER_JSON_KEYS) expect(payload).toHaveProperty(key);
+    expect(payload["chapterTitle"]).toBeNull();
+    expect(payload["chapterNumber"]).toBe("12");
+  });
+
+  it("reports the sidecars it carried and nothing else", () => {
+    const payload = chapterToTaskPayload({ ...full, payload: {}, oldInfo: {} }, artifacts);
+    expect(taskPayloadSidecarKeys(payload).sort()).toEqual(["oldInfo", "payload"]);
+    expect(taskPayloadSidecarKeys(chapterToTaskPayload({ ...full }, artifacts))).toEqual([]);
+  });
+});
+
+describe("mapping key set", () => {
+  it("keeps the promoted key list in step with Chapter", () => {
     // Guards the mapping against a field being added to Chapter and silently
     // becoming residue instead of a column.
     const chapterKeys = Object.keys(full).filter((key) => key !== "imageArtifacts");

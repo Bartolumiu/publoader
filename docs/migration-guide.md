@@ -162,8 +162,9 @@ timestamps there; the transient `upload_tasks.chapter` payload keeps them as
 ISO-8601 strings inside JSONB. Any key a legacy document carries that has no
 column (`_id`, the GridFS `images` list, `archivedAt`) is parked in that table's
 nullable `extra` JSONB rather than dropped, so a migrated row stays traceable
-back to Mongo — see §3.1 of `target-architecture.md`. The importer reports any
-key it dropped from a *queue* payload at the end of the run.
+back to Mongo — see §3.1 of `target-architecture.md`. Queue documents keep their
+non-chapter sidecars (`payload`, `oldInfo`, `unavailableAt`) in the JSONB
+payload, since the upload workers read them alongside the chapter.
 Images larger than 20 MiB are skipped with a warning (they are not real pages).
 
 > **Not migrated here:** `manga_id_map.json` and `override_options.json` never
@@ -186,10 +187,11 @@ It exits non-zero if `inserted + skipped ≠ source` for any collection — that
 means rows were read but neither written nor deliberately skipped, and you
 should stop and investigate rather than cut over.
 
-It also lists legacy queue fields that are not part of the canonical
-`ChapterRecord` shape and were therefore dropped from the task payload. Read
-that list once: if anything on it matters to your extensions, fix it before
-stage 5 rather than discovering it after.
+It also lists the non-chapter fields it carried through into the task payload.
+Nothing is dropped — an `EDIT` task cannot execute without its `payload` (the
+literal MangaDex PUT body) and an `UNAVAILABLE` task reads `unavailableAt`, so
+anything that is not a chapter field rides along verbatim. Read the list once as
+a sanity check that the queues look like you expect.
 
 > **Run one instance at a time.** Two concurrent passes can write image
 > artifacts whose owning upload task then loses the `ON CONFLICT` race, leaving

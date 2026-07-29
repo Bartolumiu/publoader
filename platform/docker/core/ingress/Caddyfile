@@ -26,7 +26,7 @@
 	# Operational endpoints are for the internal network and a Prometheus
 	# scraper, not the public internet: /metrics names every extension, queue
 	# depth and worker, and the health probes are a free liveness oracle.
-	# Prometheus should scrape core-api:8100 over the compose network instead.
+	# Prometheus should scrape core-api:8104 (METRICS_PORT) over the compose network instead.
 	@internal_only path /metrics /metrics/* /healthz /readyz
 	respond @internal_only 404
 

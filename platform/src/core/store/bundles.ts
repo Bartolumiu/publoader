@@ -104,21 +104,14 @@ export class BundleStore {
     // Falls back to the conventional filename when data_files doesn't map it.
     const idMap = readJson(manifest.data_files["manga_id_map"] ?? "manga_id_map.json");
     if (idMap && typeof idMap === "object" && !Array.isArray(idMap)) {
-      const rows: { extension: string; mangaId: string; mdMangaId: string; source: string }[] = [];
+      const rows: { extension: string; mangaId: string; mdMangaId: string }[] = [];
       for (const [mdMangaId, externals] of Object.entries(idMap as Record<string, unknown>)) {
         if (!Array.isArray(externals)) continue;
         for (const external of externals) {
-          rows.push({
-            extension: manifest.name,
-            mangaId: String(external),
-            mdMangaId,
-            source: "bundle-import",
-          });
+          rows.push({ extension: manifest.name, mangaId: String(external), mdMangaId });
         }
       }
-      if (rows.length > 0) {
-        await this.prisma.trackedManga.createMany({ data: rows, skipDuplicates: true });
-      }
+      await this.reconcileTrackedManga(manifest.name, rows);
     }
 
     // override_options.json -> ExtensionConfig (create-only; DB wins afterwards).
@@ -130,6 +123,71 @@ export class BundleStore {
         update: {},
       });
     }
+  }
+
+  /**
+   * Reconcile the bundle's `manga_id_map.json` against the tracked table.
+   *
+   * The database is authoritative for the tracked map, but contributors still
+   * add series by editing that file and opening a pull request — so a publish
+   * has to honour the file without trampling decisions made after it.
+   * `source` is what makes that possible:
+   *
+   *   - a NEW pair is inserted (this is the contributor workflow, and it works);
+   *   - a pair whose row came from a previous import (`bundle-import`) is
+   *     UPDATED, so correcting a wrong id in git actually takes effect — the
+   *     previous create-only behaviour silently ignored those edits, which is a
+   *     bad thing to discover after opening a PR;
+   *   - a row an operator set by hand (`operator:…`) or the title pipeline
+   *     created (`auto`) is LEFT ALONE, because it represents a later, more
+   *     informed decision than the file's.
+   *
+   * Nothing is ever deleted here: removing a line from the map must not silently
+   * stop a series from being tracked. Untracking is an explicit operator action
+   * (dashboard, `publoader-admin tracked remove`, or the bot).
+   */
+  private async reconcileTrackedManga(
+    extension: string,
+    rows: { extension: string; mangaId: string; mdMangaId: string }[],
+  ): Promise<{ added: number; updated: number; preserved: number }> {
+    if (rows.length === 0) return { added: 0, updated: 0, preserved: 0 };
+
+    const existing = await this.prisma.trackedManga.findMany({
+      where: { extension },
+      select: { mangaId: true, mdMangaId: true, source: true },
+    });
+    const byMangaId = new Map(existing.map((row) => [row.mangaId, row]));
+
+    const toInsert: typeof rows = [];
+    const toUpdate: { mangaId: string; mdMangaId: string }[] = [];
+    let preserved = 0;
+
+    for (const row of rows) {
+      const current = byMangaId.get(row.mangaId);
+      if (!current) {
+        toInsert.push(row);
+      } else if (current.mdMangaId === row.mdMangaId) {
+        // Already correct; nothing to do.
+      } else if (current.source === "bundle-import") {
+        toUpdate.push({ mangaId: row.mangaId, mdMangaId: row.mdMangaId });
+      } else {
+        preserved += 1;
+      }
+    }
+
+    if (toInsert.length > 0) {
+      await this.prisma.trackedManga.createMany({
+        data: toInsert.map((row) => ({ ...row, source: "bundle-import" })),
+        skipDuplicates: true,
+      });
+    }
+    for (const row of toUpdate) {
+      await this.prisma.trackedManga.updateMany({
+        where: { extension, mangaId: row.mangaId, source: "bundle-import" },
+        data: { mdMangaId: row.mdMangaId },
+      });
+    }
+    return { added: toInsert.length, updated: toUpdate.length, preserved };
   }
 
   /** Latest non-yanked bundle per extension (the scheduler's default pin). */
@@ -200,10 +258,33 @@ function assertNodeEntrypoint(manifest: Manifest, zipData: Buffer): void {
   if (source.trim().length === 0) {
     throw new BundleRejectedError(`entrypoint ${manifest.entrypoint} is empty`);
   }
-  if (!source.includes("export default") && !source.includes("exports.default")) {
+  if (!DEFAULT_EXPORT_RE.test(source)) {
     throw new BundleRejectedError(
       `entrypoint ${manifest.entrypoint} has no default export; an extension must ` +
         "default-export an ExtensionFactory",
     );
   }
 }
+
+/**
+ * Recognise a default export in the forms a bundler actually emits.
+ *
+ * A plain `source.includes("export default")` looked sufficient and was not:
+ * esbuild rewrites `export default factory` into `export { factory as default }`
+ * when it bundles, so every TypeScript extension built through the publish
+ * pipeline would have been rejected with "has no default export" — a confusing
+ * failure for a bundle that is completely correct.
+ *
+ * This stays a cheap textual check on purpose. The authoritative validation is
+ * the runner importing the module and refusing it if `default` is not a
+ * function; the point here is only to fail fast at publish, while an operator is
+ * watching, for the obvious mistake of shipping a module with no default at all.
+ */
+const DEFAULT_EXPORT_RE = new RegExp(
+  [
+    "export\\s+default",           // export default factory
+    "as\\s+default\\s*[},]",       // export { factory as default }
+    "exports\\.default",           // CJS interop
+    'exports\\[["\']default',      // exports["default"]
+  ].join("|"),
+);

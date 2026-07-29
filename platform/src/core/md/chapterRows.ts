@@ -200,6 +200,43 @@ export function chapterFromJson(raw: Record<string, unknown>): Chapter {
 }
 
 /**
+ * A chapter-shaped document as an `upload_tasks.chapter` payload: every chapter
+ * key present (defaulting to null), `imageArtifacts` set from the caller, and
+ * every other key carried through verbatim.
+ *
+ * Carrying the residue is the point. Task payloads are NOT the canonical
+ * chapter shape — EDIT rows need `payload` (the literal MangaDex PUT body) and
+ * `oldInfo`, UNAVAILABLE rows need `unavailableAt` — and they are read
+ * tolerantly by `chapterFromJson` plus a direct lookup for those sidecars, not
+ * validated against ChapterRecord. Projecting a document down to the chapter
+ * keys silently strips the sidecars, which makes an EDIT task unexecutable
+ * ("edit task has no payload"). An allowlist of the sidecars known today would
+ * break again the next time a task kind grows a field.
+ *
+ * `_id` and `images` are dropped: neither is a queue field, and `images` (the
+ * legacy GridFS list) is superseded by `imageArtifacts`.
+ */
+export function chapterToTaskPayload(
+  raw: Record<string, unknown>,
+  imageArtifacts: string[],
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const key of CHAPTER_JSON_KEYS) payload[key] = raw[key] ?? null;
+
+  for (const [key, value] of Object.entries(residualJsonKeys(raw))) {
+    if (key === "_id" || key === "images") continue;
+    payload[key] = value;
+  }
+  payload["imageArtifacts"] = imageArtifacts;
+  return payload;
+}
+
+/** The keys `chapterToTaskPayload` carried that are not part of the chapter. */
+export function taskPayloadSidecarKeys(payload: Record<string, unknown>): string[] {
+  return Object.keys(payload).filter((key) => key !== "imageArtifacts" && !PROMOTED.has(key));
+}
+
+/**
  * Everything in a chapter-shaped document that has no column, so it can be
  * parked in `extra` instead of vanishing. `imageArtifacts` is excluded because
  * `chapterFromJson` already lifts it onto the Chapter.

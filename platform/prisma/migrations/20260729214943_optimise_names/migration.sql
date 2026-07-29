@@ -19,12 +19,16 @@ ALTER TABLE "unavailable_chapters" RENAME COLUMN "data" TO "chapter";
 -- Done as add-column / UPDATE / swap rather than ALTER COLUMN … USING, because
 -- unnesting a jsonb array needs a subquery and Postgres rejects subqueries in a
 -- USING transform ("cannot use subquery in transform expression").
+-- The jsonb_typeof guard on each of these three UPDATEs is load-bearing:
+-- jsonb_array_elements_text() raises on a non-array, which would abort the whole
+-- migration rather than leaving one odd row with an empty array.
 ALTER TABLE "api_tokens" ADD COLUMN "scopes_arr" TEXT[] DEFAULT ARRAY[]::TEXT[];
 UPDATE "api_tokens"
   SET "scopes_arr" = COALESCE(
     (SELECT array_agg(value) FROM jsonb_array_elements_text("scopes") AS value),
     '{}'::TEXT[]
-  );
+  )
+  WHERE jsonb_typeof("scopes") = 'array';
 ALTER TABLE "api_tokens" DROP COLUMN "scopes";
 ALTER TABLE "api_tokens" RENAME COLUMN "scopes_arr" TO "scopes";
 ALTER TABLE "api_tokens" ALTER COLUMN "scopes" SET NOT NULL;

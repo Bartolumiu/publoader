@@ -72,6 +72,24 @@ const ConfigSchema = z.object({
   discordClientId: z.string().optional(),
   discordClientSecret: z.string().optional(),
 
+  // GitHub push webhook (core-api only). See docs/webhooks.md — CI-side
+  // publishing is the preferred alternative to all of this.
+  /**
+   * Shared HMAC secret for X-Hub-Signature-256. The endpoint is
+   * unauthenticated by design, so this IS the credential: with it unset the
+   * webhook refuses every delivery rather than accepting unsigned ones.
+   */
+  githubWebhookSecret: z.string().min(16).optional(),
+  /** Required to match the owner in `repository.full_name`, case-insensitively. */
+  githubRepoOwner: z.string().default("publoader"),
+  /** Comma-separated repo names whose pushes publish extension bundles. */
+  githubExtensionsRepos: z.string().default(""),
+  /** Repo name for the core service; pushes to it are acknowledged, not acted on. */
+  githubCoreRepo: z.string().default(""),
+  /** Read access to the extensions repos. Required for the private one. */
+  githubToken: z.string().optional(),
+  githubApiUrl: z.string().default("https://api.github.com"),
+
   // Worker agent settings (worker process only)
   coreUrl: z.string().optional(),
   workerToken: z.string().optional(),
@@ -125,6 +143,12 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): Con
     dashPublicUrl: get("DASH_PUBLIC_URL"),
     discordClientId: get("DISCORD_CLIENT_ID"),
     discordClientSecret: get("DISCORD_CLIENT_SECRET"),
+    githubWebhookSecret: get("GITHUB_WEBHOOK_SECRET"),
+    githubRepoOwner: get("GITHUB_REPO_OWNER"),
+    githubExtensionsRepos: get("GITHUB_EXTENSIONS_REPOS"),
+    githubCoreRepo: get("GITHUB_CORE_REPO"),
+    githubToken: get("GITHUB_TOKEN"),
+    githubApiUrl: get("GITHUB_API_URL"),
     coreUrl: get("CORE_URL"),
     workerToken: get("WORKER_TOKEN"),
     enrollToken: get("ENROLL_TOKEN"),

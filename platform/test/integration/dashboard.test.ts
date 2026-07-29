@@ -491,7 +491,9 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
 
   it("does not let the root mount shadow the internal endpoints", async () => {
     expect((await app.inject({ method: "GET", url: "/healthz" })).json()).toMatchObject({ ok: true });
-    expect((await app.inject({ method: "GET", url: "/metrics" })).headers["content-type"]).toContain("text/plain");
+    // /metrics is served only on the internal METRICS_PORT: the public
+    // hostname forwards every path, so it must not exist here.
+    expect((await app.inject({ method: "GET", url: "/metrics" })).statusCode).toBe(404);
     // There is no root-level wildcard, so an unknown top-level path still 404s.
     expect((await app.inject({ method: "GET", url: "/not-a-page" })).statusCode).toBe(404);
 

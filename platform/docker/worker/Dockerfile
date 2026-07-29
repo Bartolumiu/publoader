@@ -119,14 +119,21 @@ USER 10001:10001
 # publish, no listener to firewall, and no reason for a worker host to be
 # reachable from the internet.
 
-# Liveness via a heartbeat file the agent rewrites while its lease loop is
-# turning (same technique as the legacy scheduler's /tmp heartbeat). A wedged
-# agent — blocked on a hung extension subprocess, stuck socket — keeps its
-# process alive and would otherwise never be restarted.
-# A MISSING file is treated as healthy on purpose: the agent writes it once
-# started, and a slow first boot (enrollment, bundle download) must not be
-# killed. Staleness is what indicates a wedge.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD ["node", "-e", "const fs=require('fs'),p=(process.env.WORKER_STATE_PATH||'/var/lib/publoader-worker')+'/heartbeat';let s;try{s=fs.statSync(p)}catch{process.exit(0)}process.exit(Date.now()-s.mtimeMs<180000?0:1)"]
+# Liveness via the heartbeat file services/worker.ts refreshes on every piece of
+# work-related traffic with the core (lease polls while idle, lease renewals
+# while a job runs). A wedged agent — one whose loop stopped turning but whose
+# process is still alive — is the failure `restart: unless-stopped` cannot see,
+# and this is what catches it.
+#
+# A MISSING file is UNHEALTHY. The previous version exited 0 when the file was
+# absent, and nothing in the tree ever wrote it, so the probe could not fail at
+# all: every worker reported healthy forever, wedged or not. The entry point now
+# writes the file before enrolling, so absent genuinely means "never started".
+#
+# WORKER_HEARTBEAT_MAX_AGE_SECONDS must stay above both the lease long-poll wait
+# and one third of the core's LEASE_TTL_SECONDS (the renewal interval); 600s
+# clears the shipped defaults (25s and 100s) with room to spare.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=3 \
+  CMD ["node", "-e", "const fs=require('fs'),p=(process.env.WORKER_STATE_PATH||'/var/lib/publoader-worker')+'/heartbeat',max=Number(process.env.WORKER_HEARTBEAT_MAX_AGE_SECONDS||600)*1000;let s;try{s=fs.statSync(p)}catch{console.error('no heartbeat file at '+p);process.exit(1)}const age=Date.now()-s.mtimeMs;if(age>max){console.error('heartbeat stale by '+Math.round(age/1000)+'s');process.exit(1)}"]
 
 CMD ["node", "dist/src/services/worker.js"]

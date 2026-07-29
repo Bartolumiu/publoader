@@ -26,10 +26,11 @@ import { randomUUID, createHash } from "node:crypto";
 import { GridFSBucket, MongoClient, ObjectId, type Db, type Document } from "mongodb";
 import { Prisma, PrismaClient } from "@prisma/client";
 import {
-  CHAPTER_JSON_KEYS,
   chapterFromJson,
   chapterToColumns,
+  chapterToTaskPayload,
   residualJsonKeys,
+  taskPayloadSidecarKeys,
   type ChapterColumns,
 } from "../core/md/chapterRows.js";
 import { uploadDedupeKey } from "../core/store/uploadTasks.js";
@@ -121,7 +122,8 @@ function date(value: unknown): Date | null {
   return null;
 }
 
-const droppedKeys = new Map<string, number>();
+/** Non-chapter keys seen on queue documents, reported at the end of the run. */
+const carriedKeys = new Map<string, number>();
 
 /**
  * A legacy history document mapped onto the typed chapter columns the four
@@ -142,22 +144,23 @@ function chapterColumnsFromDoc(doc: Document, ownColumns: string[] = []): Chapte
 }
 
 /**
- * Project a legacy queue document down to the strict ChapterRecord shape the
- * uploader parses. Dropped keys are counted and reported at the end rather
- * than silently discarded.
+ * A legacy queue document as the `upload_tasks.chapter` payload.
+ *
+ * This USED TO project the document down to the canonical chapter keys, on the
+ * stated premise that the uploader parses the strict ChapterRecord schema. It
+ * does not — ChapterRecord validates worker *envelopes*; task rows are read
+ * tolerantly. The projection threw away the sidecar fields the upload workers
+ * read alongside the chapter, so a migrated `to_edit` document arrived without
+ * its `payload` and taskWorkers rejected it with "edit task has no payload",
+ * dead-lettering every migrated edit. The shape now lives in chapterRows.ts
+ * next to the rest of the Chapter <-> storage mapping.
  */
 function toChapterRecord(doc: Document, imageArtifacts: string[]): Record<string, unknown> {
-  const full = asRecord(doc);
-  const out: Record<string, unknown> = {};
-  for (const key of CHAPTER_JSON_KEYS) out[key] = full[key] ?? null;
-  out["imageArtifacts"] = imageArtifacts;
-  for (const key of Object.keys(full)) {
-    if (key === "_id" || key === "images") continue;
-    if (!(CHAPTER_JSON_KEYS as readonly string[]).includes(key)) {
-      droppedKeys.set(key, (droppedKeys.get(key) ?? 0) + 1);
-    }
+  const payload = chapterToTaskPayload(asRecord(doc), imageArtifacts);
+  for (const key of taskPayloadSidecarKeys(payload)) {
+    carriedKeys.set(key, (carriedKeys.get(key) ?? 0) + 1);
   }
-  return out;
+  return payload;
 }
 
 // ----------------------------------------------------------------- migration
@@ -593,12 +596,13 @@ async function main(): Promise<void> {
       `images: ${imageStats.fetched} fetched (${(imageStats.bytes / 1024 / 1024).toFixed(1)} MiB), ` +
         `${imageStats.missing} missing, ${imageStats.oversize} over the ${MAX_ARTIFACT_BYTES}-byte cap`,
     );
-    if (droppedKeys.size > 0) {
+    if (carriedKeys.size > 0) {
       console.log("");
-      console.log("legacy queue fields not present in ChapterRecord (dropped from the task payload):");
-      for (const [key, count] of [...droppedKeys].sort((a, b) => b[1] - a[1])) {
+      console.log("non-chapter fields carried through into the task payload:");
+      for (const [key, count] of [...carriedKeys].sort((a, b) => b[1] - a[1])) {
         console.log(`  ${key}: ${count}`);
       }
+      console.log("  (EDIT tasks need `payload`; UNAVAILABLE tasks use `unavailableAt`)");
     }
 
     if (mismatched) {

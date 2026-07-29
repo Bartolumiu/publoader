@@ -175,8 +175,10 @@ services:
     mem_limit: 512m
 
   # --- core-api -------------------------------------------------------------
-  # The only service with a listening socket, and the only thing workers ever
-  # talk to. Serves two audiences with strictly separated token types
+  # The only service that serves *traffic*, and the only thing workers ever talk
+  # to. (The other three now bind a metrics/health port on the internal network
+  # — see core-scheduler — but nothing routes to them.) Serves two audiences
+  # with strictly separated token types
   # (§8/auth.ts): /api/v1/worker/* for the fleet, /api/v1/admin/* for the
   # operator CLI, Discord bot and dashboard.
   #
@@ -193,6 +195,12 @@ services:
       <<: *core-env
       PORT: "8100"
       HOST: 0.0.0.0
+      # Metrics are NOT on 8100. The tunnel forwards every path on the public
+      # hostname, so a /metrics route on the public port would be world-readable
+      # (it names every extension, queue depth and worker) the moment an edge
+      # rule is missing. 8104 is exposed to the compose network only and nothing
+      # routes to it — the guarantee is structural, not a WAF rule.
+      METRICS_PORT: "8104"
       # Bearer token for /api/v1/admin/*. If unset the admin API answers 503 —
       # it fails closed rather than open. Mint with: openssl rand -base64 48
       ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
@@ -209,7 +217,11 @@ services:
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
     expose:
+      # 8100: the tunnel's origin (API, dashboard, /healthz, /readyz).
+      # 8104: /metrics + the same health probes, for Prometheus. Reachable from
+      # the compose network only, and the tunnel is not configured to it.
       - "8100"
+      - "8104"
     networks:
       - data
       - edge
@@ -235,17 +247,33 @@ services:
         condition: service_completed_successfully
     environment:
       <<: *core-env
+      METRICS_PORT: "8101"
+      HOST: 0.0.0.0
+    # Internal only, like core-api's 8100: /metrics is unauthenticated and leaks
+    # queue and fleet topology, so it must never be published on the host or
+    # routed through the tunnel. Prometheus scrapes it over this compose network
+    # at http://core-scheduler:8101/metrics — put the scraper on the `data`
+    # network (or on `edge` plus an `expose` here) rather than opening a port.
+    expose:
+      - "8101"
     networks:
       - data
     command: ["node", "dist/src/services/scheduler.js"]
-    # No listening socket and no heartbeat file, so the image's HTTP probe
-    # cannot apply. Docker restarts it if the process exits; a *hung* loop is
-    # detected out-of-band via scheduler lag on core-api's /metrics rather than
-    # by an autoheal container — deliberately, because autoheal requires
-    # mounting docker.sock into the stack, which is a far bigger risk than the
-    # failure mode it fixes.
+    # A hung tick loop is the failure that matters here, and it is now visible:
+    # the process publishes publoader_scheduler_last_tick_timestamp_seconds,
+    # which ages on its own when the loop stops (see src/metrics.ts for why a
+    # "seconds since" gauge could not). /healthz only proves the process
+    # answers, so it stays the container probe while the stall alert lives in
+    # Prometheus — nothing here restarts on unhealthy, deliberately: autoheal
+    # would require mounting docker.sock into the stack, a far bigger risk than
+    # the failure it fixes.
     healthcheck:
-      disable: true
+      test:
+        ["CMD", "node", "-e", "fetch('http://127.0.0.1:8101/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     mem_limit: 512m
     stop_grace_period: 30s
 
@@ -260,12 +288,26 @@ services:
         condition: service_completed_successfully
     environment:
       <<: [*core-env, *md-env]
+      METRICS_PORT: "8102"
+      HOST: 0.0.0.0
+    # Internal only (see the note on core-scheduler). Scrape
+    # http://core-processor:8102/metrics from inside the compose network.
+    expose:
+      - "8102"
     networks:
       - data
       - edge
     command: ["node", "dist/src/services/processor.js"]
+    # /healthz is liveness only; /readyz on the same port is the Postgres-aware
+    # probe and is deliberately not wired here, so a Postgres restart does not
+    # cascade into killing the processor.
     healthcheck:
-      disable: true
+      test:
+        ["CMD", "node", "-e", "fetch('http://127.0.0.1:8102/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     # Chapter/manga fan-out over many extensions is the memory-hungriest read
     # path in the control plane.
     mem_limit: 1g
@@ -287,12 +329,27 @@ services:
         condition: service_completed_successfully
     environment:
       <<: [*core-env, *md-env]
+      METRICS_PORT: "8103"
+      HOST: 0.0.0.0
+    # Internal only (see the note on core-scheduler). Scrape
+    # http://core-uploader:8103/metrics from inside the compose network — this
+    # is where publoader_upload_tasks{state="DEAD_LETTER"} becomes visible.
+    expose:
+      - "8103"
     networks:
       - data
       - edge
     command: ["node", "dist/src/services/uploader.js"]
+    # Liveness only, and note what it does NOT cover: this loop can be idle for
+    # a long time legitimately (paused, empty queues), so a stalled queue is an
+    # alert on publoader_upload_tasks, not a container probe.
     healthcheck:
-      disable: true
+      test:
+        ["CMD", "node", "-e", "fetch('http://127.0.0.1:8103/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     # Holds decoded page images in memory while committing a chapter.
     mem_limit: 1536m
     tmpfs:
@@ -366,9 +423,10 @@ services:
   #
   # WAF / rules — these are load-bearing, not optional. Configure in the
   # Cloudflare dashboard (full rule text in docs/deployment.md):
-  #   * BLOCK /metrics, /healthz and /readyz from the internet. They are for
-  #     the internal network only (see server.ts) — /metrics leaks fleet and
-  #     queue topology, and none of the three requires authentication.
+  #   * BLOCK /healthz and /readyz from the internet. Neither requires
+  #     authentication. /metrics is no longer served on 8100 at all — it lives on
+  #     the internal-only 8104 — so the tunnel cannot reach it even with no rule
+  #     in place; keep a block rule anyway as defence in depth.
   #   * RATE LIMIT /api/v1/worker/enroll hard (a handful per hour per IP). It
   #     is the one unauthenticated write endpoint; the in-process limiter is a
   #     backstop, not the front line.

@@ -16,6 +16,12 @@ import { JobCancelledError, JobExecutor } from "./executor.js";
 
 const HEARTBEAT_INTERVAL_MS = 60_000;
 /** How long to idle after the core says we're drained or paused. */
+/**
+ * Floor on the gap between empty lease polls. Small enough that picking up
+ * work still feels immediate, large enough that a fast-204 core cannot be
+ * hammered. Long-polling means this rarely applies.
+ */
+const IDLE_SLEEP_MS = 1_000;
 const DRAINED_SLEEP_MS = 60_000;
 const LEASE_ERROR_BASE_MS = 2_000;
 const LEASE_ERROR_MAX_MS = 60_000;
@@ -127,6 +133,16 @@ export class WorkerAgent {
           if (outcome.drained) {
             this.log.info("worker is drained or paused; idling");
             await sleep(DRAINED_SLEEP_MS);
+          } else {
+            // An empty 204 is SUPPOSED to arrive only after the core has held
+            // the poll for waitSeconds, so this branch is normally already
+            // paced. But that makes our request rate depend entirely on the
+            // server choosing to be slow: point a worker at a core that answers
+            // 204 immediately — misconfigured waitSeconds, a proxy that buffers,
+            // an older core — and this loop spins as fast as the network allows
+            // (measured: ~190k requests in 18s against a stub). A client must
+            // pace itself rather than trust the server to do it.
+            await sleep(IDLE_SLEEP_MS);
           }
           continue;
         }

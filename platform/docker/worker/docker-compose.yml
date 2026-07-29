@@ -60,6 +60,11 @@ services:
       WORKER_STATE_PATH: /var/lib/publoader-worker
       LOG_LEVEL: ${LOG_LEVEL:-info}
       RUNNER_EXTRA_ARGS: ${RUNNER_EXTRA_ARGS:-}
+      # How stale the liveness heartbeat may get before the container is marked
+      # unhealthy. Raise it only if you also raised the core's LEASE_TTL_SECONDS
+      # — the agent renews a lease every TTL/3, and that is the slowest signal
+      # the heartbeat has while a long job runs.
+      WORKER_HEARTBEAT_MAX_AGE_SECONDS: ${WORKER_HEARTBEAT_MAX_AGE_SECONDS:-600}
 
     volumes:
       # The worker token and bundle cache. A named volume, not a bind mount, so
@@ -122,8 +127,12 @@ services:
         max-file: "5"
 
     # Uses the image's HEALTHCHECK: the agent's heartbeat file must stay fresh.
-    # Catches the failure mode restart-on-exit cannot — a wedged agent stuck on
-    # a hung extension, which stays "running" forever while leasing nothing.
+    # Catches the failure mode restart-on-exit cannot — an agent that stays
+    # "running" forever while its lease loop no longer turns. Docker only
+    # *reports* unhealthy; nothing restarts on it, so watch `docker compose ps`
+    # or scrape the docker socket from outside this stack. An autoheal sidecar
+    # would need docker.sock mounted into the worker host, which is a worse
+    # trade than the failure it fixes (same reasoning as the core stack).
 
 volumes:
   # Holds the worker's identity. Deleting it means re-enrolling (and leaves a

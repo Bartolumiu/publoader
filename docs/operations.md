@@ -439,7 +439,9 @@ and it has not moved after two sweep intervals, the scheduler is not running:
 ```bash
 docker compose ps core-scheduler
 docker compose logs --tail 100 core-scheduler
-curl -s http://core-api:8100/metrics | grep publoader_scheduler_lag_seconds
+# Unix time of the last COMPLETED tick. Compare it against `date +%s`: more
+# than two intervals behind means the loop is not turning.
+curl -s http://core-scheduler:8101/metrics | grep publoader_scheduler_last_tick
 ```
 
 ---
@@ -796,7 +798,10 @@ Symptom: `publoader_lease_expiries_total` climbing fast, jobs cycling
 little or nothing succeeding.
 
 ```bash
-curl -s http://core-api:8100/metrics | grep -E 'lease_expiries|jobs_requeued|job_queue_depth'
+# Lease/queue metrics are recorded by the scheduler process, so they are on the
+# scheduler's port — prom-client registries are per-process (see "Which service
+# serves which metric" below).
+curl -s http://core-scheduler:8101/metrics | grep -E 'lease_expiries|jobs_requeued|job_queue_depth'
 padmin workers list      # heartbeat ages
 ```
 
@@ -1011,7 +1016,8 @@ surviving worker claims it → `SUCCEEDED`.
 ```bash
 padmin runs show <runId>            # state PROCESSED
 padmin quarantine                   # still empty
-curl -s http://core-api:8100/metrics | grep -E 'lease_expiries|envelopes_(committed|superseded)'
+curl -s http://core-api:8104/metrics | grep -E 'envelopes_(committed|superseded)'
+curl -s http://core-scheduler:8101/metrics | grep lease_expiries
 ```
 
 `publoader_lease_expiries_total` should have incremented by one.
@@ -1038,9 +1044,72 @@ nothing is quarantined, and no chapter is uploaded twice.
 
 ## Monitoring quick reference
 
-`/metrics` on `core-api` (Prometheus format). It is **not** authenticated and
-must be blocked at the Cloudflare edge — it leaks fleet and queue topology.
-Scrape it from inside the compose network.
+Every core service serves `/metrics`, `/healthz` and `/readyz` (Prometheus text
+format) on an internal-only metrics port, reachable **only** from the compose
+network:
+
+| Service | Metrics port | Public port | Env override |
+|---|---|---|---|
+| `core-api` | 8104 | 8100 (API, dashboard, health) | `METRICS_PORT` / `PORT` |
+| `core-scheduler` | 8101 | — | `METRICS_PORT` |
+| `core-processor` | 8102 | — | `METRICS_PORT` |
+| `core-uploader` | 8103 | — | `METRICS_PORT` |
+
+**`/metrics` is deliberately unreachable from the public hostname.** The
+Cloudflare tunnel's Public Hostname maps `publoader.ardax.dev` to a single
+origin — `core-api:8100` — and cloudflared forwards *every* path on that
+hostname. So `/metrics` is not served on 8100 at all: it lives on 8104, which
+nothing routes to. That makes the guarantee structural rather than a WAF rule
+someone can forget; `https://publoader.ardax.dev/metrics` returns 404 from the
+API's own router even before the edge rules are considered. The direct-ingress
+path (`docker/core/ingress/Caddyfile`) 404s it too.
+
+`/healthz` and `/readyz` remain on the public port because the container
+healthcheck and compose `depends_on` use them, and they return only
+`{"ok":true}` / `{"ok":false,"reason":"database unreachable"}` — a boolean and a
+fixed string, no topology.
+
+Nothing is authenticated, and the compose file uses `expose:`, never `ports:`,
+so nothing is on the host either. Point Prometheus at the service names over
+the compose network:
+
+```yaml
+scrape_configs:
+  - job_name: publoader
+    static_configs:
+      - targets:
+          - core-api:8104        # NOT 8100 — metrics are on the internal port
+          - core-scheduler:8101
+          - core-processor:8102
+          - core-uploader:8103
+```
+
+Put the scraper on the stack's `data` network (or on `edge` with the same
+`expose` ports) rather than publishing anything.
+
+### Which service serves which metric
+
+This matters, because a `prom-client` registry is per-process: a metric is only
+visible on the port of the process that records it. Scraping the wrong one
+returns a *missing* series, not a zero.
+
+| Recorded by | Metrics |
+|---|---|
+| `core-api` | `envelopes_*`, `jobs_succeeded_total`, `jobs_requeued_total`, `job_duration_seconds` — everything driven by an inbound worker request |
+| `core-scheduler` | `scheduler_last_tick_timestamp_seconds`, `job_queue_depth`, `dead_letter_jobs`, `oldest_pending_job_age_seconds`, `runs`, `oldest_ingesting_run_age_seconds`, `result_submissions`, `artifact_rows`, `artifact_bytes`, `workers`, `jobs_created_total`, `lease_expiries_total`, `jobs_requeued_total`, `jobs_dead_letter_total`, `upload_tasks` |
+| `core-uploader` | `md_uploads_total`, `upload_tasks` (its own live view of the queue it drains) |
+| `core-processor` | `upload_tasks` (the queue it fills) |
+
+Two consequences worth knowing before you write a query:
+
+- `upload_tasks` is published by three processes. Aggregate with
+  `max by (kind, state) (publoader_upload_tasks)` — summing triple-counts.
+- `jobs_requeued_total` is incremented in two processes for two different
+  reasons (`reason="lease_expired"` by the scheduler, transient failures by the
+  API), so `sum without (instance, job) (...)` is the fleet-wide number.
+- `publoader_jobs_leased_total` is declared but **never incremented** — no lease
+  route records it. Treat it as absent, and use `publoader_job_queue_depth` and
+  `publoader_jobs_succeeded_total` instead.
 
 Metric names are defined in `platform/src/metrics.ts`.
 
@@ -1049,7 +1118,7 @@ Metric names are defined in `platform/src/metrics.ts`.
 | Metric | Labels | Watch for |
 |---|---|---|
 | `publoader_jobs_created_total` | extension, kind | Flat when it should not be = scheduler is not ticking. |
-| `publoader_jobs_leased_total` | extension | Flat with a non-zero queue = no workers claiming. |
+| `publoader_jobs_leased_total` | extension | **Never incremented** — declared but no call site records it. Use `publoader_oldest_pending_job_age_seconds` to see "no one is claiming". |
 | `publoader_jobs_succeeded_total` | extension | The success signal. |
 | `publoader_jobs_requeued_total` | extension, reason | Rising = retry churn. |
 | `publoader_jobs_dead_letter_total` | extension | Any increase deserves a look. |
@@ -1062,12 +1131,28 @@ Metric names are defined in `platform/src/metrics.ts`.
 
 ### Gauges
 
+All of these seed every label value to 0 on each refresh, so a series never
+goes missing when a queue empties and never sticks at a stale value.
+
 | Metric | Labels | Watch for |
 |---|---|---|
+| `publoader_scheduler_last_tick_timestamp_seconds` | — | Unix time of the last **completed** scheduler tick. **The single best liveness signal for the control plane** — alert on `time() - <metric>`, never on a "seconds since" gauge (see below). |
 | `publoader_job_queue_depth` | state | `PENDING` growing without bound = not enough worker capacity. |
-| `publoader_upload_tasks` | kind, state | `DEAD_LETTER` non-zero = uploads failing permanently. |
+| `publoader_dead_letter_jobs` | — | Jobs sitting in `DEAD_LETTER` right now. The `_total` counter says it happened once; this says it is still unfixed. |
+| `publoader_oldest_pending_job_age_seconds` | — | Age of the oldest *due* job. Better than depth: a small queue that never drains is still broken. |
+| `publoader_runs` | state | `INGESTING` piling up = `core-processor` is down, paused, or stuck on MangaDex. |
+| `publoader_oldest_ingesting_run_age_seconds` | — | How long the oldest such run has waited. Non-zero and climbing = processing has stopped. |
+| `publoader_result_submissions` | state | `QUARANTINED` is the security-relevant depth; `RECEIVED` growing = envelopes arriving but not committing. |
+| `publoader_upload_tasks` | kind, state | `DEAD_LETTER` non-zero = uploads failing permanently; `PENDING` flat and non-zero = uploader stalled. |
+| `publoader_artifact_rows` / `publoader_artifact_bytes` | — | Artifact table growth (bytes includes TOAST, i.e. the real disk cost). Refreshed every 5 minutes. Unbounded growth = retention is not pruning. |
 | `publoader_workers` | status | `ACTIVE` dropping = fleet shrinking. |
-| `publoader_scheduler_lag_seconds` | — | Seconds since the last scheduler tick. **The single best liveness signal for the control plane.** |
+
+**Why there is no `publoader_scheduler_lag_seconds` any more.** It was set to 0
+at the top of every tick, so it read 0 when the scheduler was healthy — and
+also read 0 forever once the loop wedged, because the only code that could
+raise it was the code that had stopped running. A process cannot be trusted to
+report its own absence; record a timestamp and let the scraper do the
+subtraction.
 
 ### Histogram
 
@@ -1075,31 +1160,55 @@ Metric names are defined in `platform/src/metrics.ts`.
 1h. A p95 approaching `LEASE_TTL_SECONDS` predicts lease-expiry storms before
 they happen.
 
-### Suggested alerts
+### What to alert on
 
-Tune to your traffic; these are starting points, not tuned thresholds.
+Every expression below reads a metric that a scraper can actually reach today,
+on the port listed in "Which service serves which metric". Thresholds are
+starting points; the shapes are not — each one is chosen so that the *absence*
+of a working service still fires.
 
-| Alert | Condition | Severity | Why |
+| Metric | Expression | What it means | First action |
 |---|---|---|---|
-| Scheduler stalled | `publoader_scheduler_lag_seconds > 180` for 5m | page | Nothing is being scheduled or swept. Everything else follows from this. |
-| No active workers | `sum(publoader_workers{status="ACTIVE"}) == 0` for 10m | page | No capacity at all. |
-| Queue backing up | `publoader_job_queue_depth{state="PENDING"} > 50` for 30m | warn | Capacity shortfall, or nothing is claiming. |
-| Dead-letters | `increase(publoader_jobs_dead_letter_total[1h]) > 5` | warn | An extension or the platform is broken. |
-| Quarantine | `increase(publoader_envelopes_quarantined_total[1h]) > 0` | warn | Security-relevant; investigate every time until you know the cause. |
-| Quarantine burst | `increase(publoader_envelopes_quarantined_total[15m]) > 10` | page | A worker is submitting garbage at volume. |
-| Lease churn | `rate(publoader_lease_expiries_total[15m]) > rate(publoader_jobs_succeeded_total[15m])` | warn | More jobs are timing out than completing. |
-| Upload failures | `increase(publoader_md_uploads_total{outcome="failure"}[15m]) > 5` | page | Credential expired, MangaDex down, or a bad payload. |
-| Upload dead-letter | `publoader_upload_tasks{state="DEAD_LETTER"} > 0` | warn | Chapters that will never be posted without intervention. |
-| Job duration creep | `histogram_quantile(0.95, publoader_job_duration_seconds) > 0.8 * LEASE_TTL_SECONDS` | warn | Lease-expiry storm forming. |
+| `publoader_scheduler_last_tick_timestamp_seconds` | `time() - publoader_scheduler_last_tick_timestamp_seconds > 120` or `absent(...)` for 5m | The clock has stopped: nothing is scheduled, no lease is swept, no retry backs off. Everything else follows from this. | `docker compose logs --tail 200 core-scheduler`; restart it if the loop is wedged rather than erroring. |
+| `up` (scrape target) | `up{job="publoader"} == 0` for 5m | A core service is gone or cannot be scraped — including the scheduler, whose stall alert would otherwise go quiet with it. | `docker compose ps`; check the container's healthcheck and last log lines. |
+| `publoader_dead_letter_jobs` | `publoader_dead_letter_jobs > 0` for 15m | Work has permanently failed and is sitting there; no retry will pick it up. | `padmin dead-letter` to see what and why, then `padmin retry` after fixing the cause. |
+| `publoader_oldest_pending_job_age_seconds` | `publoader_oldest_pending_job_age_seconds > 1800` | A due job has waited 30m: no worker is claiming, or the fleet is too small. | `padmin workers list`; check `publoader_workers{status="ACTIVE"}` and worker logs. |
+| `publoader_workers` | `sum(publoader_workers{status="ACTIVE"}) == 0` for 10m | No capacity at all. | Check worker hosts (`docker compose ps` there); heartbeat ages via `padmin workers list`. |
+| `publoader_oldest_ingesting_run_age_seconds` | `publoader_oldest_ingesting_run_age_seconds > 1800` | Runs finished executing but nothing is processing them — `core-processor` down, paused, or stuck on MangaDex. | `padmin stats` (is it paused?), then `docker compose logs --tail 200 core-processor`. |
+| `publoader_result_submissions` | `publoader_result_submissions{state="QUARANTINED"} > 0` | **Security signal.** A worker submitted data that failed validation and it is still held. | `padmin quarantine`; identify the worker and revoke it if the pattern repeats. |
+| `publoader_envelopes_quarantined_total` | `increase(publoader_envelopes_quarantined_total[15m]) > 10` | A worker is submitting garbage at volume, right now. | `padmin quarantine`, then `padmin workers revoke <id>`. |
+| `publoader_upload_tasks` | `max by (kind) (publoader_upload_tasks{state="DEAD_LETTER"}) > 0` | Chapters that will never be posted without intervention. | `padmin upload-tasks --state DEAD_LETTER`; fix the cause and requeue. |
+| `publoader_upload_tasks` | `min_over_time(max(publoader_upload_tasks{state="PENDING"})[30m:]) > 0` | The upload queue has not drained to empty in 30m: the uploader is stalled or paused. | `padmin stats` (paused?), then `docker compose logs --tail 200 core-uploader`. |
+| `publoader_md_uploads_total` | `increase(publoader_md_uploads_total{outcome="failure"}[15m]) > 5` | Credential expired, MangaDex down, or a bad payload. | Uploader logs; `padmin pause` if it is posting bad data. |
+| `publoader_lease_expiries_total` | `rate(publoader_lease_expiries_total[15m]) > rate(publoader_jobs_succeeded_total[15m])` | More jobs are timing out than completing — lease churn. | Compare `publoader_job_duration_seconds` p95 against `LEASE_TTL_SECONDS`. |
+| `publoader_job_duration_seconds` | `histogram_quantile(0.95, sum by (le) (rate(publoader_job_duration_seconds_bucket[1h]))) > 0.8 * LEASE_TTL_SECONDS` | A lease-expiry storm is forming. | Raise `LEASE_TTL_SECONDS` or split the extension into more segments. |
+| `publoader_artifact_bytes` | `publoader_artifact_bytes > 5e9` | The artifact table is eating the disk that Postgres shares with everything else. | Check expiry pruning; artifacts have `expiresAt` for a reason. |
+
+Note the two rate-based rows read counters recorded in *different* processes
+(`lease_expiries_total` on the scheduler, `jobs_succeeded_total` on the API), so
+drop the `instance`/`job` labels when comparing them.
 
 ### Health endpoints
 
-- `GET /healthz` — process is alive. This is the container healthcheck.
-- `GET /readyz` — Postgres reachable and migrations applied. Deliberately
-  **not** the container healthcheck: a Postgres restart should not cascade into
-  killing the API.
+All four core services answer both, on the ports above:
+
+- `GET /healthz` — "alive": the process is running and its event loop turns.
+  This is the container healthcheck.
+- `GET /readyz` — "safe to work": Postgres answers. Deliberately **not** the
+  container healthcheck anywhere: a Postgres restart must not cascade into
+  killing the whole control plane.
 
 Both are unauthenticated and both are blocked at the edge.
+
+The worker agent has no listening socket by design, so its liveness probe is a
+heartbeat file instead: `services/worker.ts` refreshes
+`$WORKER_STATE_PATH/heartbeat` on every piece of work-related traffic with the
+core (lease polls while idle, lease renewals while a job runs), and the image's
+HEALTHCHECK fails if it is missing or older than
+`WORKER_HEARTBEAT_MAX_AGE_SECONDS` (default 600). Raise that only if you also
+raised the core's `LEASE_TTL_SECONDS`, since renewals happen every TTL/3.
+`docker` only *reports* the worker unhealthy — nothing restarts on it, because
+an autoheal sidecar would need `docker.sock` mounted on the worker host.
 
 ---
 
@@ -1113,7 +1222,8 @@ Print this. Work top to bottom.
 4. `padmin untracked list --state NEW` — is a flood of series about to have
    MangaDex titles created for it? If yes, `padmin pause` before anything else.
 5. `padmin workers list` — heartbeat ages; is the fleet there?
-6. `curl -s http://core-api:8100/metrics | grep scheduler_lag` — is the clock running?
+6. `curl -s http://core-scheduler:8101/metrics | grep scheduler_last_tick` vs
+   `date +%s` — is the clock running?
 7. `docker compose ps` — is everything up? did `migrate` exit 0?
 8. `docker compose logs --tail 200 core-api core-scheduler core-uploader`
 9. **If unsure, `padmin pause`.** Stopping is cheap; an incorrect upload to

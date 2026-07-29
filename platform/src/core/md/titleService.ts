@@ -110,6 +110,38 @@ export class TitleService {
         return null; // tracked, but nothing newly created to announce
       }
 
+      // Does this series already exist on MangaDex? Creating a duplicate title
+      // is the one mistake in this pipeline that other people have to clean up,
+      // and "the publisher lists a series we have no mapping for" is a much
+      // weaker signal than "this series is not on MangaDex". So when a plausible
+      // match exists, refuse to auto-create and hand it to a human with the
+      // candidates attached — mapping an existing title is a two-click job in
+      // the dashboard, un-duplicating a catalogue is not.
+      if (actor === "auto") {
+        const candidates = await this.md.searchManga(row.mangaName, 5);
+        const match = candidates.find((candidate) =>
+          titleMatches(candidate, row.mangaName),
+        );
+        if (match) {
+          await this.prisma.untrackedManga.update({
+            where: { id: row.id },
+            data: {
+              state: "FAILED",
+              lastError:
+                `a MangaDex title already looks like this series ` +
+                `(https://mangadex.org/title/${match.id}). Not auto-creating a ` +
+                `duplicate — map it with \`tracked set\`, or approve this row to ` +
+                `create a new title anyway.`,
+            },
+          });
+          log.warn(
+            { candidate: match.id, mangaName: row.mangaName },
+            "skipping auto-create: probable existing MangaDex title",
+          );
+          return null;
+        }
+      }
+
       const draft = await this.md.createMangaDraft({
         // Title keyed by the language the source reports it in; fall back to en.
         title: { [row.mangaLanguage || "en"]: row.mangaName },
@@ -189,4 +221,30 @@ export class TitleService {
     }
     return map;
   }
+}
+
+/**
+ * Does a MangaDex search hit plausibly denote the same series?
+ *
+ * Deliberately conservative on the "same" side: compares the reported name
+ * against every title and alt-title after case-folding and stripping
+ * punctuation/whitespace. A false positive costs one operator click; a false
+ * negative creates a duplicate title on a public catalogue.
+ */
+function titleMatches(candidate: { attributes: { title: Record<string, string>; altTitles: Record<string, string>[] } }, reported: string): boolean {
+  const normalise = (value: string) =>
+    value
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/[^\p{Letter}\p{Number}]+/gu, "");
+  const target = normalise(reported);
+  if (target.length === 0) return false;
+  const names = [
+    ...Object.values(candidate.attributes.title ?? {}),
+    ...(candidate.attributes.altTitles ?? []).flatMap((alt) => Object.values(alt)),
+  ];
+  return names.some((name) => {
+    const other = normalise(name);
+    return other.length > 0 && (other === target || other.includes(target) || target.includes(other));
+  });
 }

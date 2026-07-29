@@ -9,7 +9,6 @@ import { registerSessionRoutes } from "./session.js";
 import { registerOAuthRoutes } from "./oauth.js";
 import { registerUserRoutes } from "./routes/users.js";
 import { registerDashboardRoutes } from "./dashboard.js";
-import { renderMetrics } from "../../metrics.js";
 
 /**
  * The control-plane HTTP server. Public entry is expected to be fronted by
@@ -21,8 +20,11 @@ import { renderMetrics } from "../../metrics.js";
  *  - conservative security headers
  *  - 1 MiB default body limit (routes opt into larger, capped limits)
  *  - binary parsers only for the exact content types that need them
- *  - /metrics and /healthz intended for the internal network only —
- *    do NOT expose them through the public tunnel hostname.
+ *  - /healthz and /readyz are unauthenticated and intended for container
+ *    probes and the internal network. /metrics is deliberately NOT served here:
+ *    it is on the internal-only METRICS_PORT (see services/api.ts), because the
+ *    tunnel forwards EVERY path on the public hostname, and queue depths,
+ *    worker names and failure counts are not public information.
  *  - /dash serves the operator dashboard (static, CSP-locked); it is the only
  *    browser-facing surface and authenticates via /api/v1/admin/session.
  */
@@ -80,15 +82,13 @@ export function buildServer(ctx: AppContext): FastifyInstance {
     try {
       await ctx.prisma.$queryRawUnsafe("SELECT 1");
     } catch {
-      return reply.code(503).send({ ok: false, reason: "database unreachable" });
+      // Bare boolean on the public port: the reason is available on the
+      // internal metrics port, where the caller is already trusted.
+      return reply.code(503).send({ ok: false });
     }
     return { ok: true };
   });
 
-  app.get("/metrics", async (_req, reply) => {
-    reply.header("content-type", "text/plain; version=0.0.4");
-    return renderMetrics();
-  });
 
   registerWorkerRoutes(app, ctx);
   // Session login/logout and the OAuth dance are the authentication step, so

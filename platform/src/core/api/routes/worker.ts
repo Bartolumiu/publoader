@@ -6,6 +6,7 @@ import { workerAuthHook } from "../auth.js";
 import { MAX_ENVELOPE_BYTES } from "../../../contracts/envelope.js";
 import { MAX_ARTIFACT_BYTES } from "../../store/artifacts.js";
 import { hashToken } from "../../store/workers.js";
+import { metrics } from "../../../metrics.js";
 
 const EnrollBody = z.object({
   enrollToken: z.string().min(8).max(256),
@@ -142,6 +143,7 @@ export function registerWorkerRoutes(app: FastifyInstance, ctx: AppContext): voi
                     select: { chapterId: true },
                   })
                 ).map((r) => r.chapterId);
+          metrics.jobsLeased.inc({ extension: claimed.job.extension });
           ctx.log.info(
             { jobId: claimed.job.id, workerId: worker.id, extension: claimed.job.extension },
             "job leased",
