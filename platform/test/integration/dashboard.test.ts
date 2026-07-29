@@ -344,7 +344,7 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
       where: { action: "platform.resume" },
       orderBy: { createdAt: "desc" },
     });
-    expect(event.actor).toBe("admin:ardax");
+    expect(event.actor).toBe("user:ardax");
   });
 
   it("rejects a wrong token and rate limits repeated login attempts", async () => {

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { AppContext } from "./context.js";
 import { registerWorkerRoutes } from "./routes/worker.js";
 import { registerAdminRoutes } from "./routes/admin.js";
+import { registerTokenRoutes } from "./routes/tokens.js";
 import { registerSessionRoutes } from "./session.js";
 import { registerOAuthRoutes } from "./oauth.js";
 import { registerUserRoutes } from "./routes/users.js";
@@ -70,6 +71,7 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   registerSessionRoutes(app, ctx);
   registerOAuthRoutes(app, ctx);
   registerAdminRoutes(app, ctx);
+  registerTokenRoutes(app, ctx);
   registerUserRoutes(app, ctx);
   registerDashboardRoutes(app);
 

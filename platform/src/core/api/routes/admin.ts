@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
-import { adminAuthHook } from "../auth.js";
+import { adminAuthHook, requireScope } from "../auth.js";
 import { sessionAuthenticator } from "../session.js";
 import { Manifest, EXTENSION_NAME_RE } from "../../../contracts/manifest.js";
 import { VALID_REMOVAL_MODES } from "../../store/settings.js";
@@ -22,6 +22,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       adminAuthHook({
         adminToken: ctx.config.adminToken,
         session: sessionAuthenticator(ctx),
+        apiTokens: ctx.apiTokens,
       }),
     );
     scope.addHook("preHandler", async (req, reply) => {
@@ -29,13 +30,27 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         await reply.code(429).send({ error: "rate limited" });
       }
     });
-    // Bearer clients (bot, CLI) name themselves with X-Actor. Dashboard
-    // sessions carry the operator name in the cookie, so they need no header.
-    const actor = (req: FastifyRequest) =>
-      `admin:${(req.headers["x-actor"] as string | undefined)?.slice(0, 64) ?? req.adminActor ?? "unknown"}`;
+    /**
+     * Who to blame in the audit log.
+     *
+     * A scoped token is always named, so "which client did this?" is always
+     * answerable; when that client acts for a human (the Discord bot passing
+     * `x-actor: discord:alice`) both identities are recorded. Browser sessions
+     * are named by their account and may NOT claim someone else via the
+     * header — only machine credentials can speak for a third party.
+     */
+    const actor = (req: FastifyRequest) => {
+      const claimed = (req.headers["x-actor"] as string | undefined)?.slice(0, 64);
+      const principal = req.principal;
+      if (principal?.kind === "api-token") {
+        return claimed ? `${principal.name} for ${claimed}` : principal.name;
+      }
+      if (principal?.kind === "session") return principal.name;
+      return `admin:${claimed ?? "root"}`;
+    };
 
     // ---- worker fleet ----
-    scope.post("/api/v1/admin/enroll-tokens", async (req) => {
+    scope.post("/api/v1/admin/enroll-tokens", { preHandler: requireScope("enroll:write") }, async (req) => {
       const body = z
         .object({
           trust: z.enum(["TRUSTED", "COMMUNITY"]).default("COMMUNITY"),
@@ -51,7 +66,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return token;
     });
 
-    scope.get("/api/v1/admin/workers", async () => {
+    scope.get("/api/v1/admin/workers", { preHandler: requireScope("workers:read") }, async () => {
       const workers = await ctx.workers.list();
       return {
         workers: workers.map((w) => ({
@@ -72,7 +87,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       ["activate", "ACTIVE"],
       ["revoke", "REVOKED"],
     ] as const) {
-      scope.post(`/api/v1/admin/workers/:id/${action}`, async (req, reply) => {
+      scope.post(`/api/v1/admin/workers/:id/${action}`, { preHandler: requireScope("workers:write") }, async (req, reply) => {
         const { id } = req.params as { id: string };
         const ok = await ctx.workers.setStatus(id, status);
         if (!ok) return reply.code(404).send({ error: "unknown worker" });
@@ -82,7 +97,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     }
 
     // ---- runs & jobs ----
-    scope.post("/api/v1/admin/runs", async (req, reply) => {
+    scope.post("/api/v1/admin/runs", { preHandler: requireScope("runs:write") }, async (req, reply) => {
       const body = z
         .object({
           extension: z.string().regex(EXTENSION_NAME_RE),
@@ -108,7 +123,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return reply.code(result.created ? 201 : 200).send(result);
     });
 
-    scope.get("/api/v1/admin/runs", async (req) => {
+    scope.get("/api/v1/admin/runs", { preHandler: requireScope("runs:read") }, async (req) => {
       const query = z
         .object({
           limit: z.coerce.number().int().min(1).max(200).default(25),
@@ -123,14 +138,14 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { runs };
     });
 
-    scope.get("/api/v1/admin/runs/:id", async (req, reply) => {
+    scope.get("/api/v1/admin/runs/:id", { preHandler: requireScope("runs:read") }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const run = await ctx.prisma.run.findUnique({ where: { id }, include: { jobs: true } });
       if (!run) return reply.code(404).send({ error: "unknown run" });
       return { run };
     });
 
-    scope.post("/api/v1/admin/jobs/:id/cancel", async (req, reply) => {
+    scope.post("/api/v1/admin/jobs/:id/cancel", { preHandler: requireScope("runs:write") }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const result = await ctx.jobs.cancel(id);
       if (result === "rejected") return reply.code(409).send({ error: "job not cancellable" });
@@ -138,7 +153,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { ok: true, result };
     });
 
-    scope.post("/api/v1/admin/jobs/:id/retry", async (req, reply) => {
+    scope.post("/api/v1/admin/jobs/:id/retry", { preHandler: requireScope("runs:write") }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const ok = await ctx.jobs.replayDeadLetter(id);
       if (!ok) return reply.code(409).send({ error: "job is not dead-lettered" });
@@ -146,7 +161,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { ok: true };
     });
 
-    scope.get("/api/v1/admin/dead-letter", async () => {
+    scope.get("/api/v1/admin/dead-letter", { preHandler: requireScope("runs:read") }, async () => {
       const jobs = await ctx.prisma.job.findMany({
         where: { state: "DEAD_LETTER" },
         orderBy: { updatedAt: "desc" },
@@ -155,7 +170,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { jobs };
     });
 
-    scope.get("/api/v1/admin/quarantine", async () => {
+    scope.get("/api/v1/admin/quarantine", { preHandler: requireScope("runs:read") }, async () => {
       const results = await ctx.prisma.resultSubmission.findMany({
         where: { state: "QUARANTINED" },
         orderBy: { createdAt: "desc" },
@@ -172,7 +187,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     });
 
     // ---- pause / resume ----
-    scope.post("/api/v1/admin/pause", async (req) => {
+    scope.post("/api/v1/admin/pause", { preHandler: requireScope("settings:write") }, async (req) => {
       const body = z
         .object({ minutes: z.number().int().min(1).max(1440).nullable().optional() })
         .parse(req.body ?? {});
@@ -183,14 +198,14 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { ok: true, paused: true, indefinite: body.minutes == null };
     });
 
-    scope.post("/api/v1/admin/resume", async (req) => {
+    scope.post("/api/v1/admin/resume", { preHandler: requireScope("settings:write") }, async (req) => {
       await ctx.settings.setPauseUntil(0);
       await ctx.audit.record(actor(req), "platform.resume");
       return { ok: true, paused: false };
     });
 
     // ---- extensions ----
-    scope.get("/api/v1/admin/extensions", async () => {
+    scope.get("/api/v1/admin/extensions", { preHandler: requireScope("extensions:read") }, async () => {
       const bundles = await ctx.bundles.listLatest();
       const disabled = new Set(await ctx.settings.listDisabled());
       return {
@@ -208,7 +223,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       ["disable", (e: string) => ctx.settings.disable(e)],
       ["enable", (e: string) => ctx.settings.enable(e)],
     ] as const) {
-      scope.post(`/api/v1/admin/extensions/:name/${action}`, async (req, reply) => {
+      scope.post(`/api/v1/admin/extensions/:name/${action}`, { preHandler: requireScope("extensions:write") }, async (req, reply) => {
         const { name } = req.params as { name: string };
         if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
         await method(name);
@@ -218,7 +233,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     }
 
     // ---- schedules ----
-    scope.get("/api/v1/admin/schedules", async () => {
+    scope.get("/api/v1/admin/schedules", { preHandler: requireScope("extensions:read") }, async () => {
       const overrides = await ctx.settings.getScheduleOverrides();
       const bundles = await ctx.bundles.listLatest();
       const defaults: Record<string, unknown> = {};
@@ -229,7 +244,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { defaults, overrides };
     });
 
-    scope.put("/api/v1/admin/schedules/:name", async (req, reply) => {
+    scope.put("/api/v1/admin/schedules/:name", { preHandler: requireScope("extensions:write") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
       const body = z
@@ -244,7 +259,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { ok: true };
     });
 
-    scope.delete("/api/v1/admin/schedules/:name", async (req) => {
+    scope.delete("/api/v1/admin/schedules/:name", { preHandler: requireScope("extensions:write") }, async (req) => {
       const { name } = req.params as { name: string };
       const removed = await ctx.settings.removeSchedule(name);
       await ctx.audit.record(actor(req), "schedule.remove", name, { removed });
@@ -252,12 +267,12 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     });
 
     // ---- removal mode ----
-    scope.get("/api/v1/admin/removal-mode", async () => ({
+    scope.get("/api/v1/admin/removal-mode", { preHandler: requireScope("settings:write") }, async () => ({
       mode: await ctx.settings.getRemovalMode(),
       validModes: VALID_REMOVAL_MODES,
     }));
 
-    scope.post("/api/v1/admin/removal-mode", async (req) => {
+    scope.post("/api/v1/admin/removal-mode", { preHandler: requireScope("settings:write") }, async (req) => {
       const body = z.object({ mode: z.enum(VALID_REMOVAL_MODES) }).parse(req.body);
       await ctx.settings.setRemovalMode(body.mode);
       await ctx.audit.record(actor(req), "removal_mode.set", body.mode);
@@ -267,7 +282,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     // ---- bundles ----
     scope.post(
       "/api/v1/admin/bundles",
-      { bodyLimit: MAX_BUNDLE_BYTES },
+      { bodyLimit: MAX_BUNDLE_BYTES, preHandler: requireScope("bundles:write") },
       async (req, reply) => {
         if (!Buffer.isBuffer(req.body)) {
           return reply.code(400).send({ error: "zip body required (content-type application/zip)" });
@@ -322,7 +337,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     );
 
     // ---- tracked manga & extension config (DB is the config authority) ----
-    scope.get("/api/v1/admin/extensions/:name/tracked", async (req, reply) => {
+    scope.get("/api/v1/admin/extensions/:name/tracked", { preHandler: requireScope("extensions:read") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
       const rows = await ctx.prisma.trackedManga.findMany({
@@ -332,7 +347,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { tracked: rows };
     });
 
-    scope.put("/api/v1/admin/extensions/:name/tracked", async (req, reply) => {
+    scope.put("/api/v1/admin/extensions/:name/tracked", { preHandler: requireScope("extensions:write") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
       const body = z
@@ -347,7 +362,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { ok: true };
     });
 
-    scope.delete("/api/v1/admin/extensions/:name/tracked/:mangaId", async (req) => {
+    scope.delete("/api/v1/admin/extensions/:name/tracked/:mangaId", { preHandler: requireScope("extensions:write") }, async (req) => {
       const { name, mangaId } = req.params as { name: string; mangaId: string };
       const res = await ctx.prisma.trackedManga.deleteMany({
         where: { extension: name, mangaId },
@@ -356,14 +371,14 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { ok: true, removed: res.count > 0 };
     });
 
-    scope.get("/api/v1/admin/extensions/:name/config", async (req, reply) => {
+    scope.get("/api/v1/admin/extensions/:name/config", { preHandler: requireScope("extensions:read") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
       const config = await ctx.prisma.extensionConfig.findUnique({ where: { extension: name } });
       return { extension: name, overrideOptions: config?.overrideOptions ?? {} };
     });
 
-    scope.put("/api/v1/admin/extensions/:name/config", async (req, reply) => {
+    scope.put("/api/v1/admin/extensions/:name/config", { preHandler: requireScope("extensions:write") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
       const body = z.object({ overrideOptions: z.record(z.unknown()) }).parse(req.body);
@@ -377,7 +392,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     });
 
     // ---- untracked series pipeline ----
-    scope.get("/api/v1/admin/untracked", async (req) => {
+    scope.get("/api/v1/admin/untracked", { preHandler: requireScope("untracked:read") }, async (req) => {
       const query = z
         .object({
           state: z.enum(["NEW", "CREATING", "CREATED", "TRACKED", "FAILED", "SKIPPED"]).optional(),
@@ -392,7 +407,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { untracked: rows };
     });
 
-    scope.post("/api/v1/admin/untracked/:id/approve", async (req, reply) => {
+    scope.post("/api/v1/admin/untracked/:id/approve", { preHandler: requireScope("untracked:write") }, async (req, reply) => {
       const { id } = req.params as { id: string };
       if (!ctx.titleService) {
         return reply.code(503).send({ error: "title service not available on this instance" });
@@ -402,7 +417,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { ok: true, ...result };
     });
 
-    scope.post("/api/v1/admin/untracked/:id/skip", async (req, reply) => {
+    scope.post("/api/v1/admin/untracked/:id/skip", { preHandler: requireScope("untracked:write") }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const res = await ctx.prisma.untrackedManga.updateMany({
         where: { id, state: { in: ["NEW", "FAILED"] } },
@@ -414,7 +429,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     });
 
     // ---- observability ----
-    scope.get("/api/v1/admin/stats", async () => {
+    scope.get("/api/v1/admin/stats", { preHandler: requireScope("stats:read") }, async () => {
       const [jobCounts, taskDepths, workerCount, quarantined] = await Promise.all([
         ctx.prisma.job.groupBy({ by: ["state"], _count: true }),
         ctx.uploadTasks.depths(),
@@ -430,7 +445,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       };
     });
 
-    scope.get("/api/v1/admin/audit", async (req) => {
+    scope.get("/api/v1/admin/audit", { preHandler: requireScope("audit:read") }, async (req) => {
       const query = z
         .object({ limit: z.coerce.number().int().min(1).max(500).default(100) })
         .parse(req.query ?? {});

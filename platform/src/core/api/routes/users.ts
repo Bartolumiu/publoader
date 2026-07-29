@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
-import { adminAuthHook, requireOwner } from "../auth.js";
+import { adminAuthHook, requireOwner, requireScope } from "../auth.js";
 import { sessionAuthenticator } from "../session.js";
 import { MIN_PASSWORD_LENGTH, toPublicUser } from "../../store/adminUsers.js";
 
@@ -20,6 +20,7 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
       adminAuthHook({
         adminToken: ctx.config.adminToken,
         session: sessionAuthenticator(ctx),
+        apiTokens: ctx.apiTokens,
       }),
     );
     scope.addHook("preHandler", async (req, reply) => {
@@ -30,7 +31,10 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
 
     const actor = (req: FastifyRequest) =>
       `admin:${(req.headers["x-actor"] as string | undefined)?.slice(0, 64) ?? req.adminActor ?? "unknown"}`;
-    const owner = { preHandler: requireOwner };
+    // Account administration needs BOTH the owner role and the users:admin
+    // scope: role keeps API tokens out entirely (they are never OWNER), scope
+    // keeps a future non-owner principal from inheriting it by accident.
+    const owner = { preHandler: [requireOwner, requireScope("users:admin")] };
 
     // ---- accounts ----
 
