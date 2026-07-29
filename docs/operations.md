@@ -1422,27 +1422,24 @@ so **no client credential can dump the database**, however broadly it is scoped
 — not even one minted with `["*"]`. Treat the downloaded file as a secret:
 encrypt it at rest, and keep it off shared storage.
 
-**It answers 503 in the shipped image.** The core image installs no postgres
-client tools, so `pg_dump` is not on its `PATH` and the endpoint says so with the
-fix in the message. That is the intended default: adding a database-dumping
-binary to an internet-facing long-lived service widens its reach for a
-convenience. Take scheduled backups inside the postgres container, where the tool
-belongs.
+**It needs `pg_dump` in the container, and the shipped image has it.** The core
+runtime image installs `postgresql-client-16` from PGDG — specifically 16, because
+Debian bookworm ships client 15 and `pg_dump` refuses to dump a *newer* server
+("aborting because of server version mismatch"), so Debian's default package
+would give you a button that always fails against Postgres 16.9. If you build a
+custom image without it the endpoint answers 503 naming the missing binary rather
+than failing obscurely, and the host procedure above still works.
 
-If you do want the button to work, add the client to the **runtime** stage of
-`platform/docker/core/Dockerfile` — matching the server's major version, which is
-`postgres:16.9-bookworm`:
+Adding a database-dumping binary to a long-lived internet-facing service is worth
+being deliberate about, so the reasoning is recorded here rather than assumed: it
+adds no listener and no privilege, and anyone who can already execute code in
+this container holds `DATABASE_URL` and can read the same rows over SQL. `pg_dump`
+therefore gives an attacker who is already inside nothing they did not have. What
+it costs is image size and one well-maintained package's CVE surface.
 
-```dockerfile
-RUN apt-get update \
- && apt-get install -y --no-install-recommends openssl ca-certificates postgresql-client-16 \
- && rm -rf /var/lib/apt/lists/*
-```
-
-A mismatched client major version fails with "server version mismatch" rather
-than producing a bad dump, so the failure is loud. Restoring is always host-side
-regardless: it requires stopping the services that would write during it, and
-nothing that can take the API down should be reachable through the API.
+Restoring is host-side regardless of any of this: it requires stopping the
+services that would write during it, and nothing that can take the API down
+should be reachable through the API.
 
 ---
 
