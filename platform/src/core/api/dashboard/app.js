@@ -18,9 +18,12 @@ const CSRF_HEADER = "x-requested-with";
 const CSRF_VALUE = "publoader-dash";
 const REFRESH_MS = 10_000;
 
-const state = { actor: null, role: null, userId: null, tab: "overview", timer: null };
+const state = { actor: null, role: null, userId: null, tab: "overview", timer: null, owner: false };
 
-const isOwner = () => state.role === "OWNER";
+// The session payload's role says what the account is; `state.owner` says what
+// the server actually answered when asked (see confirmOwner). Only the second
+// one may gate UI, so the page never offers a control that 403s.
+const isOwner = () => state.owner;
 
 // ---------------------------------------------------------------- DOM helpers
 
@@ -187,8 +190,36 @@ async function api(path, opts) {
     showLogin(state.actor ? "Session expired. Sign in again." : "");
     throw new ApiError(401, "not authenticated");
   }
-  if (!res.ok) throw new ApiError(res.status, (data && data.error) || `${res.status} ${res.statusText}`);
+  const message = (data && data.error) || `${res.status} ${res.statusText}`;
+  // A missing scope is a configuration answer, not a transient failure: naming
+  // the scope is the difference between "it broke" and "your credential needs
+  // runs:write". Probes pass `quiet` because a 403 is their expected answer.
+  if (res.status === 403 && !options.quiet) {
+    const scope = /^missing scope:\s*(\S+)/.exec(message);
+    if (scope) toast(`Not permitted — this credential is missing the "${scope[1]}" scope.`, false);
+  }
+  if (!res.ok) throw new ApiError(res.status, message);
   return data;
+}
+
+/**
+ * Does account administration actually answer for us?
+ *
+ * A 403 from /users is the server's own statement that this principal is not an
+ * owner, and it is the only signal the SPA can trust — the role in the session
+ * payload describes the account, not what the endpoints behind the owner-only
+ * views will do. Asking once at login keeps those views off the page entirely
+ * rather than letting an operator click into a wall of 403s.
+ */
+async function confirmOwner() {
+  try {
+    await api("/users", { allow401: true, quiet: true });
+    state.owner = true;
+  } catch (err) {
+    // A 403 is definitive. Anything else (500, offline) leaves us guessing, so
+    // fall back to what the session claimed rather than hiding an owner's tabs.
+    state.owner = err instanceof ApiError && err.status === 403 ? false : state.role === "OWNER";
+  }
 }
 
 /** Wrap a mutating call: toast the outcome, then refresh the current view. */
@@ -214,6 +245,7 @@ function showLogin(message) {
   state.actor = null;
   state.role = null;
   state.userId = null;
+  state.owner = false;
   $("app").hidden = true;
   $("whoami").textContent = "";
   $("logout").hidden = true;
@@ -227,7 +259,7 @@ function showLogin(message) {
   void applyLoginMethods();
 }
 
-function showApp(session) {
+async function showApp(session) {
   state.actor = session.actor;
   state.role = session.role;
   state.userId = session.userId;
@@ -237,6 +269,7 @@ function showApp(session) {
     ? `${session.actor}${session.role ? ` · ${session.role.toLowerCase()}` : ""}`
     : "";
   $("logout").hidden = false;
+  await confirmOwner();
   buildTabs();
   startRefresh();
 }
@@ -259,7 +292,7 @@ async function submitLogin(event, body, clear) {
   try {
     const res = await api("/session", { method: "POST", body, allow401: true });
     clear();
-    showApp(res);
+    await showApp(res);
     await renderTab();
   } catch (err) {
     $("login-error").textContent = err.message;
@@ -299,12 +332,16 @@ const TABS = [
   ["workers", "Workers"],
   ["extensions", "Extensions"],
   ["runs", "Runs"],
+  ["queues", "Queues"],
+  ["errors", "Errors"],
   ["untracked", "Untracked"],
   ["quarantine", "Quarantine"],
   ["audit", "Audit"],
-  // Account administration is the one thing an ADMIN cannot do. Hiding the tab
-  // is cosmetic; the server enforces it on every endpoint behind it.
+  // Account administration and credential minting are the two things an ADMIN
+  // cannot do. Hiding the tabs is cosmetic; the server enforces it on every
+  // endpoint behind them.
   ["users", "Users", { owner: true }],
+  ["tokens", "Tokens", { owner: true }],
 ];
 
 const visibleTabs = () => TABS.filter(([, , opts]) => !opts || !opts.owner || isOwner());
@@ -339,10 +376,13 @@ const VIEWS = {
   workers: viewWorkers,
   extensions: viewExtensions,
   runs: viewRuns,
+  queues: viewQueues,
+  errors: viewErrors,
   untracked: viewUntracked,
   quarantine: viewQuarantine,
   audit: viewAudit,
   users: viewUsers,
+  tokens: viewTokens,
 };
 
 async function renderTab() {
@@ -1363,7 +1403,7 @@ async function boot() {
     showLogin(err.message);
     return;
   }
-  showApp(me);
+  await showApp(me);
   await renderTab();
 }
 

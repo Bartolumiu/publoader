@@ -1,0 +1,626 @@
+import { describe, expect, it, vi } from "vitest";
+import { pino } from "pino";
+import { AdminApiError, type AdminApiClient } from "../../src/bot/apiClient.js";
+import {
+  ALL_COMMANDS,
+  COMMANDS_BY_NAME,
+  RETIRED_COMMANDS,
+  resolveSensitivity,
+  runCommand,
+  type BotCommand,
+  type OptionReader,
+} from "../../src/bot/commands.js";
+import { actorFor } from "../../src/bot/bot.js";
+
+const log = pino({ level: "silent" });
+
+/** Options as supplied by a user, keyed by option name. */
+function options(values: Record<string, string | number | boolean | null>, subcommand?: string): OptionReader {
+  const read = <T>(name: string, kind: "string" | "number" | "boolean"): T | null => {
+    const value = values[name];
+    if (value === undefined || value === null) return null;
+    if (kind === "string") return (typeof value === "string" ? value : String(value)) as T;
+    if (kind === "number") return (typeof value === "number" ? value : null) as T | null;
+    return (typeof value === "boolean" ? value : null) as T | null;
+  };
+  return {
+    subcommand: () => subcommand ?? null,
+    string: (name) => read<string>(name, "string"),
+    integer: (name) => read<number>(name, "number"),
+    boolean: (name) => read<boolean>(name, "boolean"),
+  };
+}
+
+/**
+ * A stand-in for the API client. Only the methods a given test exercises need
+ * to exist; anything else being called is itself a failure worth surfacing.
+ */
+function fakeApi(over: Partial<Record<keyof AdminApiClient, unknown>> = {}): AdminApiClient {
+  return {
+    baseUrl: "https://core.example",
+    tokenFingerprint: "pa_a…z999 (24 chars)",
+    looksScoped: true,
+    ...over,
+  } as unknown as AdminApiClient;
+}
+
+function invoke(
+  name: string,
+  api: AdminApiClient,
+  values: Record<string, string | number | boolean | null> = {},
+  subcommand?: string,
+) {
+  const command = COMMANDS_BY_NAME.get(name);
+  if (!command) throw new Error(`no such command: ${name}`);
+  return runCommand(command, {
+    api,
+    actor: "discord:ardax",
+    options: options(values, subcommand),
+    log,
+    interactionId: "interaction-1",
+  });
+}
+
+describe("command table", () => {
+  it("registers every command exactly once", () => {
+    const names = ALL_COMMANDS.map((c) => c.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  it("keeps builder names in step with command names — a mismatch would route to nothing", () => {
+    for (const command of ALL_COMMANDS) {
+      expect(command.builder.toJSON().name).toBe(command.name);
+    }
+  });
+
+  it("covers every legacy command that has no platform equivalent", () => {
+    // The list the migration doc calls retired; if one is dropped here, someone
+    // typing it gets "unknown command" instead of a pointer.
+    for (const legacy of ["logs", "queue", "kill", "restart-workers", "config", "mdauth", "login", "logout", "pull", "reload", "restart"]) {
+      expect(COMMANDS_BY_NAME.has(legacy)).toBe(true);
+    }
+  });
+
+  it("every retired command explains what to do instead", async () => {
+    for (const retired of RETIRED_COMMANDS) {
+      const reply = await invoke(retired.name, fakeApi());
+      expect(reply.text).toContain("is retired");
+      expect(reply.text).toContain(retired.replacement);
+    }
+  });
+});
+
+describe("resolveSensitivity", () => {
+  const withSubs: BotCommand = {
+    ...(COMMANDS_BY_NAME.get("extensions") as BotCommand),
+  };
+
+  it("reads a per-subcommand mapping", () => {
+    expect(resolveSensitivity(withSubs, "list")).toBe("read");
+    expect(resolveSensitivity(withSubs, "disable")).toBe("mutate");
+  });
+
+  it("falls back to destructive for an unmapped subcommand, not to read", () => {
+    // A subcommand added to the builder but forgotten in the sensitivity map
+    // must fail closed.
+    expect(resolveSensitivity(withSubs, "nuke")).toBe("destructive");
+    expect(resolveSensitivity(withSubs, null)).toBe("destructive");
+  });
+
+  it("reads a flat sensitivity", () => {
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("run") as BotCommand, null)).toBe("mutate");
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("status") as BotCommand, null)).toBe("read");
+  });
+
+  it("classifies the irreversible operations as destructive", () => {
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("enroll") as BotCommand, null)).toBe("destructive");
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("workers") as BotCommand, "revoke")).toBe("destructive");
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("untracked") as BotCommand, "approve")).toBe("destructive");
+  });
+});
+
+describe("/status", () => {
+  const stats = {
+    jobs: { QUEUED: 3, RUNNING: 1, PROCESSED: 40 },
+    uploadTasks: [{ kind: "UPLOAD", state: "PENDING", count: 7 }],
+    workers: { ACTIVE: 2, DRAINED: 1 },
+    quarantined: 0,
+    paused: false,
+  };
+
+  it("reports pause state, job counts, queue depths and the fleet", async () => {
+    const api = fakeApi({
+      stats: vi.fn().mockResolvedValue(stats),
+      workers: vi.fn().mockResolvedValue({
+        workers: [
+          {
+            id: "w1",
+            name: "alpha",
+            status: "ACTIVE",
+            trust: "TRUSTED",
+            lastHeartbeatAt: new Date().toISOString(),
+            agentVersion: "1.0.0",
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      }),
+    });
+    const reply = await invoke("status", api);
+    expect(reply.text).toContain("Platform: running");
+    expect(reply.text).toContain("QUEUED=3");
+    expect(reply.text).toContain("UPLOAD/PENDING=7");
+    expect(reply.text).toContain("alpha");
+  });
+
+  it("says the platform is paused, loudly", async () => {
+    const api = fakeApi({
+      stats: vi.fn().mockResolvedValue({ ...stats, paused: true }),
+      workers: vi.fn().mockResolvedValue({ workers: [] }),
+    });
+    expect((await invoke("status", api)).text).toContain("PAUSED");
+  });
+
+  it("still reports status when the token cannot read the fleet", async () => {
+    // A partial credential must degrade one section, not the whole command.
+    const api = fakeApi({
+      stats: vi.fn().mockResolvedValue(stats),
+      workers: vi.fn().mockRejectedValue(
+        new AdminApiError({ status: 403, detail: "no scope", scope: "workers:read", method: "GET", path: "/x" }),
+      ),
+    });
+    const reply = await invoke("status", api);
+    expect(reply.text).toContain("QUEUED=3");
+    expect(reply.text).toContain("lacks `workers:read`");
+  });
+
+  it("flags quarantined submissions", async () => {
+    const api = fakeApi({
+      stats: vi.fn().mockResolvedValue({ ...stats, quarantined: 4 }),
+      workers: vi.fn().mockResolvedValue({ workers: [] }),
+    });
+    expect((await invoke("status", api)).text).toContain("4 :warning:");
+  });
+});
+
+describe("/run", () => {
+  it("defaults to an UPDATE run and passes an interaction-derived idempotency key", async () => {
+    const triggerRun = vi.fn().mockResolvedValue({ runId: "run-1", created: true });
+    const reply = await invoke("run", fakeApi({ triggerRun }), { extension: "mangaplus" });
+    expect(triggerRun).toHaveBeenCalledWith("discord:ardax", {
+      extension: "mangaplus",
+      kind: "UPDATE",
+      idempotencyKey: "discord:interaction-1",
+    });
+    expect(reply.text).toContain("run-1");
+  });
+
+  it("refuses a CLEAN run without confirmation and makes no API call", async () => {
+    const triggerRun = vi.fn();
+    const reply = await invoke("run", fakeApi({ triggerRun }), { extension: "mangaplus", mode: "CLEAN" });
+    expect(triggerRun).not.toHaveBeenCalled();
+    expect(reply.text).toContain("not started");
+    expect(reply.text).toContain("confirm: true");
+  });
+
+  it("runs a confirmed CLEAN", async () => {
+    const triggerRun = vi.fn().mockResolvedValue({ runId: "run-2", created: true });
+    await invoke("run", fakeApi({ triggerRun }), { extension: "mangaplus", mode: "CLEAN", confirm: true });
+    expect(triggerRun).toHaveBeenCalledWith(
+      "discord:ardax",
+      expect.objectContaining({ kind: "CLEAN" }),
+    );
+  });
+
+  it("does not require confirmation for FORCE, which is not destructive", async () => {
+    const triggerRun = vi.fn().mockResolvedValue({ runId: "run-3", created: true });
+    await invoke("run", fakeApi({ triggerRun }), { extension: "mangaplus", mode: "FORCE" });
+    expect(triggerRun).toHaveBeenCalledWith("discord:ardax", expect.objectContaining({ kind: "FORCE" }));
+  });
+
+  it("rejects a malformed extension name locally, with a usable message", async () => {
+    const triggerRun = vi.fn();
+    const reply = await invoke("run", fakeApi({ triggerRun }), { extension: "Manga Plus!" });
+    expect(triggerRun).not.toHaveBeenCalled();
+    expect(reply.text).toContain("not a valid extension name");
+  });
+
+  it("says nothing was created when the idempotency key already existed", async () => {
+    const api = fakeApi({ triggerRun: vi.fn().mockResolvedValue({ runId: "run-1", created: false }) });
+    expect((await invoke("run", api, { extension: "mangaplus" })).text).toContain("already existed");
+  });
+
+  it("surfaces the paused 409 as the API worded it", async () => {
+    const api = fakeApi({
+      triggerRun: vi.fn().mockRejectedValue(
+        new AdminApiError({
+          status: 409,
+          detail: "platform is paused",
+          scope: "runs:write",
+          method: "POST",
+          path: "/runs",
+        }),
+      ),
+    });
+    const reply = await invoke("run", api, { extension: "mangaplus" });
+    expect(reply.text).toContain("platform is paused");
+  });
+});
+
+describe("/pause and /resume", () => {
+  it("pauses indefinitely when no duration is given", async () => {
+    const pause = vi.fn().mockResolvedValue({ paused: true, indefinite: true });
+    const reply = await invoke("pause", fakeApi({ pause }));
+    expect(pause).toHaveBeenCalledWith("discord:ardax", null);
+    expect(reply.text).toContain("indefinitely");
+  });
+
+  it("pauses for a bounded window", async () => {
+    const pause = vi.fn().mockResolvedValue({ paused: true, indefinite: false });
+    const reply = await invoke("pause", fakeApi({ pause }), { minutes: 30 });
+    expect(pause).toHaveBeenCalledWith("discord:ardax", 30);
+    expect(reply.text).toContain("30 minute(s)");
+  });
+
+  it("resumes", async () => {
+    const resume = vi.fn().mockResolvedValue({ paused: false });
+    expect((await invoke("resume", fakeApi({ resume }))).text).toContain("resumed");
+  });
+});
+
+describe("/extensions", () => {
+  it("lists published bundles with their disabled state", async () => {
+    const api = fakeApi({
+      extensions: vi.fn().mockResolvedValue({
+        extensions: [
+          { name: "mangaplus", version: "1.2", sha256: "abc123def456789", disabled: false, publishedAt: "2026-07-01T10:00:00Z" },
+          { name: "k_manga", version: "0.9", sha256: "fff", disabled: true, publishedAt: "2026-06-01T10:00:00Z" },
+        ],
+      }),
+    });
+    const reply = await invoke("extensions", api, {}, "list");
+    expect(reply.text).toContain("mangaplus");
+    expect(reply.text).toContain(":no_entry: `k_manga`");
+  });
+
+  it("explains the empty case in terms of publishing, not missing files", async () => {
+    const api = fakeApi({ extensions: vi.fn().mockResolvedValue({ extensions: [] }) });
+    expect((await invoke("extensions", api, {}, "list")).text).toContain("bundle publish");
+  });
+
+  it("enables and disables", async () => {
+    const setExtensionEnabled = vi.fn().mockResolvedValue({ ok: true });
+    await invoke("extensions", fakeApi({ setExtensionEnabled }), { extension: "mangaplus" }, "enable");
+    expect(setExtensionEnabled).toHaveBeenCalledWith("discord:ardax", "mangaplus", true);
+
+    const off = vi.fn().mockResolvedValue({ ok: true });
+    await invoke("extensions", fakeApi({ setExtensionEnabled: off }), { extension: "mangaplus" }, "disable");
+    expect(off).toHaveBeenCalledWith("discord:ardax", "mangaplus", false);
+  });
+});
+
+describe("/schedule", () => {
+  it("shows the override winning over the manifest default", async () => {
+    const api = fakeApi({
+      schedules: vi.fn().mockResolvedValue({
+        defaults: { mangaplus: { hour: 15, minute: 5 }, k_manga: { hour: 1, minute: 0 } },
+        overrides: { mangaplus: { hour: 3, minute: 30, day: 2 } },
+      }),
+    });
+    const reply = await invoke("schedule", api, {}, "list");
+    expect(reply.text).toContain("03:30 UTC on Wed *(override)*");
+    expect(reply.text).toContain("01:00 UTC daily (manifest default)");
+  });
+
+  it("sets a daily override without a day field", async () => {
+    const setSchedule = vi.fn().mockResolvedValue({ ok: true });
+    await invoke("schedule", fakeApi({ setSchedule }), { extension: "mangaplus", hour: 4, minute: 15 }, "set");
+    expect(setSchedule).toHaveBeenCalledWith("discord:ardax", "mangaplus", { hour: 4, minute: 15 });
+  });
+
+  it("passes a weekday through when given", async () => {
+    const setSchedule = vi.fn().mockResolvedValue({ ok: true });
+    await invoke(
+      "schedule",
+      fakeApi({ setSchedule }),
+      { extension: "mangaplus", hour: 4, minute: 15, day: 0 },
+      "set",
+    );
+    expect(setSchedule).toHaveBeenCalledWith("discord:ardax", "mangaplus", { hour: 4, minute: 15, day: 0 });
+  });
+
+  it("distinguishes removing an override from there never having been one", async () => {
+    const had = fakeApi({ removeSchedule: vi.fn().mockResolvedValue({ ok: true, removed: true }) });
+    expect((await invoke("schedule", had, { extension: "mangaplus" }, "remove")).text).toContain("Override removed");
+
+    const none = fakeApi({ removeSchedule: vi.fn().mockResolvedValue({ ok: true, removed: false }) });
+    expect((await invoke("schedule", none, { extension: "mangaplus" }, "remove")).text).toContain("no override");
+  });
+});
+
+describe("/removal-mode", () => {
+  it("reports the current mode and the valid set", async () => {
+    const api = fakeApi({
+      getRemovalMode: vi.fn().mockResolvedValue({ mode: "unavailable", validModes: ["unavailable", "delete"] }),
+    });
+    expect((await invoke("removal-mode", api, {}, "get")).text).toContain("**unavailable**");
+  });
+
+  it("sets it and notes that manifests can still override", async () => {
+    const setRemovalMode = vi.fn().mockResolvedValue({ ok: true, mode: "delete" });
+    const reply = await invoke("removal-mode", fakeApi({ setRemovalMode }), { mode: "delete" }, "set");
+    expect(setRemovalMode).toHaveBeenCalledWith("discord:ardax", "delete");
+    expect(reply.text).toContain("manifest still win");
+  });
+});
+
+describe("/runs", () => {
+  it("lists recent runs with the trigger source", async () => {
+    const api = fakeApi({
+      listRuns: vi.fn().mockResolvedValue({
+        runs: [
+          {
+            id: "run-aaaaaaaa-1",
+            extension: "mangaplus",
+            kind: "FORCE",
+            state: "PROCESSED",
+            createdAt: "2026-07-29T15:05:00Z",
+            triggeredBy: "admin:discord:ardax",
+          },
+        ],
+      }),
+    });
+    const reply = await invoke("runs", api, { limit: 5 }, "recent");
+    expect(reply.text).toContain("mangaplus");
+    expect(reply.text).toContain("admin:discord:ardax");
+  });
+
+  it("defaults the limit rather than sending undefined", async () => {
+    const listRuns = vi.fn().mockResolvedValue({ runs: [] });
+    await invoke("runs", fakeApi({ listRuns }), {}, "recent");
+    expect(listRuns).toHaveBeenCalledWith("discord:ardax", { limit: 15 });
+  });
+
+  it("shows a run with its jobs and each job's last error", async () => {
+    const api = fakeApi({
+      getRun: vi.fn().mockResolvedValue({
+        run: {
+          id: "run-1",
+          extension: "mangaplus",
+          kind: "UPDATE",
+          state: "FAILED",
+          createdAt: "2026-07-29T15:05:00Z",
+          jobs: [
+            { id: "job-abcdefgh", state: "DEAD_LETTER", attempt: 4, segmentIndex: 0, segmentTotal: 2, lastError: "upstream 500" },
+            { id: "job-ijklmnop", state: "PROCESSED", attempt: 1, segmentIndex: 1, segmentTotal: 2, lastError: null },
+          ],
+        },
+      }),
+    });
+    const reply = await invoke("runs", api, { id: "run-1" }, "show");
+    expect(reply.text).toContain("2 job(s)");
+    expect(reply.text).toContain("seg 1/2");
+    expect(reply.text).toContain("upstream 500");
+  });
+
+  it("requires an id for show", async () => {
+    expect((await invoke("runs", fakeApi({}), {}, "show")).text).toContain("`id` is required");
+  });
+});
+
+describe("/jobs, /dead-letter, /quarantine", () => {
+  it("reports what cancel actually did", async () => {
+    const api = fakeApi({ cancelJob: vi.fn().mockResolvedValue({ ok: true, result: "cancelled" }) });
+    expect((await invoke("jobs", api, { id: "job-1" }, "cancel")).text).toContain("cancelled");
+  });
+
+  it("explains a 409 from cancel instead of claiming success", async () => {
+    const api = fakeApi({
+      cancelJob: vi.fn().mockRejectedValue(
+        new AdminApiError({ status: 409, detail: "job not cancellable", scope: "jobs:write", method: "POST", path: "/x" }),
+      ),
+    });
+    const reply = await invoke("jobs", api, { id: "job-1" }, "cancel");
+    expect(reply.text).toContain("job not cancellable");
+  });
+
+  it("retries a dead-lettered job", async () => {
+    const retryJob = vi.fn().mockResolvedValue({ ok: true });
+    expect((await invoke("jobs", fakeApi({ retryJob }), { id: "job-1" }, "retry")).text).toContain("requeued");
+  });
+
+  it("says the dead-letter queue is empty when it is", async () => {
+    const api = fakeApi({ deadLetter: vi.fn().mockResolvedValue({ jobs: [] }) });
+    expect((await invoke("dead-letter", api)).text).toContain("empty");
+  });
+
+  it("points at the replay command when listing dead letters", async () => {
+    const api = fakeApi({
+      deadLetter: vi.fn().mockResolvedValue({
+        jobs: [{ id: "job-abcdefgh", extension: "mangaplus", state: "DEAD_LETTER", attempt: 5, lastError: "boom" }],
+      }),
+    });
+    const reply = await invoke("dead-letter", api);
+    expect(reply.text).toContain("/jobs retry");
+    expect(reply.text).toContain("boom");
+  });
+
+  it("shows quarantined submissions with their reject reason", async () => {
+    const api = fakeApi({
+      quarantine: vi.fn().mockResolvedValue({
+        quarantined: [
+          { id: "q1", jobId: "job-abcdefgh", workerId: "worker-1", rejectReason: "schema: pages[0]", createdAt: "2026-07-29T15:00:00Z" },
+        ],
+      }),
+    });
+    expect((await invoke("quarantine", api)).text).toContain("schema: pages[0]");
+  });
+});
+
+describe("/workers", () => {
+  it("lists the fleet with full ids, since the ids are what other commands take", async () => {
+    const api = fakeApi({
+      workers: vi.fn().mockResolvedValue({
+        workers: [
+          {
+            id: "worker-uuid-1234",
+            name: "alpha",
+            status: "DRAINED",
+            trust: "COMMUNITY",
+            lastHeartbeatAt: null,
+            agentVersion: null,
+            createdAt: "2026-07-01T00:00:00Z",
+          },
+        ],
+      }),
+    });
+    const reply = await invoke("workers", api, {}, "list");
+    expect(reply.text).toContain("worker-uuid-1234");
+    expect(reply.text).toContain("heartbeat never");
+  });
+
+  it("drains and activates without confirmation — both are reversible", async () => {
+    const drain = vi.fn().mockResolvedValue({ ok: true, status: "DRAINED" });
+    await invoke("workers", fakeApi({ workerAction: drain }), { id: "w1" }, "drain");
+    expect(drain).toHaveBeenCalledWith("discord:ardax", "w1", "drain");
+
+    const activate = vi.fn().mockResolvedValue({ ok: true, status: "ACTIVE" });
+    await invoke("workers", fakeApi({ workerAction: activate }), { id: "w1" }, "activate");
+    expect(activate).toHaveBeenCalledWith("discord:ardax", "w1", "activate");
+  });
+
+  it("refuses to revoke without confirmation and suggests drain instead", async () => {
+    const workerAction = vi.fn();
+    const reply = await invoke("workers", fakeApi({ workerAction }), { id: "w1" }, "revoke");
+    expect(workerAction).not.toHaveBeenCalled();
+    expect(reply.text).toContain("not revoked");
+    expect(reply.text).toContain("drain");
+  });
+
+  it("revokes when confirmed", async () => {
+    const workerAction = vi.fn().mockResolvedValue({ ok: true, status: "REVOKED" });
+    await invoke("workers", fakeApi({ workerAction }), { id: "w1", confirm: true }, "revoke");
+    expect(workerAction).toHaveBeenCalledWith("discord:ardax", "w1", "revoke");
+  });
+});
+
+describe("/enroll", () => {
+  it("puts the token in a DM and never in the channel reply", async () => {
+    const api = fakeApi({
+      createEnrollToken: vi.fn().mockResolvedValue({ token: "pe_supersecret", expiresAt: "2026-07-30T00:00:00Z" }),
+    });
+    const reply = await invoke("enroll", api, { trust: "TRUSTED", note: "arda laptop" });
+    expect(reply.dm).toContain("pe_supersecret");
+    expect(reply.text).not.toContain("pe_supersecret");
+    expect(reply.text).toContain("DM");
+  });
+
+  it("defaults to COMMUNITY trust and a 24h window", async () => {
+    const createEnrollToken = vi.fn().mockResolvedValue({ token: "pe_x", expiresAt: "2026-07-30T00:00:00Z" });
+    await invoke("enroll", fakeApi({ createEnrollToken }));
+    expect(createEnrollToken).toHaveBeenCalledWith("discord:ardax", { trust: "COMMUNITY", ttlHours: 24 });
+  });
+});
+
+describe("/untracked and /tracked", () => {
+  it("refuses to approve without confirmation, because it creates a real title", async () => {
+    const approveUntracked = vi.fn();
+    const reply = await invoke("untracked", fakeApi({ approveUntracked }), { id: "u1" }, "approve");
+    expect(approveUntracked).not.toHaveBeenCalled();
+    expect(reply.text).toContain("cannot be undone");
+  });
+
+  it("approves when confirmed and reports the new MangaDex id", async () => {
+    const api = fakeApi({ approveUntracked: vi.fn().mockResolvedValue({ ok: true, mdMangaId: "md-uuid" }) });
+    expect((await invoke("untracked", api, { id: "u1", confirm: true }, "approve")).text).toContain("md-uuid");
+  });
+
+  it("skips without confirmation — skipping is reversible by re-reporting", async () => {
+    const skipUntracked = vi.fn().mockResolvedValue({ ok: true });
+    await invoke("untracked", fakeApi({ skipUntracked }), { id: "u1" }, "skip");
+    expect(skipUntracked).toHaveBeenCalledWith("discord:ardax", "u1");
+  });
+
+  it("filters the untracked list by state", async () => {
+    const untracked = vi.fn().mockResolvedValue({ untracked: [] });
+    await invoke("untracked", fakeApi({ untracked }), { state: "NEW", limit: 5 }, "list");
+    expect(untracked).toHaveBeenCalledWith("discord:ardax", { limit: 5, state: "NEW" });
+  });
+
+  it("maps a tracked entry and says MangaDex was untouched on removal", async () => {
+    const setTracked = vi.fn().mockResolvedValue({ ok: true });
+    await invoke(
+      "tracked",
+      fakeApi({ setTracked }),
+      { extension: "mangaplus", "manga-id": "100001", "md-manga-id": "md-uuid" },
+      "set",
+    );
+    expect(setTracked).toHaveBeenCalledWith("discord:ardax", "mangaplus", {
+      mangaId: "100001",
+      mdMangaId: "md-uuid",
+    });
+
+    const removeTracked = vi.fn().mockResolvedValue({ ok: true, removed: true });
+    const reply = await invoke(
+      "tracked",
+      fakeApi({ removeTracked }),
+      { extension: "mangaplus", "manga-id": "100001" },
+      "remove",
+    );
+    expect(reply.text).toContain("Nothing on MangaDex was changed");
+  });
+});
+
+describe("/whoami", () => {
+  it("shows where it points, a masked token, and the audit identity", async () => {
+    const api = fakeApi({ tokenSelf: vi.fn().mockResolvedValue(null) });
+    const reply = await invoke("whoami", api);
+    expect(reply.text).toContain("https://core.example");
+    expect(reply.text).toContain("pa_a…z999");
+    expect(reply.text).toContain("discord:ardax");
+    expect(reply.text).toContain("does not expose token introspection");
+  });
+
+  it("lists real scopes when the deployment exposes them", async () => {
+    const api = fakeApi({ tokenSelf: vi.fn().mockResolvedValue({ scopes: ["runs:write", "stats:read"] }) });
+    expect((await invoke("whoami", api)).text).toContain("`runs:write`");
+  });
+
+  it("calls out a wildcard scope as defeating the purpose", async () => {
+    const api = fakeApi({ tokenSelf: vi.fn().mockResolvedValue({ scopes: ["*"] }) });
+    expect((await invoke("whoami", api)).text).toContain("defeats the point");
+  });
+
+  it("warns when the bot is running on something that is not a scoped token", async () => {
+    const api = fakeApi({ looksScoped: false, tokenSelf: vi.fn().mockResolvedValue(null) });
+    expect((await invoke("whoami", api)).text).toContain("root `ADMIN_TOKEN`");
+  });
+});
+
+describe("runCommand error handling", () => {
+  it("turns an unexpected throw into an actionable reply rather than an unhandled rejection", async () => {
+    const api = fakeApi({ stats: vi.fn().mockRejectedValue(new TypeError("undefined is not a function")) });
+    const reply = await invoke("status", api);
+    expect(reply.text).toContain("`/status` failed");
+    expect(reply.text).toContain("undefined is not a function");
+  });
+});
+
+describe("actorFor", () => {
+  it("prefixes the username so the audit log names the human", () => {
+    expect(actorFor("ardax")).toBe("discord:ardax");
+  });
+
+  it("strips anything that could forge a header — the username is untrusted input", () => {
+    // CRLF plus a second header name is the whole attack; neither the newlines
+    // nor the colon survive.
+    expect(actorFor("ard\r\nx-actor: admin")).toBe("discord:ardx-actoradmin");
+  });
+
+  it("keeps the value inside the server's 64-character bound", () => {
+    expect(actorFor("a".repeat(200)).length).toBeLessThanOrEqual(64);
+  });
+
+  it("never produces a bare prefix for a username of only stripped characters", () => {
+    expect(actorFor("！！！")).toBe("discord:unknown");
+  });
+});
