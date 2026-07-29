@@ -412,6 +412,137 @@ for (const action of ["enable", "disable"] as const) {
     });
 }
 
+// ---- tracked manga (the database replacement for manga_id_map.json) ----
+const tracked = program
+  .command("tracked")
+  .description("external manga id -> MangaDex id mapping");
+
+tracked
+  .command("list <extension>")
+  .description("every tracked manga for an extension")
+  .action(async (extension: string) => {
+    const res = await api<{ tracked: Record<string, unknown>[] }>(
+      `/api/v1/admin/extensions/${extension}/tracked`,
+    );
+    table(res.tracked, [
+      { header: "MANGA ID", get: (t) => t["mangaId"] },
+      { header: "MANGADEX ID", get: (t) => t["mdMangaId"] },
+      { header: "SOURCE", get: (t) => t["source"] },
+      { header: "ADDED", get: (t) => ago(t["createdAt"]) },
+    ], `nothing tracked for ${extension}`);
+    if (res.tracked.length > 0) console.log(`\n${res.tracked.length} tracked`);
+  });
+
+tracked
+  .command("set <extension> <mangaId> <mdMangaId>")
+  .description("add or repoint a mapping")
+  .action(async (extension: string, mangaId: string, mdMangaId: string) => {
+    await api(`/api/v1/admin/extensions/${extension}/tracked`, {
+      method: "PUT",
+      json: { mangaId, mdMangaId },
+    });
+    ok(`${extension}: ${mangaId} -> ${mdMangaId}`);
+  });
+
+tracked
+  .command("remove <extension> <mangaId>")
+  .description("stop tracking a manga (does not touch MangaDex)")
+  .action(async (extension: string, mangaId: string) => {
+    const res = await api<{ removed: boolean }>(
+      `/api/v1/admin/extensions/${extension}/tracked/${encodeURIComponent(mangaId)}`,
+      { method: "DELETE" },
+    );
+    ok(res.removed ? `removed ${extension}:${mangaId}` : `no mapping for ${extension}:${mangaId}`);
+  });
+
+// ---- extension config (the database replacement for override_options.json) ----
+const extConfig = program
+  .command("ext-config")
+  .description("per-extension override options");
+
+extConfig
+  .command("get <extension>")
+  .description("print the current override options as JSON")
+  .action(async (extension: string) => {
+    const res = await api<{ overrideOptions: unknown }>(
+      `/api/v1/admin/extensions/${extension}/config`,
+    );
+    console.log(JSON.stringify(res.overrideOptions, null, 2));
+  });
+
+extConfig
+  .command("set <extension> [file]")
+  .description("replace the override options from a JSON file, or from stdin when omitted")
+  .action(async (extension: string, file?: string) => {
+    // Reading a whole document from argv would be unusable; a file or a pipe is
+    // how an operator actually has this content to hand.
+    const raw =
+      file && file !== "-"
+        ? readFileSync(resolve(file), "utf8")
+        : readFileSync(0, "utf8");
+    let overrideOptions: unknown;
+    try {
+      overrideOptions = JSON.parse(raw);
+    } catch (err) {
+      return fail(`input is not valid JSON: ${(err as Error).message}`);
+    }
+    if (typeof overrideOptions !== "object" || overrideOptions === null || Array.isArray(overrideOptions)) {
+      fail("override options must be a JSON object");
+    }
+    await api(`/api/v1/admin/extensions/${extension}/config`, {
+      method: "PUT",
+      json: { overrideOptions },
+    });
+    ok(`override options replaced for ${extension}`);
+  });
+
+// ---- untracked series pipeline ----
+const untracked = program
+  .command("untracked")
+  .description("series an extension reported that have no MangaDex title yet");
+
+untracked
+  .command("list")
+  .description("untracked candidates, newest first")
+  .option("--state <state>", "NEW | CREATING | CREATED | TRACKED | FAILED | SKIPPED")
+  .option("--limit <n>", "how many rows", "100")
+  .action(async (opts: { state?: string; limit: string }) => {
+    const state = opts.state?.toUpperCase();
+    const valid = ["NEW", "CREATING", "CREATED", "TRACKED", "FAILED", "SKIPPED"];
+    if (state && !valid.includes(state)) fail(`--state must be one of ${valid.join(", ")}`);
+    const res = await api<{ untracked: Record<string, unknown>[] }>("/api/v1/admin/untracked", {
+      query: { state, limit: opts.limit },
+    });
+    table(res.untracked, [
+      { header: "ID", get: (u) => u["id"] },
+      { header: "EXTENSION", get: (u) => u["extension"] },
+      { header: "MANGA", get: (u) => String(u["mangaName"] ?? "").slice(0, 40) },
+      { header: "LANG", get: (u) => u["mangaLanguage"] },
+      { header: "STATE", get: (u) => u["state"] },
+      { header: "MANGADEX ID", get: (u) => u["mdMangaId"] },
+      { header: "TRIES", get: (u) => u["attempts"] },
+      { header: "ERROR", get: (u) => String(u["lastError"] ?? "").slice(0, 50) || "-" },
+    ], "no untracked series");
+  });
+
+untracked
+  .command("approve <id>")
+  .description("create the MangaDex title now and start tracking it")
+  .action(async (id: string) => {
+    const res = await api<{ mdMangaId: string }>(`/api/v1/admin/untracked/${id}/approve`, {
+      method: "POST",
+    });
+    kv({ mdMangaId: res.mdMangaId, url: `https://mangadex.org/title/${res.mdMangaId}` });
+  });
+
+untracked
+  .command("skip <id>")
+  .description("never create a title for this series")
+  .action(async (id: string) => {
+    await api(`/api/v1/admin/untracked/${id}/skip`, { method: "POST" });
+    ok(`untracked ${id} skipped`);
+  });
+
 // ---- schedules ----
 const schedules = program.command("schedules").description("run schedules");
 

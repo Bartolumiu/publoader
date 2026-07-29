@@ -51,12 +51,12 @@ not how much you personally trust the person running it.
 
 | | |
 |---|---|
-| **Assets** | Every control operation: trigger runs, publish bundles, pause, drain/revoke workers, mint enroll tokens, change removal mode. |
+| **Assets** | Every control operation: trigger runs, publish bundles, pause, drain/revoke workers, mint enroll tokens, change removal mode, edit the tracked-manga mapping and extension override options (the config authority), and approve untracked series into new MangaDex titles. |
 | **Trust level** | Operator-only. Effectively equivalent to shell access to the control plane. |
 | **Authn/authz** | Single bearer token. `X-Actor` header is **attribution, not authentication** — it is attacker-controlled and only meaningful because possession of the token is already proven. |
 | **Network exposure** | Through the tunnel, same as everything else. |
 | **Hardening** | Every mutating route writes an `AuditEvent` with actor, action, subject and detail. Extension names are regex-validated (`^[a-z0-9_]+$`) at the route before reaching any store. Removal mode is enum-validated. Rate limited. |
-| **Residual risks** | No scopes and no per-client tokens: the Discord bot holds the same credential you do, so a compromised bot can publish a bundle. No overlap window on rotation — changing the token breaks every client at once. `bundle publish` accepts any zip that passes manifest validation, so admin-token compromise is code execution on every worker. |
+| **Residual risks** | No scopes and no per-client tokens: the Discord bot holds the same credential you do, so a compromised bot can publish a bundle, repoint a tracked-manga mapping, or approve a title into existence. No overlap window on rotation — changing the token breaks every client at once. `bundle publish` accepts any zip that passes manifest validation, so admin-token compromise is code execution on every worker. Repointing a `tracked_manga` mapping is the quietest destructive action available: it makes future chapters upload to the *wrong MangaDex title*, with nothing in the upload path to notice. |
 
 ### 1.4 core-scheduler
 
@@ -84,12 +84,12 @@ not how much you personally trust the person running it.
 
 | | |
 |---|---|
-| **Assets** | The MangaDex account: username, password, client id, client secret, and the live session. This is the crown jewel. |
+| **Assets** | The MangaDex account: username, password, client id, client secret, and the live session. This is the crown jewel. Also hosts the **title service**, which creates MangaDex titles for untracked series. |
 | **Trust level** | Fully trusted and maximally isolated. |
-| **Authn/authz** | MangaDex OAuth. It is the **only** process in the entire system permitted to write to MangaDex. |
+| **Authn/authz** | MangaDex OAuth. It is the **only** process in the entire system permitted to write to MangaDex — chapter uploads and **title creation** alike. |
 | **Network exposure** | `data` + `edge`. No listener. |
 | **Hardening** | Same baseline; 1.5 GB cap and a larger 1 GB tmpfs for image work; `stop_grace_period: 120s` so an in-flight chapter commit finishes rather than leaving a half-uploaded session. Exactly one replica — the MD upload session is per-account state and two uploaders would clobber each other. Every commit attempt is recorded in `upload_log` before and after, closing the legacy crash window between "MD commit succeeded" and "queue row removed". |
-| **Residual risks** | Compromise here is total with respect to MangaDex — it can post, edit, and delete anything the account can. Credentials are long-lived; rotation is manual. There is no second-person approval on destructive operations, so a `DELETE` task that reached the queue *will* be executed. |
+| **Residual risks** | Compromise here is total with respect to MangaDex — it can post, edit, delete, and now *create titles* with anything the account can do. Credentials are long-lived; rotation is manual. There is no second-person approval on destructive operations, so a `DELETE` task that reached the queue *will* be executed. With `auto_create_titles: true`, title creation is likewise unattended — see §2a. |
 
 ### 1.7 postgres
 
@@ -233,6 +233,59 @@ wrong reaches MangaDex, the worker that proposed it is identifiable, and
 re-runs of the same job on a second worker with result comparison; reputation
 scoring per worker; canary manga with known-correct expected output.
 
+### 2a. Title creation from worker-reported candidates
+
+The untracked-series pipeline is the one place where worker-reported data can
+cause a **new object to be created on MangaDex**, so it deserves its own
+analysis.
+
+**The flow.** An extension reports manga in the envelope's `untrackedManga`
+array → the processor persists `untracked_manga` rows → the title service
+(inside `core-uploader`) creates the MangaDex title → the mapping lands in
+`tracked_manga` → a Discord embed announces it.
+
+**Where the authority sits.** Workers **propose candidates; they never create
+titles.** `untrackedManga` entries are `MangaRecord`s — id, name, language, url
+— and go through the same pipeline as everything else: strict schema
+validation, host allowlist on `mangaUrl`, language ⊆ manifest languages, counts
+within caps. A violation quarantines the **whole envelope**, so a worker cannot
+smuggle a bogus title candidate past validation by attaching it to an otherwise
+valid result. Persistence is idempotent on `(extension, mangaId, mangaLanguage)`,
+so replaying a result cannot enqueue the same candidate twice, and creation is
+a CAS claim (`NEW → CREATING`) so two uploader instances cannot double-create.
+
+**What a hostile worker can achieve.** With `auto_create_titles: false` — the
+default — **nothing without a human**. The row sits at `NEW` until an operator
+runs `untracked approve`. This is the recommended posture for any extension
+that community workers execute.
+
+With `auto_create_titles: true`, a worker that survives policy validation can
+cause the operator's account to create MangaDex titles with attacker-chosen
+name, language, and source URL. The mitigations are: the manifest opt-in itself
+(off by default, per-extension, set by the maintainer not the worker), the host
+allowlist on `mangaUrl`, `title_defaults` in the manifest fixing the content
+rating / status / original language so those are not worker-controlled, and the
+audit + Discord announcement making every creation immediately visible.
+
+**The honest residual risk:** `auto_create_titles: true` plus `COMMUNITY`
+workers means unattended title creation driven by untrusted input. Titles are
+not silently destructive the way chapter deletion is — they are visible,
+attributable, and removable — but cleaning up a few hundred junk titles is slow
+manual work. **Pair `auto_create_titles: true` with `min_trust: TRUSTED`**, and
+leave it off for anything a community worker executes.
+
+There is also a non-adversarial failure with the same blast radius, and it is
+the more likely one: if `tracked_manga` is empty or wrong (a config seed that
+did not land — see `docs/migration-guide.md` stage 3a), every series looks
+untracked and the pipeline will duplicate the entire catalogue. The operational
+guard is watching `untracked list` volume, documented as a runbook in
+`docs/operations.md`.
+
+**Rate limiting title creation is not implemented.** A per-run or per-hour cap
+on automatic creations, refusing to proceed when the untracked count exceeds a
+threshold, would turn the flood case from an incident into a stopped queue.
+Recommended before enabling `auto_create_titles` on anything busy.
+
 ---
 
 ## 3. Secrets inventory
@@ -290,6 +343,9 @@ operator asks and the one the design exists to answer.
 
 - Lease jobs for extensions its trust tier permits, execute them, and submit
   result envelopes.
+- **Propose** untracked series as title-creation candidates (§2a). Proposing is
+  not creating: with the default `auto_create_titles: false` an operator must
+  approve each one.
 - Upload artifacts (page images) tied to its own leased job, sha256- and
   size-verified.
 - Fetch bundles by sha256 for jobs it holds.
@@ -298,9 +354,12 @@ operator asks and the one the design exists to answer.
 
 **A worker CANNOT do:**
 
-- Write to MangaDex. Ever. Not once, not indirectly. `core-uploader` is the
-  only process with that authority.
+- Write to MangaDex. Ever. Not once, not indirectly — chapters or titles.
+  `core-uploader` is the only process with that authority.
 - Write to Postgres directly.
+- Change any configuration. `tracked_manga` and `extension_configs` are the
+  config authority and are writable only through the admin API; a worker sees
+  the tracked ids for its own job as *input* and cannot alter the mapping.
 - Complete, renew, or overwrite a job whose lease it does not hold.
 - Cause a second ingestion of a job that already committed (partial unique
   index).

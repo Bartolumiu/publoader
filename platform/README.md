@@ -13,6 +13,14 @@ to the database.
 "Distributed" means execution capacity. Canonical state and upload authority
 are centralised by design.
 
+**The database is the config authority.** There are no runtime JSON config
+files. `manga_id_map.json` and `override_options.json` are seed data, imported
+once when a bundle is first published, into `tracked_manga` and
+`extension_configs`; after that the database wins and republishing does not
+overwrite it. Schedules, disabled extensions, removal mode, and pause live
+there too. Everything is edited through the admin API — see
+`publoader-admin tracked` and `publoader-admin ext-config`.
+
 Full design: [`../docs/target-architecture.md`](../docs/target-architecture.md).
 
 ## What runs where
@@ -40,7 +48,7 @@ CORE (operator's host)                    WORKER HOST(S)
 | `src/core/scheduler/` | Due-slot computation and run/job creation. |
 | `src/core/ingest/` | Envelope validation, policy checks, quarantine, commit marker. |
 | `src/core/processor/` | MangaDex-side dedup — the port of the legacy `ExtensionUploader` decisions. |
-| `src/core/md/` | MangaDex client, upload task workers, chapter-card generation, Discord webhooks. |
+| `src/core/md/` | MangaDex client, upload task workers, chapter-card generation, Discord webhooks, and the title service that auto-creates MangaDex titles for untracked series. |
 | `src/worker/` | The worker agent: lease loop, bundle cache, credential persistence, runner execution. |
 | `src/services/` | Process entrypoints, one per container. |
 | `src/cli/` | `admin.ts` (operator CLI), `migrate-from-mongo.ts`, `import-sqlite.ts`. |
@@ -142,6 +150,19 @@ pnpm run admin -- workers list
 pnpm run admin -- runs trigger mangaplus --kind FORCE
 pnpm run admin -- dead-letter
 pnpm run admin -- --help
+```
+
+Config and the untracked-series pipeline are driven from the same CLI:
+
+```bash
+pnpm run admin -- tracked list mangaplus
+pnpm run admin -- tracked set mangaplus <externalId> <mdMangaId>
+pnpm run admin -- ext-config get mangaplus            # prints JSON
+pnpm run admin -- ext-config set mangaplus ./o.json   # or pipe to stdin
+
+pnpm run admin -- untracked list --state NEW
+pnpm run admin -- untracked approve <id>   # creates the MangaDex title
+pnpm run admin -- untracked skip <id>
 ```
 
 ## Migration from the legacy stack

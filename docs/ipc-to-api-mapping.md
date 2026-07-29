@@ -62,8 +62,16 @@ surface them because they are where operational problems now appear.
 | `POST /jobs/:id/retry` | `jobs retry <id>` | Replay a dead-lettered job. |
 | `GET /dead-letter` | `dead-letter` | Jobs that exhausted retries or hit a permanent/policy error. |
 | `GET /quarantine` | `quarantine` | Result envelopes rejected by schema or policy validation — the signal that a worker is misbehaving. |
-| `POST /bundles` | `bundle publish <dir>` | Publish a content-addressed extension bundle. |
+| `POST /bundles` | `bundle publish <dir>` | Publish a content-addressed extension bundle. Also performs the one-time seed of `manga_id_map.json` / `override_options.json` into the database. |
 | `GET /audit` | `audit` | Who did what, when. |
+| `GET /extensions/:name/tracked` | `tracked list <ext>` | The external-id → MangaDex-id mapping. **Replaces `manga_id_map.json`** — the database is the config authority. |
+| `PUT /extensions/:name/tracked` | `tracked set <ext> <mangaId> <mdMangaId>` | Add or repoint a mapping. |
+| `DELETE /extensions/:name/tracked/:mangaId` | `tracked remove <ext> <mangaId>` | Stop tracking a manga. Does not touch MangaDex. |
+| `GET /extensions/:name/config` | `ext-config get <ext>` | Override options as JSON. **Replaces `override_options.json`.** |
+| `PUT /extensions/:name/config` | `ext-config set <ext> [file]` | Replace the override options (whole-document, not a merge). CLI reads a file or stdin. |
+| `GET /untracked?state=` | `untracked list [--state]` | Series an extension reported with no MangaDex title yet. |
+| `POST /untracked/:id/approve` | `untracked approve <id>` | Create the MangaDex title now and start tracking it. Synchronous; returns the new `mdMangaId`. |
+| `POST /untracked/:id/skip` | `untracked skip <id>` | Never create a title for this series. |
 
 ### Retired — and what replaces the capability
 
@@ -133,6 +141,14 @@ migration, but the bot loses a feature until they land.
 - **Rate limiting.** The admin scope returns 429 under load. Clients must back
   off rather than retry immediately; a dashboard that polls `/stats` on a
   one-second timer will trip it.
+- **Config is in the database now.** Anything in the bot or dashboard that
+  reads `manga_id_map.json` or `override_options.json` off disk must move to
+  `GET /extensions/:name/tracked` and `GET /extensions/:name/config`. The files
+  are seed data imported at first publish; after that they are stale by
+  definition.
+- **`untracked approve` is destructive-ish and synchronous.** It creates a real
+  MangaDex title and cannot be undone from the API. If the bot exposes it as a
+  slash command, gate it — this is not a read-only convenience.
 - **Token scope.** There is one admin token in v1 and it grants everything,
   including `bundle publish`. The bot and dashboard both hold it. Per-client
   tokens with scopes are a follow-up; until then, treat the bot's token as

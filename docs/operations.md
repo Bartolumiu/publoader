@@ -363,6 +363,142 @@ submission — the job is retried and re-run rather than the envelope being
 
 ---
 
+## Untracked series triage
+
+When an extension reports a series that has no `tracked_manga` mapping, the
+processor records an `untracked_manga` row instead of dropping it. What happens
+next depends on the extension's manifest:
+
+- `auto_create_titles: true` — the title service (inside `core-uploader`)
+  creates and commits the MangaDex title automatically, writes the mapping into
+  `tracked_manga`, and announces it to Discord with a
+  `https://mangadex.org/title/<id>` link.
+- `auto_create_titles: false` (the default) — the row sits at `NEW` until an
+  operator approves or skips it. Nothing is created on MangaDex without you.
+
+```bash
+padmin untracked list                 # everything
+padmin untracked list --state NEW     # awaiting your decision
+padmin untracked list --state FAILED  # creation was attempted and failed
+```
+
+### States
+
+| State | Meaning |
+|---|---|
+| `NEW` | Reported, nothing done. Awaiting auto-creation or your approval. |
+| `CREATING` | A title service instance has claimed it (CAS) and is calling MangaDex. Transient. |
+| `CREATED` | The MangaDex title exists but the mapping is not yet written. Transient. |
+| `TRACKED` | Done. `mdMangaId` is set and a `tracked_manga` row exists. |
+| `FAILED` | Creation was attempted and failed. `lastError` says why. |
+| `SKIPPED` | You decided this series should never get a title. Terminal. |
+
+### Triaging `NEW`
+
+For each row, decide whether the series should exist on MangaDex at all.
+Check `MANGA`, `LANG`, and the source URL first — the common reasons to skip
+are a series that already has a MangaDex title under a different name (the
+mapping is missing, not the title), a duplicate the extension emitted under two
+ids, or something the group does not actually translate.
+
+```bash
+# Already on MangaDex under a different id — map it instead of creating one.
+padmin tracked set <extension> <externalMangaId> <mdMangaId>
+padmin untracked skip <id>
+
+# Genuinely new — create it now.
+padmin untracked approve <id>
+# -> prints the new mdMangaId and its mangadex.org URL
+
+# Should never exist.
+padmin untracked skip <id>
+```
+
+`approve` is synchronous: it creates the title, writes the mapping, announces
+it, and returns the `mdMangaId`. It returns 409 if the row is not in `NEW` or
+`FAILED`, and 503 if you hit an API instance without the title service
+configured.
+
+**Approval is not reversible from here.** There is no un-create — deleting a
+MangaDex title is a MangaDex-side operation. Read the row before approving.
+
+### Triaging `FAILED`
+
+`lastError` is the MangaDex API's complaint. The usual causes:
+
+- **Validation rejected the draft** — a missing or malformed field in the
+  manifest's `title_defaults` (original language, content rating, status). Fix
+  the manifest, republish, then approve. Approving a `FAILED` row resets its
+  attempt budget.
+- **Rate limited or transient 5xx** — just approve again.
+- **Duplicate title** — MangaDex already has it. Map it by hand with
+  `tracked set` and then `untracked skip`.
+
+```bash
+padmin untracked list --state FAILED
+padmin untracked approve <id>       # retries with a fresh attempt budget
+```
+
+### Rows stuck in `CREATING`
+
+`CREATING` is a CAS claim held by one title-service instance. If a row has sat
+there for more than a few minutes, the uploader died mid-creation. Check
+whether the title actually got made on MangaDex before doing anything else — if
+it did, map it with `tracked set` and skip the row, or you will create a
+duplicate.
+
+```bash
+docker compose logs --tail 200 core-uploader | grep -i untracked
+```
+
+### A flood of untracked rows
+
+Dozens or hundreds of `NEW` rows appearing at once is almost never a real
+publisher event. It means the platform thinks nothing is tracked:
+
+```bash
+padmin tracked list <extension> | tail -1     # expect thousands, not zero
+```
+
+If that count is zero or implausibly low, the bundle's config seed did not land
+(see `docs/migration-guide.md` stage 3a). **`padmin pause` immediately** if any
+affected extension has `auto_create_titles: true` — otherwise the title service
+will start creating hundreds of duplicate MangaDex titles, and cleaning that up
+is manual and slow. Fix the tracking data, then skip the bogus rows in bulk
+before resuming.
+
+---
+
+## Config lives in the database, not in JSON files
+
+`manga_id_map.json` and `override_options.json` are **seed data**, imported
+once when a bundle is first published. After that the database wins and
+republishing does not overwrite it. Editing the files on a live deployment
+changes nothing.
+
+```bash
+padmin tracked list <extension>
+padmin tracked set <extension> <externalMangaId> <mdMangaId>
+padmin tracked remove <extension> <externalMangaId>
+
+padmin ext-config get <extension>                 # prints JSON
+padmin ext-config set <extension> ./overrides.json
+padmin ext-config get ext-a | padmin ext-config set ext-b   # or from stdin
+```
+
+`ext-config set` **replaces** the whole document — it is not a merge. Get it,
+edit it, set it back:
+
+```bash
+padmin ext-config get mangaplus > /tmp/o.json
+$EDITOR /tmp/o.json
+padmin ext-config set mangaplus /tmp/o.json
+```
+
+Both are audited, so `padmin audit` shows who repointed a mapping and when.
+
+---
+
 ## Lease-expiry storms
 
 Symptom: `publoader_lease_expiries_total` climbing fast, jobs cycling
@@ -684,12 +820,14 @@ Print this. Work top to bottom.
 1. `padmin stats` — is it paused? are there workers? how deep are the queues?
 2. `padmin dead-letter` — what has already failed?
 3. `padmin quarantine` — is a worker submitting bad data? (security-relevant)
-4. `padmin workers list` — heartbeat ages; is the fleet there?
-5. `curl -s http://core-api:8100/metrics | grep scheduler_lag` — is the clock running?
-6. `docker compose ps` — is everything up? did `migrate` exit 0?
-7. `docker compose logs --tail 200 core-api core-scheduler core-uploader`
-8. **If unsure, `padmin pause`.** Stopping is cheap; an incorrect upload to
+4. `padmin untracked list --state NEW` — is a flood of series about to have
+   MangaDex titles created for it? If yes, `padmin pause` before anything else.
+5. `padmin workers list` — heartbeat ages; is the fleet there?
+6. `curl -s http://core-api:8100/metrics | grep scheduler_lag` — is the clock running?
+7. `docker compose ps` — is everything up? did `migrate` exit 0?
+8. `docker compose logs --tail 200 core-api core-scheduler core-uploader`
+9. **If unsure, `padmin pause`.** Stopping is cheap; an incorrect upload to
    MangaDex is not.
-9. `padmin audit --limit 100` — did a human change something just before this started?
-10. Once resolved: `padmin resume`, then verify with `padmin stats` and a spot
+10. `padmin audit --limit 100` — did a human change something just before this started?
+11. Once resolved: `padmin resume`, then verify with `padmin stats` and a spot
     check on MangaDex.

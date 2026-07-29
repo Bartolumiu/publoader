@@ -159,6 +159,10 @@ Field names are converted snake_case → camelCase throughout; datetimes become
 ISO-8601 strings inside JSONB and real `timestamptz` values in indexed columns.
 Images larger than 20 MiB are skipped with a warning (they are not real pages).
 
+> **Not migrated here:** `manga_id_map.json` and `override_options.json` never
+> lived in Mongo, so this script does not touch them. They are seeded into
+> `tracked_manga` and `extension_configs` by **bundle publish** in stage 3.
+
 Every insert is `ON CONFLICT DO NOTHING` against the natural key, so re-running
 adds only what is new. The script ends with a verification report:
 
@@ -219,10 +223,16 @@ Compare against the counts you recorded in stage 0.
 
 ---
 
-## Stage 3 — Publish extension bundles
+## Stage 3 — Publish extension bundles (and seed the config tables)
 
 The platform does not read extensions from a shared volume. Each extension is
 published once as a content-addressed zip; jobs then pin a specific sha256.
+
+**This stage also migrates the JSON config files.** `manga_id_map.json` and
+`override_options.json` are no longer read at runtime — the database is the
+config authority. Publishing a bundle **seeds** those files into
+`tracked_manga` and `extension_configs`. The Mongo migrator does **not** touch
+them; this is the only path that imports them.
 
 For each extension directory (one containing `manifest.json`):
 
@@ -251,6 +261,57 @@ scheduled.
 
 Extensions that were disabled in SQLite carry over from stage 2b; confirm the
 `DISABLED` column matches your intent.
+
+### 3a. Verify the config seed
+
+**Seeding runs on every publish, but it is create-only — it never overwrites.**
+A mapping an operator fixed by hand survives a republish carrying stale JSON;
+new external ids in the file *are* added. `extension_configs` is created once
+and never touched again. The practical consequences, both worth internalising:
+
+- **If the seed is wrong, republishing will not fix it.** Correct it through
+  the API.
+- **A wrong JSON file can still inject *new* mappings on a later publish**, so
+  a repo with drifted data files is not harmless just because the database is
+  authoritative for the ids it already has.
+
+Check the counts against the JSON files, per extension:
+
+```bash
+# What the file says. manga_id_map.json is {mdMangaId: [externalId, ...]},
+# so the row count is the total number of external ids, not the key count.
+jq '[.[] | length] | add' ./src/mangaplus/manga_id_map.json
+
+# What the database got.
+node $REPO/platform/dist/src/cli/admin.js tracked list mangaplus | tail -1
+```
+
+These must match. If the database count is lower, the usual causes are a
+`data_files` entry in `manifest.json` pointing at a different filename, or
+duplicate external ids in the JSON (which collapse onto the
+`(extension, mangaId)` unique constraint — legitimate, but worth knowing about).
+
+Then the override options:
+
+```bash
+node $REPO/platform/dist/src/cli/admin.js ext-config get mangaplus \
+  | diff - <(jq -S . ./src/mangaplus/override_options.json) && echo "match"
+```
+
+Fix any discrepancy through the API rather than by editing the JSON:
+
+```bash
+# One mapping.
+node .../admin.js tracked set mangaplus <externalId> <mdMangaId>
+node .../admin.js tracked remove mangaplus <externalId>
+
+# Whole override document, from the file or a pipe.
+node .../admin.js ext-config set mangaplus ./src/mangaplus/override_options.json
+```
+
+Once this stage is complete, treat the JSON files in the extensions repos as
+**historical**. They are seed data, not configuration. Editing them changes
+nothing on a deployment that has already published once.
 
 ---
 
@@ -343,6 +404,25 @@ This is the actual gate. Check all four:
 4. **No `DELETE`/`UNAVAILABLE` surprises.** A `CLEAN`-style removal decision
    made from bad data removes real chapters. If the run queued removals you did
    not expect, cancel those tasks and investigate before stage 5.
+
+5. **Untracked series look sane.** This is new behaviour with no legacy
+   equivalent, so give it a careful first look:
+
+   ```bash
+   node $REPO/platform/dist/src/cli/admin.js untracked list
+   ```
+
+   Every series the extension reported that has no `tracked_manga` mapping
+   lands here as `NEW`. A handful is expected — genuinely new series the
+   publisher added. **A flood is a symptom**, not a feature: it almost always
+   means the stage-3 seed did not land, so the platform thinks nothing is
+   tracked. Stop and re-check `tracked list` counts before going further.
+
+   If the manifest sets `auto_create_titles`, rows move to `CREATED`/`TRACKED`
+   on their own once the platform is unpaused, and titles get created on
+   MangaDex. **During the shadow phase the platform is paused, so nothing is
+   created** — which is the point. Review the list, `untracked skip` anything
+   that should not exist, and only unpause when the remainder looks right.
 
 Run the shadow phase for at least a full scheduling cycle of your busiest
 extension — a day is reasonable. Repeat 4b/4c for two or three different
@@ -506,6 +586,13 @@ current Postgres backup.
       that only worked because everything ran on one host.
 - [ ] **Retire the SQLite state store.** Postgres is now authoritative for
       schedules, disabled extensions, removal mode, and pause.
+- [ ] **Stop maintaining the JSON config files.** `manga_id_map.json` and
+      `override_options.json` are seed data only; after the first publish the
+      database wins and edits to the files do nothing. Either delete them from
+      the extensions repos or add a header comment saying so — a file that
+      looks live but is not will eventually cost someone an afternoon. Export
+      the current truth first if you want a copy in the repo:
+      `admin.js tracked list <ext>` and `admin.js ext-config get <ext>`.
 - [ ] **Retire the shared `extensions` volume.** Extension code is delivered as
       hash-pinned bundles; a writable shared volume of Python that several
       containers execute is exactly the supply-chain path the bundle pipeline
