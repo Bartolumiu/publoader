@@ -244,7 +244,7 @@ but nothing reads them.
 | `name` | Must match `^[a-z0-9_]+$`. This is the extension's identity everywhere: the directory name, the audit subject, the `extension` column |
 | `version` | 1–32 chars. Free-form; semver by convention |
 | `entrypoint` | Must match `^[a-zA-Z0-9_./-]+\.(py\|mjs\|js)$`. For a node bundle it must be `.mjs` or `.js`, must exist in the zip, must be non-empty, and must contain a default export — all checked at publish (`store/bundles.ts:181-209`). This is the **built** file, not your TypeScript source |
-| `mangadex_group_id` | uuid. Enforced at ingest: an envelope naming a different group id is quarantined (`ingest.ts:137-139`) |
+| `mangadex_group_id` | uuid. Enforced at ingest: an envelope naming a different group id is quarantined (`ingest.ts:148-150`) |
 | `languages` | ≥1 entry, each 2–16 chars. **Enforced as policy**: a chapter in an undeclared language quarantines the run |
 | `allowed_hosts` | ≥1 entry. See below — this is the most consequential field in the file |
 
@@ -263,7 +263,7 @@ It is enforced at two independent points:
    (`extsdk/guardedFetch.ts:195-214`).
 2. **On the way back in.** Ingest checks every `chapterUrl` you report against the
    core's own copy of your manifest. A URL on an unlisted host **quarantines the
-   envelope and dead-letters the job** (`ingest.ts:146-149`).
+   envelope and dead-letters the job** (`ingest.ts:176-181`).
 
 An empty list blocks everything (`guardedFetch.test.ts:88`). List every host you
 fetch *and* every host you build URLs on — mangaplus lists two for exactly that
@@ -500,27 +500,46 @@ actually did. See [development.md](development.md#the-local-stack).
 publoader-admin bundle publish <extension-dir> [--source-commit <sha>]
 ```
 
-`src/cli/admin.ts:753-819`. What it does:
+The build-and-zip step lives in
+[`platform/src/core/webhooks/bundleBuilder.ts`](../platform/src/core/webhooks/bundleBuilder.ts),
+not in the CLI, because **two callers need it**: an operator on a laptop, and the
+[GitHub push webhook](webhooks.md) building a directory it just extracted from a
+repo archive. Both must produce byte-identical archives for the same input — the
+sha256 of the zip is the version pin a worker verifies, so two publish paths that
+disagreed would be two different programs (`bundleBuilder.ts:1-16`).
 
-1. Validates that `<dir>/manifest.json` parses and has `name` and `version` —
-   locally, so you do not upload megabytes to be told about a typo.
-2. Detects a source entrypoint: `index.ts`, then `src/index.ts`, else a `build`
-   script in `package.json` (`admin.ts:699-721`).
+`buildExtensionBundle(root)` (`bundleBuilder.ts:217-249`):
+
+1. Reads `<dir>/manifest.json` and requires `name` and `version` — locally, so you
+   do not upload megabytes to be told about a typo.
+2. Detects a source entrypoint: `index.ts`, then `src/index.ts`, else `main` from a
+   `package.json` that declares a `build` script (`bundleBuilder.ts:137-159`). No
+   match means the directory is already plain ESM and is zipped as-is.
 3. If it found one, **builds it with esbuild**: `bundle: true`, `format: "esm"`,
    `platform: "node"`, `target: "node24"`, **`external: []`**
-   (`admin.ts:668-696`). Dependencies are inlined, so the sha256 pins your whole
-   program and not just your own source.
-4. Stages a zip containing only the built `index.mjs`, a manifest rewritten with
+   (`bundleBuilder.ts:98-134`). Dependencies are inlined, so the sha256 pins your
+   whole program and not just your own source. The flip side: every import must
+   resolve from the extension directory — a node builtin or a relative path.
+4. Stages only what ships: the built `index.mjs`, a manifest **rewritten** with
    `entrypoint: "index.mjs"`, and each declared `data_files` value — failing if one
-   is missing (`admin.ts:729-751`). Plain-ESM directories with no TypeScript are
-   zipped as-is.
-5. Zips deterministically: entries sorted, and `__pycache__`, `.git`,
-   `node_modules`, `dist`, `.turbo` excluded (`admin.ts:633-650`).
-6. `POST /api/v1/admin/bundles` with `content-type: application/zip`, plus
-   `x-source-commit` when given.
+   is missing (`bundleBuilder.ts:167-193`). Source, tests, `node_modules`, and
+   lockfiles are left behind. A bundle is the program, not the project.
+5. Zips **deterministically** (`bundleBuilder.ts:51-76`): entries in sorted order,
+   `__pycache__`/`.git`/`node_modules`/`dist`/`.turbo` excluded, and every entry
+   stamped with a fixed mtime rather than the filesystem's. That last detail
+   matters — a repo archive extracts with "now" as its mtime, so without it the
+   webhook would compute a different sha256 than the CLI for the very same commit,
+   and every redelivery would look like a new version of identical code.
 
-Output tells you `extension`, `version`, `sha256`, and whether it was `created`.
-`created: false` means byte-identical content was already published.
+Then the CLI posts it to `POST /api/v1/admin/bundles` with
+`content-type: application/zip`, adding `x-source-commit` when given
+(`src/cli/admin.ts:629-680`). Output tells you `extension`, `version`, `sha256`,
+and whether it was `created`; `created: false` means byte-identical content was
+already published.
+
+If a build is needed and esbuild is not installed, the error says so and tells you
+to run `pnpm install` in `platform/` or ship a prebuilt `index.mjs`
+(`bundleBuilder.ts:105-110`).
 
 Publishing needs the `bundles:write` scope — the `ci-publisher` preset is exactly
 that one scope, and nothing else.
@@ -541,6 +560,15 @@ The entrypoint checks are deliberately a shallow smell test, not a parser — th
 real validation is the runner importing the file and refusing it if `default` is
 not a function. The point is to fail at publish, where an operator is watching,
 rather than on a worker an hour later (`store/bundles.ts:172-180`).
+
+### Publishing from a push
+
+A GitHub push to an extensions repository can build and publish automatically, via
+`POST /webhook` on the control plane. It uses the same `buildExtensionBundle`, so
+the bytes are identical to what the CLI would have produced. Because
+`external: []` requires every import to resolve from the extension directory, that
+path is limited to dependency-free extensions. Setup, the signature check, and why
+CI-side publishing is preferred: [webhooks.md](webhooks.md).
 
 ---
 

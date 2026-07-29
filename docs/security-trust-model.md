@@ -363,8 +363,9 @@ dashboard's mint form, so the easy path is the least-privilege one):
 obviously look at them, and making callers list both halves invites
 over-granting by copy-paste. Nothing else implies anything.
 
-**No token can mint tokens or manage accounts.** This is the one invariant to
-state without hedging, because it is what makes the table above hold:
+**No token can mint tokens, manage accounts, or take a database dump.** This is
+the one invariant to state without hedging, because it is what makes the table
+above hold:
 
 - `POST /api/v1/admin/tokens` requires the `users:admin` scope **and** the
   `OWNER` role. API-token principals are assigned `ADMIN` in `adminAuthHook`
@@ -374,12 +375,33 @@ state without hedging, because it is what makes the table above hold:
 - The same double gate covers `/api/v1/admin/users*`, `/sessions*`, and the
   signup toggle: no token can create an operator, promote one, set someone's
   password, or read the accounts list.
+- It also covers `GET /api/v1/admin/backup`, the `pg_dump` stream. A dump is not
+  a read: it contains every operator password hash, every token hash, and the
+  saved MangaDex access and refresh tokens in plaintext, so whoever holds one can
+  attack the account table offline and authenticate to MangaDex as the operator.
+  It therefore sits at the account-administration bar and not at `settings:write`
+  — which the Discord bot holds so it can pause the platform.
+- **The scope alone is never the gate; `requireOwner` is.** An OWNER may mint a
+  `pa_…` token with `["*"]`, and wildcard satisfies every scope check — so a
+  route guarded only by `requireScope("users:admin")` is reachable by a client
+  credential. The role is what excludes tokens, because `adminAuthHook` never
+  assigns one the OWNER role. Any future route at this bar needs both.
 - Consequence: a leaked client credential cannot widen itself, cannot issue a
-  second credential to outlive its own revocation, and cannot grant a human
-  persistent access. Revoking the row ends it.
+  second credential to outlive its own revocation, cannot grant a human
+  persistent access, and cannot exfiltrate the material that would let it do any
+  of those offline. Revoking the row ends it.
 - `test/integration/tokens.test.ts` asserts both halves of this (a `["*"]`
   token 403s on mint and on `/users`), and `test/integration/ops.test.ts` does
-  the same for the operational routes. The claim is tested, not just documented.
+  the same for the operational routes and for `/backup` (a `["*"]`, a
+  `users:admin` and a `settings:write` token all 403). The claim is tested, not
+  just documented.
+
+`pg_dump` is deliberately **absent** from the core runtime image, so `/backup`
+answers 503 with that fact and a pointer to the host procedure unless an operator
+adds `postgresql-client` to it. That is a defensible place to leave it: the
+scheduled backup in `docs/operations.md` runs `pg_dump` inside the postgres
+container, where the tool belongs, and adding it to a long-lived internet-facing
+service is a real increase in that service's reach.
 
 ---
 
@@ -448,3 +470,32 @@ operator asks and the one the design exists to answer.
 cannot *act*. Everything in §2 is about narrowing what a survivable lie can
 achieve, and everything in §1 is about making sure a lie is the only thing on
 the table.
+
+
+---
+
+## Documentation map
+
+This document is one of the set below. Start at
+[architecture-guide.md](architecture-guide.md) if you are new to the platform.
+
+| Document | One line |
+| --- | --- |
+| [architecture-guide.md](architecture-guide.md) | How it works: the planes, one run traced end to end, the job state machine, and why exactly-once holds |
+| [development.md](development.md) | Local setup, running services from source, the Prisma workflow, the test layers, debugging a failing job |
+| [api-reference.md](api-reference.md) | Every HTTP endpoint, its required scope, and its meaningful failures |
+| [data-model.md](data-model.md) | Every table, column, index, and invariant |
+| [extension-guide.md](extension-guide.md) | Writing an extension: the v2 contract, the manifest, the sandbox, publishing |
+| [glossary.md](glossary.md) | Every load-bearing term, with the file that defines it |
+| [target-architecture.md](target-architecture.md) | The binding design reference and the rationale for each choice |
+| [architecture-assessment.md](architecture-assessment.md) | The legacy Python system and the failure modes that motivated the rewrite |
+| [security-trust-model.md](security-trust-model.md) | Threat model, control matrix, secrets inventory, and what a worker can and cannot do |
+| [deployment.md](deployment.md) | Standing up the core and worker hosts, the tunnel and WAF, upgrades, backups |
+| [operations.md](operations.md) | Day-2 runbooks: triage, worker lifecycle, secret rotation, dead letters, incidents |
+| [migration-guide.md](migration-guide.md) | Staged Mongo/SQLite to Postgres cutover, with a rollback at every stage |
+| [ipc-to-api-mapping.md](ipc-to-api-mapping.md) | Which endpoint replaced each legacy IPC command |
+| [bot.md](bot.md) | Discord bot setup, the admin-gating model, and the command reference |
+| [webhooks.md](webhooks.md) | Publishing extension bundles from a GitHub push: setup, the signature check, and why CI-side publishing is preferred |
+| [implementation-plan.md](implementation-plan.md) | Historical: the original milestone plan |
+| [../README.md](../README.md) | What publoader is, and the five-minute quickstart |
+| [../CONTRIBUTING.md](../CONTRIBUTING.md) | Branch workflow, definition of done, and the review checklist |

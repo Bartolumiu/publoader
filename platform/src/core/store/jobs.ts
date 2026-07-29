@@ -156,6 +156,12 @@ export class JobStore {
         WHERE state = 'PENDING'
           AND not_before <= now()
           AND cancel_requested = false
+          -- A disabled extension is unloaded, not merely unscheduled: whatever
+          -- was already queued for it must stop being handed out too. Enforcing
+          -- it in the claim (rather than only when creating runs) means the
+          -- guarantee holds for jobs created before the extension was disabled,
+          -- and for manual runs, without a sweep to race against.
+          AND extension NOT IN (SELECT extension FROM disabled_extensions)
           ${extFilter}
           ${trustFilter}
         ORDER BY not_before ASC
@@ -358,6 +364,42 @@ export class JobStore {
       data: { cancelRequested: true },
     });
     return flagged.count === 1 ? "flagged" : "rejected";
+  }
+
+  /**
+   * Stop all outstanding work for one extension — the "unload" half of
+   * enable/disable.
+   *
+   * Disabling used to mean only "stop scheduling it", which left whatever was
+   * already queued to run minutes or hours later. For an operator pulling a
+   * misbehaving extension that is the wrong behaviour: they want it stopped now.
+   * Queued jobs are cancelled outright; jobs a worker is already running are
+   * flagged, and the worker aborts on its next lease renewal (see the renew
+   * response's `cancelRequested`).
+   */
+  async cancelAllForExtension(extension: string): Promise<{ cancelled: number; flagged: number }> {
+    const cancelled = await this.prisma.job.updateMany({
+      where: { extension, state: "PENDING" },
+      data: { state: "CANCELLED", cancelRequested: true },
+    });
+    const flagged = await this.prisma.job.updateMany({
+      where: { extension, state: { in: ["LEASED", "RUNNING"] } },
+      data: { cancelRequested: true },
+    });
+    return { cancelled: cancelled.count, flagged: flagged.count };
+  }
+
+  /** Same, for every job pinned to one bundle — used when a bundle is yanked. */
+  async cancelAllForBundle(sha256: string): Promise<{ cancelled: number; flagged: number }> {
+    const cancelled = await this.prisma.job.updateMany({
+      where: { bundleSha256: sha256, state: "PENDING" },
+      data: { state: "CANCELLED", cancelRequested: true },
+    });
+    const flagged = await this.prisma.job.updateMany({
+      where: { bundleSha256: sha256, state: { in: ["LEASED", "RUNNING"] } },
+      data: { cancelRequested: true },
+    });
+    return { cancelled: cancelled.count, flagged: flagged.count };
   }
 
   /**

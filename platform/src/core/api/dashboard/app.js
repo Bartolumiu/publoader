@@ -17,13 +17,47 @@ const API = "/api/v1/admin";
 const CSRF_HEADER = "x-requested-with";
 const CSRF_VALUE = "publoader-dash";
 const REFRESH_MS = 10_000;
+const WILDCARD = "*";
 
-const state = { actor: null, role: null, userId: null, tab: "overview", timer: null, owner: false };
+const state = {
+  actor: null,
+  role: null,
+  userId: null,
+  tab: "overview",
+  timer: null,
+  /** Scope set from GET /whoami. Empty until it answers. */
+  scopes: [],
+  /** "root" | "api-token" | "session". */
+  kind: null,
+};
 
-// The session payload's role says what the account is; `state.owner` says what
-// the server actually answered when asked (see confirmOwner). Only the second
-// one may gate UI, so the page never offers a control that 403s.
-const isOwner = () => state.owner;
+/**
+ * Does the signed-in principal hold `required`?
+ *
+ * This mirrors `hasScope` in src/core/api/scopes.ts, including that write
+ * implies append implies read within an area. Two copies of one rule is a
+ * liability, so be clear about which is which: the server's copy is the
+ * control, and this one exists only to decide what to draw. Getting this wrong
+ * can hide a control the operator is entitled to, or show one that 403s — it
+ * can never grant anything.
+ */
+function can(required) {
+  for (const held of state.scopes) {
+    if (held === WILDCARD || held === required) return true;
+    const [area, verb] = held.split(":");
+    if (verb === "write" && (required === `${area}:read` || required === `${area}:append`)) return true;
+    if (verb === "append" && required === `${area}:read`) return true;
+  }
+  return false;
+}
+
+/**
+ * Account administration needs the OWNER role on top of the scope, because an
+ * api-token is never OWNER however broadly it is scoped (see requireOwner).
+ * Checking both here is what keeps the owner-only tabs off the page for a
+ * wildcard token that would still fail every request behind them.
+ */
+const isOwner = () => state.role === "OWNER" && can("users:admin");
 
 // ---------------------------------------------------------------- DOM helpers
 
@@ -131,6 +165,60 @@ function ago(value) {
 const truncate = (text, max = 160) =>
   typeof text === "string" && text.length > max ? `${text.slice(0, max)}…` : text;
 
+/**
+ * A button that is visibly disabled, and says why, when the principal lacks
+ * `scope`.
+ *
+ * Disabling beats hiding for a destructive action a colleague might expect to
+ * find: a greyed-out "Remove" that explains it needs `tracked:write` tells a
+ * contributor the operation exists and who to ask, whereas an absent button
+ * reads as a missing feature. The tooltip names the scope because that is the
+ * only actionable part of the answer.
+ */
+function gatedButton(scope, attrs) {
+  const allowed = can(scope);
+  return el("button", {
+    ...attrs,
+    type: "button",
+    disabled: !allowed || attrs.disabled === true,
+    title: allowed ? (attrs.title ?? null) : `Needs the "${scope}" scope, which this account does not hold.`,
+    onclick: allowed ? attrs.onclick : undefined,
+  });
+}
+
+/**
+ * Hand the browser a generated file. Used for the series-map export and
+ * anything else the operator needs to round-trip through a text editor, so
+ * "export, edit, paste back" never involves a file in git or a shell on the
+ * host.
+ */
+function download(filename, text, type = "text/plain") {
+  const url = URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` }));
+  const link = el("a", { href: url, download: filename });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  // Revoking immediately can cancel the download in some browsers; one turn of
+  // the event loop is enough for it to have started.
+  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
+/** Prev/next pager for a client-side page of `rows`. */
+function pager(total, page, size, onChange) {
+  const pages = Math.max(1, Math.ceil(total / size));
+  const clamped = Math.min(Math.max(page, 0), pages - 1);
+  return row(
+    el("button", { type: "button", text: "‹ Prev", disabled: clamped === 0, onclick: () => onChange(clamped - 1) }),
+    el("span", { class: "dim", text: `Page ${clamped + 1} of ${pages} · ${total} row(s)` }),
+    el("button", {
+      type: "button",
+      text: "Next ›",
+      disabled: clamped >= pages - 1,
+      onclick: () => onChange(clamped + 1),
+    }),
+  );
+}
+
 // ------------------------------------------------------------------- feedback
 
 function toast(message, ok = true) {
@@ -151,9 +239,13 @@ const closeModal = () => $("modal").close();
 // ------------------------------------------------------------------------ api
 
 class ApiError extends Error {
-  constructor(status, message) {
+  constructor(status, message, body) {
     super(message);
     this.status = status;
+    // The parsed body, for the callers that need more than the first line —
+    // the bundle preflight returns a list of reasons under a 422, and showing
+    // only `error` would hide all but one of them.
+    this.body = body ?? null;
   }
 }
 
@@ -198,28 +290,65 @@ async function api(path, opts) {
     const scope = /^missing scope:\s*(\S+)/.exec(message);
     if (scope) toast(`Not permitted — this credential is missing the "${scope[1]}" scope.`, false);
   }
-  if (!res.ok) throw new ApiError(res.status, message);
+  if (!res.ok) throw new ApiError(res.status, message, data);
   return data;
 }
 
 /**
- * Does account administration actually answer for us?
+ * Ask the server what this principal is and may do.
  *
- * A 403 from /users is the server's own statement that this principal is not an
- * owner, and it is the only signal the SPA can trust — the role in the session
- * payload describes the account, not what the endpoints behind the owner-only
- * views will do. Asking once at login keeps those views off the page entirely
- * rather than letting an operator click into a wall of 403s.
+ * This replaced probing an owner-only endpoint and reading the 403: that told
+ * us one bit, and the page needs the whole scope set to decide what to draw.
+ * A CONTRIBUTOR must not be shown a Workers tab that answers 403 on every
+ * request, and an operator must not have a button hidden from them because the
+ * SPA guessed from a role name.
+ *
+ * On failure the principal keeps whatever the session payload claimed and no
+ * scopes, which renders the smallest possible surface. That is the right way to
+ * fail: an operator who sees too few tabs reloads, whereas one who sees too
+ * many learns by clicking.
  */
-async function confirmOwner() {
+async function loadWhoami() {
   try {
-    await api("/users", { allow401: true, quiet: true });
-    state.owner = true;
-  } catch (err) {
-    // A 403 is definitive. Anything else (500, offline) leaves us guessing, so
-    // fall back to what the session claimed rather than hiding an owner's tabs.
-    state.owner = err instanceof ApiError && err.status === 403 ? false : state.role === "OWNER";
+    const me = await api("/whoami", { allow401: true, quiet: true });
+    state.scopes = Array.isArray(me.scopes) ? me.scopes : [];
+    state.kind = me.kind ?? null;
+    if (me.role) state.role = me.role;
+  } catch {
+    state.scopes = [];
+    state.kind = null;
   }
+}
+
+/** What each role is for, named on the banner so the limits are not a surprise. */
+const ROLE_BLURB = {
+  OWNER: "Full control plane, including operator accounts, client tokens and database backups.",
+  ADMIN: "Full control plane except operator accounts and client tokens.",
+  CONTRIBUTOR:
+    "Series-map curation and untracked triage. Adding mappings is allowed; changing or removing " +
+    "an existing one needs an operator.",
+};
+
+/**
+ * Name the current role and its limits, so a contributor understands that the
+ * short tab strip is the design rather than a bug — and so an operator can see
+ * at a glance which credential they are acting as.
+ */
+function renderRoleBanner() {
+  const banner = $("role-banner");
+  const role = state.role;
+  if (!role) {
+    banner.hidden = true;
+    return;
+  }
+  banner.hidden = false;
+  banner.className = role === "CONTRIBUTOR" ? "banner info" : "banner quiet";
+  banner.replaceChildren(
+    el("strong", { text: `Signed in as ${role.toLowerCase()}` }),
+    document.createTextNode(
+      `${state.kind === "root" ? " (break-glass admin token)" : ""} — ${ROLE_BLURB[role] ?? ""}`,
+    ),
+  );
 }
 
 /** Wrap a mutating call: toast the outcome, then refresh the current view. */
@@ -245,8 +374,10 @@ function showLogin(message) {
   state.actor = null;
   state.role = null;
   state.userId = null;
-  state.owner = false;
+  state.scopes = [];
+  state.kind = null;
   $("app").hidden = true;
+  $("role-banner").hidden = true;
   $("whoami").textContent = "";
   $("logout").hidden = true;
   $("pause-pill").hidden = true;
@@ -269,7 +400,8 @@ async function showApp(session) {
     ? `${session.actor}${session.role ? ` · ${session.role.toLowerCase()}` : ""}`
     : "";
   $("logout").hidden = false;
-  await confirmOwner();
+  await loadWhoami();
+  renderRoleBanner();
   buildTabs();
   startRefresh();
 }
@@ -327,27 +459,48 @@ async function logout() {
 
 // ------------------------------------------------------------------ tab router
 
+/**
+ * Every tab names the scope its view needs to render at all. A principal that
+ * lacks it never sees the tab — a CONTRIBUTOR gets Overview, Extensions and
+ * Untracked and nothing else.
+ *
+ * Hiding is cosmetic and must be read that way: the server checks the same
+ * scope on every endpoint behind every tab, and the integration suite asserts
+ * the refusals directly rather than trusting this list. What this buys is that
+ * an operator is never offered a control that cannot work.
+ */
 const TABS = [
-  ["overview", "Overview"],
-  ["workers", "Workers"],
-  ["extensions", "Extensions"],
-  ["runs", "Runs"],
-  ["queues", "Queues"],
-  ["errors", "Errors"],
-  ["untracked", "Untracked"],
-  ["quarantine", "Quarantine"],
-  ["audit", "Audit"],
+  ["overview", "Overview", { scope: "stats:read" }],
+  ["activity", "Activity", { scope: "runs:read" }],
+  ["workers", "Workers", { scope: "workers:read" }],
+  ["extensions", "Extensions", { scope: "extensions:read" }],
+  ["runs", "Runs", { scope: "runs:read" }],
+  ["queues", "Queues", { scope: "runs:read" }],
+  ["untracked", "Untracked", { scope: "untracked:read" }],
+  ["quarantine", "Quarantine", { scope: "runs:read" }],
+  ["audit", "Audit", { scope: "audit:read" }],
+  ["system", "System", { scope: "settings:read" }],
   // Account administration and credential minting are the two things an ADMIN
-  // cannot do. Hiding the tabs is cosmetic; the server enforces it on every
-  // endpoint behind them.
+  // cannot do, and they need the OWNER role rather than a scope: a wildcard api
+  // token holds users:admin but is never OWNER.
   ["users", "Users", { owner: true }],
   ["tokens", "Tokens", { owner: true }],
 ];
 
-const visibleTabs = () => TABS.filter(([, , opts]) => !opts || !opts.owner || isOwner());
+const tabAllowed = (opts) => {
+  if (!opts) return true;
+  if (opts.owner) return isOwner();
+  return !opts.scope || can(opts.scope);
+};
+
+const visibleTabs = () => TABS.filter(([, , opts]) => tabAllowed(opts));
 
 function buildTabs() {
-  if (!visibleTabs().some(([id]) => id === state.tab)) state.tab = "overview";
+  const visible = visibleTabs();
+  // Land on the first tab this principal can actually use rather than assuming
+  // Overview: a narrowly-scoped credential may not hold stats:read, and
+  // defaulting to a view that 403s is the exact failure this gating removes.
+  if (!visible.some(([id]) => id === state.tab)) state.tab = visible.length ? visible[0][0] : null;
   $("tabs").replaceChildren(
     ...visibleTabs().map(([id, label]) =>
       el("button", {
@@ -373,20 +526,37 @@ async function selectTab(id) {
 
 const VIEWS = {
   overview: viewOverview,
+  activity: viewActivity,
   workers: viewWorkers,
   extensions: viewExtensions,
   runs: viewRuns,
   queues: viewQueues,
-  errors: viewErrors,
   untracked: viewUntracked,
   quarantine: viewQuarantine,
   audit: viewAudit,
+  system: viewSystem,
   users: viewUsers,
   tokens: viewTokens,
 };
 
 async function renderTab() {
   const view = $("view");
+  if (!state.tab) {
+    // Reachable for a credential scoped for one machine job (say bundles:write
+    // for CI). Say what it holds rather than showing an empty page.
+    view.replaceChildren(
+      card(
+        "Nothing to show",
+        el("p", {
+          text:
+            "This credential holds no scope that the dashboard renders a section for. It can still " +
+            "be used against the API directly.",
+        }),
+        el("p", { class: "dim", text: `Scopes: ${state.scopes.join(", ") || "none"}` }),
+      ),
+    );
+    return;
+  }
   try {
     view.replaceChildren(await VIEWS[state.tab]());
   } catch (err) {
@@ -425,35 +595,42 @@ async function viewOverview() {
     "aria-label": "Pause duration in minutes",
   });
 
+  // A contributor sees the pause state — it explains why nothing is moving —
+  // but not the levers, which need settings:write.
   const controls = card(
     "Platform",
     stats.paused
       ? el("div", { class: "banner", text: "Scheduling is paused. No new jobs will be leased." })
       : null,
-    row(
-      minutes,
-      el("button", {
-        type: "button",
-        text: "Pause for N minutes",
-        onclick: () =>
-          act("pause", () =>
-            api("/pause", { method: "POST", body: { minutes: Number(minutes.value) || 60 } }),
-          ),
-      }),
-      el("button", {
-        type: "button",
-        text: "Pause indefinitely",
-        onclick: () =>
-          confirmDestructive("Pause the platform until explicitly resumed?") &&
-          act("pause", () => api("/pause", { method: "POST", body: {} })),
-      }),
-      el("button", {
-        type: "button",
-        class: "primary",
-        text: "Resume",
-        onclick: () => act("resume", () => api("/resume", { method: "POST", body: {} })),
-      }),
-    ),
+    can("settings:write")
+      ? row(
+          minutes,
+          el("button", {
+            type: "button",
+            text: "Pause for N minutes",
+            onclick: () =>
+              act("pause", () =>
+                api("/pause", { method: "POST", body: { minutes: Number(minutes.value) || 60 } }),
+              ),
+          }),
+          el("button", {
+            type: "button",
+            text: "Pause indefinitely",
+            onclick: () =>
+              confirmDestructive("Pause the platform until explicitly resumed?") &&
+              act("pause", () => api("/pause", { method: "POST", body: {} })),
+          }),
+          el("button", {
+            type: "button",
+            class: "primary",
+            text: "Resume",
+            onclick: () => act("resume", () => api("/resume", { method: "POST", body: {} })),
+          }),
+        )
+      : el("p", {
+          class: "dim",
+          text: `Scheduling is ${stats.paused ? "paused" : "running"}. Pausing and resuming needs the "settings:write" scope.`,
+        }),
   );
 
   const counts = (title, entries) =>
@@ -486,7 +663,9 @@ async function viewOverview() {
         text: `${stats.quarantined} quarantined result submission(s).`,
       }),
     ),
-    await mangadexCard(),
+    // The platform's own MangaDex credential is settings state, so it stays off
+    // a contributor's Overview entirely rather than degrading to a 403 note.
+    can("settings:read") ? await mangadexCard() : null,
   );
 }
 
@@ -719,52 +898,12 @@ function showEnrollToken(minted, workerName) {
 // ------------------------------------------------------------------ extensions
 
 async function viewExtensions() {
-  const [{ extensions }, removal] = await Promise.all([api("/extensions"), api("/removal-mode")]);
-
-  const modeSelect = el(
-    "select",
-    { id: "removal-mode", "aria-label": "Chapter removal mode" },
-    removal.validModes.map((mode) =>
-      el("option", { value: mode, text: mode, selected: mode === removal.mode }),
-    ),
-  );
-
-  const file = el("input", { type: "file", id: "bundle-file", accept: ".zip,application/zip" });
-
-  const settings = card(
-    "Settings",
-    row(
-      el("label", { for: "removal-mode", text: "Chapter removal mode" }),
-      modeSelect,
-      el("button", {
-        type: "button",
-        text: "Save",
-        onclick: () =>
-          act("removal-mode.set", () => api("/removal-mode", { method: "POST", body: { mode: modeSelect.value } })),
-      }),
-    ),
-    el("label", { for: "bundle-file", text: "Publish extension bundle (.zip)" }),
-    row(
-      file,
-      el("button", {
-        type: "button",
-        text: "Publish",
-        onclick: async () => {
-          const chosen = file.files && file.files[0];
-          if (!chosen) return toast("choose a bundle zip first", false);
-          const buffer = await chosen.arrayBuffer();
-          await act("bundle.publish", () =>
-            api("/bundles", {
-              method: "POST",
-              raw: true,
-              body: buffer,
-              headers: { "content-type": "application/zip" },
-            }),
-          );
-        },
-      }),
-    ),
-  );
+  // Removal mode is settings state, so a contributor never asks for it — the
+  // request would 403 and the card is not theirs to see.
+  const [{ extensions }, removal] = await Promise.all([
+    api("/extensions"),
+    can("settings:read") ? api("/removal-mode") : Promise.resolve(null),
+  ]);
 
   const detail = el("div", { id: "ext-detail" });
 
@@ -775,11 +914,10 @@ async function viewExtensions() {
     fmtTime(ext.publishedAt),
     chip(ext.disabled ? "disabled" : "enabled"),
     [
-      el("button", { type: "button", text: "Run", onclick: () => triggerRun(ext.name, "UPDATE") }),
-      el("button", { type: "button", text: "Force", onclick: () => triggerRun(ext.name, "FORCE") }),
-      el("button", { type: "button", class: "danger", text: "Clean", onclick: () => triggerRun(ext.name, "CLEAN") }),
-      el("button", {
-        type: "button",
+      gatedButton("runs:write", { text: "Run", onclick: () => triggerRun(ext.name, "UPDATE") }),
+      gatedButton("runs:write", { text: "Force", onclick: () => triggerRun(ext.name, "FORCE") }),
+      gatedButton("runs:write", { class: "danger", text: "Clean", onclick: () => triggerRun(ext.name, "CLEAN") }),
+      gatedButton("extensions:write", {
         text: ext.disabled ? "Enable" : "Disable",
         onclick: () =>
           act(`extension.${ext.disabled ? "enable" : "disable"}`, () =>
@@ -791,7 +929,10 @@ async function viewExtensions() {
       }),
       el("button", {
         type: "button",
-        text: "Configure",
+        class: "primary",
+        // "Configure" undersold it once this became the series-map and activity
+        // view as well; a contributor's whole job lives behind this button.
+        text: "Open",
         onclick: async () => {
           detail.replaceChildren(el("p", { class: "dim", text: "Loading…" }));
           detail.replaceChildren(await extensionDetail(ext.name));
@@ -804,9 +945,306 @@ async function viewExtensions() {
   return el(
     "div",
     {},
-    settings,
+    removal ? removalModeCard(removal) : null,
+    can("bundles:write") ? publishCard() : null,
     card("Published bundles", table(["Extension", "Version", "sha256", "Published", "State", ""], rows)),
     detail,
+  );
+}
+
+function removalModeCard(removal) {
+  const modeSelect = el(
+    "select",
+    { id: "removal-mode", "aria-label": "Chapter removal mode" },
+    removal.validModes.map((mode) => el("option", { value: mode, text: mode, selected: mode === removal.mode })),
+  );
+  return card(
+    "Chapter removal mode",
+    row(
+      el("label", { for: "removal-mode", text: "When a chapter disappears from the source" }),
+      modeSelect,
+      gatedButton("settings:write", {
+        text: "Save",
+        onclick: () =>
+          act("removal-mode.set", () => api("/removal-mode", { method: "POST", body: { mode: modeSelect.value } })),
+      }),
+    ),
+  );
+}
+
+// ------------------------------------------------------- bundle publishing (zip)
+
+/**
+ * CRC-32, table-driven. Needed because a zip entry carries its own checksum and
+ * the archive is rejected outright without a correct one.
+ */
+const CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let bit = 0; bit < 8; bit++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) crc = CRC_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+/**
+ * Build a STORED (uncompressed) zip from picked files, in the browser.
+ *
+ * This is what makes "publish an extension directory" possible without a shell:
+ * the directory picker hands us the files, and the publish endpoint wants a zip.
+ * Store-only keeps it to one page of code with no dependency — the publish path
+ * hashes and stores the archive rather than caring how well it compresses, and
+ * AdmZip on the server reads stored entries like any other.
+ *
+ * Entry names are made relative to the picked directory, which also fixes the
+ * single most common publish mistake: zipping the directory itself, so
+ * manifest.json ends up one level down and the server cannot find it.
+ */
+async function zipStored(files) {
+  const encoder = new TextEncoder();
+  const local = [];
+  const central = [];
+  let offset = 0;
+
+  const u16 = (value) => [value & 0xff, (value >>> 8) & 0xff];
+  const u32 = (value) => [value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff];
+
+  for (const file of files) {
+    const name = encoder.encode(file.name);
+    const data = new Uint8Array(await file.blob.arrayBuffer());
+    const crc = crc32(data);
+    // Flag 0x0800 declares the name is UTF-8. Time/date are left at zero: a
+    // bundle is identified by its sha256, so a fabricated mtime would only make
+    // two byte-identical publishes hash differently.
+    const header = [
+      ...u32(0x04034b50), ...u16(20), ...u16(0x0800), ...u16(0),
+      ...u16(0), ...u16(0), ...u32(crc), ...u32(data.length), ...u32(data.length),
+      ...u16(name.length), ...u16(0),
+    ];
+    local.push(new Uint8Array(header), name, data);
+    central.push(
+      new Uint8Array([
+        ...u32(0x02014b50), ...u16(20), ...u16(20), ...u16(0x0800), ...u16(0),
+        ...u16(0), ...u16(0), ...u32(crc), ...u32(data.length), ...u32(data.length),
+        ...u16(name.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0),
+        ...u32(offset),
+      ]),
+      name,
+    );
+    offset += header.length + name.length + data.length;
+  }
+
+  const centralSize = central.reduce((sum, part) => sum + part.length, 0);
+  const eocd = new Uint8Array([
+    ...u32(0x06054b50), ...u16(0), ...u16(0),
+    ...u16(files.length), ...u16(files.length),
+    ...u32(centralSize), ...u32(offset), ...u16(0),
+  ]);
+  return new Blob([...local, ...central, eocd], { type: "application/zip" });
+}
+
+/** Strip the picked directory's own name so manifest.json lands at the root. */
+function relativeEntries(fileList) {
+  const files = [...fileList];
+  const paths = files.map((file) => file.webkitRelativePath || file.name);
+  const root = paths[0]?.includes("/") ? `${paths[0].split("/")[0]}/` : "";
+  return files
+    .map((file, index) => ({ name: (paths[index] ?? file.name).slice(root.length), blob: file }))
+    // Editor droppings and VCS metadata have no business in a published bundle,
+    // and node_modules would blow past the 64 MiB body limit.
+    .filter(
+      (entry) =>
+        entry.name &&
+        !entry.name.startsWith(".git/") &&
+        !entry.name.includes("/node_modules/") &&
+        !entry.name.endsWith(".DS_Store") &&
+        !entry.name.endsWith(".pyc"),
+    );
+}
+
+/**
+ * Publish a bundle: drop a zip, pick a zip, or pick the extension directory.
+ *
+ * Publishing runs a preflight first and shows the verdict inline. The reason is
+ * not convenience: a publish is a code-execution change on every worker that
+ * runs this extension, so an operator should be looking at the parsed manifest
+ * — name, version, entrypoint, whether it replaces what is live — before they
+ * confirm, not reading a 422 afterwards.
+ */
+function publishCard() {
+  const file = el("input", { type: "file", id: "bundle-file", accept: ".zip,application/zip" });
+  const dir = el("input", { type: "file", id: "bundle-dir" });
+  // Not settable via the attribute allow-list in `el`, and only meaningful on
+  // browsers that implement it; the zip picker next to it is the fallback.
+  dir.webkitdirectory = true;
+  dir.multiple = true;
+
+  const status = el("div", { id: "bundle-status" });
+  let pending = null;
+
+  const setPending = async (blob, label) => {
+    pending = { blob, label };
+    status.replaceChildren(el("p", { class: "dim", text: `Checking ${label} (${(blob.size / 1024).toFixed(0)} KiB)…` }));
+    const buffer = await blob.arrayBuffer();
+    let verdict;
+    try {
+      verdict = await api("/bundles/inspect", {
+        method: "POST",
+        raw: true,
+        body: buffer,
+        headers: { "content-type": "application/zip" },
+        quiet: true,
+      });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return;
+      // The preflight answers 422 with the reasons in the body; ApiError only
+      // carries the first line, so re-read it for the full list.
+      verdict = err.body ?? { ok: false, errors: [err.message] };
+    }
+    status.replaceChildren(publishVerdict(verdict, label, () => publishNow(pending)));
+  };
+
+  const publishNow = async (chosen) => {
+    if (!chosen) return;
+    const buffer = await chosen.blob.arrayBuffer();
+    const published = await act(
+      "bundle.publish",
+      () =>
+        api("/bundles", {
+          method: "POST",
+          raw: true,
+          body: buffer,
+          headers: { "content-type": "application/zip" },
+        }),
+      { refresh: false },
+    );
+    if (published) {
+      toast(`published ${published.extension}@${published.version}`);
+      await renderTab();
+    }
+  };
+
+  const drop = el("div", {
+    class: "dropzone",
+    id: "bundle-drop",
+    tabindex: "0",
+    role: "button",
+    "aria-label": "Drop an extension bundle zip here, or press Enter to choose one",
+    text: "Drop a bundle .zip here",
+    onclick: () => file.click(),
+    onkeydown: (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        file.click();
+      }
+    },
+    ondragover: (event) => {
+      event.preventDefault();
+      drop.classList.add("over");
+    },
+    ondragleave: () => drop.classList.remove("over"),
+    ondrop: (event) => {
+      event.preventDefault();
+      drop.classList.remove("over");
+      const dropped = event.dataTransfer?.files?.[0];
+      if (!dropped) return toast("nothing usable was dropped", false);
+      if (!/\.zip$/i.test(dropped.name)) {
+        // Directory drops arrive as entries rather than files and would need a
+        // recursive FileSystemEntry walk; the directory picker below already
+        // does that job, so point at it instead of half-supporting the drop.
+        return toast("drop a .zip, or use “Choose directory” for an unzipped extension", false);
+      }
+      void setPending(dropped, dropped.name);
+    },
+  });
+
+  file.addEventListener("change", () => {
+    const chosen = file.files?.[0];
+    if (chosen) void setPending(chosen, chosen.name);
+  });
+
+  dir.addEventListener("change", async () => {
+    const entries = relativeEntries(dir.files ?? []);
+    if (!entries.length) return toast("that directory has no files", false);
+    if (!entries.some((entry) => entry.name === "manifest.json")) {
+      return toast("no manifest.json at the top level of that directory", false);
+    }
+    status.replaceChildren(el("p", { class: "dim", text: `Zipping ${entries.length} file(s)…` }));
+    void setPending(await zipStored(entries), `${entries.length} file(s)`);
+  });
+
+  return card(
+    "Publish an extension bundle",
+    el("p", {
+      class: "dim",
+      text:
+        "Publishing replaces what every worker runs for this extension. The manifest is validated " +
+        "before anything is written, and nothing is published until you confirm.",
+    }),
+    drop,
+    row(
+      el("label", { for: "bundle-file", class: "inline", text: "or a zip:" }),
+      file,
+      el("label", { for: "bundle-dir", class: "inline", text: "or a directory:" }),
+      dir,
+    ),
+    status,
+  );
+}
+
+/** The preflight result: the parsed manifest, or every reason it was refused. */
+function publishVerdict(verdict, label, onPublish) {
+  if (!verdict.ok) {
+    return el(
+      "div",
+      {},
+      el("p", { class: "error", text: `${label} cannot be published:` }),
+      el("ul", { class: "errors" }, (verdict.errors || ["unreadable archive"]).map((line) => el("li", { text: line }))),
+    );
+  }
+
+  const m = verdict.manifest;
+  const facts = [
+    ["Extension", m.name],
+    ["Version", m.version],
+    ["Runtime", m.runtime || `inferred from publoader_api ${m.publoaderApi}`],
+    ["Entrypoint", m.entrypoint],
+    ["Languages", m.languages.join(", ")],
+    ["Allowed hosts", m.allowedHosts.join(", ")],
+    ["MangaDex group", m.mangadexGroupId],
+    ["Minimum worker trust", m.minTrust],
+    ["Files in archive", String(verdict.entries)],
+    [
+      "Currently published",
+      verdict.currentlyPublished
+        ? `${verdict.currentlyPublished.version} (${verdict.currentlyPublished.sha256.slice(0, 12)}), ${fmtTime(verdict.currentlyPublished.publishedAt)}`
+        : "nothing yet",
+    ],
+  ];
+
+  return el(
+    "div",
+    {},
+    el("p", { class: "ok-text", text: `${label} validates as ${m.name}@${m.version}.` }),
+    verdict.replacesSameVersion
+      ? el("div", {
+          class: "banner",
+          text:
+            `Version ${m.version} is already published. Publishing replaces its bytes, and jobs already ` +
+            "pinned to the old sha256 will not be able to fetch it. Bump the version to keep both.",
+        })
+      : null,
+    table(["Field", "Value"], facts),
+    row(
+      el("button", { type: "button", class: "primary", text: `Publish ${m.name}@${m.version}`, onclick: onPublish }),
+    ),
   );
 }
 
@@ -823,21 +1261,123 @@ function triggerRun(extension, kind) {
   void act(`run.${kind}`, () => api("/runs", { method: "POST", body: { extension, kind } }), { refresh: false });
 }
 
+// -------------------------------------------------------- one extension, in full
+
 async function extensionDetail(name) {
   const encoded = encodeURIComponent(name);
+  // Only the tracked map is guaranteed readable for a contributor; schedules and
+  // config both sit behind extensions:read, which they do hold, while activity
+  // is worth failing softly on because it is the largest query here.
   const [schedules, config, tracked] = await Promise.all([
-    api("/schedules"),
-    api(`/extensions/${encoded}/config`),
+    api(`/schedules`).catch(() => null),
+    api(`/extensions/${encoded}/config`).catch(() => null),
     api(`/extensions/${encoded}/tracked`),
   ]);
+
+  const reload = async () => {
+    $("ext-detail").replaceChildren(await extensionDetail(name));
+  };
 
   return el(
     "div",
     {},
-    el("h2", { text: `${name} configuration` }),
-    scheduleCard(name, schedules),
-    configCard(name, config),
-    trackedCard(name, tracked.tracked),
+    el("h2", { text: name }),
+    await extensionActivityCard(name),
+    schedules ? scheduleCard(name, schedules) : null,
+    config ? configCard(name, config) : null,
+    trackedCard(name, tracked.tracked, reload),
+    bulkCurationCard(name, tracked.tracked, reload),
+  );
+}
+
+/**
+ * Everything this extension has been doing, in one place: its runs, its jobs,
+ * the upload tasks its chapters produced and its quarantined submissions.
+ *
+ * The value is the join. "The scrape succeeds but nothing reaches MangaDex" is
+ * invisible in any single list and obvious here, because the runs are green and
+ * the upload tasks are red on the same screen.
+ */
+async function extensionActivityCard(name) {
+  let activity;
+  try {
+    activity = await api(`/extensions/${encodeURIComponent(name)}/activity?limit=10`, { quiet: true });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) throw err;
+    return card("Recent activity", el("p", { class: "dim", text: `Not available: ${err.message}` }));
+  }
+
+  const counts = [
+    ["tracked series", String(activity.tracked)],
+    ...Object.entries(activity.untracked || {}).map(([k, v]) => [`untracked ${k}`, String(v)]),
+  ];
+
+  const runRows = activity.runs.map((run) => [
+    can("runs:read")
+      ? el("button", { type: "button", class: "linkish", text: run.kind, onclick: () => openRun(run.id) })
+      : run.kind,
+    chip(run.state),
+    `${run.segmentsTotal}`,
+    run.triggeredBy,
+    fmtTime(run.createdAt),
+    truncate(run.error, 80),
+  ]);
+
+  const jobRows = activity.jobs.map((job) => [
+    `${job.segmentIndex + 1}/${job.segmentTotal}`,
+    chip(job.state),
+    `${job.attempt}/${job.maxAttempts}`,
+    job.errorClass || "—",
+    truncate(job.lastError, 120),
+    fmtTime(job.updatedAt),
+  ]);
+
+  const taskRows = activity.uploadTasks.map((task) => [
+    task.kind,
+    chip(task.state),
+    el("code", { text: task.dedupeKey }),
+    `${task.attempt}`,
+    truncate(task.lastError, 120),
+    fmtTime(task.updatedAt),
+  ]);
+
+  const quarantineRows = activity.quarantined.map((item) => [
+    el("code", { text: item.jobId }),
+    el("code", { text: (item.workerId || "").slice(0, 8) }),
+    truncate(item.rejectReason, 200),
+    fmtTime(item.createdAt),
+  ]);
+
+  return card(
+    "Recent activity",
+    activity.bundle
+      ? el("p", {
+          class: "dim",
+          text:
+            `Published ${activity.bundle.version} (${activity.bundle.sha256.slice(0, 12)}) ` +
+            `${fmtTime(activity.bundle.publishedAt)}` +
+            `${activity.bundle.sourceCommit ? ` from commit ${activity.bundle.sourceCommit.slice(0, 12)}` : ""}.`,
+        })
+      : el("p", { class: "error", text: "No bundle is published for this extension, so it cannot run." }),
+    el(
+      "div",
+      { class: "grid" },
+      counts.map(([key, value]) =>
+        el("div", { class: "stat" }, el("div", { class: "n", text: value }), el("div", { class: "k", text: key })),
+      ),
+    ),
+    el("h3", { text: "Runs" }),
+    table(["Kind", "State", "Segments", "Triggered by", "Created", "Error"], runRows),
+    el("h3", { text: "Jobs" }),
+    table(["Segment", "State", "Attempts", "Class", "Last error", "Updated"], jobRows),
+    el("h3", { text: "Upload tasks" }),
+    el("p", {
+      class: "dim",
+      text: "Matched on the chapter payload's extension name, so tasks queued before that field existed are absent.",
+    }),
+    table(["Kind", "State", "Dedupe key", "Attempt", "Last error", "Updated"], taskRows),
+    el("h3", { text: "Quarantined submissions" }),
+    table(["Job", "Worker", "Reject reason", "Received"], quarantineRows),
   );
 }
 
@@ -874,20 +1414,16 @@ function scheduleCard(name, schedules) {
       minute,
       el("label", { for: "sched-day", text: "Day" }),
       day,
-      el("button", {
-        type: "button",
+      gatedButton("extensions:write", {
         class: "primary",
         text: "Save override",
         onclick: () => {
           const body = { hour: Number(hour.value), minute: Number(minute.value) };
           if (day.value !== "") body.day = Number(day.value);
-          void act("schedule.set", () =>
-            api(`/schedules/${encodeURIComponent(name)}`, { method: "PUT", body }),
-          );
+          void act("schedule.set", () => api(`/schedules/${encodeURIComponent(name)}`, { method: "PUT", body }));
         },
       }),
-      el("button", {
-        type: "button",
+      gatedButton("extensions:write", {
         text: "Remove override",
         onclick: () =>
           act("schedule.remove", () => api(`/schedules/${encodeURIComponent(name)}`, { method: "DELETE" })),
@@ -897,9 +1433,11 @@ function scheduleCard(name, schedules) {
 }
 
 function configCard(name, config) {
+  const writable = can("extensions:write");
   const editor = el("textarea", {
     id: "config-json",
     spellcheck: "false",
+    readonly: !writable,
     "aria-label": "Override options JSON",
   });
   editor.value = JSON.stringify(config.overrideOptions ?? {}, null, 2);
@@ -922,7 +1460,12 @@ function configCard(name, config) {
 
   return card(
     "Override options",
-    el("p", { class: "dim", text: "The database is the source of truth; this replaces the whole document." }),
+    el("p", {
+      class: "dim",
+      text: writable
+        ? "The database is the source of truth; this replaces the whole document."
+        : 'Read-only: editing extension configuration needs the "extensions:write" scope.',
+    }),
     editor,
     status,
     row(
@@ -937,8 +1480,7 @@ function configCard(name, config) {
           }
         },
       }),
-      el("button", {
-        type: "button",
+      gatedButton("extensions:write", {
         class: "primary",
         text: "Save",
         onclick: () => {
@@ -959,48 +1501,105 @@ function configCard(name, config) {
   );
 }
 
-function trackedCard(name, tracked) {
+// ------------------------------------------------------------- the series map
+
+const TRACKED_PAGE = 50;
+
+/** `externalId,mdMangaId` — the one format the paste box and the export share. */
+const mapLine = (item) => `${item.mangaId},${item.mdMangaId}`;
+
+/**
+ * The tracked map for one extension: searchable, paged, and exportable.
+ *
+ * Searching and paging happen in the browser over the whole set rather than
+ * per-request. That is a deliberate trade: the rows are tiny, the batch ceiling
+ * is 2000 of them, and having every row in hand is what lets Export produce a
+ * complete file and lets the bulk editor preview a removal without a round
+ * trip.
+ */
+function trackedCard(name, tracked, reload) {
   const encoded = encodeURIComponent(name);
+  const search = el("input", {
+    id: "tracked-search",
+    type: "search",
+    placeholder: "filter by external id, MangaDex id, or source",
+    "aria-label": "Filter tracked mappings",
+  });
+  const body = el("div", {});
+  let page = 0;
+
+  const render = () => {
+    const needle = search.value.trim().toLowerCase();
+    const matches = needle
+      ? tracked.filter((item) =>
+          [item.mangaId, item.mdMangaId, item.source].some((field) => (field || "").toLowerCase().includes(needle)),
+        )
+      : tracked;
+    const pages = Math.max(1, Math.ceil(matches.length / TRACKED_PAGE));
+    page = Math.min(page, pages - 1);
+    const slice = matches.slice(page * TRACKED_PAGE, page * TRACKED_PAGE + TRACKED_PAGE);
+
+    const rows = slice.map((item) => [
+      item.mangaId,
+      el("a", {
+        href: `https://mangadex.org/title/${encodeURIComponent(item.mdMangaId)}`,
+        target: "_blank",
+        rel: "noreferrer noopener",
+        text: item.mdMangaId,
+      }),
+      item.source,
+      fmtTime(item.createdAt),
+      [
+        gatedButton("tracked:write", {
+          class: "danger",
+          text: "Remove",
+          onclick: () => {
+            if (!confirmDestructive(`Stop tracking ${item.mangaId}? Its chapters stop being uploaded. This does not touch MangaDex.`)) {
+              return;
+            }
+            void act(
+              "tracked_manga.remove",
+              async () => {
+                await api(`/extensions/${encoded}/tracked/${encodeURIComponent(item.mangaId)}`, { method: "DELETE" });
+                await reload();
+              },
+              { refresh: false },
+            );
+          },
+        }),
+      ],
+    ]);
+
+    body.replaceChildren(
+      table(["External id", "MangaDex id", "Source", "Added", ""], rows),
+      matches.length > TRACKED_PAGE
+        ? pager(matches.length, page, TRACKED_PAGE, (next) => {
+            page = next;
+            render();
+          })
+        : el("p", { class: "dim", text: `${matches.length} of ${tracked.length} mapping(s).` }),
+    );
+  };
+
+  search.addEventListener("input", () => {
+    page = 0;
+    render();
+  });
+  render();
+
   const mangaId = el("input", { id: "tracked-manga-id", type: "text", placeholder: "external manga id" });
   const mdMangaId = el("input", { id: "tracked-md-id", type: "text", placeholder: "MangaDex UUID" });
 
-  const rows = tracked.map((item) => [
-    item.mangaId,
-    el("a", {
-      href: `https://mangadex.org/title/${encodeURIComponent(item.mdMangaId)}`,
-      target: "_blank",
-      rel: "noreferrer noopener",
-      text: item.mdMangaId,
-    }),
-    item.source,
-    fmtTime(item.createdAt),
-    [
-      el("button", {
-        type: "button",
-        class: "danger",
-        text: "Remove",
-        onclick: () => {
-          if (!confirmDestructive(`Stop tracking ${item.mangaId}? This does not touch MangaDex.`)) return;
-          void act("tracked_manga.remove", async () => {
-            await api(`/extensions/${encoded}/tracked/${encodeURIComponent(item.mangaId)}`, { method: "DELETE" });
-            $("ext-detail").replaceChildren(await extensionDetail(name));
-          }, { refresh: false });
-        },
-      }),
-    ],
-  ]);
-
   return card(
-    "Tracked manga",
+    "Tracked series",
     row(
       el("label", { for: "tracked-manga-id", text: "External id" }),
       mangaId,
       el("label", { for: "tracked-md-id", text: "MangaDex id" }),
       mdMangaId,
-      el("button", {
-        type: "button",
+      gatedButton("tracked:append", {
         class: "primary",
-        text: "Add / repoint",
+        text: "Add mapping",
         onclick: () =>
           act(
             "tracked_manga.set",
@@ -1009,16 +1608,269 @@ function trackedCard(name, tracked) {
                 method: "PUT",
                 body: { mangaId: mangaId.value.trim(), mdMangaId: mdMangaId.value.trim() },
               });
-              $("ext-detail").replaceChildren(await extensionDetail(name));
+              await reload();
             },
             { refresh: false },
           ),
       }),
     ),
-    table(["External id", "MangaDex id", "Source", "Added", ""], rows),
+    el("p", {
+      class: "dim",
+      text: can("tracked:write")
+        ? "Adding a mapping that already exists repoints it."
+        : 'Adding a new mapping is allowed. Repointing one that already exists needs the "tracked:write" scope, and is refused with the id it is currently mapped to.',
+    }),
+    row(
+      search,
+      el("button", {
+        type: "button",
+        text: "Export map",
+        title: "Download every mapping in the same format the bulk editor accepts",
+        onclick: () => {
+          const text = [
+            `# publoader tracked map for ${name}`,
+            `# exported ${new Date().toISOString()} — ${tracked.length} mapping(s)`,
+            "# externalId,mdMangaId",
+            ...tracked.map(mapLine),
+            "",
+          ].join("\n");
+          download(`${name}-tracked-map.csv`, text, "text/csv");
+        },
+      }),
+    ),
+    body,
   );
 }
 
+/**
+ * Bulk curation: paste lines, see exactly what would happen, then apply.
+ *
+ * The dry run is not optional and not a checkbox. A paste of 200 lines can add,
+ * repoint, no-op and fail in the same batch, and repointing a series silently
+ * redirects uploads to a different MangaDex title — so the operator confirms
+ * against a per-row verdict rather than against their own reading of the paste.
+ * "Apply" only exists once a preview has come back.
+ */
+function bulkCurationCard(name, tracked, reload) {
+  const encoded = encodeURIComponent(name);
+  const canWrite = can("tracked:write");
+
+  const mode = el(
+    "select",
+    { id: "bulk-mode", "aria-label": "Bulk operation" },
+    el("option", { value: "set", text: "Add or repoint (externalId,mdMangaId per line)" }),
+    el("option", { value: "remove", text: "Remove (one external id per line)", disabled: !canWrite }),
+  );
+  const text = el("textarea", {
+    id: "bulk-text",
+    spellcheck: "false",
+    placeholder: "abc123,3f1e...-uuid\ndef456,7a2b...-uuid\n# comments and a header row are ignored",
+    "aria-label": "Mappings to apply",
+  });
+  const preview = el("div", { id: "bulk-preview" });
+  const applyRow = el("div", {});
+
+  const OUTCOME_TONE = {
+    added: "ok",
+    updated: "warn",
+    unchanged: "dim",
+    removed: "warn",
+    not_found: "warn",
+    rejected_needs_write: "bad",
+    invalid: "bad",
+  };
+
+  const renderSummary = (summary, parseErrors, onApply) => {
+    const totals = [
+      ["added", summary.added],
+      ["repointed", summary.updated],
+      ["unchanged", summary.unchanged],
+      ["removed", summary.removed],
+      ["rejected", summary.failed],
+    ];
+    const rows = summary.results.map((result) => [
+      result.mangaId,
+      result.mdMangaId || "—",
+      el("span", { class: `chip ${OUTCOME_TONE[result.outcome] || ""}`.trim(), text: result.outcome }),
+      result.detail || "",
+    ]);
+
+    preview.replaceChildren(
+      el(
+        "div",
+        { class: "grid" },
+        totals.map(([key, value]) =>
+          el("div", { class: "stat" }, el("div", { class: "n", text: String(value) }), el("div", { class: "k", text: key })),
+        ),
+      ),
+      parseErrors.length
+        ? el(
+            "div",
+            {},
+            el("h3", { text: `${parseErrors.length} line(s) could not be read` }),
+            table(
+              ["Line", "Text", "Why"],
+              parseErrors.map((e) => [String(e.line), el("code", { text: e.text }), e.reason]),
+            ),
+          )
+        : null,
+      el("h3", { text: "Per-row outcome" }),
+      table(["External id", "MangaDex id", "Outcome", "Detail"], rows),
+    );
+
+    applyRow.replaceChildren(
+      summary.added + summary.updated + summary.removed === 0
+        ? el("p", { class: "dim", text: "Nothing would change, so there is nothing to apply." })
+        : row(
+            el("button", {
+              type: "button",
+              class: "primary",
+              text: `Apply — ${summary.added} added, ${summary.updated} repointed, ${summary.removed} removed`,
+              onclick: onApply,
+            }),
+            el("button", { type: "button", text: "Discard preview", onclick: () => clear() }),
+          ),
+    );
+  };
+
+  const clear = () => {
+    preview.replaceChildren();
+    applyRow.replaceChildren();
+  };
+
+  /**
+   * Removals are judged here rather than by a dry run, because the batch
+   * endpoint's dry run deliberately ignores `remove`. The judgement is not a
+   * guess: the whole current map is in hand, so "exists → removed, absent →
+   * not_found" is exactly what the server will decide, and the scope check is
+   * the same one `applyBatch` applies.
+   */
+  const previewRemoval = (ids) => {
+    const present = new Set(tracked.map((item) => item.mangaId));
+    const seen = new Set();
+    const results = [];
+    for (const id of ids) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (!canWrite) {
+        results.push({ mangaId: id, outcome: "rejected_needs_write", detail: "removing a mapping needs scope tracked:write" });
+      } else if (!present.has(id)) {
+        results.push({ mangaId: id, outcome: "not_found", detail: "not in this extension's map" });
+      } else {
+        results.push({
+          mangaId: id,
+          mdMangaId: tracked.find((item) => item.mangaId === id)?.mdMangaId,
+          outcome: "removed",
+        });
+      }
+    }
+    const count = (outcome) => results.filter((r) => r.outcome === outcome).length;
+    return {
+      added: 0,
+      updated: 0,
+      unchanged: 0,
+      removed: count("removed"),
+      failed: count("not_found") + count("rejected_needs_write"),
+      results,
+    };
+  };
+
+  const removalIds = () =>
+    text.value
+      .split(/\r?\n/)
+      .map((line) => line.split("#")[0].trim())
+      .filter(Boolean);
+
+  const runPreview = async () => {
+    clear();
+    if (!text.value.trim()) return toast("paste something first", false);
+
+    if (mode.value === "remove") {
+      const ids = removalIds();
+      renderSummary(previewRemoval(ids), [], async () => {
+        const applied = await act(
+          "tracked_manga.batch",
+          () => api(`/extensions/${encoded}/tracked/batch`, { method: "POST", body: { remove: ids } }),
+          { refresh: false },
+        );
+        if (applied) {
+          clear();
+          text.value = "";
+          await reload();
+        }
+      });
+      return;
+    }
+
+    const dry = await act(
+      "tracked_manga.preview",
+      () =>
+        api(`/extensions/${encoded}/tracked/batch`, {
+          method: "POST",
+          body: { text: text.value, dryRun: true },
+        }),
+      { refresh: false },
+    );
+    if (!dry) return;
+    renderSummary(dry, dry.parseErrors || [], async () => {
+      const applied = await act(
+        "tracked_manga.batch",
+        () => api(`/extensions/${encoded}/tracked/batch`, { method: "POST", body: { text: text.value } }),
+        { refresh: false },
+      );
+      if (applied) {
+        clear();
+        text.value = "";
+        await reload();
+      }
+    });
+  };
+
+  mode.addEventListener("change", () => {
+    clear();
+    text.placeholder =
+      mode.value === "remove"
+        ? "abc123\ndef456\n# one external id per line"
+        : "abc123,3f1e...-uuid\ndef456,7a2b...-uuid\n# comments and a header row are ignored";
+  });
+
+  return card(
+    "Bulk curation",
+    el("p", {
+      class: "dim",
+      text:
+        "Paste lines of externalId,mdMangaId — order-insensitive, with # comments and a header row ignored. " +
+        "Up to 2000 rows. Nothing is written until you apply a preview.",
+    }),
+    row(el("label", { for: "bulk-mode", text: "Operation" }), mode),
+    text,
+    row(
+      gatedButton("tracked:append", { class: "primary", text: "Preview changes", onclick: () => void runPreview() }),
+      el("button", {
+        type: "button",
+        text: "Paste from clipboard",
+        onclick: async () => {
+          try {
+            text.value = await navigator.clipboard.readText();
+            clear();
+          } catch {
+            toast("clipboard blocked — paste into the box directly", false);
+          }
+        },
+      }),
+    ),
+    !canWrite
+      ? el("p", {
+          class: "dim",
+          text:
+            'Batch remove and batch repoint need the "tracked:write" scope. Rows that would change an existing ' +
+            "mapping are reported as rejected in the preview, with the id they are currently mapped to.",
+        })
+      : null,
+    preview,
+    applyRow,
+  );
+}
 // ------------------------------------------------------------------------ runs
 
 async function viewRuns() {
@@ -1261,57 +2113,237 @@ async function viewQueues() {
   );
 }
 
-// ---------------------------------------------------------------------- errors
+// -------------------------------------------------------------------- activity
+
+const SEVERITY_TONE = { error: "bad", warn: "warn", info: "" };
+const ACTIVITY_WINDOWS = [
+  [1, "last hour"],
+  [6, "last 6 hours"],
+  [24, "last 24 hours"],
+  [72, "last 3 days"],
+  [168, "last week"],
+  [720, "last 30 days"],
+];
 
 /**
- * Everything that failed, newest first, across dead-lettered jobs, failed upload
- * tasks, and quarantined submissions. This is the answer to "what broke?" that
- * used to be the legacy `logs` command; container logs are still `docker logs`,
- * because they describe processes rather than platform state.
+ * Every application-level event the platform recorded, newest first: runs, jobs
+ * (including the last error of a job that is still retrying), upload tasks,
+ * quarantined submissions, and the audit trail.
+ *
+ * This is the answer to "what has been happening?" that used to require
+ * `docker logs`, and it is worth being precise about what it does and does not
+ * replace. Everything here is a durable row, which is why it can be filtered,
+ * linked to, and read months later. Process stdout is NOT here — a stack trace
+ * from a crash loop, a prisma connection warning — because nothing writes it to
+ * the database. That still lives in `docker logs` on the host.
  */
-async function viewErrors() {
-  const limit = state.errorLimit || 50;
-  const { errors } = await api(`/errors?limit=${limit}`);
+async function viewActivity() {
+  const severity = state.activitySeverity || "all";
+  const hours = state.activityHours || 72;
+  const needle = state.activityQuery || "";
+  const limit = state.activityLimit || 100;
 
-  const select = el(
-    "select",
-    {
-      id: "error-limit",
-      "aria-label": "Number of errors",
-      onchange: (event) => {
-        state.errorLimit = Number(event.target.value);
-        void renderTab();
-      },
-    },
-    [25, 50, 100, 200].map((value) =>
-      el("option", { value: String(value), text: String(value), selected: value === limit }),
+  const query = new URLSearchParams({ severity, hours: String(hours), limit: String(limit) });
+  if (needle) query.set("q", needle);
+  if (state.activityExtension) query.set("extension", state.activityExtension);
+  const feed = await api(`/activity?${query}`);
+
+  const picker = (id, label, options, current, key) =>
+    el(
+      "span",
+      { class: "row tight" },
+      el("label", { for: id, class: "inline", text: label }),
+      el(
+        "select",
+        {
+          id,
+          onchange: (event) => {
+            state[key] = event.target.value === "" ? "" : event.target.value;
+            void renderTab();
+          },
+        },
+        options.map(([value, text]) =>
+          el("option", { value: String(value), text, selected: String(value) === String(current) }),
+        ),
+      ),
+    );
+
+  const search = el("input", {
+    id: "activity-q",
+    type: "search",
+    value: needle,
+    placeholder: "text in the subject or message",
+    "aria-label": "Filter activity by text",
+  });
+  // Enter rather than every keystroke: each search is a server round trip over
+  // five tables.
+  search.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      state.activityQuery = search.value.trim();
+      void renderTab();
+    }
+  });
+
+  const controls = card(
+    "Activity",
+    el("p", {
+      class: "dim",
+      text:
+        "Runs, jobs, upload tasks, quarantined submissions and audit events in one timeline. Application " +
+        "events only — container stdout is not captured here and is still read with docker logs on the host.",
+    }),
+    row(
+      picker(
+        "activity-severity",
+        "Severity",
+        [
+          ["all", "everything"],
+          ["error", "errors only"],
+          ["warn", "warnings"],
+          ["info", "informational"],
+        ],
+        severity,
+        "activitySeverity",
+      ),
+      picker("activity-hours", "Window", ACTIVITY_WINDOWS, hours, "activityHours"),
+      picker(
+        "activity-limit",
+        "Rows",
+        [25, 50, 100, 250, 500].map((n) => [n, String(n)]),
+        limit,
+        "activityLimit",
+      ),
+      search,
+      el("button", {
+        type: "button",
+        text: "Search",
+        onclick: () => {
+          state.activityQuery = search.value.trim();
+          void renderTab();
+        },
+      }),
+      needle || state.activityExtension
+        ? el("button", {
+            type: "button",
+            text: "Clear filters",
+            onclick: () => {
+              state.activityQuery = "";
+              state.activityExtension = "";
+              void renderTab();
+            },
+          })
+        : null,
     ),
+    state.activityExtension
+      ? el("p", { class: "dim", text: `Filtered to extension ${state.activityExtension}.` })
+      : null,
+    (feed.omittedSources || []).length
+      ? el("div", {
+          class: "banner",
+          text: `Audit events are not shown: ${feed.omittedSources.map((o) => o.reason).join("; ")}.`,
+        })
+      : null,
   );
 
-  const rows = errors.map((entry) => [
-    fmtTime(entry.at),
-    chip(entry.kind.split(":")[1] || entry.kind),
-    el("div", {}, el("div", { text: entry.subject }), el("div", { class: "dim", text: entry.kind })),
+  const rows = feed.activity.map((entry) => [
+    el(
+      "div",
+      {},
+      el("div", { text: fmtTime(entry.at) }),
+      el("div", { class: "dim", text: ago(entry.at) }),
+    ),
+    el("span", { class: `chip ${SEVERITY_TONE[entry.severity]}`.trim(), text: entry.severity }),
+    el(
+      "div",
+      {},
+      el("div", { text: entry.subject }),
+      el("div", { class: "dim", text: entry.kind }),
+    ),
     truncate(entry.message, 300) || "—",
+    activityActions(entry),
   ]);
 
-  return el(
-    "div",
-    {},
-    card(
-      "Recent failures",
-      el("p", {
-        class: "dim",
-        text:
-          "Dead-lettered jobs, failed upload tasks, and quarantined submissions in one list. Retry actions live " +
-          "in Runs (jobs) and Queues (upload tasks); container logs are on the host, via docker logs.",
-      }),
-      row(el("label", { for: "error-limit", text: "Rows" }), select),
-    ),
-    card(null, table(["When", "State", "Subject", "Message"], rows)),
-  );
+  return el("div", {}, controls, card(null, table(["When", "Severity", "Subject", "Message", ""], rows)));
 }
 
+/**
+ * Per-row actions: open the thing the row is about, and copy a link that lands
+ * somebody else on it.
+ *
+ * The permalink is a fragment rather than a path because the dashboard is a
+ * single page served from one route — and a fragment is never sent to the
+ * server, so pasting one into chat cannot leak an id into an access log.
+ */
+function activityActions(entry) {
+  // A job's own id opens nothing actionable; its run shows every sibling
+  // segment and the retry buttons, so that is what the link points at.
+  const target =
+    entry.source === "job" && entry.runId ? { type: "run", id: entry.runId } : { type: entry.source, id: entry.id };
+  const hash = `#${target.type}/${target.id}`;
+
+  return [
+    OPENERS[target.type] && can("runs:read")
+      ? el("button", { type: "button", text: "Open", onclick: () => void openPermalink(hash) })
+      : null,
+    el("button", {
+      type: "button",
+      text: "Copy link",
+      title: "A link that opens this row for anyone who can sign in",
+      onclick: async () => {
+        const url = `${window.location.origin}${window.location.pathname}${hash}`;
+        try {
+          await navigator.clipboard.writeText(url);
+          toast("link copied");
+        } catch {
+          // Falling back to the address bar still gives them something to copy.
+          window.location.hash = hash;
+          toast("clipboard blocked — the link is in the address bar", false);
+        }
+      },
+    }),
+  ].filter(Boolean);
+}
+
+/**
+ * What a permalink of each type opens. Keyed by the Activity feed's `source`
+ * values so a new source needs one entry here and nothing else.
+ */
+const OPENERS = {
+  run: async (id) => {
+    await selectTab("runs");
+    await openRun(id);
+  },
+  "upload-task": async (id) => {
+    // No per-task detail view exists, so land on the queue filtered to the
+    // states a task worth linking to is in, and say which row was meant.
+    await selectTab("queues");
+    toast(`upload task ${id}`);
+  },
+  submission: async () => {
+    await selectTab("quarantine");
+  },
+  audit: async (id) => {
+    state.auditQuery = "";
+    await selectTab("audit");
+    toast(`audit event ${id}`);
+  },
+};
+
+/** Handle `#<type>/<id>`, from a pasted permalink or the back button. */
+async function openPermalink(hash) {
+  const match = /^#([a-z-]+)\/([\w-]+)$/.exec(hash || window.location.hash);
+  if (!match) return false;
+  const [, type, id] = match;
+  // A tab-only link (`#tab/queues`) is the other thing people paste.
+  if (type === "tab") {
+    if (visibleTabs().some(([tabId]) => tabId === id)) await selectTab(id);
+    return true;
+  }
+  const opener = OPENERS[type];
+  if (!opener) return false;
+  await opener(id);
+  return true;
+}
 // ------------------------------------------------------------------- untracked
 
 const UNTRACKED_STATES = ["NEW", "CREATING", "CREATED", "TRACKED", "FAILED", "SKIPPED"];

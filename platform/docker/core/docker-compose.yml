@@ -214,6 +214,16 @@ services:
       # a fresh database is never locked out of its own dashboard.
       DASH_OWNER_EMAIL: ${DASH_OWNER_EMAIL:-iam@ardax.dev}
       DASH_PUBLIC_URL: ${DASH_PUBLIC_URL:-https://publoader.ardax.dev}
+      # --- GitHub push webhook (core-api only) -----------------------------
+      # POST /webhook publishes a new bundle for each changed extension. Blank
+      # secret = the endpoint answers 503 rather than accepting unsigned
+      # deliveries, so leaving it unset disables the feature safely.
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      GITHUB_REPO_OWNER: ${GITHUB_REPO_OWNER:-publoader}
+      GITHUB_EXTENSIONS_REPOS: ${GITHUB_EXTENSIONS_REPOS:-}
+      GITHUB_CORE_REPO: ${GITHUB_CORE_REPO:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
     expose:

@@ -10,6 +10,7 @@ import { UploadTaskStore } from "../store/uploadTasks.js";
 import { IngestService } from "../ingest/ingest.js";
 import { SchedulerService } from "../scheduler/service.js";
 import type { TitleService } from "../md/titleService.js";
+import type { RepoArchiveFetcher } from "../webhooks/repoArchive.js";
 import { ApiTokenStore } from "../store/apiTokens.js";
 import { TrackedMangaStore } from "../store/trackedManga.js";
 import { RateLimiter } from "./ratelimit.js";
@@ -34,6 +35,12 @@ export interface AppContext {
   scheduler: SchedulerService;
   /** Present when this instance holds MangaDex credentials (api + uploader). */
   titleService?: TitleService;
+  /**
+   * Test seam for the GitHub webhook's archive download. Injected here rather
+   * than as a route option so `buildServer` can register the webhook routes
+   * unconditionally while tests still avoid the network.
+   */
+  webhookFetchArchive?: RepoArchiveFetcher;
   enrollLimiter: RateLimiter;
   workerLimiter: RateLimiter;
   adminLimiter: RateLimiter;

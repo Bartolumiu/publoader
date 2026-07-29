@@ -515,3 +515,32 @@ gVisor isolation; object-storage artifact backend + GC service; Kubernetes
 manifests; bundle signing with sigstore (sha256 pinning ships in v1); Grafana
 dashboards; porting the Discord bot/dashboard UIs themselves to TypeScript
 (they keep working against the admin API compatibility layer).
+
+
+---
+
+## Documentation map
+
+This document is one of the set below. Start at
+[architecture-guide.md](architecture-guide.md) if you are new to the platform.
+
+| Document | One line |
+| --- | --- |
+| [architecture-guide.md](architecture-guide.md) | How it works: the planes, one run traced end to end, the job state machine, and why exactly-once holds |
+| [development.md](development.md) | Local setup, running services from source, the Prisma workflow, the test layers, debugging a failing job |
+| [api-reference.md](api-reference.md) | Every HTTP endpoint, its required scope, and its meaningful failures |
+| [data-model.md](data-model.md) | Every table, column, index, and invariant |
+| [extension-guide.md](extension-guide.md) | Writing an extension: the v2 contract, the manifest, the sandbox, publishing |
+| [glossary.md](glossary.md) | Every load-bearing term, with the file that defines it |
+| [target-architecture.md](target-architecture.md) | The binding design reference and the rationale for each choice |
+| [architecture-assessment.md](architecture-assessment.md) | The legacy Python system and the failure modes that motivated the rewrite |
+| [security-trust-model.md](security-trust-model.md) | Threat model, control matrix, secrets inventory, and what a worker can and cannot do |
+| [deployment.md](deployment.md) | Standing up the core and worker hosts, the tunnel and WAF, upgrades, backups |
+| [operations.md](operations.md) | Day-2 runbooks: triage, worker lifecycle, secret rotation, dead letters, incidents |
+| [migration-guide.md](migration-guide.md) | Staged Mongo/SQLite to Postgres cutover, with a rollback at every stage |
+| [ipc-to-api-mapping.md](ipc-to-api-mapping.md) | Which endpoint replaced each legacy IPC command |
+| [bot.md](bot.md) | Discord bot setup, the admin-gating model, and the command reference |
+| [webhooks.md](webhooks.md) | Publishing extension bundles from a GitHub push: setup, the signature check, and why CI-side publishing is preferred |
+| [implementation-plan.md](implementation-plan.md) | Historical: the original milestone plan |
+| [../README.md](../README.md) | What publoader is, and the five-minute quickstart |
+| [../CONTRIBUTING.md](../CONTRIBUTING.md) | Branch workflow, definition of done, and the review checklist |

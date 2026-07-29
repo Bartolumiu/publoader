@@ -184,10 +184,10 @@ sequenceDiagram
 
 ### 1. The scheduler creates a run and its jobs
 
-`scheduler.tick()` (`src/core/scheduler/service.ts:39-65`) runs every 30 s. It
+`scheduler.tick()` (`src/core/scheduler/service.ts:39-72`) runs every 30 s. It
 reads the persisted `scheduler_last_tick` setting, so a scheduler that was down
 resumes exactly where it left off rather than storming through history — and on
-first boot it looks back one minute only (`service.ts:68-70`).
+first boot it looks back one minute only (`service.ts:75-77`).
 
 Effective schedules are the manifest's `schedule` overridden by
 `schedule_overrides` rows, minus anything in `disabled_extensions`
@@ -197,7 +197,7 @@ Effective schedules are the manifest's `schedule` overridden by
 crash-tolerant: a scheduler down over the slot still creates the run on its next
 tick within the same UTC day.
 
-Then `createRunForExtension` (`service.ts:105-161`) computes
+Then `createRunForExtension` (`service.ts:112-168`) computes
 [segments](#partitioned-execution) and calls `createRun`, whose idempotency key is
 `sched:<extension>:<slot>`. `createRun` (`store/jobs.ts:72-129`) inserts the run
 and all its jobs **in one transaction**, and a duplicate key returns the existing
@@ -212,7 +212,7 @@ never changes for the life of the job.
 
 The agent long-polls `POST /api/v1/worker/lease` (`worker/coreApi.ts:277-297`).
 The endpoint holds the request open, retrying the claim once a second until
-`waitSeconds` elapses (`routes/worker.ts:108-175`).
+`waitSeconds` elapses (`routes/worker.ts:88-177`).
 
 The claim is one statement (`store/jobs.ts:153-186`):
 
@@ -359,17 +359,17 @@ the design:
 **Gate 0 — schema.** `ResultEnvelope.safeParse`. The schema is `.strict()`, so an
 unknown field is a rejection rather than a silently dropped key. A failure here
 is a 422 and never reaches the database, because there is no job it can be
-reliably attributed to (`ingest.ts:36-42`).
+reliably attributed to (`ingest.ts:35-41`).
 
 **Gate 1 — record before judging.** The submission is inserted idempotently under
 `res:<jobId>:<attempt>`. If it is a duplicate that was already judged, the prior
-verdict is returned unchanged (`ingest.ts:50-54`). This is what turns
+verdict is returned unchanged (`ingest.ts:49-53`). This is what turns
 at-least-once *delivery* into exactly-once *effect*: a worker whose network
 dropped after the server committed can retry safely and gets `committed` back.
 
 **Gate 2 — lease validity.** The envelope's `leaseId` must match the job's, the
 `workerId` must match the lease holder, and the job must still be `LEASED` or
-`RUNNING` (`ingest.ts:56-66`). Anything else is `SUPERSEDED`. This is the gate
+`RUNNING` (`ingest.ts:55-66`). Anything else is `SUPERSEDED`. This is the gate
 that makes a late submission from a worker declared dead into a recorded no-op
 rather than data.
 
@@ -434,7 +434,7 @@ Only after a successful commit are referenced artifacts pinned, clearing their
 
 ### 6. The run advances
 
-The scheduler's next tick calls `advanceRuns()` (`store/jobs.ts:373-399`), two
+The scheduler's next tick calls `advanceRuns()` (`store/jobs.ts:405-431`), two
 set-based statements: a run whose jobs are *all* `SUCCEEDED` becomes `INGESTING`;
 a run with at least one `DEAD_LETTER`/`CANCELLED` job and nothing still running
 becomes `DEAD_LETTER`. Being set-based rather than per-job means this is correct
@@ -442,27 +442,27 @@ however many segments a run has and however they interleave.
 
 ### 7. The processor decides upload / edit / skip / remove
 
-`RunProcessor.tick()` (`src/core/processor/processor.ts:88-107`) claims the
+`RunProcessor.tick()` (`src/core/processor/processor.ts:89-107`) claims the
 least-recently-touched `INGESTING` run with `SKIP LOCKED` and a bumped
 `updated_at` — a *soft* claim rather than a lease, which is safe precisely because
-processing is idempotent (`processor.ts:109-132`).
+processing is idempotent (`core/processor/processor.ts:116-132`).
 
-`processRun` (`processor.ts:134-286`) then:
+`processRun` (`core/processor/processor.ts:135-286`) then:
 
 1. Loads the committed envelope for every job in the run and merges them
-   (`mergeEnvelopes`, `processor.ts:633-676`). Segments cover disjoint manga, so
+   (`mergeEnvelopes`, `core/processor/processor.ts:629-672`). Segments cover disjoint manga, so
    chapter lists concatenate — **except `allChapters`**, which means "this is
    everything the publisher has". A single segment that declined to answer makes
    the merged view incomplete, so **any null collapses the whole thing to null**.
    Getting this wrong would turn the removal passes into mass deletions.
 2. **Refuses to process a `CLEAN` run with missing segments** and stays in
-   `INGESTING` (`processor.ts:143-146`). A clean run decides deletions from a "the
+   `INGESTING` (`core/processor/processor.ts:144-146`). A clean run decides deletions from a "the
    publisher no longer has this" premise; acting on a partial view would remove
    chapters a missing segment would have vouched for.
 3. **Replaces the worker-reported configuration with the database's.** Override
    options come from `extension_configs`, and the tracked set is the *union* of
    what the database knows with what the worker reported
-   (`processor.ts:158-162`, `330-367`). This is not tidiness: override options
+   (`core/processor/processor.ts:159-162`, `330-367`). This is not tidiness: override options
    decide what counts as a duplicate and which languages may stay on MangaDex, so
    taking them from worker output would let a compromised worker steer deletions.
 4. Persists untracked manga for the [title pipeline](#the-untracked-title-pipeline).
@@ -489,14 +489,14 @@ processing is idempotent (`processor.ts:109-132`).
 6. Enqueues tasks with `ON CONFLICT DO NOTHING` on `(kind, dedupeKey)` and
    records bookkeeping with upserts, then runs the untracked-manga and
    duplicate-sweep passes, then flips the run to `PROCESSED` **last**
-   (`processor.ts:499-505`). A crash mid-run therefore replays cleanly: every
+   (`core/processor/processor.ts:495-505`). A crash mid-run therefore replays cleanly: every
    effect is idempotent and the second pass is a no-op for whatever already
    landed.
 
 The untracked-manga cleanup pass is skipped when any segment is missing, because
 "untracked" is derived from the union of every segment's tracked ids and an absent
 segment could make a perfectly tracked series look orphaned
-(`processor.ts:256-269`).
+(`core/processor/processor.ts:258-269`).
 
 ### 8. The uploader commits to MangaDex
 
@@ -677,7 +677,7 @@ processed with a duplicate committed envelope.
 *Remove it:* the *worker's* retries stop being safe. `submitResult` retries up to
 8 times with backoff (`worker/coreApi.ts:330-342`), which is correct only because
 a redelivery of the same envelope collides on this key and is answered with the
-prior verdict (`ingest.ts:50-54`). Without it, a submission whose response was
+prior verdict (`ingest.ts:49-53`). Without it, a submission whose response was
 lost in transit would be re-judged from scratch — and since the first one already
 committed and marked the job `SUCCEEDED`, the second would find a stale lease and
 be superseded. Recoverable, but the worker would now log a failure for a job that
@@ -690,7 +690,7 @@ succeeded, and every network blip would produce a phantom error.
 
 *Remove the constraint:* the processor's idempotency evaporates. `processRun` is
 explicitly designed to be re-runnable — a crash mid-run leaves the run in
-`INGESTING` and the next tick retries it (`processor.ts:100-104`) — and what makes
+`INGESTING` and the next tick retries it (`core/processor/processor.ts:100-104`) — and what makes
 that safe is that re-enqueueing is a no-op. Without the constraint, one
 interrupted run means every chapter it had already queued gets queued a second
 time, and the uploader uploads each twice.
@@ -763,19 +763,19 @@ output to `segmentMangaIds` regardless of whether the extension honoured
 `trackedSubset` (`runner.mjs:637-642`), so non-overlapping output is a property of
 the runner rather than of extension cooperation. And `mergeEnvelopes` collapses
 `allChapters` to null if *any* segment declined to publish a full listing
-(`processor.ts:647-649`), so a partial view can never be mistaken for a complete
+(`core/processor/processor.ts:644-646`), so a partial view can never be mistaken for a complete
 one.
 
-**Clean runs are never partitioned** (`scheduler/service.ts:116-118`). A `CLEAN`
+**Clean runs are never partitioned** (`scheduler/service.ts:123-125`). A `CLEAN`
 run is all-or-nothing over the full catalogue, and a missing segment must not read
 as "chapters were removed". The processor enforces the same thing from the other
 side by refusing to process a clean run with missing segments
-(`processor.ts:143-146`).
+(`core/processor/processor.ts:144-146`).
 
 Untracked manga are deliberately **not** segment-filtered: they have no mapping
 yet, so they belong to no segment, and dropping them would hide new titles from
 the operator. The core dedupes them across the run's segments
-(`runner.mjs:670-673`, `processor.ts:654`).
+(`runner.mjs:670-673`, `core/processor/processor.ts:654`).
 
 ---
 
@@ -813,12 +813,23 @@ filter in the claim query, so the enforcement is in SQL
 
 ### Scopes
 
-Sixteen scopes, `<area>:read` / `<area>:write`
-(`api/scopes.ts:20-37`). Write implies read within an area; **nothing else implies
-anything**, so `users:admin` grants only itself and a token scoped for account
-management cannot quietly publish bundles (`scopes.ts:82-89`).
+Nineteen scopes, `<area>:read` / `<area>:append` / `<area>:write`
+(`api/scopes.ts:20-45`). Within one area `write` implies `append` implies `read`;
+**nothing else implies anything**, so `users:admin` grants only itself and a token
+scoped for account management cannot quietly publish bundles
+(`scopes.ts:91-101`).
 
-Unknown scope strings are rejected at mint time (`scopes.ts:56-63`). That stops a
+The three-verb split exists for exactly one area, the series map, and it is what
+lets the platform delegate curation without delegating control.
+`tracked:append` can create a mapping that does not exist — the worst case is a
+wrong *new* mapping, which is visible and reversible. Repointing or deleting an
+existing one needs `tracked:write`, because un-tracking a series silently stops its
+uploads. The single-row `PUT` enforces the distinction at the route: it accepts
+`tracked:append` but returns 403 if the mapping already exists and points somewhere
+else and the caller lacks `tracked:write` (`routes/admin.ts:397-423`). That is the
+mechanism behind the `CONTRIBUTOR` role.
+
+Unknown scope strings are rejected at mint time (`scopes.ts:65-72`). That stops a
 typo like `run:write` from producing a token that silently does nothing, and stops
 a caller inventing a scope a future release might define as something powerful.
 
@@ -864,7 +875,7 @@ extension reports untrackedManga
         │
         ▼
 processor persists to untracked_manga (state NEW), skipping anything
-already tracked                                    processor.ts:376-413
+already tracked                                    processor.ts:377-413
         │
         ├── manifest auto_create_titles = true ──> TitleService.tick()
         │                                          titleService.ts:44-64
@@ -903,7 +914,7 @@ Details that matter:
 - The processor drops reported series that are *already* tracked before queueing,
   because a worker only knows the series had no MangaDex id in **its** config copy
   — which is exactly the state a just-auto-created title leaves behind
-  (`processor.ts:369-375`).
+  (`core/processor/processor.ts:369-376`).
 
 `TitleService` runs in `core-uploader` because that is where the MangaDex write
 credentials live. `core-api` also constructs one when it happens to have
@@ -922,13 +933,13 @@ legacy design and it shows up in four places
 **Tracked manga.** `tracked_manga` is the authority. A bundle's
 `manga_id_map.json` *seeds* missing rows at first publish and never overwrites
 existing ones (`store/bundles.ts:79-84`, `120`). The lease builds `mangaIdMap`
-from the table (`routes/worker.ts:121-136`), so a title created ten minutes ago
+from the table (`routes/worker.ts:122-137`), so a title created ten minutes ago
 reaches the extension on its next run.
 
 **Override options.** `extension_configs.override_options`, seeded the same way
 and edited through the admin API. The processor reads them from the database and
 *discards* what the worker reported, because they decide what counts as a
-duplicate and which languages may stay on MangaDex (`processor.ts:330-347`). The
+duplicate and which languages may stay on MangaDex (`core/processor/processor.ts:338-347`). The
 runner does not even try: it reports `overrideOptions: {}` because the worker is
 not a trusted source of configuration (`runner.mjs:677-679`).
 

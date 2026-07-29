@@ -580,10 +580,10 @@ The dashboard is vanilla JS with no build step, served from
 3. Add the API call to `src/bot/apiClient.ts` with its `scope` (client-side
    metadata used for error messages) and a timeout if the operation is slow.
 4. If the response contains secret material — an enroll token, a minted token —
-   send it by **DM**, never to a channel (`bot.ts:258-273` is the DM path with an
+   send it by **DM**, never to a channel (`src/bot/bot.ts:258-273` is the DM path with an
    ephemeral fallback; `/enroll` is the worked example).
 5. `resolveSensitivity` defaults a missing subcommand key to `destructive`
-   (`commands.ts:78-82`), so a subcommand you forget to classify fails safe.
+   (`src/bot/commands.ts:78-82`), so a subcommand you forget to classify fails safe.
 6. Test it in `test/unit/botCommands.test.ts` and, for the gating,
    `test/unit/botAuthz.test.ts`.
 7. Update [bot.md](bot.md#5-command-reference).

@@ -459,28 +459,37 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     expect(styles.headers["content-type"]).toContain("text/css");
   });
 
-  it("names every operator section it can render, including the new ones", async () => {
-    // The views are built client-side, so the HTML shell names them in its
-    // <noscript> fallback and app.js registers them as tabs. Both halves are
-    // asserted: a section present in one and missing from the other is either an
-    // unreachable view or a tab that renders nothing.
+  it("names every operator section it can render in the no-script fallback", async () => {
+    // Every view is built client-side, so a browser with scripting off sees only
+    // the shell. The <noscript> block is what tells that operator which sections
+    // exist — and it is derived from nothing, so it goes stale silently.
+    //
+    // The tab labels are read out of the served app.js rather than hard-coded
+    // here: the point is that the two halves agree, and pinning the list in the
+    // test would just move the staleness rather than catch it.
     const page = await app.inject({ method: "GET", url: "/dash" });
     const script = await app.inject({ method: "GET", url: "/dash/app.js" });
 
-    for (const section of ["Queues", "Errors", "Tokens"]) {
-      expect(page.body, `${section} should be named in the served HTML`).toContain(section);
-      expect(script.body, `${section} should be a registered tab`).toContain(`"${section}"`);
+    const registry = /const TABS = \[(.*?)\n\];/s.exec(script.body);
+    expect(registry, "app.js should declare a TABS registry").not.toBeNull();
+    const labels = [...registry![1]!.matchAll(/^\s*\["[a-z]+", "([^"]+)"/gm)].map((m) => m[1]!);
+    expect(labels.length).toBeGreaterThanOrEqual(10);
+
+    for (const label of labels) {
+      expect(page.body, `the noscript fallback should name the ${label} section`).toContain(label);
     }
-    // Credential minting and account administration are owner-gated in the UI.
+
+    // Credential minting and account administration need the OWNER role, not a
+    // scope — a wildcard api token holds users:admin but is never OWNER.
     expect(script.body).toContain('["tokens", "Tokens", { owner: true }]');
     expect(script.body).toContain('["users", "Users", { owner: true }]');
 
-    // The controls behind those views must exist too — a tab with no endpoint
-    // wired to it is the failure mode this catches.
+    // A tab with no endpoint wired to it renders an empty panel; these are the
+    // calls behind the sections this dashboard grew for queue and session triage.
     for (const call of [
+      "/whoami",
       "/upload-tasks",
       "/upload-tasks/requeue-stale",
-      "/errors?limit=",
       "/mangadex/auth",
       "/mangadex/auth/clear",
       "/tokens/scopes",

@@ -31,7 +31,7 @@ owner-equivalent by construction and resolves to the wildcard scope `["*"]`
 accounts table itself is the problem. Logging in with it attaches a session to
 the seeded owner account (`platform/src/core/api/session.ts:199-203`), which is
 how a fresh deployment bootstraps its first password. It should live in a vault,
-not in a client; clients get [scoped tokens](#scope) instead. If it is unset, the
+not in a client; clients get [scoped tokens](api-reference.md#scopes) instead. If it is unset, the
 whole admin API answers 503 rather than opening up
 (`auth.ts:103-106`).
 
@@ -55,10 +55,12 @@ arrive for a job — duplicated, late, or hostile — the database admits one
 
 **dead letter** — The terminal failure state for a job (`JobState.DEAD_LETTER`)
 or an upload task (`UploadTaskState.DEAD_LETTER`). A job dead-letters when its
-attempts are exhausted, or immediately on a `PERMANENT` or `POLICY` error
-(`platform/src/core/store/jobs.ts:257-270`). Nothing retries a dead letter
+attempts are exhausted, or immediately on a `PERMANENT` error;
+`TRANSIENT` and `POLICY` requeue with backoff until the budget runs out
+(`platform/src/core/store/jobs.ts:246-296`). Nothing retries a dead letter
 automatically; an operator replays it, which resets the attempt counter to zero
-(`jobs.ts:352-366`, `POST /api/v1/admin/jobs/:id/retry`). Note that jobs have no
+**and revives the parent run** in the same transaction
+(`jobs.ts:374-398`, `POST /api/v1/admin/jobs/:id/retry`). Note that jobs have no
 `FAILED` state — exhaustion goes straight to `DEAD_LETTER`, which is why the
 merged error feed filters jobs and upload tasks on different state sets
 (`platform/src/core/api/routes/ops.ts:269-272`).
@@ -80,7 +82,7 @@ chapters and manga. It holds no credentials, makes no MangaDex calls, and does
 not decide what gets uploaded.
 
 **job** — One unit of leasable work: an extension run, or one
-[segment](#segment) of one. A job carries its own version pin (`bundleSha256`),
+**segment** of one. A job carries its own version pin (`bundleSha256`),
 its retry budget, its timeout, and its `minTrust` requirement. See the [job state
 machine](architecture-guide.md#the-job-state-machine).
 
@@ -97,7 +99,7 @@ TTL/3 (`platform/src/worker/agent.ts:248-251`).
 schedule, `allowed_hosts`, partitioning, trust floor, and title-creation
 defaults. It is validated *and enforced* — the core keeps its own copy for the
 pinned bundle and checks worker output against it at ingest, because a worker
-cannot vouch for itself (`platform/src/core/ingest/ingest.ts:120-155`). Schema:
+cannot vouch for itself (`platform/src/core/ingest/ingest.ts:135-231`). Schema:
 `platform/src/contracts/manifest.ts:10-79`. Field reference:
 [extension-guide.md](extension-guide.md#manifestjson-field-by-field).
 
@@ -128,7 +130,7 @@ link with a generated info card and repoints `externalUrl` away from it;
 (`platform/src/core/processor/processor.ts:170-171`;
 `platform/src/core/store/settings.ts:4-8`). Duplicate chapters are always
 hard-deleted regardless of the mode — an "unavailable" card on a duplicate would
-just leave the duplicate in place (`processor.ts:575-579`).
+just leave the duplicate in place (`core/processor/processor.ts:575-579`).
 
 **run** — One scheduled or manually triggered execution of one extension, and the
 parent of one or more jobs. A run is created idempotently under a key: the
@@ -139,12 +141,15 @@ restarts cannot double-create. Run kinds are `UPDATE` (the scheduled kind),
 default for a manual trigger).
 
 **scope** — A permission string on an admin-audience credential, of the form
-`<area>:read` / `<area>:write`, where write implies read within the same area and
-nothing else implies anything (`platform/src/core/api/scopes.ts:82-89`). The
-sixteen valid scopes are enumerated at `scopes.ts:20-37`; an unknown string is
-rejected at mint time so a typo cannot produce a quietly powerless token
-(`scopes.ts:56-63`). Every admin route declares the scope it needs. Full list:
-[api-reference.md](api-reference.md#scopes).
+`<area>:read` / `<area>:append` / `<area>:write`. Within one area `write` implies
+`append` implies `read`; **nothing else implies anything**, so `users:admin` grants
+only itself (`platform/src/core/api/scopes.ts:91-101`). The nineteen valid scopes
+are enumerated at `scopes.ts:20-45`; an unknown string is rejected at mint time so
+a typo cannot produce a quietly powerless token (`scopes.ts:65-72`). Only the
+series map uses the middle verb: `tracked:append` may create a mapping that does
+not exist, while repointing or deleting one needs `tracked:write` — which is what
+makes the series map safe to delegate to a contributor. Every admin route declares
+the scope it needs. Full list: [api-reference.md](api-reference.md#scopes).
 
 **segment** — A slice of a partitioned run. When a manifest declares
 `partition.mode: "tracked_manga"`, the scheduler splits the extension's tracked
@@ -152,12 +157,12 @@ manga ids into contiguous, **non-overlapping** chunks and creates one job per
 chunk (`platform/src/core/scheduler/slots.ts:80-105`). Segment keys are a
 deterministic hash of the inputs, so a replay addresses the same segments. Clean
 runs are never partitioned — a missing segment must not read as "the publisher
-removed everything" (`platform/src/core/scheduler/service.ts:116-118`).
+removed everything" (`platform/src/core/scheduler/service.ts:123-125`).
 
 **tracked / untracked manga** — A series is *tracked* when a `tracked_manga` row
 maps its publisher-side id to a MangaDex title id; that table is the authority,
 and it is delivered to workers on lease as `mangaIdMap`
-(`platform/src/core/api/routes/worker.ts:118-136`). A series an extension reports
+(`platform/src/core/api/routes/worker.ts:119-137`). A series an extension reports
 that has no such mapping is *untracked*: it lands in `untracked_manga` with state
 `NEW` and either gets a MangaDex title created automatically (when the manifest
 sets `auto_create_titles`) or waits for an operator to approve it

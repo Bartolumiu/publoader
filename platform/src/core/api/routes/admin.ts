@@ -98,6 +98,32 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       });
     }
 
+    /**
+     * Change which extensions a worker will be given, at runtime.
+     *
+     * The stored list is what the lease query filters on, so this takes effect
+     * on that worker's very next poll — no re-enrolment, no restart, no
+     * redeploy. An empty list means "anything", which is the right default for
+     * a dedicated worker and the wrong one for a community host.
+     */
+    scope.put(
+      "/api/v1/admin/workers/:id/extensions",
+      { preHandler: requireScope("workers:write") },
+      async (req, reply) => {
+        const { id } = req.params as { id: string };
+        const body = z
+          .object({ extensions: z.array(z.string().max(128)).max(256) })
+          .parse(req.body);
+        const updated = await ctx.prisma.worker.updateMany({
+          where: { id },
+          data: { extensions: body.extensions },
+        });
+        if (updated.count !== 1) return reply.code(404).send({ error: "unknown worker" });
+        await ctx.audit.record(actor(req), "worker.extensions.set", id, body);
+        return { ok: true, extensions: body.extensions };
+      },
+    );
+
     // ---- runs & jobs ----
     scope.post("/api/v1/admin/runs", { preHandler: requireScope("runs:write") }, async (req, reply) => {
       const body = z
@@ -221,18 +247,37 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       };
     });
 
-    for (const [action, method] of [
-      ["disable", (e: string) => ctx.settings.disable(e)],
-      ["enable", (e: string) => ctx.settings.enable(e)],
-    ] as const) {
-      scope.post(`/api/v1/admin/extensions/:name/${action}`, { preHandler: requireScope("extensions:write") }, async (req, reply) => {
+    /**
+     * Unload an extension. Disabling stops scheduling AND stops outstanding
+     * work: queued jobs are cancelled and running ones are told to abort, so
+     * "disabled" means disabled now rather than after the queue drains. The
+     * claim query also refuses disabled extensions, so nothing can slip through
+     * between these two statements.
+     */
+    scope.post(
+      "/api/v1/admin/extensions/:name/disable",
+      { preHandler: requireScope("extensions:write") },
+      async (req, reply) => {
         const { name } = req.params as { name: string };
         if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
-        await method(name);
-        await ctx.audit.record(actor(req), `extension.${action}`, name);
-        return { ok: true };
-      });
-    }
+        await ctx.settings.disable(name);
+        const stopped = await ctx.jobs.cancelAllForExtension(name);
+        await ctx.audit.record(actor(req), "extension.disable", name, stopped);
+        return { ok: true, disabled: true, ...stopped };
+      },
+    );
+
+    scope.post(
+      "/api/v1/admin/extensions/:name/enable",
+      { preHandler: requireScope("extensions:write") },
+      async (req, reply) => {
+        const { name } = req.params as { name: string };
+        if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
+        await ctx.settings.enable(name);
+        await ctx.audit.record(actor(req), "extension.enable", name);
+        return { ok: true, disabled: false };
+      },
+    );
 
     // ---- schedules ----
     scope.get("/api/v1/admin/schedules", { preHandler: requireScope("extensions:read") }, async () => {
@@ -511,6 +556,63 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       await ctx.audit.record(actor(req), "untracked.skip", id);
       return { ok: true };
     });
+
+    /**
+     * Yank a bundle version. `latest()` then resolves to the previous
+     * non-yanked version, so this is how a bad extension release is rolled back
+     * without touching the core or deleting anything. Jobs already pinned to the
+     * yanked sha keep running unless `cancelPinned` is set — pinning is what
+     * makes a run reproducible, so breaking it is opt-in.
+     */
+    scope.post(
+      "/api/v1/admin/bundles/:extension/:version/yank",
+      { preHandler: requireScope("bundles:write") },
+      async (req, reply) => {
+        const { extension, version } = req.params as { extension: string; version: string };
+        const body = z.object({ cancelPinned: z.boolean().default(false) }).parse(req.body ?? {});
+        const bundle = await ctx.prisma.bundle.findUnique({
+          where: { extension_version: { extension, version } },
+        });
+        if (!bundle) return reply.code(404).send({ error: "unknown bundle version" });
+
+        const yanked = await ctx.bundles.yank(extension, version);
+        const stopped = body.cancelPinned
+          ? await ctx.jobs.cancelAllForBundle(bundle.sha256)
+          : { cancelled: 0, flagged: 0 };
+        const fallback = await ctx.bundles.latest(extension);
+        await ctx.audit.record(actor(req), "bundle.yank", `${extension}@${version}`, {
+          sha256: bundle.sha256,
+          ...stopped,
+          nowLatest: fallback?.version ?? null,
+        });
+        return {
+          ok: yanked,
+          yanked: `${extension}@${version}`,
+          nowLatest: fallback ? { version: fallback.version, sha256: fallback.sha256 } : null,
+          ...stopped,
+        };
+      },
+    );
+
+    scope.get(
+      "/api/v1/admin/bundles/:extension/versions",
+      { preHandler: requireScope("bundles:read") },
+      async (req) => {
+        const { extension } = req.params as { extension: string };
+        const versions = await ctx.prisma.bundle.findMany({
+          where: { extension },
+          orderBy: { publishedAt: "desc" },
+          select: {
+            version: true,
+            sha256: true,
+            yanked: true,
+            sourceCommit: true,
+            publishedAt: true,
+          },
+        });
+        return { extension, versions };
+      },
+    );
 
     // ---- observability ----
     scope.get("/api/v1/admin/stats", { preHandler: requireScope("stats:read") }, async () => {

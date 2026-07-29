@@ -6,7 +6,6 @@ import { loadConfig } from "../../src/config.js";
 import { createLogger } from "../../src/logging.js";
 import { buildContext } from "../../src/core/api/context.js";
 import { buildServer } from "../../src/core/api/server.js";
-import { registerWebhookRoutes } from "../../src/core/api/routes/webhooks.js";
 import type { RepoArchiveFetcher } from "../../src/core/webhooks/repoArchive.js";
 import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
 
@@ -112,9 +111,11 @@ describe.skipIf(!dbReady())("github push webhook", () => {
     };
     // Mirrors the single registration line server.ts needs, with the fetcher
     // injected so the test never reaches api.github.com.
+    // buildServer registers the webhook routes; the fetcher rides on the
+    // context so this test never reaches api.github.com.
     const ctx = buildContext(prisma, config, log);
+    ctx.webhookFetchArchive = fetchArchive;
     app = buildServer(ctx);
-    registerWebhookRoutes(app, ctx, { fetchArchive });
     await app.ready();
   });
   afterAll(async () => {
@@ -426,7 +427,6 @@ describe.skipIf(!dbReady())("github push webhook", () => {
         log,
       );
       const unconfigured = buildServer(ctx);
-      registerWebhookRoutes(unconfigured, ctx);
       await unconfigured.ready();
       try {
         const body = pushBody(["src/mangaplus/index.mjs"]);

@@ -142,7 +142,9 @@ export function registerWebhookRoutes(
             bundles: ctx.bundles,
             audit: ctx.audit,
             log: ctx.log,
-            ...(options.fetchArchive ? { fetchArchive: options.fetchArchive } : {}),
+            ...(options.fetchArchive ?? ctx.webhookFetchArchive
+              ? { fetchArchive: (options.fetchArchive ?? ctx.webhookFetchArchive)! }
+              : {}),
           },
         );
 

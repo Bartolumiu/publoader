@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
+import AdmZip from "adm-zip";
 import { loadConfig } from "../../src/config.js";
 import { createLogger } from "../../src/logging.js";
 import { buildContext, type AppContext } from "../../src/core/api/context.js";
@@ -418,6 +419,257 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
       headers: { authorization: "Bearer pw_not-a-real-worker-token" },
     });
     expect(worker.statusCode).toBe(401);
+  });
+
+  // ---- identity, schema, search, preflight ----
+
+  it("tells each principal what it is and what it may do", async () => {
+    const asRoot = await app.inject({ method: "GET", url: "/api/v1/admin/whoami", headers: root });
+    expect(asRoot.statusCode).toBe(200);
+    expect(asRoot.json()).toMatchObject({
+      kind: "root",
+      name: "root",
+      role: "OWNER",
+      scopes: ["*"],
+      csrfHeader: "x-requested-with",
+    });
+
+    // A token reports its own scopes and is never OWNER — which is what the
+    // dashboard needs in order to hide what the server would refuse.
+    const headers = await mint(["runs:read", "stats:read"]);
+    const asToken = await app.inject({ method: "GET", url: "/api/v1/admin/whoami", headers });
+    expect(asToken.json()).toMatchObject({ kind: "api-token", role: "ADMIN" });
+    expect(asToken.json().scopes.sort()).toEqual(["runs:read", "stats:read"]);
+    // No secret is disclosed: the answer is about authority, not credentials.
+    expect(asToken.body).not.toContain("pa_");
+
+    // Authentication is still required — "who am I" is not a public question.
+    expect((await app.inject({ method: "GET", url: "/api/v1/admin/whoami" })).statusCode).toBe(401);
+  });
+
+  it("reports the migration state of the database it is actually connected to", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/v1/admin/schema", headers: root });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // globalSetup runs `prisma migrate deploy`, so this database is by
+    // construction fully migrated with a real history table.
+    expect(body).toMatchObject({ historyAvailable: true, current: true, pending: [], failed: [] });
+    expect(body.onDisk.length).toBeGreaterThan(0);
+    expect(body.applied.map((m: { name: string }) => m.name)).toEqual(expect.arrayContaining(body.onDisk));
+    expect(body.applied.every((m: { failed: boolean }) => !m.failed)).toBe(true);
+
+    // Reading migration names is a settings:read question, not an open one.
+    const stats = await mint(["stats:read"]);
+    expect((await app.inject({ method: "GET", url: "/api/v1/admin/schema", headers: stats })).statusCode).toBe(403);
+  });
+
+  it("searches the audit log by needle, actor, action, and time window", async () => {
+    await ctx.audit.record("user:ardax", "platform.pause", undefined, { minutes: 5 });
+    await ctx.audit.record("token:discord-bot", "run.trigger", "mangaplus", { kind: "FORCE" });
+    await ctx.audit.record("user:ardax", "worker.revoke", "worker-7");
+
+    const all = await app.inject({ method: "GET", url: "/api/v1/admin/audit/search", headers: root });
+    expect(all.statusCode).toBe(200);
+    expect(all.json().total).toBe(3);
+    // Newest first.
+    expect(all.json().events[0].action).toBe("worker.revoke");
+
+    const byActor = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/audit/search?actor=ardax",
+      headers: root,
+    });
+    expect(byActor.json().total).toBe(2);
+
+    const byAction = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/audit/search?action=worker.",
+      headers: root,
+    });
+    expect(byAction.json().total).toBe(1);
+
+    // The needle reaches the detail JSON, which is where the useful specifics
+    // live (a manga id, a kind, a scope list).
+    const byDetail = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/audit/search?q=mangaplus",
+      headers: root,
+    });
+    expect(byDetail.json().total).toBe(1);
+    expect(byDetail.json().events[0].actor).toBe("token:discord-bot");
+
+    // A `%` in the needle is data for the parameter binder, not a syntax error.
+    const wildcard = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/audit/search?q=${encodeURIComponent("100% not here")}`,
+      headers: root,
+    });
+    expect(wildcard.statusCode).toBe(200);
+    expect(wildcard.json().total).toBe(0);
+
+    // Total counts the whole match set, so paging can say "1 of 3".
+    const paged = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/audit/search?limit=1&offset=1",
+      headers: root,
+    });
+    expect(paged.json().total).toBe(3);
+    expect(paged.json().events).toHaveLength(1);
+
+    const future = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/audit/search?since=${new Date(Date.now() + 60_000).toISOString()}`,
+      headers: root,
+    });
+    expect(future.json().total).toBe(0);
+
+    const runsOnly = await mint(["runs:write"]);
+    expect(
+      (await app.inject({ method: "GET", url: "/api/v1/admin/audit/search", headers: runsOnly })).statusCode,
+    ).toBe(403);
+  });
+
+  it("preflights a bundle zip without publishing it", async () => {
+    const manifest = {
+      name: "opstest",
+      version: "1.0.0",
+      publoader_api: "^2.0.0",
+      runtime: "node",
+      entrypoint: "index.mjs",
+      mangadex_group_id: "4f1de6a2-f0c5-4ac5-bce5-02c7dbb67deb",
+      languages: ["en"],
+      allowed_hosts: ["example.com"],
+    };
+    const zipWith = (files: Record<string, string>): Buffer => {
+      const zip = new AdmZip();
+      for (const [name, content] of Object.entries(files)) zip.addFile(name, Buffer.from(content));
+      return zip.toBuffer();
+    };
+    const post = (payload: Buffer, headers: Record<string, string>) =>
+      app.inject({
+        method: "POST",
+        url: "/api/v1/admin/bundles/inspect",
+        headers: { ...headers, "content-type": "application/zip" },
+        payload,
+      });
+
+    const good = await post(
+      zipWith({ "manifest.json": JSON.stringify(manifest), "index.mjs": "export default () => ({});\n" }),
+      root,
+    );
+    expect(good.statusCode).toBe(200);
+    expect(good.json()).toMatchObject({
+      ok: true,
+      errors: [],
+      manifest: { name: "opstest", version: "1.0.0", entrypoint: "index.mjs" },
+      currentlyPublished: null,
+    });
+
+    // Nothing was published — that is the whole point of a preflight.
+    expect(await prisma.bundle.count()).toBe(0);
+
+    const missingEntrypoint = await post(zipWith({ "manifest.json": JSON.stringify(manifest) }), root);
+    expect(missingEntrypoint.statusCode).toBe(422);
+    expect(missingEntrypoint.json().errors[0]).toContain("index.mjs");
+
+    const noManifest = await post(zipWith({ "index.mjs": "export default () => ({});\n" }), root);
+    expect(noManifest.statusCode).toBe(422);
+    expect(noManifest.json().errors[0]).toContain("manifest.json");
+
+    const badManifest = await post(zipWith({ "manifest.json": "{not json" }), root);
+    expect(badManifest.statusCode).toBe(422);
+
+    // A read scope is enough to preflight; it changes nothing.
+    const reader = await mint(["bundles:read"]);
+    expect(
+      (
+        await post(
+          zipWith({ "manifest.json": JSON.stringify(manifest), "index.mjs": "export default () => ({});\n" }),
+          reader,
+        )
+      ).statusCode,
+    ).toBe(200);
+    const outsider = await mint(["runs:write"]);
+    expect((await post(zipWith({ "manifest.json": "{}" }), outsider)).statusCode).toBe(403);
+  });
+
+  it("gathers one extension's runs, jobs, and curation counts into one answer", async () => {
+    const dead = await job({ state: "DEAD_LETTER", lastError: "boom", errorClass: "PERMANENT" });
+    await prisma.trackedManga.create({
+      data: { extension: "opstest", mangaId: "ext-1", mdMangaId: "9a1b1c1d-0000-4000-8000-000000000000" },
+    });
+    await prisma.untrackedManga.create({
+      data: {
+        extension: "opstest",
+        mangaId: "ext-2",
+        mangaName: "Something New",
+        mangaLanguage: "en",
+        mangaUrl: "https://example.com/2",
+        state: "NEW",
+      },
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/extensions/opstest/activity",
+      headers: root,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.extension).toBe("opstest");
+    expect(body.jobs.map((j: { id: string }) => j.id)).toContain(dead.id);
+    expect(body.runs).toHaveLength(1);
+    expect(body.tracked).toBe(1);
+    expect(body.untracked).toMatchObject({ NEW: 1 });
+    // No bundle was published for it, which is a real state and not an error.
+    expect(body.bundle).toBeNull();
+
+    const bad = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/extensions/Not-A-Name/activity",
+      headers: root,
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it("merges every source into the activity feed, newest first", async () => {
+    await job({ state: "DEAD_LETTER", lastError: "job died" });
+    await task({ state: "FAILED", lastError: "task failed" });
+    await ctx.audit.record("user:ardax", "platform.pause", undefined, { minutes: 5 });
+
+    const res = await app.inject({ method: "GET", url: "/api/v1/admin/activity", headers: root });
+    expect(res.statusCode).toBe(200);
+    const rows = res.json().activity as { at: string; severity: string; source: string }[];
+    expect(rows.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(rows.map((r) => r.source))).toEqual(new Set(["run", "job", "upload-task", "audit"]));
+    // Severity is decided server-side so the UI filter is a predicate, not a guess.
+    expect(rows.filter((r) => r.severity === "error").length).toBeGreaterThanOrEqual(2);
+    const timestamps = rows.map((r) => Date.parse(r.at));
+    expect(timestamps).toEqual([...timestamps].sort((a, b) => b - a));
+  });
+
+  it("keeps a database dump out of reach of every token, however broadly scoped", async () => {
+    // A dump contains every operator password hash, every token hash, and the
+    // saved MangaDex session in plaintext — so taking one is a credential-theft
+    // primitive, not a read. It must sit at the same bar as account
+    // administration: OWNER role AND users:admin, which together exclude api
+    // tokens by construction (adminAuthHook never gives one the OWNER role).
+    for (const scopes of [["*"], ["users:admin"], ["settings:write"]]) {
+      const headers = await mint(scopes);
+      const res = await app.inject({ method: "GET", url: "/api/v1/admin/backup", headers });
+      expect(res.statusCode, `a ${scopes.join(",")} token must not reach /backup`).toBe(403);
+    }
+    expect(await prisma.auditEvent.count({ where: { action: "database.backup" } })).toBe(0);
+
+    // The break-glass credential is owner-equivalent, so it gets past the guard.
+    // Whether the dump then runs depends on pg_dump being installed, which the
+    // runtime image deliberately omits — 503 with a fix is the correct answer
+    // there, and either outcome proves authorization passed.
+    const allowed = await app.inject({ method: "GET", url: "/api/v1/admin/backup", headers: root });
+    expect([200, 503]).toContain(allowed.statusCode);
+    if (allowed.statusCode === 503) {
+      expect(allowed.json().error).toContain("pg_dump");
+    }
   });
 
   it("requires the CSRF header on cookie-authenticated queue writes", async () => {

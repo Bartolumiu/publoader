@@ -10,9 +10,17 @@ import { MIN_PASSWORD_LENGTH, toPublicUser } from "../../store/adminUsers.js";
  * which of their sessions are live.
  *
  * Everything here is OWNER-only except setting your own password — an ADMIN
- * has full control-plane authority but cannot grant it to anybody else, which
- * is the only privilege boundary the platform has.
+ * has full control-plane authority but cannot grant it to anybody else.
+ *
+ * Three roles, and the gap between the first two is much smaller than the gap
+ * to the third: OWNER and ADMIN differ only in account administration, while
+ * CONTRIBUTOR is a genuinely confined role (see `scopesForRole`) that can
+ * curate the series map and work the untracked queue and nothing else. That is
+ * the role to hand someone outside the operator group — an ADMIN can publish
+ * bundles, which is code execution on every worker.
  */
+const ASSIGNABLE_ROLES = ["OWNER", "ADMIN", "CONTRIBUTOR"] as const;
+
 export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.register(async (scope) => {
     scope.addHook(
@@ -44,7 +52,7 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
 
     scope.post("/api/v1/admin/users", owner, async (req, reply) => {
       const body = z
-        .object({ email: z.string().email().max(320), role: z.enum(["OWNER", "ADMIN"]).default("ADMIN") })
+        .object({ email: z.string().email().max(320), role: z.enum(ASSIGNABLE_ROLES).default("ADMIN") })
         .parse(req.body ?? {});
       if (await ctx.adminUsers.byEmail(body.email)) {
         return reply.code(409).send({ error: "an account with that email already exists" });
@@ -67,7 +75,7 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
 
     scope.post("/api/v1/admin/users/:id/role", owner, async (req, reply) => {
       const { id } = req.params as { id: string };
-      const body = z.object({ role: z.enum(["OWNER", "ADMIN"]) }).parse(req.body ?? {});
+      const body = z.object({ role: z.enum(ASSIGNABLE_ROLES) }).parse(req.body ?? {});
       const result = await ctx.adminUsers.setRole(id, body.role);
       if (result === "unknown") return reply.code(404).send({ error: "unknown account" });
       if (result === "last-owner") {

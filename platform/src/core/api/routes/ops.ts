@@ -10,7 +10,7 @@ import { Prisma } from "@prisma/client";
 import AdmZip from "adm-zip";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
-import { adminAuthHook, requireScope } from "../auth.js";
+import { adminAuthHook, requireOwner, requireScope } from "../auth.js";
 import { hasScope } from "../scopes.js";
 import { sessionAuthenticator } from "../session.js";
 import { EXTENSION_NAME_RE, Manifest } from "../../../contracts/manifest.js";
@@ -52,8 +52,13 @@ const MD_REFRESH_KEY = "mdauth_refresh";
  * reports as "internal error" — actively misleading for a caller who mistyped a
  * filter. The filters here are the ones an operator types by hand, so they get
  * a real answer. `statusCode` is what the handler keys off.
+ *
+ * Generic over the schema rather than over a result type, so the return is the
+ * schema's OUTPUT: with `z.ZodType<T>` TypeScript infers T from the input side,
+ * which types every `.default(…)` field as possibly-undefined even though
+ * parsing guarantees it is not.
  */
-function parseOrThrow<T>(schema: z.ZodType<T>, value: unknown): T {
+function parseOrThrow<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infer<S> {
   const result = schema.safeParse(value);
   if (result.success) return result.data;
   const issue = result.error.issues[0];
@@ -85,7 +90,101 @@ function jwtExpiry(token: string): Date | null {
   }
 }
 
+/**
+ * Locate `prisma/migrations` by walking up from this module.
+ *
+ * The depth differs between `src/` (vitest, tsx) and `dist/` (the container),
+ * and the runtime image copies `prisma/` next to `dist/` — so searching upwards
+ * for the directory is the one lookup that is correct in both, without either
+ * layout being hard-coded. Returns null when the history was not shipped, which
+ * the route reports as "unknown" rather than "up to date".
+ */
+function findMigrationsDir(): string | null {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let hop = 0; hop < 8; hop++) {
+    const candidate = join(dir, "prisma", "migrations");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/** Migration directory names on disk, in the order prisma applies them. */
+function migrationsOnDisk(dir: string | null): string[] {
+  if (!dir) return [];
+  return readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+}
+
+/**
+ * Postgres connection parameters for `pg_dump`, taken from the URL the app is
+ * already using. Returned separately from the password so the password can go
+ * into the child's environment instead of its argv, where `ps` would show it.
+ */
+function pgDumpTarget(databaseUrl: string): { args: string[]; password: string; database: string } | null {
+  let url: URL;
+  try {
+    url = new URL(databaseUrl);
+  } catch {
+    return null;
+  }
+  const database = url.pathname.replace(/^\//, "");
+  if (!database) return null;
+  return {
+    database,
+    password: decodeURIComponent(url.password),
+    args: [
+      "--host",
+      url.hostname,
+      "--port",
+      url.port || "5432",
+      "--username",
+      decodeURIComponent(url.username),
+      "--dbname",
+      database,
+      // Custom format: compressed, and `pg_restore` can pick objects out of it.
+      // Matches the shape docs/operations.md §"Backup and restore" documents,
+      // so a dashboard dump and a host dump restore identically.
+      "--format=custom",
+      "--no-owner",
+      "--no-privileges",
+    ],
+  };
+}
+
+/**
+ * Severity for the Activity feed. Rows are classified once, here, so the UI
+ * filter is a server-side predicate rather than a guess made from a label.
+ */
+type Severity = "error" | "warn" | "info";
+
+interface ActivityRow {
+  at: Date;
+  severity: Severity;
+  /** Which table this came from; also the permalink's type. */
+  source: "run" | "job" | "upload-task" | "submission" | "audit";
+  kind: string;
+  subject: string;
+  message: string;
+  id: string;
+  extension?: string | null;
+  /**
+   * Parent run, for rows that have one. The dashboard's per-row permalink needs
+   * it: a job id alone opens nothing an operator can act on, while its run
+   * shows every sibling segment and the retry buttons.
+   */
+  runId?: string | null;
+}
+
 export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
+  // Resolved once at wiring time: the answer cannot change while the process
+  // lives, and a per-request filesystem walk would be pure waste.
+  const migrationsDir = findMigrationsDir();
+
   app.register(async (scope) => {
     scope.addHook(
       "preHandler",
@@ -111,6 +210,284 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
       if (principal?.kind === "session") return principal.name;
       return `admin:${claimed ?? "root"}`;
     };
+
+    // ---- who am I ----
+
+    /**
+     * The principal's own identity and authority. No scope guard: every
+     * authenticated caller may ask what it is, and refusing would make the
+     * answer unobtainable exactly when it is needed.
+     *
+     * This exists because the dashboard cannot otherwise know what to render.
+     * It used to probe an owner-only endpoint and read the 403 — which worked,
+     * but only answered one bit. Returning the scope set lets the SPA hide
+     * every control the server would refuse, so an operator never clicks into a
+     * wall of "missing scope" toasts.
+     *
+     * Hiding is cosmetic and this endpoint does not change that: the same scope
+     * checks still run on every route. Nothing secret is returned — no token,
+     * no session id, no email beyond the actor name already in the audit log.
+     */
+    scope.get("/api/v1/admin/whoami", async (req, reply) => {
+      const principal = req.principal;
+      if (!principal) return reply.code(401).send({ error: "unauthenticated" });
+      return {
+        kind: principal.kind,
+        name: principal.name,
+        role: req.adminRole ?? null,
+        scopes: [...principal.scopes],
+        // The SPA needs this on every mutating call; sending it beats hard-coding
+        // the same constant in two languages.
+        csrfHeader: "x-requested-with",
+      };
+    });
+
+    // ---- schema & migrations ----
+
+    /**
+     * Is the database schema the one this build expects?
+     *
+     * The answer used to require `docker compose run migrate status` on the
+     * host. It is a `settings:read` question rather than a privileged one: it
+     * returns migration names and timestamps, nothing about the data.
+     *
+     * A migration prisma recorded but never finished (`finished_at` null) or
+     * rolled back is reported as failed. That is the state that makes a
+     * container crash-loop on boot, and it is invisible from every other panel.
+     */
+    scope.get("/api/v1/admin/schema", { preHandler: requireScope("settings:read") }, async () => {
+      const onDisk = migrationsOnDisk(migrationsDir);
+
+      let rows: { migration_name: string; finished_at: Date | null; rolled_back_at: Date | null }[];
+      try {
+        rows = await ctx.prisma.$queryRaw<
+          { migration_name: string; finished_at: Date | null; rolled_back_at: Date | null }[]
+        >(
+          Prisma.sql`SELECT migration_name, finished_at, rolled_back_at
+                     FROM _prisma_migrations ORDER BY started_at ASC`,
+        );
+      } catch {
+        // No `_prisma_migrations` table: the schema was created some other way
+        // (`prisma db push`, a hand-restored dump). Say so instead of implying
+        // the database is unmigrated, which would send an operator to run a
+        // migration that then conflicts with existing objects.
+        return {
+          historyAvailable: false,
+          current: null,
+          applied: [],
+          pending: onDisk,
+          onDisk,
+          note: "this database has no _prisma_migrations table; its schema was not applied by prisma migrate",
+        };
+      }
+
+      const applied = rows.map((row) => ({
+        name: row.migration_name,
+        appliedAt: row.finished_at,
+        rolledBackAt: row.rolled_back_at,
+        failed: row.rolled_back_at !== null || row.finished_at === null,
+      }));
+      const appliedNames = new Set(applied.filter((m) => !m.failed).map((m) => m.name));
+      const pending = onDisk.filter((name) => !appliedNames.has(name));
+      const failed = applied.filter((m) => m.failed).map((m) => m.name);
+
+      return {
+        historyAvailable: true,
+        // Null rather than true when the history was not shipped with the
+        // build: "no pending migrations found" and "we cannot see the
+        // migrations" must not look alike.
+        current: migrationsDir === null ? null : pending.length === 0 && failed.length === 0,
+        applied,
+        pending,
+        failed,
+        onDisk,
+        ...(migrationsDir === null
+          ? { note: "prisma/migrations was not shipped with this build, so pending migrations cannot be detected" }
+          : {}),
+      };
+    });
+
+    /**
+     * Stream a `pg_dump` of the whole database as a download.
+     *
+     * Gated on the OWNER role AND `users:admin` — the same double gate as
+     * routes/tokens.ts and routes/users.ts, and for the same reason. The scope
+     * name looks off for a backup until you notice what a dump contains: every
+     * operator password hash, every token hash and the saved MangaDex session in
+     * plaintext. Taking one is a credential-theft primitive, not a read, so it
+     * belongs at the bar for account administration — emphatically NOT at
+     * `settings:write`, which the Discord bot holds so it can pause the platform.
+     *
+     * The scope alone is not that bar: an OWNER may mint a `pa_…` token with
+     * `["*"]` (or with `users:admin` outright), and wildcard satisfies every
+     * scope check. `requireOwner` is what actually excludes tokens, because
+     * `adminAuthHook` never assigns one the OWNER role — so no credential a
+     * client holds can dump the database and widen itself offline.
+     *
+     * stdout is piped straight to the response: a multi-GB dump must never be
+     * buffered in the API process, and the operator sees bytes immediately.
+     */
+    scope.get("/api/v1/admin/backup", { preHandler: [requireOwner, requireScope("users:admin")] }, async (req, reply) => {
+      const target = pgDumpTarget(ctx.config.databaseUrl);
+      if (!target) {
+        return reply.code(500).send({ error: "DATABASE_URL is not a usable postgres url" });
+      }
+
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const child = spawn("pg_dump", target.args, {
+        // The password goes in the environment, never in argv where `ps` on the
+        // host would show it. PGCONNECT_TIMEOUT keeps a wedged connection from
+        // holding the request open forever.
+        env: { ...process.env, PGPASSWORD: target.password, PGCONNECT_TIMEOUT: "10" },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      // ENOENT is the expected failure, not an exceptional one: the runtime
+      // image deliberately carries no postgres client tools. Answer with the
+      // fix rather than a 500 (see docs/dashboard.md §"still needs host access").
+      const spawned = await new Promise<Error | null>((resolve) => {
+        child.once("spawn", () => resolve(null));
+        child.once("error", (err) => resolve(err));
+      });
+      if (spawned) {
+        const missing = (spawned as NodeJS.ErrnoException).code === "ENOENT";
+        return reply.code(503).send({
+          error: missing
+            ? "pg_dump is not installed in this container; take the backup on the host " +
+              "(docs/operations.md §Backup and restore) or add postgresql-client-16 to the core image"
+            : `could not start pg_dump: ${spawned.message}`,
+        });
+      }
+
+      // pg_dump's diagnostics are on stderr; keep them for the log line rather
+      // than mixing them into the download.
+      let stderr = "";
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => {
+        if (stderr.length < 4000) stderr += chunk;
+      });
+      child.once("close", (code) => {
+        if (code !== 0) {
+          ctx.log.error({ code, stderr: stderr.slice(0, 2000) }, "pg_dump failed");
+        }
+      });
+      // A client that disconnects mid-download must not leave pg_dump holding a
+      // connection and a snapshot open.
+      reply.raw.once("close", () => {
+        if (child.exitCode === null) child.kill("SIGTERM");
+      });
+
+      await ctx.audit.record(actor(req), "database.backup", target.database);
+      return reply
+        .header("content-type", "application/octet-stream")
+        .header("content-disposition", `attachment; filename="publoader-${stamp}.dump"`)
+        .send(child.stdout);
+    });
+
+    // ---- bundle preflight ----
+
+    /**
+     * Read a bundle zip and report what publishing it would accept or reject,
+     * WITHOUT publishing.
+     *
+     * The publish route already answers 422 with a readable reason, so this is
+     * not the validation of record — `POST /bundles` is, and it re-checks
+     * everything. What this buys is that an operator who dragged the wrong
+     * directory in learns so from an inline error next to the drop zone,
+     * before they have authorized a code-execution change to every worker.
+     */
+    scope.post(
+      "/api/v1/admin/bundles/inspect",
+      { bodyLimit: MAX_BUNDLE_BYTES, preHandler: requireScope("bundles:read") },
+      async (req, reply) => {
+        if (!Buffer.isBuffer(req.body)) {
+          return reply.code(400).send({ error: "zip body required (content-type application/zip)" });
+        }
+
+        let zip: AdmZip;
+        try {
+          zip = new AdmZip(req.body);
+        } catch {
+          return reply.code(422).send({ ok: false, errors: ["not a readable zip archive"] });
+        }
+        const names = zip.getEntries().map((entry) => entry.entryName);
+        const manifestEntry = zip.getEntry("manifest.json");
+        if (!manifestEntry) {
+          return reply.code(422).send({
+            ok: false,
+            entries: names.length,
+            errors: [
+              "no manifest.json at the root of the archive — zip the contents of the " +
+                "extension directory, not the directory itself",
+            ],
+          });
+        }
+
+        let raw: unknown;
+        try {
+          raw = JSON.parse(manifestEntry.getData().toString("utf8"));
+        } catch (err) {
+          return reply
+            .code(422)
+            .send({ ok: false, entries: names.length, errors: [`manifest.json is not valid JSON: ${String(err)}`] });
+        }
+
+        const parsed = Manifest.safeParse(raw);
+        if (!parsed.success) {
+          // One line per bad field, pathed — "languages: array must contain at
+          // least 1 element" is actionable in a way "validation failed" is not.
+          return reply.code(422).send({
+            ok: false,
+            entries: names.length,
+            errors: parsed.error.issues.map(
+              (issue) => `${issue.path.length ? issue.path.join(".") : "manifest"}: ${issue.message}`,
+            ),
+          });
+        }
+
+        // Mirrors the entrypoint checks in store/bundles.ts. Duplicated on
+        // purpose and deliberately advisory: publishing re-runs the real ones,
+        // so drift here can only ever make the preflight less helpful, never
+        // let a bad bundle through.
+        const manifest = parsed.data;
+        const errors: string[] = [];
+        const entry = zip.getEntry(manifest.entrypoint);
+        if (!entry) {
+          errors.push(`entrypoint ${manifest.entrypoint} is missing from the archive`);
+        } else if (entry.getData().toString("utf8").trim().length === 0) {
+          errors.push(`entrypoint ${manifest.entrypoint} is empty`);
+        }
+        if ((manifest.runtime ?? (manifest.publoader_api.includes("2") ? "node" : "python")) === "python") {
+          errors.push(
+            "python bundles are no longer accepted; port to extension API v2 " +
+              '(publoader_api "^2.0.0", runtime "node", ESM default export)',
+          );
+        }
+
+        const latest = await ctx.bundles.latest(manifest.name);
+        return reply.code(errors.length ? 422 : 200).send({
+          ok: errors.length === 0,
+          entries: names.length,
+          errors,
+          manifest: {
+            name: manifest.name,
+            version: manifest.version,
+            runtime: manifest.runtime ?? null,
+            publoaderApi: manifest.publoader_api,
+            entrypoint: manifest.entrypoint,
+            languages: manifest.languages,
+            allowedHosts: manifest.allowed_hosts,
+            mangadexGroupId: manifest.mangadex_group_id,
+            minTrust: manifest.min_trust,
+            schedule: manifest.schedule ?? null,
+          },
+          // "Am I about to replace what is live?" is the question an operator
+          // asks right before clicking publish.
+          currentlyPublished: latest ? { version: latest.version, sha256: latest.sha256, publishedAt: latest.publishedAt } : null,
+          replacesSameVersion: latest?.version === manifest.version,
+        });
+      },
+    );
 
     // ---- upload-task queues ----
 
@@ -356,5 +733,387 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
       return { errors };
     });
+
+    // ---- unified activity feed ----
+
+    /**
+     * Everything the platform did recently, in one time-ordered list: runs,
+     * jobs, upload tasks, quarantined submissions and audit events.
+     *
+     * This is the closest thing to "logs" the dashboard can honestly offer, and
+     * the distinction matters enough to state twice: it covers APPLICATION
+     * events, every one of which is a durable row. Process stdout — a stack
+     * trace from a crash loop, prisma's connection warnings — is not here and
+     * cannot be, because nothing writes it to the database. That stays
+     * `docker logs` (docs/dashboard.md §"still needs host access").
+     *
+     * Unlike `/errors`, healthy rows are included, because "the run succeeded
+     * four minutes ago" is half of most answers. `severity=error` reproduces
+     * the old feed.
+     *
+     * Audit events need `audit:read` on top of `runs:read`, so a credential
+     * with only the latter gets the operational half and is TOLD that the audit
+     * half was withheld — silently returning a short list would read as "the
+     * platform has been quiet".
+     */
+    scope.get("/api/v1/admin/activity", { preHandler: requireScope("runs:read") }, async (req) => {
+      const query = parseOrThrow(
+        z.object({
+          severity: z.enum(["error", "warn", "info", "all"]).default("all"),
+          /** How far back to look, in hours. */
+          hours: z.coerce.number().int().min(1).max(24 * 30).default(DEFAULT_WINDOW_HOURS),
+          extension: z.string().max(128).optional(),
+          /** Case-insensitive substring over the subject and message. */
+          q: z.string().max(200).optional(),
+          limit: z.coerce.number().int().min(1).max(500).default(100),
+        }),
+        req.query ?? {},
+      );
+
+      const since = new Date(Date.now() - query.hours * 3600_000);
+      const extensionFilter = query.extension ? { extension: query.extension } : {};
+      const includeAudit = hasScope(req.principal!, "audit:read");
+
+      // Every source is queried at the full limit before merging, for the same
+      // reason the error feed does it: splitting the budget would hide a burst
+      // in one source behind old rows from another.
+      const [runs, jobs, tasks, submissions, auditEvents] = await Promise.all([
+        ctx.prisma.run.findMany({
+          where: { updatedAt: { gte: since }, ...extensionFilter },
+          orderBy: { updatedAt: "desc" },
+          take: query.limit,
+          select: {
+            id: true,
+            extension: true,
+            kind: true,
+            state: true,
+            segmentsTotal: true,
+            triggeredBy: true,
+            error: true,
+            updatedAt: true,
+          },
+        }),
+        ctx.prisma.job.findMany({
+          where: { updatedAt: { gte: since }, ...extensionFilter },
+          orderBy: { updatedAt: "desc" },
+          take: query.limit,
+          select: {
+            id: true,
+            runId: true,
+            extension: true,
+            state: true,
+            segmentIndex: true,
+            segmentTotal: true,
+            attempt: true,
+            maxAttempts: true,
+            errorClass: true,
+            lastError: true,
+            updatedAt: true,
+          },
+        }),
+        ctx.prisma.uploadTask.findMany({
+          where: { updatedAt: { gte: since } },
+          orderBy: { updatedAt: "desc" },
+          take: query.limit,
+          select: { id: true, kind: true, state: true, dedupeKey: true, attempt: true, lastError: true, updatedAt: true },
+        }),
+        ctx.prisma.resultSubmission.findMany({
+          where: { createdAt: { gte: since }, state: { in: ["QUARANTINED", "COMMITTED"] } },
+          orderBy: { createdAt: "desc" },
+          take: query.limit,
+          select: { id: true, jobId: true, workerId: true, state: true, rejectReason: true, createdAt: true },
+        }),
+        includeAudit
+          ? ctx.prisma.auditEvent.findMany({
+              where: { createdAt: { gte: since } },
+              orderBy: { createdAt: "desc" },
+              take: query.limit,
+              select: { id: true, actor: true, action: true, subject: true, detail: true, createdAt: true },
+            })
+          : Promise.resolve([]),
+      ]);
+
+      const rows: ActivityRow[] = [
+        ...runs.map((run): ActivityRow => ({
+          at: run.updatedAt,
+          severity: run.state === "FAILED" || run.state === "DEAD_LETTER" ? "error" : run.state === "CANCELLED" ? "warn" : "info",
+          source: "run",
+          kind: `run:${run.state}`,
+          subject: `${run.extension} · ${run.kind} · ${run.segmentsTotal} segment(s)`,
+          message: run.error ?? (run.triggeredBy ? `triggered by ${run.triggeredBy}` : ""),
+          id: run.id,
+          extension: run.extension,
+        })),
+        ...jobs.map((job): ActivityRow => ({
+          at: job.updatedAt,
+          severity: job.state === "DEAD_LETTER" ? "error" : job.lastError ? "warn" : job.state === "CANCELLED" ? "warn" : "info",
+          source: "job",
+          kind: `job:${job.state}`,
+          subject: `${job.extension} · segment ${job.segmentIndex + 1}/${job.segmentTotal} · attempt ${job.attempt}/${job.maxAttempts}`,
+          // A retrying job carries its last error while still being healthy, so
+          // the text is attached whatever the state — that is the single most
+          // useful string in the whole feed and it is otherwise only visible by
+          // opening the run.
+          message: job.lastError ? `${job.errorClass ? `[${job.errorClass}] ` : ""}${job.lastError}` : "",
+          id: job.id,
+          extension: job.extension,
+        })),
+        ...tasks.map((task): ActivityRow => ({
+          at: task.updatedAt,
+          severity: task.state === "FAILED" || task.state === "DEAD_LETTER" ? "error" : task.lastError ? "warn" : "info",
+          source: "upload-task",
+          kind: `upload-task:${task.state}`,
+          subject: `${task.kind} · ${task.dedupeKey}`,
+          message: task.lastError ?? "",
+          id: task.id,
+          extension: null,
+        })),
+        ...submissions.map((submission): ActivityRow => ({
+          at: submission.createdAt,
+          severity: submission.state === "QUARANTINED" ? "error" : "info",
+          source: "submission",
+          kind: `submission:${submission.state}`,
+          subject: `worker ${submission.workerId.slice(0, 8)} · job ${submission.jobId}`,
+          message: submission.rejectReason ?? "",
+          id: submission.id,
+          extension: null,
+        })),
+        ...auditEvents.map((event): ActivityRow => ({
+          at: event.createdAt,
+          // An audit event records a deliberate action, so it is never an error
+          // in itself; the thing it did may show up as one on its own row.
+          severity: "info",
+          source: "audit",
+          kind: `audit:${event.action}`,
+          subject: `${event.actor} → ${event.action}${event.subject ? ` · ${event.subject}` : ""}`,
+          message: event.detail ? JSON.stringify(event.detail) : "",
+          id: event.id,
+          extension: null,
+        })),
+      ];
+
+      const needle = query.q?.toLowerCase();
+      const filtered = rows
+        .filter((r) => query.severity === "all" || r.severity === query.severity)
+        // An extension filter cannot pass rows we cannot attribute: upload
+        // tasks and submissions carry no extension column, and guessing from
+        // the dedupe key would quietly show the wrong series.
+        .filter((r) => !query.extension || r.extension === query.extension)
+        .filter((r) => !needle || r.subject.toLowerCase().includes(needle) || r.message.toLowerCase().includes(needle))
+        .sort((a, b) => b.at.getTime() - a.at.getTime())
+        .slice(0, query.limit);
+
+      return {
+        activity: filtered,
+        since,
+        // Named sources rather than a boolean: the UI says which half is
+        // missing, and adding a source later does not change the shape.
+        sources: ["run", "job", "upload-task", "submission", ...(includeAudit ? ["audit"] : [])],
+        omittedSources: includeAudit ? [] : [{ source: "audit", reason: "missing scope: audit:read" }],
+        note: "application events only; container stdout is not captured here (see docker logs)",
+      };
+    });
+
+    // ---- audit search ----
+
+    /**
+     * Search the audit log instead of paging through it.
+     *
+     * `q` is a case-insensitive substring across actor, action, subject and the
+     * serialised detail — matching detail is the whole point, because "which
+     * change set removal mode to delete?" lives in there and nowhere else.
+     *
+     * Deliberately ILIKE and not a tsvector index: the corpus is small, the
+     * queries are ad-hoc, and substring beats word-stemming on identifiers like
+     * `mangaplus:12345`, which a text-search parser would mangle. The time
+     * window is what keeps it bounded, and `createdAt` is already indexed.
+     */
+    scope.get("/api/v1/admin/audit/search", { preHandler: requireScope("audit:read") }, async (req) => {
+      const query = parseOrThrow(
+        z.object({
+          q: z.string().max(200).optional(),
+          actor: z.string().max(128).optional(),
+          action: z.string().max(128).optional(),
+          subject: z.string().max(256).optional(),
+          /** ISO instants. Omitted `since` means "as far back as it goes". */
+          since: z.coerce.date().optional(),
+          until: z.coerce.date().optional(),
+          limit: z.coerce.number().int().min(1).max(500).default(100),
+          offset: z.coerce.number().int().min(0).max(100_000).default(0),
+        }),
+        req.query ?? {},
+      );
+
+      const where: Prisma.Sql[] = [];
+      if (query.q) {
+        // Parameterised, so a `%` or a quote in the needle is data. Escaping the
+        // LIKE metacharacters as well would make `%` un-searchable; an operator
+        // typing one means it as a wildcard.
+        const like = `%${query.q}%`;
+        where.push(
+          Prisma.sql`(actor ILIKE ${like} OR action ILIKE ${like} OR coalesce(subject, '') ILIKE ${like} OR coalesce(detail::text, '') ILIKE ${like})`,
+        );
+      }
+      if (query.actor) where.push(Prisma.sql`actor ILIKE ${`%${query.actor}%`}`);
+      if (query.action) where.push(Prisma.sql`action ILIKE ${`%${query.action}%`}`);
+      if (query.subject) where.push(Prisma.sql`coalesce(subject, '') ILIKE ${`%${query.subject}%`}`);
+      if (query.since) where.push(Prisma.sql`created_at >= ${query.since}`);
+      if (query.until) where.push(Prisma.sql`created_at <= ${query.until}`);
+      const predicate = where.length ? Prisma.sql`WHERE ${Prisma.join(where, " AND ")}` : Prisma.empty;
+
+      const [events, counted] = await Promise.all([
+        ctx.prisma.$queryRaw<
+          { id: string; actor: string; action: string; subject: string | null; detail: unknown; created_at: Date }[]
+        >(
+          Prisma.sql`SELECT id, actor, action, subject, detail, created_at
+                     FROM audit_events ${predicate}
+                     ORDER BY created_at DESC
+                     LIMIT ${query.limit} OFFSET ${query.offset}`,
+        ),
+        // The total is what makes paging honest: without it the UI cannot tell
+        // "these are all of them" from "here is the first page of 4000".
+        ctx.prisma.$queryRaw<{ total: bigint }[]>(
+          Prisma.sql`SELECT count(*) AS total FROM audit_events ${predicate}`,
+        ),
+      ]);
+
+      return {
+        events: events.map((row) => ({
+          id: row.id,
+          actor: row.actor,
+          action: row.action,
+          subject: row.subject,
+          detail: row.detail,
+          createdAt: row.created_at,
+        })),
+        total: Number(counted[0]?.total ?? 0),
+        limit: query.limit,
+        offset: query.offset,
+      };
+    });
+
+    // ---- per-extension activity ----
+
+    /**
+     * One extension, everything about it: its runs, its jobs, the upload tasks
+     * its chapters produced, its quarantined submissions and its curation
+     * counts.
+     *
+     * Assembling this by hand meant five filtered views and a mental join on
+     * run ids. It is the panel an operator opens when an extension "looks
+     * broken" and the one place where "the scrape succeeded but the uploads are
+     * all failing" is visible as a single fact.
+     */
+    scope.get(
+      "/api/v1/admin/extensions/:name/activity",
+      { preHandler: requireScope("extensions:read") },
+      async (req, reply) => {
+        const { name } = req.params as { name: string };
+        if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
+        const query = parseOrThrow(
+          z.object({ limit: z.coerce.number().int().min(1).max(100).default(20) }),
+          req.query ?? {},
+        );
+
+        const [runs, jobs, uploadTasks, quarantined, trackedCount, untrackedCounts, bundle] = await Promise.all([
+          ctx.prisma.run.findMany({
+            where: { extension: name },
+            orderBy: { createdAt: "desc" },
+            take: query.limit,
+            select: {
+              id: true,
+              kind: true,
+              state: true,
+              segmentsTotal: true,
+              triggeredBy: true,
+              error: true,
+              createdAt: true,
+              completedAt: true,
+            },
+          }),
+          ctx.prisma.job.findMany({
+            where: { extension: name },
+            orderBy: { updatedAt: "desc" },
+            take: query.limit,
+            select: {
+              id: true,
+              runId: true,
+              state: true,
+              segmentIndex: true,
+              segmentTotal: true,
+              attempt: true,
+              maxAttempts: true,
+              errorClass: true,
+              lastError: true,
+              updatedAt: true,
+            },
+          }),
+          // Upload tasks have no extension column — the chapter payload is a
+          // transient queue document, not a queryable record. Reaching into the
+          // JSONB is the only join available, and it checks the EDIT shape's
+          // nested payload too, because an edit task wraps the chapter.
+          ctx.prisma.$queryRaw<
+            {
+              id: string;
+              kind: string;
+              state: string;
+              dedupe_key: string;
+              attempt: number;
+              last_error: string | null;
+              updated_at: Date;
+            }[]
+          >(
+            Prisma.sql`SELECT id, kind::text, state::text, dedupe_key, attempt, last_error, updated_at
+                       FROM upload_tasks
+                       WHERE chapter->>'extensionName' = ${name}
+                          OR chapter->'payload'->>'extensionName' = ${name}
+                       ORDER BY updated_at DESC
+                       LIMIT ${query.limit}`,
+          ),
+          ctx.prisma.$queryRaw<{ id: string; job_id: string; worker_id: string; reject_reason: string | null; created_at: Date }[]>(
+            Prisma.sql`SELECT s.id, s.job_id, s.worker_id, s.reject_reason, s.created_at
+                       FROM result_submissions s
+                       JOIN jobs j ON j.id = s.job_id
+                       WHERE s.state = 'QUARANTINED' AND j.extension = ${name}
+                       ORDER BY s.created_at DESC
+                       LIMIT ${query.limit}`,
+          ),
+          ctx.prisma.trackedManga.count({ where: { extension: name } }),
+          ctx.prisma.untrackedManga.groupBy({
+            by: ["state"],
+            where: { extension: name },
+            _count: true,
+          }),
+          ctx.bundles.latest(name),
+        ]);
+
+        return {
+          extension: name,
+          bundle: bundle
+            ? { version: bundle.version, sha256: bundle.sha256, publishedAt: bundle.publishedAt, sourceCommit: bundle.sourceCommit }
+            : null,
+          runs,
+          jobs,
+          uploadTasks: uploadTasks.map((task) => ({
+            id: task.id,
+            kind: task.kind,
+            state: task.state,
+            dedupeKey: task.dedupe_key,
+            attempt: task.attempt,
+            lastError: task.last_error,
+            updatedAt: task.updated_at,
+          })),
+          quarantined: quarantined.map((row) => ({
+            id: row.id,
+            jobId: row.job_id,
+            workerId: row.worker_id,
+            rejectReason: row.reject_reason,
+            createdAt: row.created_at,
+          })),
+          tracked: trackedCount,
+          untracked: Object.fromEntries(untrackedCounts.map((row) => [row.state, row._count])),
+        };
+      },
+    );
   });
 }
