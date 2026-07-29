@@ -182,9 +182,13 @@ async function migrateUploaded(db: Db, prisma: PrismaClient): Promise<Counts> {
         createdAt: date(d["chapter_lookup"]) ?? new Date(),
       }));
     counts.skipped += docs.length - rows.length;
-    if (!DRY_RUN && rows.length > 0) {
+    if (DRY_RUN) {
+      counts.inserted += rows.length;
+    } else if (rows.length > 0) {
       const res = await prisma.uploadedChapter.createMany({ data: rows, skipDuplicates: true });
       counts.inserted += res.count;
+      // Rows the unique constraint rejected are already migrated, not lost.
+      counts.skipped += rows.length - res.count;
       if (REFRESH && res.count < rows.length) {
         for (const row of rows) {
           await prisma.uploadedChapter.updateMany({
@@ -234,9 +238,12 @@ async function migrateUploadedIds(db: Db, prisma: PrismaClient): Promise<Counts>
         mdChapterId: str(d["md_chapter_id"]),
       });
     }
-    if (!DRY_RUN && rows.length > 0) {
+    if (DRY_RUN) {
+      counts.inserted += rows.length;
+    } else if (rows.length > 0) {
       const res = await prisma.uploadedId.createMany({ data: rows, skipDuplicates: true });
       counts.inserted += res.count;
+      counts.skipped += rows.length - res.count;
     }
     log(`uploaded_ids: ${counts.source} read, ${counts.inserted} inserted`);
   }
@@ -258,7 +265,10 @@ async function migrateEdited(db: Db, prisma: PrismaClient): Promise<Counts> {
       // The edits array is the audit history — never collapsed or truncated.
       const edits = (toJson(d["edits"]) ?? []) as Prisma.InputJsonValue;
       delete full["edits"];
-      if (DRY_RUN) continue;
+      if (DRY_RUN) {
+        counts.inserted += 1;
+        continue;
+      }
       const res = await prisma.editedChapter.createMany({
         data: [
           {
@@ -272,11 +282,14 @@ async function migrateEdited(db: Db, prisma: PrismaClient): Promise<Counts> {
         skipDuplicates: true,
       });
       counts.inserted += res.count;
-      if (res.count === 0 && REFRESH) {
-        await prisma.editedChapter.updateMany({
-          where: { mdChapterId },
-          data: { data: full as Prisma.InputJsonValue, edits },
-        });
+      if (res.count === 0) {
+        counts.skipped += 1;
+        if (REFRESH) {
+          await prisma.editedChapter.updateMany({
+            where: { mdChapterId },
+            data: { data: full as Prisma.InputJsonValue, edits },
+          });
+        }
       }
     }
     log(`edited: ${counts.source} read, ${counts.inserted} inserted`);
@@ -305,9 +318,12 @@ async function migrateUnavailable(db: Db, prisma: PrismaClient): Promise<Counts>
         unavailableAt: date(d["unavailable_at"]) ?? new Date(),
       });
     }
-    if (!DRY_RUN && rows.length > 0) {
+    if (DRY_RUN) {
+      counts.inserted += rows.length;
+    } else if (rows.length > 0) {
       const res = await prisma.unavailableChapter.createMany({ data: rows, skipDuplicates: true });
       counts.inserted += res.count;
+      counts.skipped += rows.length - res.count;
     }
     log(`unavailable: ${counts.source} read, ${counts.inserted} inserted`);
   }
