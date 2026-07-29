@@ -9,6 +9,12 @@
  *
  * Authentication is the session cookie set by POST /api/v1/admin/session; the
  * admin token is never held in JS beyond the login submit.
+ *
+ * What the page offers is decided by GET /api/v1/admin/whoami: every tab names
+ * the scope its view needs, and every control that mutates something is either
+ * absent or visibly disabled without the scope behind it. That is presentation
+ * only — the server checks the same scopes on every request, and the integration
+ * suite asserts the refusals rather than trusting this file.
  */
 
 "use strict";
@@ -1268,9 +1274,11 @@ async function extensionDetail(name) {
   // Only the tracked map is guaranteed readable for a contributor; schedules and
   // config both sit behind extensions:read, which they do hold, while activity
   // is worth failing softly on because it is the largest query here.
+  // `quiet` on the two optional halves: a narrowly-scoped credential gets a
+  // hidden card, not a toast complaining about a request it never made itself.
   const [schedules, config, tracked] = await Promise.all([
-    api(`/schedules`).catch(() => null),
-    api(`/extensions/${encoded}/config`).catch(() => null),
+    api("/schedules", { quiet: true }).catch(() => null),
+    api(`/extensions/${encoded}/config`, { quiet: true }).catch(() => null),
     api(`/extensions/${encoded}/tracked`),
   ]);
 
@@ -1802,16 +1810,19 @@ function bulkCurationCard(name, tracked, reload) {
       return;
     }
 
-    const dry = await act(
-      "tracked_manga.preview",
-      () =>
-        api(`/extensions/${encoded}/tracked/batch`, {
-          method: "POST",
-          body: { text: text.value, dryRun: true },
-        }),
-      { refresh: false },
-    );
-    if (!dry) return;
+    // Not wrapped in `act`: a preview is not an outcome, and "ok" toasted over a
+    // table that says three rows were rejected is actively misleading.
+    let dry;
+    try {
+      dry = await api(`/extensions/${encoded}/tracked/batch`, {
+        method: "POST",
+        body: { text: text.value, dryRun: true },
+      });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return;
+      preview.replaceChildren(el("p", { class: "error", text: `Preview failed: ${err.message}` }));
+      return;
+    }
     renderSummary(dry, dry.parseErrors || [], async () => {
       const applied = await act(
         "tracked_manga.batch",
@@ -2282,7 +2293,7 @@ function activityActions(entry) {
   const hash = `#${target.type}/${target.id}`;
 
   return [
-    OPENERS[target.type] && can("runs:read")
+    OPENERS[target.type]
       ? el("button", { type: "button", text: "Open", onclick: () => void openPermalink(hash) })
       : null,
     el("button", {
@@ -2309,39 +2320,46 @@ function activityActions(entry) {
  * values so a new source needs one entry here and nothing else.
  */
 const OPENERS = {
-  run: async (id) => {
-    await selectTab("runs");
-    await openRun(id);
-  },
-  "upload-task": async (id) => {
-    // No per-task detail view exists, so land on the queue filtered to the
-    // states a task worth linking to is in, and say which row was meant.
-    await selectTab("queues");
-    toast(`upload task ${id}`);
-  },
-  submission: async () => {
-    await selectTab("quarantine");
-  },
-  audit: async (id) => {
-    state.auditQuery = "";
-    await selectTab("audit");
-    toast(`audit event ${id}`);
+  run: { tab: "runs", open: (id) => openRun(id) },
+  // No per-task detail view exists, so land on the queue and name the row that
+  // was meant rather than pretending to scroll to it.
+  "upload-task": { tab: "queues", open: (id) => toast(`upload task ${id}`) },
+  submission: { tab: "quarantine" },
+  // The audit search is the detail view: filtering to the event's own id is
+  // what actually surfaces one row out of thousands.
+  audit: {
+    tab: "audit",
+    before: (id) => {
+      state.auditQuery = id;
+      state.auditOffset = 0;
+    },
   },
 };
 
-/** Handle `#<type>/<id>`, from a pasted permalink or the back button. */
+/**
+ * Handle `#<type>/<id>`, from a pasted permalink or the back button.
+ *
+ * Returns whether it handled the hash, so boot can tell "the link decided the
+ * view" from "render the default tab". A link into a tab this principal cannot
+ * see is refused here rather than selected and then answered with a 403 — that
+ * is the whole point of gating the tabs.
+ */
 async function openPermalink(hash) {
-  const match = /^#([a-z-]+)\/([\w-]+)$/.exec(hash || window.location.hash);
+  const match = /^#([a-z-]+)\/([\w:-]+)$/.exec(hash || window.location.hash);
   if (!match) return false;
   const [, type, id] = match;
+
   // A tab-only link (`#tab/queues`) is the other thing people paste.
-  if (type === "tab") {
-    if (visibleTabs().some(([tabId]) => tabId === id)) await selectTab(id);
-    return true;
+  const target = type === "tab" ? { tab: id } : OPENERS[type];
+  if (!target) return false;
+  if (!visibleTabs().some(([tabId]) => tabId === target.tab)) {
+    toast(`That link points at ${target.tab}, which this account cannot open.`, false);
+    return false;
   }
-  const opener = OPENERS[type];
-  if (!opener) return false;
-  await opener(id);
+
+  target.before?.(id);
+  await selectTab(target.tab);
+  await target.open?.(id);
   return true;
 }
 // ------------------------------------------------------------------- untracked
@@ -2444,41 +2462,218 @@ async function viewQuarantine() {
 
 // ----------------------------------------------------------------------- audit
 
-async function viewAudit() {
-  const limit = state.auditLimit || 100;
-  const { events } = await api(`/audit?limit=${limit}`);
+const AUDIT_PAGE = 100;
 
-  const select = el(
-    "select",
-    {
-      id: "audit-limit",
-      "aria-label": "Number of audit events",
-      onchange: (event) => {
-        state.auditLimit = Number(event.target.value);
-        void renderTab();
-      },
-    },
-    [25, 50, 100, 250, 500].map((value) =>
-      el("option", { value: String(value), text: String(value), selected: value === limit }),
+/**
+ * The audit trail, searchable.
+ *
+ * Paging back through a fixed number of rows only answers "what happened
+ * recently". The questions that actually come up are retrospective — "who
+ * changed the removal mode?", "when did this series get repointed, and by
+ * whom?" — and they need a search that reaches into the detail JSON, which is
+ * where the arguments of every audited action are recorded and the only place
+ * they exist.
+ */
+async function viewAudit() {
+  const needle = state.auditQuery || "";
+  const actorFilter = state.auditActor || "";
+  const actionFilter = state.auditAction || "";
+  const offset = state.auditOffset || 0;
+
+  const query = new URLSearchParams({ limit: String(AUDIT_PAGE), offset: String(offset) });
+  if (needle) query.set("q", needle);
+  if (actorFilter) query.set("actor", actorFilter);
+  if (actionFilter) query.set("action", actionFilter);
+  const result = await api(`/audit/search?${query}`);
+
+  const search = el("input", {
+    id: "audit-q",
+    type: "search",
+    value: needle,
+    placeholder: "actor, action, subject, or anything in the detail",
+    "aria-label": "Search the audit log",
+  });
+  const actorBox = el("input", { id: "audit-actor", type: "search", value: actorFilter, placeholder: "actor" });
+  const actionBox = el("input", { id: "audit-action", type: "search", value: actionFilter, placeholder: "action" });
+
+  const apply = () => {
+    state.auditQuery = search.value.trim();
+    state.auditActor = actorBox.value.trim();
+    state.auditAction = actionBox.value.trim();
+    state.auditOffset = 0;
+    void renderTab();
+  };
+  for (const box of [search, actorBox, actionBox]) {
+    box.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") apply();
+    });
+  }
+
+  const filters = card(
+    "Search",
+    row(
+      el("label", { for: "audit-q", class: "inline", text: "Anything" }),
+      search,
+      el("label", { for: "audit-actor", class: "inline", text: "Actor" }),
+      actorBox,
+      el("label", { for: "audit-action", class: "inline", text: "Action" }),
+      actionBox,
+      el("button", { type: "button", class: "primary", text: "Search", onclick: apply }),
+      needle || actorFilter || actionFilter
+        ? el("button", {
+            type: "button",
+            text: "Clear",
+            onclick: () => {
+              state.auditQuery = "";
+              state.auditActor = "";
+              state.auditAction = "";
+              state.auditOffset = 0;
+              void renderTab();
+            },
+          })
+        : null,
+      el("button", {
+        type: "button",
+        text: "Export results",
+        title: "Download the matching events as JSON",
+        onclick: () =>
+          download(
+            `publoader-audit-${new Date().toISOString().slice(0, 10)}.json`,
+            JSON.stringify(result.events, null, 2),
+            "application/json",
+          ),
+      }),
     ),
+    el("p", {
+      class: "dim",
+      text: `${result.total} matching event(s). Search is a case-insensitive substring, so partial ids and partial action names both work.`,
+    }),
   );
 
-  const rows = events.map((event) => [
+  const rows = result.events.map((event) => [
     fmtTime(event.createdAt),
     event.actor,
-    event.action,
+    // Clicking an action name is the fastest way to ask "what else did this?".
+    el("button", {
+      type: "button",
+      class: "linkish",
+      text: event.action,
+      title: `Filter to ${event.action}`,
+      onclick: () => {
+        state.auditAction = event.action;
+        state.auditOffset = 0;
+        void renderTab();
+      },
+    }),
     event.subject,
-    event.detail ? truncate(JSON.stringify(event.detail), 160) : "—",
+    event.detail ? truncate(JSON.stringify(event.detail), 200) : "—",
   ]);
 
   return el(
     "div",
     {},
-    card("Filter", row(el("label", { for: "audit-limit", text: "Events" }), select)),
-    card(null, table(["When", "Actor", "Action", "Subject", "Detail"], rows)),
+    filters,
+    card(
+      null,
+      table(["When", "Actor", "Action", "Subject", "Detail"], rows),
+      result.total > AUDIT_PAGE
+        ? pager(result.total, Math.floor(offset / AUDIT_PAGE), AUDIT_PAGE, (page) => {
+            state.auditOffset = page * AUDIT_PAGE;
+            void renderTab();
+          })
+        : null,
+    ),
   );
 }
 
+// ---------------------------------------------------------------------- system
+
+/**
+ * The two things that used to need a shell on the host: is the database schema
+ * the one this build expects, and can I take a backup right now.
+ *
+ * Both are read as "should I be worried?", so both lead with a verdict rather
+ * than with a table of names.
+ */
+async function viewSystem() {
+  const schema = await api("/schema");
+
+  const verdict = !schema.historyAvailable
+    ? { tone: "warn", text: "This database has no prisma migration history." }
+    : schema.failed?.length
+      ? { tone: "bad", text: `${schema.failed.length} migration(s) failed or were rolled back.` }
+      : schema.current === null
+        ? { tone: "warn", text: "Pending migrations cannot be detected in this build." }
+        : schema.current
+          ? { tone: "ok", text: "The schema is up to date." }
+          : { tone: "bad", text: `${schema.pending.length} migration(s) have not been applied.` };
+
+  const appliedRows = (schema.applied || []).map((m) => [
+    m.name,
+    el("span", { class: `chip ${m.failed ? "bad" : "ok"}`, text: m.failed ? "failed" : "applied" }),
+    fmtTime(m.appliedAt),
+    m.rolledBackAt ? `rolled back ${fmtTime(m.rolledBackAt)}` : "—",
+  ]);
+
+  const schemaCard = card(
+    "Schema & migrations",
+    el("p", { class: verdict.tone === "ok" ? "ok-text" : "error", text: verdict.text }),
+    schema.note ? el("p", { class: "dim", text: schema.note }) : null,
+    (schema.pending || []).length
+      ? el(
+          "div",
+          {},
+          el("div", {
+            class: "banner",
+            text:
+              "Migrations are applied by the one-shot `migrate` service at deploy time, not from here — " +
+              "running DDL from the API process is deliberately impossible. See docs/operations.md → Upgrade the core.",
+          }),
+          table(["Not yet applied"], schema.pending.map((name) => [name])),
+        )
+      : null,
+    el("h3", { text: "History" }),
+    table(["Migration", "State", "Applied", "Note"], appliedRows),
+  );
+
+  // The dump contains every password hash and the saved MangaDex session, so the
+  // link only exists for a principal the server will actually serve it to.
+  const backupCard = isOwner()
+    ? card(
+        "Database backup",
+        el("p", {
+          class: "dim",
+          text:
+            "Streams a pg_dump of the whole database in custom format (-Fc), the same shape docs/operations.md " +
+            "documents — so a dump taken here and one taken on the host restore identically with pg_restore.",
+        }),
+        el("div", {
+          class: "banner",
+          text:
+            "The download contains operator password hashes, client token hashes and the saved MangaDex session. " +
+            "Treat the file as a credential: encrypt it at rest and keep it off shared storage.",
+        }),
+        row(
+          // A plain link, not fetch(): the browser streams a multi-GB response
+          // to disk, whereas fetch would buffer it in the tab first.
+          el("a", {
+            class: "button-link inline",
+            href: `${API}/backup`,
+            download: "",
+            text: "Download backup",
+          }),
+        ),
+        el("p", {
+          class: "dim",
+          text:
+            "Large databases take a while and the browser shows no progress until bytes arrive. If it answers " +
+            "503, this container has no postgres client tools and the backup has to be taken on the host.",
+        }),
+      )
+    : null;
+
+  return el("div", {}, schemaCard, backupCard);
+}
 // ----------------------------------------------------------------------- users
 
 async function viewUsers() {
@@ -2519,8 +2714,7 @@ async function viewUsers() {
   const inviteRole = el(
     "select",
     { id: "invite-role" },
-    el("option", { value: "ADMIN", text: "ADMIN" }),
-    el("option", { value: "OWNER", text: "OWNER" }),
+    ROLES.map(([value, label]) => el("option", { value, text: label, selected: value === "ADMIN" })),
   );
 
   const invite = card(
@@ -2528,6 +2722,13 @@ async function viewUsers() {
     el("p", {
       class: "dim",
       text: "Creates an approved account with no credentials. They get in by linking Discord with that email, or by you setting a password below.",
+    }),
+    el("p", {
+      class: "dim",
+      text:
+        "CONTRIBUTOR is the role to hand someone outside the operator group: they can add series mappings and " +
+        "triage untracked series, and cannot reach runs, workers, credentials or settings. An ADMIN can publish " +
+        "bundles, which is code execution on every worker.",
     }),
     row(
       el("label", { for: "invite-email", text: "Email" }),
@@ -2576,20 +2777,10 @@ async function viewUsers() {
               }).then(reload),
           })
         : null,
-      el("button", {
-        type: "button",
-        text: user.role === "OWNER" ? "Make admin" : "Make owner",
-        onclick: () =>
-          act(
-            "admin_user.role",
-            () =>
-              api(`/users/${user.id}/role`, {
-                method: "POST",
-                body: { role: user.role === "OWNER" ? "ADMIN" : "OWNER" },
-              }),
-            { refresh: false },
-          ).then(reload),
-      }),
+      // A select rather than a toggle: with three roles there is no "the other
+      // one", and a button that guessed would be the wrong kind of convenient
+      // for an action that grants control-plane authority.
+      roleSelect(user, reload),
       el("button", { type: "button", text: "Set password", onclick: () => passwordDialog(user, reload) }),
       el("button", {
         type: "button",
@@ -2639,6 +2830,44 @@ async function viewUsers() {
       table(["Actor", "Account", "Role", "Signed in", "Expires", ""], sessionRows),
     ),
   );
+}
+
+/** Assignable roles, most privileged first. Mirrors ASSIGNABLE_ROLES in routes/users.ts. */
+const ROLES = [
+  ["OWNER", "OWNER — full control, including accounts and backups"],
+  ["ADMIN", "ADMIN — full control plane, no account administration"],
+  ["CONTRIBUTOR", "CONTRIBUTOR — series map and untracked triage only"],
+];
+
+/**
+ * Change one account's role. Confirms on the way up (granting authority) and on
+ * the way down (taking it away mid-session), because both surprise somebody.
+ */
+function roleSelect(user, reload) {
+  const select = el(
+    "select",
+    {
+      "aria-label": `Role for ${user.email}`,
+      onchange: (event) => {
+        const role = event.target.value;
+        if (role === user.role) return;
+        const message =
+          role === "OWNER"
+            ? `Make ${user.email} an OWNER? They will be able to manage every account, mint client tokens, and download database backups.`
+            : `Change ${user.email} to ${role}? Their existing sessions keep working with the new, narrower authority from their next request.`;
+        if (!confirmDestructive(message)) {
+          // Snap back so the control never shows a role that was not applied.
+          event.target.value = user.role;
+          return;
+        }
+        void act("admin_user.role", () => api(`/users/${user.id}/role`, { method: "POST", body: { role } }), {
+          refresh: false,
+        }).then(reload);
+      },
+    },
+    ROLES.map(([value]) => el("option", { value, text: value, selected: value === user.role })),
+  );
+  return select;
 }
 
 function passwordDialog(user, reload) {
@@ -2924,6 +3153,11 @@ async function boot() {
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && state.actor && state.tab === "overview") void renderTab();
   });
+  // Pasted permalinks and the back button take the same path. Only while signed
+  // in: a hash change on the login screen must not try to open anything.
+  window.addEventListener("hashchange", () => {
+    if (state.actor) void openPermalink();
+  });
 
   // The session cookie is HttpOnly, so the only way to know whether we are
   // signed in — and as whom — is to ask the API.
@@ -2936,7 +3170,10 @@ async function boot() {
     return;
   }
   await showApp(me);
-  await renderTab();
+  // A permalink decides the first view; otherwise fall back to the default tab.
+  // `openPermalink` renders whatever it opens, so rendering again would double
+  // every request on the landing view.
+  if (!(await openPermalink())) await renderTab();
 }
 
 void boot();

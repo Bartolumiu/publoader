@@ -301,6 +301,260 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     expect((await app.inject({ method: "GET", url: "/api/v1/admin/session/methods" })).json().signups).toBe(true);
   });
 
+  // ---- the contributor role ----
+
+  /** An approved account of `role` with a password, and a live session cookie. */
+  async function loginAs(role: "OWNER" | "ADMIN" | "CONTRIBUTOR", email: string): Promise<string> {
+    const user = await ctx.adminUsers.invite(email, role);
+    await ctx.adminUsers.setPassword(user.id, PASSWORD);
+    const res = await loginWithPassword(email, PASSWORD);
+    expect(res.statusCode, `${role} login should succeed`).toBe(200);
+    expect(res.json().role).toBe(role);
+    return cookieFrom(res);
+  }
+
+  it("confines a contributor to curating the series map", async () => {
+    const cookie = await loginAs("CONTRIBUTOR", "contributor@example.com");
+
+    // What the role exists to do: see the catalogue, work the untracked queue,
+    // add mappings.
+    for (const url of [
+      "/api/v1/admin/stats",
+      "/api/v1/admin/extensions",
+      "/api/v1/admin/extensions/opstest/tracked",
+      "/api/v1/admin/untracked",
+    ]) {
+      const res = await app.inject({ method: "GET", url, headers: { cookie } });
+      expect(res.statusCode, `contributor should read ${url}`).toBe(200);
+    }
+
+    const append = await app.inject({
+      method: "PUT",
+      url: "/api/v1/admin/extensions/opstest/tracked",
+      headers: { cookie, ...dash },
+      payload: { mangaId: "ext-1", mdMangaId: "9a1b1c1d-0000-4000-8000-000000000000" },
+    });
+    expect(append.statusCode).toBe(200);
+
+    // Everything else. A contributor is an untrusted-but-helpful human: they can
+    // add facts to the map, and they cannot touch execution, credentials, other
+    // people's accounts, or anything that reaches MangaDex on its own.
+    // The payload is typed as an object rather than `unknown`: fastify's
+    // InjectOptions.payload is a union that `unknown` does not satisfy, and
+    // widening it here is what let the whole file stop type-checking.
+    const forbidden: [string, string, Record<string, unknown>?][] = [
+      ["POST", "/api/v1/admin/runs", { extension: "opstest", kind: "FORCE" }],
+      ["POST", "/api/v1/admin/pause", {}],
+      ["POST", "/api/v1/admin/resume", {}],
+      ["GET", "/api/v1/admin/workers"],
+      ["POST", "/api/v1/admin/enroll-tokens", {}],
+      ["GET", "/api/v1/admin/audit"],
+      ["GET", "/api/v1/admin/upload-tasks"],
+      ["GET", "/api/v1/admin/errors"],
+      ["GET", "/api/v1/admin/mangadex/auth"],
+      ["GET", "/api/v1/admin/schema"],
+      ["GET", "/api/v1/admin/backup"],
+      ["GET", "/api/v1/admin/tokens"],
+      ["GET", "/api/v1/admin/users"],
+      ["POST", "/api/v1/admin/extensions/opstest/disable", {}],
+    ];
+    for (const [method, url, payload] of forbidden) {
+      const res = await app.inject({
+        method: method as "GET" | "POST",
+        url,
+        headers: { cookie, ...dash },
+        ...(payload === undefined ? {} : { payload }),
+      });
+      expect(res.statusCode, `contributor must not reach ${method} ${url}`).toBe(403);
+    }
+
+    // Repointing and removing an existing mapping are the two curation actions a
+    // contributor must not have: both silently change where uploads go.
+    const repoint = await app.inject({
+      method: "PUT",
+      url: "/api/v1/admin/extensions/opstest/tracked",
+      headers: { cookie, ...dash },
+      payload: { mangaId: "ext-1", mdMangaId: "ffffffff-0000-4000-8000-000000000000" },
+    });
+    expect(repoint.statusCode).toBe(403);
+    expect(repoint.json().error).toContain("tracked:write");
+    const remove = await app.inject({
+      method: "DELETE",
+      url: "/api/v1/admin/extensions/opstest/tracked/ext-1",
+      headers: { cookie, ...dash },
+    });
+    expect(remove.statusCode).toBe(403);
+
+    // The mapping they added is intact and still points where they put it.
+    const row = await prisma.trackedManga.findFirstOrThrow({ where: { mangaId: "ext-1" } });
+    expect(row.mdMangaId).toBe("9a1b1c1d-0000-4000-8000-000000000000");
+  });
+
+  // ---- series-map paste ----
+
+  it("reports a pasted series map line by line", async () => {
+    const cookie = await loginAs("ADMIN", "curator@example.com");
+    await prisma.trackedManga.createMany({
+      data: [
+        { extension: "opstest", mangaId: "keep", mdMangaId: "11111111-1111-4111-8111-111111111111" },
+        { extension: "opstest", mangaId: "repoint", mdMangaId: "22222222-2222-4222-8222-222222222222" },
+      ],
+    });
+
+    const text = [
+      "external_id,mangadex_id", // header: skipped, not an error
+      "brand-new, 33333333-3333-4333-8333-333333333333",
+      "keep 11111111-1111-4111-8111-111111111111", // unchanged
+      "repoint;44444444-4444-4444-8444-444444444444", // an ADMIN holds tracked:write
+      "55555555-5555-4555-8555-555555555555 reversed", // uuid first: accepted
+      "dupe,66666666-6666-4666-8666-666666666666",
+      "dupe,77777777-7777-4777-8777-777777777777", // same id, different target
+      "# a comment",
+      "no-uuid-here,also-not-a-uuid", // reported, does not fail the batch
+      "lonely", // one value only
+    ].join("\n");
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/extensions/opstest/tracked/batch",
+      headers: { cookie, ...dash },
+      payload: { text },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+
+    const outcome = (mangaId: string) =>
+      body.results.filter((r: { mangaId: string }) => r.mangaId === mangaId).map((r: { outcome: string }) => r.outcome);
+    expect(outcome("brand-new")).toEqual(["added"]);
+    expect(outcome("keep")).toEqual(["unchanged"]);
+    expect(outcome("repoint")).toEqual(["updated"]);
+    expect(outcome("reversed")).toEqual(["added"]);
+    // Listed twice with different targets: flagged, and the last one applied.
+    expect(outcome("dupe")).toEqual(["invalid", "added"]);
+    expect(
+      await prisma.trackedManga.findFirstOrThrow({ where: { mangaId: "dupe" } }),
+    ).toMatchObject({ mdMangaId: "77777777-7777-4777-8777-777777777777" });
+
+    // Unparseable lines are per-line errors, not a rejected paste.
+    expect(body.parseErrors.map((e: { line: number }) => e.line)).toEqual([9, 10]);
+    expect(body.added).toBe(3);
+    expect(body.updated).toBe(1);
+    expect(body.unchanged).toBe(1);
+
+    expect(
+      await prisma.trackedManga.findFirstOrThrow({ where: { mangaId: "repoint" } }),
+    ).toMatchObject({ mdMangaId: "44444444-4444-4444-8444-444444444444" });
+
+    // A contributor pasting the same thing gets the repoint refused by row.
+    const contributor = await loginAs("CONTRIBUTOR", "paster@example.com");
+    const asContributor = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/extensions/opstest/tracked/batch",
+      headers: { cookie: contributor, ...dash },
+      payload: { text: "repoint,88888888-8888-4888-8888-888888888888\nfresh,99999999-9999-4999-8999-999999999999" },
+    });
+    expect(asContributor.statusCode).toBe(200);
+    const byId = Object.fromEntries(
+      asContributor.json().results.map((r: { mangaId: string; outcome: string }) => [r.mangaId, r.outcome]),
+    );
+    expect(byId["repoint"]).toBe("rejected_needs_write");
+    expect(byId["fresh"]).toBe("added");
+    expect(
+      await prisma.trackedManga.findFirstOrThrow({ where: { mangaId: "repoint" } }),
+    ).toMatchObject({ mdMangaId: "44444444-4444-4444-8444-444444444444" });
+  });
+
+  it("previews a paste without writing anything", async () => {
+    const cookie = await loginAs("ADMIN", "previewer@example.com");
+    await prisma.trackedManga.createMany({
+      data: [
+        { extension: "opstest", mangaId: "existing", mdMangaId: "11111111-1111-4111-8111-111111111111" },
+        { extension: "opstest", mangaId: "goner", mdMangaId: "22222222-2222-4222-8222-222222222222" },
+      ],
+    });
+    const before = await prisma.trackedManga.findMany({ orderBy: { mangaId: "asc" } });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/extensions/opstest/tracked/batch",
+      headers: { cookie, ...dash },
+      payload: {
+        dryRun: true,
+        text: [
+          "newcomer,33333333-3333-4333-8333-333333333333",
+          "existing,44444444-4444-4444-8444-444444444444",
+        ].join("\n"),
+        remove: ["goner"],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.dryRun).toBe(true);
+
+    // The preview has to answer the question the operator actually asked, which
+    // includes the removals — reporting removed: 0 for a batch that will remove a
+    // row is worse than not previewing at all.
+    const byId = Object.fromEntries(
+      body.results.map((r: { mangaId: string; outcome: string }) => [r.mangaId, r.outcome]),
+    );
+    expect(byId["newcomer"]).toBe("added");
+    expect(byId["existing"]).toBe("updated");
+    expect(byId["goner"]).toBe("removed");
+    expect(body).toMatchObject({ added: 1, updated: 1, removed: 1 });
+
+    // Nothing moved. Not the row it would add, and — the part that bites —
+    // not the mapping it would repoint: a preview that repoints for real has
+    // silently sent this series' uploads to a different MangaDex title.
+    const after = await prisma.trackedManga.findMany({ orderBy: { mangaId: "asc" } });
+    expect(after).toEqual(before);
+    expect(await prisma.trackedManga.count({ where: { source: "dry-run" } })).toBe(0);
+    // A preview is not an action, so it does not belong in the audit log either.
+    expect(await prisma.auditEvent.count({ where: { action: "tracked_manga.batch" } })).toBe(0);
+  });
+
+  it("lets a contributor run the batch endpoint without letting it delete anything", async () => {
+    // The batch route is guarded by `tracked:append`, so a contributor reaches
+    // it — that is the point of the role. The refusal for a removal therefore
+    // cannot come from the route guard, and lives inside applyBatch instead.
+    //
+    // Worth its own test because the failure mode is quiet: a batch that both
+    // adds and removes answers 200 either way, so a regression here would look
+    // like success while silently untracking series. The single-row DELETE path
+    // 403s and is covered above; this is the other door into the same action.
+    const cookie = await loginAs("CONTRIBUTOR", "batcher@example.com");
+    await prisma.trackedManga.createMany({
+      data: [
+        { extension: "opstest", mangaId: "doomed", mdMangaId: "11111111-1111-4111-8111-111111111111" },
+        { extension: "opstest", mangaId: "also-doomed", mdMangaId: "22222222-2222-4222-8222-222222222222" },
+      ],
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/extensions/opstest/tracked/batch",
+      headers: { cookie, ...dash },
+      payload: {
+        text: "brand-new,33333333-3333-4333-8333-333333333333",
+        remove: ["doomed", "also-doomed"],
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+
+    // The append half lands; the removals are refused per row, each naming the
+    // scope, so the contributor can see what to ask an operator for.
+    expect(body).toMatchObject({ added: 1, removed: 0, failed: 2 });
+    for (const mangaId of ["doomed", "also-doomed"]) {
+      const result = body.results.find((r: { mangaId: string }) => r.mangaId === mangaId);
+      expect(result.outcome).toBe("rejected_needs_write");
+      expect(result.detail).toContain("tracked:write");
+    }
+
+    // The assertion that actually matters: both rows are still there.
+    expect(await prisma.trackedManga.count({ where: { mangaId: { in: ["doomed", "also-doomed"] } } })).toBe(2);
+    expect(await prisma.trackedManga.count({ where: { mangaId: "brand-new" } })).toBe(1);
+  });
+
   // ---- CSRF, attribution, rate limits, forgery ----
 
   it("requires the CSRF header on cookie-authenticated writes but not on reads", async () => {

@@ -356,6 +356,85 @@ pre {
   margin-bottom: 14px;
 }
 
+/* Informational, not a warning: the role banner and similar "this is how it
+   works" notes must not read as something being wrong. */
+.banner.info {
+  border-color: #234670;
+  background: #101c2b;
+  color: var(--text);
+}
+
+.banner.quiet {
+  border-color: var(--line);
+  background: var(--panel-2);
+  color: var(--dim);
+}
+
+.ok-text {
+  color: var(--ok);
+  margin: 8px 0 0;
+}
+
+/* A list of refusal reasons (a rejected bundle manifest), kept readable rather
+   than collapsed into one paragraph — each line is separately actionable. */
+ul.errors {
+  color: var(--bad);
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+
+ul.errors li {
+  margin: 3px 0;
+}
+
+.card h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--dim);
+  margin: 18px 0 8px;
+}
+
+/* Labels default to their own line, which is right above an input and wrong
+   beside one inside a .row. */
+label.inline {
+  display: inline;
+  margin: 0;
+  white-space: nowrap;
+}
+
+/* ---- bundle drop zone ---- */
+
+.dropzone {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  color: var(--dim);
+  padding: 26px 16px;
+  text-align: center;
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+
+.dropzone:hover,
+.dropzone.over {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* The drag feedback has to survive a pointer that is mid-drag over a child. */
+.dropzone.over {
+  background: #101c2b;
+}
+
+.button-link.inline {
+  display: inline-block;
+}
+
+input[type="search"] {
+  min-width: 260px;
+}
+
 /* ---- overlays ---- */
 
 dialog {

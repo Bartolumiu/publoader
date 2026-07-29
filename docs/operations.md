@@ -42,7 +42,9 @@ bootstrap path and the break-glass path both.
 
 Sessions last `SESSION_TTL_MINUTES` (12h default) and are individually
 revocable from **Users → Live sessions**. Full setup, including the Discord
-OAuth application, is in `docs/deployment.md` → "Dashboard".
+OAuth application, is in `docs/deployment.md` → "Dashboard"; a tour of every
+section, the role matrix, and the short list of things that still need a shell
+on the host is in `docs/dashboard.md`.
 
 ### Someone left the team
 
@@ -72,7 +74,67 @@ outright. Invite them instead — **Users → Invite** with their email — and 
 get in by linking Discord with that same verified email, or by you setting a
 password for them.
 
-Three operational flows are worth calling out because they are easier to get
+### Onboard a community contributor
+
+The `CONTRIBUTOR` role exists so the series map can be maintained by someone you
+have not given the keys to. A contributor can add mappings and work the
+untracked queue; they cannot trigger runs, touch workers or settings, read the
+audit log, or change where an existing mapping points.
+
+```
+Users → Invite → their email, role CONTRIBUTOR
+Users → their row → Set password        # or let them link Discord
+```
+
+Their dashboard has three sections (Overview, Extensions — with the series map
+under **Extensions → Open** — and Untracked) and nothing else: the tab strip is
+built from the scopes the server says they hold, so there is no tab that 403s.
+
+What to tell them: **add freely, and flag anything that looks already-mapped.**
+A row that would repoint or remove an existing mapping comes back as
+`rejected_needs_write` with the current target, which is the signal to bring it
+to an operator rather than a failure. Their additions are attributed to them in
+`padmin audit`, so a contributor who maps a series wrongly is traceable and
+reversible.
+
+To promote or remove them later: **Users → Make admin**, or **Delete** (which
+revokes their sessions by cascade).
+
+### Curate the series map, and preview a paste first
+
+**Extensions → (extension) → Open → Tracked series.** The paste box accepts
+lines of `externalId,mangadexTitleId` — separators can be commas, whitespace,
+tabs, semicolons or pipes, `#` comments and a header row are ignored, and the
+two columns may be in either order because the MangaDex id is recognised by its
+UUID shape. **Export** emits exactly that format, so export → edit → paste back
+is the round trip, with no file in git and no shell on the host.
+
+**Always dry-run a paste you did not generate yourself.** The preview reports
+what every line would do — added, updated (with the previous target), unchanged,
+or rejected — and writes nothing. Note that `dryRun` evaluates the additions and
+repoints only: it **ignores `remove`**, so a removal batch comes back
+`removed: 0` whether or not it would delete anything. The dashboard previews
+removals itself from the map it has loaded; if you are driving the API directly,
+capture the row list first and check it afterwards.
+
+```bash
+padmin tracked list mangaplus > /tmp/before.txt
+
+curl -sX POST "$PUBLOADER_API_URL/api/v1/admin/extensions/mangaplus/tracked/batch" \
+  -H "authorization: Bearer $PUBLOADER_ADMIN_TOKEN" \
+  -H 'content-type: application/json' \
+  -d "$(jq -Rs '{dryRun: true, text: .}' < /tmp/paste.csv)"
+```
+
+Read the `updated` rows before committing: each one silently redirects a
+series' uploads to a different MangaDex title, and the row's `detail` says what
+it was pointing at. Then re-send with `"dryRun": false`.
+
+A dry run leaves no audit entry, because nothing happened. A real batch records
+`tracked_manga.batch` with the counts. If a paste goes in wrong, the audit
+detail plus `/tmp/before.txt` is what you reconstruct from — there is no undo.
+
+Three further flows are worth calling out because they are easier to get
 wrong in a UI than on a command line.
 
 ### Enrol a worker from the dashboard
@@ -99,7 +161,7 @@ confirmation first.
 Check the series name, language, and source URL before approving — the common
 mistake is approving something that already exists on MangaDex under a
 different name, which produces a duplicate title. When it already exists, use
-**Extensions → Configure → Tracked manga** to point the external id at the
+**Extensions → Open → Tracked series** to point the external id at the
 existing MangaDex UUID instead, and **Skip** the untracked row.
 
 On success the toast contains the new `https://mangadex.org/title/<id>` link,
@@ -1232,6 +1294,158 @@ Print this. Work top to bottom.
 11. Once resolved: `padmin resume`, then verify with `padmin stats` and a spot
     check on MangaDex.
 
+
+---
+
+## Triage from the Activity feed instead of `docker logs`
+
+**Activity** is one timeline over five tables — runs, jobs, upload tasks, result
+submissions, and the audit log — so the first question in an incident ("what
+changed, and what started failing?") is answerable in a browser.
+
+Start wide and narrow down:
+
+```
+Activity → Severity: errors only → Window: last hour
+```
+
+Then filter by extension, or search the subject and message for a dedupe key, a
+manga id, or a fragment of an error string. Every row carries a permalink
+(`Copy link`) that opens the same row for anyone who can sign in — that is what
+to paste into an incident channel rather than a screenshot.
+
+Two properties make this the right starting point rather than a summary:
+
+- A job that is *still retrying* appears with its `lastError` attached, so a
+  transient failure is visible before it dead-letters.
+- Audit events are interleaved, so "the uploads started failing four minutes
+  after someone changed the removal mode" is one screen rather than two.
+
+The same feed is available to a script:
+
+```bash
+curl -s "$PUBLOADER_API_URL/api/v1/admin/activity?severity=error&hours=6&limit=50" \
+  -H "authorization: Bearer $PUBLOADER_ADMIN_TOKEN" | jq -r \
+  '.activity[] | [.at, .severity, .kind, .subject, .message] | @tsv'
+```
+
+**What it does not cover.** Every row in Activity is a database row. Container
+stdout is not — a stack trace from a crash loop, a Prisma engine that failed to
+load, anything a process emitted before it could reach Postgres. None of that is
+written to the database, so no endpoint can serve it:
+
+```bash
+docker compose logs -f --tail=200 core-uploader
+```
+
+Reach for that only when the Activity row does not already explain itself. Most
+of the time `lastError` or `rejectReason` is the whole answer.
+
+---
+
+## Search the audit log
+
+`GET /api/v1/admin/audit` returns the most recent N events, which only answers
+"what happened just now". The retrospective questions need
+**Audit → Search**, which is a case-insensitive substring across the actor, the
+action, the subject, **and the serialised detail**:
+
+```bash
+# Who changed the removal mode, ever?
+curl -s "$PUBLOADER_API_URL/api/v1/admin/audit/search?action=removal_mode" \
+  -H "authorization: Bearer $PUBLOADER_ADMIN_TOKEN" | jq '.events[]'
+
+# Everything touching one series, including inside the detail JSON.
+curl -s "$PUBLOADER_API_URL/api/v1/admin/audit/search?q=12345" \
+  -H "authorization: Bearer $PUBLOADER_ADMIN_TOKEN" | jq '.total'
+```
+
+Searching the detail is the point: the arguments of every audited action live
+there and nowhere else, so "which batch repointed this series, and to what?" is
+only answerable this way. `since` / `until` take ISO instants, `limit` and
+`offset` page, and the response carries a `total` so you can tell "that is all of
+them" from "that is the first page".
+
+Clicking an action name in the table filters to it — the fastest way to ask
+"what else did this?".
+
+---
+
+## Check the schema before and after an upgrade
+
+**System → Schema & migrations** reports what `_prisma_migrations` contains,
+what is on disk in this build, and the difference:
+
+```bash
+curl -s "$PUBLOADER_API_URL/api/v1/admin/schema" \
+  -H "authorization: Bearer $PUBLOADER_ADMIN_TOKEN" | jq '{current, pending, failed}'
+# -> { "current": true, "pending": [], "failed": [] }
+```
+
+Read the three fields together:
+
+| Field | Meaning |
+|---|---|
+| `current: true` | Nothing pending, nothing failed. What you want after `up -d`. |
+| `pending: [...]` | The image carries migrations this database has not applied. The services are running against an older schema than the code expects. |
+| `failed: [...]` | A migration was recorded but never finished, or was rolled back. **This is the state that makes containers crash-loop on boot**, and it is invisible from every other panel. |
+| `current: null` | Either the migration history was not shipped with this build, or the database has no `_prisma_migrations` table at all (its schema was created by `db push` or a hand-restored dump). The `note` field says which. |
+
+Nothing here applies a migration, and that is deliberate: the runtime image
+carries no Prisma CLI, because a long-lived internet-facing service must not
+hold a tool that can rewrite the database. Migrations are applied by the one-shot
+`migrate` compose service — see "Upgrade the core" above. The panel tells you
+*whether* you need to, which is the part that used to require a shell.
+
+`current: false` after an upgrade means the `migrate` service did not run or
+failed. Check it before restarting anything:
+
+```bash
+docker compose logs migrate
+```
+
+---
+
+## Take a backup from the dashboard
+
+**System → Database backup → Download backup** streams `pg_dump -Fc` — the same
+custom format as the scheduled backup in "Backup and restore" above, so a dump
+taken from the browser and one taken on the host restore identically with
+`pg_restore`.
+
+Two things to understand before using it.
+
+**It is gated harder than anything else in the platform**: OWNER role *and*
+`users:admin`. Not because a backup is dangerous to take, but because of what one
+contains — every operator password hash, every client token hash, and the saved
+MangaDex session. Taking a dump is a credential-theft primitive, so it sits at
+the same bar as account administration. The role requirement is what excludes
+API tokens entirely: `adminAuthHook` never grants a `pa_…` token the OWNER role,
+so **no client credential can dump the database**, however broadly it is scoped
+— not even one minted with `["*"]`. Treat the downloaded file as a secret:
+encrypt it at rest, and keep it off shared storage.
+
+**It answers 503 in the shipped image.** The core image installs no postgres
+client tools, so `pg_dump` is not on its `PATH` and the endpoint says so with the
+fix in the message. That is the intended default: adding a database-dumping
+binary to an internet-facing long-lived service widens its reach for a
+convenience. Take scheduled backups inside the postgres container, where the tool
+belongs.
+
+If you do want the button to work, add the client to the **runtime** stage of
+`platform/docker/core/Dockerfile` — matching the server's major version, which is
+`postgres:16.9-bookworm`:
+
+```dockerfile
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates postgresql-client-16 \
+ && rm -rf /var/lib/apt/lists/*
+```
+
+A mismatched client major version fails with "server version mismatch" rather
+than producing a bad dump, so the failure is loud. Restoring is always host-side
+regardless: it requires stopping the services that would write during it, and
+nothing that can take the API down should be reachable through the API.
 
 ---
 

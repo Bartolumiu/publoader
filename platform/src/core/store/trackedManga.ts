@@ -105,11 +105,16 @@ export class TrackedMangaStore {
    * Apply a batch. `canWrite` is the caller's tracked:write status: without it,
    * rows that would change an existing mapping are rejected individually (and
    * reported) rather than silently applied or the whole batch refused.
+   *
+   * With `dryRun`, every row is judged exactly as it would be and nothing is
+   * written. The judgement above this line is already pure — it reads the
+   * current mappings and decides outcomes — so the preview is the real thing
+   * minus its last statement, not a second implementation that can drift.
    */
   async applyBatch(
     extension: string,
     request: BatchRequest,
-    opts: { canWrite: boolean; source: string },
+    opts: { canWrite: boolean; source: string; dryRun?: boolean },
   ): Promise<BatchSummary> {
     const results: BatchRowResult[] = [];
     const set = request.set ?? [];
@@ -182,20 +187,22 @@ export class TrackedMangaStore {
 
     // One transaction: a partially-applied paste is the worst outcome, because
     // the operator cannot tell what landed without diffing the table by hand.
-    await this.prisma.$transaction(async (tx) => {
-      if (toCreate.length > 0) {
-        await tx.trackedManga.createMany({ data: toCreate, skipDuplicates: true });
-      }
-      for (const row of toUpdate) {
-        await tx.trackedManga.updateMany({
-          where: { extension, mangaId: row.mangaId },
-          data: { mdMangaId: row.mdMangaId, source: opts.source },
-        });
-      }
-      if (removable.length > 0) {
-        await tx.trackedManga.deleteMany({ where: { extension, mangaId: { in: removable } } });
-      }
-    });
+    if (!opts.dryRun) {
+      await this.prisma.$transaction(async (tx) => {
+        if (toCreate.length > 0) {
+          await tx.trackedManga.createMany({ data: toCreate, skipDuplicates: true });
+        }
+        for (const row of toUpdate) {
+          await tx.trackedManga.updateMany({
+            where: { extension, mangaId: row.mangaId },
+            data: { mdMangaId: row.mdMangaId, source: opts.source },
+          });
+        }
+        if (removable.length > 0) {
+          await tx.trackedManga.deleteMany({ where: { extension, mangaId: { in: removable } } });
+        }
+      });
+    }
 
     const count = (outcome: BatchOutcome) => results.filter((r) => r.outcome === outcome).length;
     return {

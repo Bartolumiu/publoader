@@ -470,19 +470,18 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
 
         const canWrite = hasScope(req.principal!, "tracked:write");
         if (body.dryRun) {
-          // Same judgement, no writes: the dashboard previews a paste with this.
+          // Same judgement, no writes — the store skips its write transaction.
+          //
+          // This used to apply the batch for real and then delete the rows it had
+          // added. That was not a preview: it left every REPOINTED mapping
+          // changed (the undo only covered inserts), so previewing a paste could
+          // silently send a series' uploads to a different MangaDex title, and it
+          // made uncommitted mappings briefly visible to the scheduler.
           const preview = await ctx.trackedManga.applyBatch(
             name,
-            { set, remove: [] },
-            { canWrite, source: "dry-run" },
+            { set, remove: body.remove },
+            { canWrite, source: actor(req), dryRun: true },
           );
-          // Undo anything the preview created.
-          const added = preview.results.filter((r) => r.outcome === "added").map((r) => r.mangaId);
-          if (added.length > 0) {
-            await ctx.prisma.trackedManga.deleteMany({
-              where: { extension: name, mangaId: { in: added }, source: "dry-run" },
-            });
-          }
           return { dryRun: true, parseErrors: parsed.errors, ...preview };
         }
 

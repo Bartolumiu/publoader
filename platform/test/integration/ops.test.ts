@@ -443,6 +443,43 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     // No secret is disclosed: the answer is about authority, not credentials.
     expect(asToken.body).not.toContain("pa_");
 
+    // A cookie session reports the account's role, and its scopes come from that
+    // role rather than from a stored list.
+    await ctx.adminUsers.ensureOwner("owner@example.com");
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/session",
+      payload: { token: ADMIN_TOKEN, actor: "ardax" },
+    });
+    const cookie = `publoader_session=${login.cookies.find((c) => c.name === "publoader_session")!.value}`;
+    const asSession = await app.inject({ method: "GET", url: "/api/v1/admin/whoami", headers: { cookie } });
+    expect(asSession.json()).toMatchObject({
+      kind: "session",
+      name: "user:ardax",
+      role: "OWNER",
+      scopes: ["*"],
+    });
+
+    const contributor = await ctx.adminUsers.invite("curator@example.com", "CONTRIBUTOR");
+    await ctx.adminUsers.setPassword(contributor.id, "correct-horse-battery-staple");
+    const asContributor = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/session",
+      payload: { email: "curator@example.com", password: "correct-horse-battery-staple" },
+    });
+    const contributorCookie = `publoader_session=${asContributor.cookies.find((c) => c.name === "publoader_session")!.value}`;
+    const me = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/whoami",
+      headers: { cookie: contributorCookie },
+    });
+    expect(me.json()).toMatchObject({ kind: "session", role: "CONTRIBUTOR" });
+    // The narrow set is the point: the SPA hides what these scopes cannot reach.
+    expect(me.json().scopes).toContain("tracked:append");
+    expect(me.json().scopes).not.toContain("tracked:write");
+    expect(me.json().scopes).not.toContain("runs:write");
+    expect(me.json().scopes).not.toContain("*");
+
     // Authentication is still required — "who am I" is not a public question.
     expect((await app.inject({ method: "GET", url: "/api/v1/admin/whoami" })).statusCode).toBe(401);
   });
@@ -578,6 +615,51 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
 
     const badManifest = await post(zipWith({ "manifest.json": "{not json" }), root);
     expect(badManifest.statusCode).toBe(422);
+    expect(badManifest.json().errors[0]).toContain("not valid JSON");
+
+    // A schema-invalid manifest is reported field by field. "languages: array
+    // must contain at least 1 element" is actionable; "validation failed" is not.
+    const schemaInvalid = await post(
+      zipWith({
+        "manifest.json": JSON.stringify({ ...manifest, languages: [], mangadex_group_id: "not-a-uuid" }),
+        "index.mjs": "export default () => ({});\n",
+      }),
+      root,
+    );
+    expect(schemaInvalid.statusCode).toBe(422);
+    expect(schemaInvalid.json().ok).toBe(false);
+    const fields = schemaInvalid.json().errors.join("\n");
+    expect(fields).toContain("languages");
+    expect(fields).toContain("mangadex_group_id");
+
+    // An empty entrypoint is a real publishing failure that a file listing alone
+    // would not catch — the file is present and useless.
+    const emptyEntrypoint = await post(
+      zipWith({ "manifest.json": JSON.stringify(manifest), "index.mjs": "   \n" }),
+      root,
+    );
+    expect(emptyEntrypoint.statusCode).toBe(422);
+    expect(emptyEntrypoint.json().errors[0]).toContain("empty");
+
+    // Python bundles are refused outright: the runtime was removed, and the
+    // preflight has to say so before an operator uploads 40 MiB of it.
+    const python = await post(
+      zipWith({
+        "manifest.json": JSON.stringify({
+          ...manifest,
+          publoader_api: "^1.0.0",
+          runtime: "python",
+          entrypoint: "extension.py",
+        }),
+        "extension.py": "class Extension: pass\n",
+      }),
+      root,
+    );
+    expect(python.statusCode).toBe(422);
+    expect(python.json().errors.join("\n")).toContain("python bundles are no longer accepted");
+
+    // Nothing above published anything, including the valid one.
+    expect(await prisma.bundle.count()).toBe(0);
 
     // A read scope is enough to preflight; it changes nothing.
     const reader = await mint(["bundles:read"]);

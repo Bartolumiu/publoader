@@ -74,6 +74,9 @@
       </section>
 
       <section id="app" hidden>
+        <!-- Named role and its limits. A contributor sees a short tab strip by
+             design, and saying so beats letting them assume it is broken. -->
+        <div id="role-banner" class="banner quiet" role="status" hidden></div>
         <nav id="tabs" class="tabs" role="tablist" aria-label="Dashboard sections"></nav>
         <div id="view" role="tabpanel" tabindex="-1"></div>
       </section>

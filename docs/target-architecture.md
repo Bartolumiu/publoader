@@ -2,7 +2,9 @@
 
 Date: 2026-07-29
 Stack: **TypeScript (Node.js 24) + Prisma + PostgreSQL** (operator directive).
-Status: implemented in this branch (v1); follow-ups listed in §12.
+Status: implemented in this branch; follow-ups listed in the final section.
+Extensions are TypeScript (extension API v2) — the Python runner described in
+earlier revisions of this document has been removed.
 
 ## 0. Summary
 
@@ -13,8 +15,9 @@ Publoader becomes a **Docker-first distributed extension execution platform**:
   **all MangaDex uploads**.
 - **Worker hosts** — including community-operated machines — enroll over an
   authenticated HTTPS control plane, lease extension *scrape jobs*, execute the
-  (Python) extension inside an isolated runner, and submit **normalized,
-  schema-validated result envelopes**. Workers never hold MangaDex, database,
+  extension inside an isolated Node runner (no filesystem writes, no
+  subprocesses, egress limited to the manifest's declared hosts), and submit
+  **normalized, schema-validated result envelopes**. Workers never hold MangaDex, database,
   Discord, or GitHub credentials, and never write to the database.
 - Coordination is durable: jobs, leases, attempts, results, and worker identity
   live in PostgreSQL with transactional state transitions
@@ -30,7 +33,7 @@ authority are centralized by design.
 |---|---|---|
 | Platform language | **TypeScript / Node.js 24** | Operator directive; aligns with the dexchan reference; single typed codebase for API, scheduler, ingestion, upload pipeline, and worker agent |
 | Durable state | **PostgreSQL 16 + Prisma** | Operator directive; `FOR UPDATE SKIP LOCKED` is the canonical job-queue/lease primitive; unique constraints give transactional idempotency keys; Prisma migrations version the schema |
-| Extension runtime | **Python 3.11 runner shim** (only place Python remains) | The extension contract (`class Extension`, `Chapter`/`Manga` shapes) is Python and must be preserved; the shim executes the extension and emits an envelope JSON on stdout — no coordination logic in Python |
+| Extension runtime | **Node 24 runner** (`platform/runner-node/runner.mjs`), extension API v2 | Extensions are TypeScript/ESM: a module default-exporting a factory whose `collect()` returns chapters. The runner executes it under Node's permission model with a manifest-derived egress allowlist and prints one envelope on stdout — no coordination logic in the runner. Python is gone from the platform entirely (see §11). |
 | Control-plane API | **Fastify** | Fast, schema-first (JSON Schema validation on every route), first-class TypeScript |
 | Validation | **zod** (envelopes, manifests) + Fastify JSON Schema (transport) | One source of truth for the result-envelope and manifest contracts |
 | Worker→core transport | Outbound HTTPS only (long-poll lease) | Community workers sit behind NAT; no inbound ports on workers; TLS via reverse proxy / cloudflared (already deployed) |
@@ -56,7 +59,7 @@ authority are centralized by design.
 ┌────────────────────┴───────────── WORKER HOST(S) ────────────────────────────────────┐
 │  worker-agent (TypeScript): enroll → lease loop → heartbeat/renew                    │
 │    └─ bundle fetch (content-addressed, sha256-verified)                              │
-│    └─ spawn python runner shim: executes Extension, enforces manifest egress         │
+│    └─ spawn node runner (--permission): runs the extension factory, enforces         │
 │       allowlist + timeouts, prints envelope JSON (non-root, read-only fs, limits)    │
 │    └─ envelope build → artifact upload → result submit (idempotency key)             │
 └──────────────────────────────────────────────────────────────────────────────────────┘
