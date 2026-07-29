@@ -455,7 +455,7 @@ is 30 instead of 300:
 cd platform/docker/dev
 docker compose up -d --build
 export DEV=http://127.0.0.1:8100
-dev_auth=(-H 'authorization: Bearer dev-admin')
+dev_auth=(-H 'authorization: Bearer dev-admin-not-a-secret')
 
 # 1. Both workers enrolled and heartbeating?
 curl -s "$DEV/api/v1/admin/workers" "${dev_auth[@]}"
@@ -555,7 +555,7 @@ docker compose -f platform/docker/dev/docker-compose.yml up -d --build
 
 You get: Postgres (tmpfs — `down` really resets), `migrate`, all four core
 services, `mock-md`, and two workers that enrol themselves automatically. The
-API is on `127.0.0.1:8100` with the admin token `dev-admin`; the mock is on
+API is on `127.0.0.1:8100` with the admin token `dev-admin-not-a-secret`; the mock is on
 `127.0.0.1:8200`.
 
 The mock's test surface:

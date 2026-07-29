@@ -204,6 +204,27 @@ const server = createServer(async (req, res) => {
     return collection(res, data);
   }
 
+  // POST /manga — title draft creation (automated untracked-series pipeline).
+  if (path === "/manga" && method === "POST") {
+    const body = parseJson(await readBody(req)) ?? {};
+    const id = crypto.randomUUID();
+    recorded.titleDrafts = recorded.titleDrafts ?? [];
+    recorded.titleDrafts.push({ id, committed: false, payload: body });
+    return json(res, 201, {
+      result: "ok",
+      data: { id, type: "manga", attributes: { ...body, version: 1 } },
+    });
+  }
+
+  // POST /manga/draft/{id}/commit — publish the draft.
+  if (seg[0] === "manga" && seg[1] === "draft" && seg[3] === "commit" && method === "POST") {
+    recorded.titleDrafts = recorded.titleDrafts ?? [];
+    const draft = recorded.titleDrafts.find((d) => d.id === seg[2]);
+    if (!draft) return json(res, 404, { result: "error" });
+    draft.committed = true;
+    return json(res, 200, { result: "ok", data: { id: draft.id, type: "manga" } });
+  }
+
   // GET /manga/{id}/aggregate — volume backfill.
   if (seg[0] === "manga" && seg[2] === "aggregate" && method === "GET") {
     return json(res, 200, { result: "ok", volumes: seeded.aggregate[seg[1]] ?? {} });

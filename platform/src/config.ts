@@ -16,7 +16,9 @@ function env(name: string): string | undefined {
 }
 
 const ConfigSchema = z.object({
-  databaseUrl: z.string().min(1),
+  // Empty on worker agents by design — workers never see the database.
+  // Core services fail fast in getPrisma() if it is missing.
+  databaseUrl: z.string().default(""),
   port: z.coerce.number().int().default(8100),
   host: z.string().default("0.0.0.0"),
   /** Admin bearer token for operator endpoints (bot/dash/CLI). */

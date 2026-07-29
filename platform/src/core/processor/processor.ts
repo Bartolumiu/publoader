@@ -117,7 +117,7 @@ export class RunProcessor {
     const rows = await this.prisma.$queryRaw<ClaimedRun[]>(Prisma.sql`
       WITH candidate AS (
         SELECT id FROM runs
-        WHERE state = 'INGESTING' AND id <> ALL(${excluded}::uuid[])
+        WHERE state = 'INGESTING' AND id <> ALL(${excluded}::text[])
         ORDER BY updated_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1

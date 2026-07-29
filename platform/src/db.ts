@@ -3,6 +3,9 @@ import { PrismaClient } from "@prisma/client";
 let prisma: PrismaClient | undefined;
 
 export function getPrisma(databaseUrl?: string): PrismaClient {
+  if (!prisma && databaseUrl !== undefined && databaseUrl === "") {
+    throw new Error("DATABASE_URL is required for core services (never set it on workers)");
+  }
   if (!prisma) {
     prisma = new PrismaClient(
       databaseUrl ? { datasources: { db: { url: databaseUrl } } } : undefined,

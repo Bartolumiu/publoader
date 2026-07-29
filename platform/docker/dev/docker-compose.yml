@@ -1,7 +1,7 @@
 # Local end-to-end stack: the whole system on one machine, with MangaDex faked.
 #
 #   docker compose -f platform/docker/dev/docker-compose.yml up -d --build
-#   curl -s -H 'authorization: Bearer dev-admin' \
+#   curl -s -H 'authorization: Bearer dev-admin-not-a-secret' \
 #        http://127.0.0.1:8100/api/v1/admin/workers | jq
 #   curl -s http://mock-md.../_test/uploads          # see docs/deployment.md
 #   docker compose -f platform/docker/dev/docker-compose.yml down -v
@@ -13,13 +13,17 @@
 # docs/deployment.md, and it runs here in about two minutes.
 #
 # THIS STACK IS NOT SECURE AND IS NOT MEANT TO BE. The admin token is
-# "dev-admin", the database password is "dev", enrollment is automated, and the
+# "dev-admin-not-a-secret", the database password is "dev", enrollment is automated, and the
 # API is published on the loopback interface. Never run it on a host that
 # accepts traffic from anywhere else.
 #
 # The hardening (read_only, cap_drop, non-root) is kept identical to production
 # on purpose: a container that only works when writable should fail here, on a
 # laptop, and not on the night of the deploy.
+
+# Distinct from publoader-core so a dev stack and a real one can coexist on the
+# same machine without sharing volumes or fighting over container names.
+name: publoader-dev
 
 x-app-security: &app-security
   read_only: true
@@ -154,7 +158,7 @@ services:
       HOST: 0.0.0.0
       # Fixed and obviously fake, so it can be hardcoded in test drivers and so
       # nobody mistakes this stack for something to expose.
-      ADMIN_TOKEN: ${DEV_ADMIN_TOKEN:-dev-admin}
+      ADMIN_TOKEN: ${DEV_ADMIN_TOKEN:-dev-admin-not-a-secret}
     ports:
       - "127.0.0.1:8100:8100"
     command: ["node", "dist/src/services/api.js"]
@@ -172,7 +176,7 @@ services:
         condition: service_started
     environment:
       CORE_URL: http://core-api:8100
-      ADMIN_TOKEN: ${DEV_ADMIN_TOKEN:-dev-admin}
+      ADMIN_TOKEN: ${DEV_ADMIN_TOKEN:-dev-admin-not-a-secret}
       BOOTSTRAP_DIR: /bootstrap
       BOOTSTRAP_WORKERS: a,b
     volumes:

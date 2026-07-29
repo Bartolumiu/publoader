@@ -14,7 +14,7 @@ set -euo pipefail
 
 API=${API:-http://127.0.0.1:8100}
 MOCK=${MOCK:-http://127.0.0.1:8200}
-ADMIN="authorization: Bearer ${DEV_ADMIN_TOKEN:-dev-admin}"
+ADMIN="authorization: Bearer ${DEV_ADMIN_TOKEN:-dev-admin-not-a-secret}"
 COMPOSE=${COMPOSE:-docker compose -f docker/dev/docker-compose.yml}
 HERE="$(cd "$(dirname "$0")" && pwd)"
 FIXTURE="$HERE/fixtures/e2etest"

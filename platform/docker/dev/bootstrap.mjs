@@ -4,7 +4,7 @@
 // Production enrollment is deliberately manual — an operator mints a
 // single-use token and hands it to a host they chose to trust (§8). Automating
 // it is acceptable HERE and only here, because this stack is throwaway, is
-// bound to localhost, and its admin token is the literal string "dev-admin".
+// bound to localhost, and its admin token is the literal string "dev-admin-not-a-secret".
 //
 // Runs on the core image (node, no curl) and writes the tokens to a shared
 // volume; the workers read them via ENROLL_TOKEN_FILE, which config.ts
