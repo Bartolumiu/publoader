@@ -287,7 +287,7 @@ useful next question (`auth.ts:169-191`):
 { "error": "missing scope: bundles:write", "held": ["runs:write", "stats:read"] }
 ```
 
-Shipped presets (`scopes.ts:123-149`) — note `discord-bot` **includes**
+Shipped presets (`scopes.ts:123-146`) — note `discord-bot` **includes**
 `settings:write`, deliberately, because pausing the platform from chat during an
 incident is the most valuable thing the bot does:
 

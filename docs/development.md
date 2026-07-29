@@ -513,19 +513,27 @@ bundle produce the same result?" — if yes, it is not `TRANSIENT`.
 
 ### Add a scope
 
-1. Append it to `SCOPES` in `src/core/api/scopes.ts:20-37`. That array is the
+1. Append it to `SCOPES` in `src/core/api/scopes.ts:20-45`. That array is the
    whole taxonomy — `parseScopes` rejects anything not in it, so a token cannot be
    minted with a scope that does not exist yet.
-2. Use `<area>:read` / `<area>:write` naming. Write implies read for free
-   (`scopes.ts:86-87`); anything else you want implied has to be coded, and the
-   default answer is "do not".
-3. Consider whether a preset should include it (`SCOPE_PRESETS`,
-   `scopes.ts:103-119`). `test/unit/scopes.test.ts:81` asserts every preset
-   contains only valid scopes, so a typo there fails the suite.
-4. `scopesForRole` gives `ADMIN` everything except `users:admin`
-   (`scopes.ts:92-96`) — a new scope is granted to dashboard admins automatically.
-   If that is wrong for your scope, exclude it there explicitly.
-5. Add cases to `test/unit/scopes.test.ts`.
+2. Use `<area>:read` / `<area>:write` naming. Within an area, `write` implies
+   `append` implies `read` for free (`scopes.ts:91-101`); anything else you want
+   implied has to be coded, and the default answer is "do not".
+3. Reach for `<area>:append` only when there is a real asymmetry between *adding*
+   and *changing*. The one existing case is the series map: adding a mapping is
+   visible and reversible, while repointing or removing one silently stops uploads,
+   so the two are separate scopes and the route enforces the difference
+   (`routes/admin.ts:397-423`). If adding and editing carry the same risk, two
+   verbs is just more surface.
+4. Consider whether a preset should include it (`SCOPE_PRESETS`,
+   `scopes.ts:123-146`). `test/unit/scopes.test.ts` asserts every preset contains
+   only valid scopes, so a typo there fails the suite.
+5. Decide what each **role** gets in `scopesForRole` (`scopes.ts:103-121`).
+   `ADMIN` is `SCOPES` minus `users:admin`, so a new scope is granted to dashboard
+   admins automatically — exclude it explicitly if that is wrong. `CONTRIBUTOR`
+   is an allowlist, so a new scope is *not* granted to contributors unless you add
+   it.
+6. Add cases to `test/unit/scopes.test.ts`.
 
 ### Add a metric
 
@@ -551,15 +559,22 @@ The dashboard is vanilla JS with no build step, served from
 
 1. Write `async function viewThings()` in `app.js` returning a DOM node, built with
    the `el` / `card` / `row` / `table` helpers.
-2. Register it in `VIEWS` (`app.js:374-386`) and add a tab to `TABS`
-   (`app.js:330-345`). `{ owner: true }` makes it owner-only —
-   `visibleTabs()` filters on `state.owner`, which is what the *server* answered,
-   not what the session payload claimed, so the page never offers a control that
-   403s (`app.js:207-221`).
+2. Register it in the `VIEWS` map and add a tab to `TABS`. Every tab declares what
+   it needs, and `tabAllowed` is what filters the tab strip:
+   - `{ scope: "things:read" }` — shown when the principal holds that scope. Use
+     this by default, and use the **same** scope the endpoints behind the view
+     require, so a visible tab always works.
+   - `{ owner: true }` — shown only to an `OWNER`. Use this for account and
+     credential management specifically, because a wildcard API token holds
+     `users:admin` but is never `OWNER`, so a scope check would let it in.
+
+   The gate reads what the server answered about the session, not what the login
+   payload claimed, which is what keeps the page from offering a control that
+   403s.
 3. Add the section name to the `<noscript>` list in `index.html`. This is not
-   cosmetic: `test/integration/dashboard.test.ts:462` asserts every section is
-   named in **both** the HTML and the registered tabs, because a section in one and
-   not the other is either an unreachable view or a tab that renders nothing.
+   cosmetic: `test/integration/dashboard.test.ts` asserts every section is named in
+   **both** the HTML and the registered tabs, because a section in one and not the
+   other is either an unreachable view or a tab that renders nothing.
 4. **No `innerHTML`, ever.** The CSP has no `unsafe-inline`; use `textContent` and
    `addEventListener`. There is no `innerHTML` anywhere in the file today and that
    is what keeps operator-supplied strings from becoming script.
