@@ -253,6 +253,14 @@ class HTTPModel(metaclass=Singleton):
                     continue
             except requests.RequestException as e:
                 logger.error(e)
+                # A connection-level failure never produces a response, so the
+                # counters below the try block are skipped — decrement here or
+                # a persistent outage (DNS failure, IP block, network down)
+                # spins this loop forever, hammering the API with no backoff.
+                retry -= 1
+                total_retry -= 1
+                if retry > 0 and total_retry > 0:
+                    time.sleep(min(90, 10 * run_number))
                 continue
 
             if (successful_codes and response.status_code not in successful_codes) or (
