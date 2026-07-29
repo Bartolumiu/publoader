@@ -1,0 +1,67 @@
+# Direct public ingress — the alternative to the Cloudflare tunnel.
+#
+# Enable by setting PUBLOADER_INGRESS=direct in your env file; the switcher
+# (scripts/publoader) then layers this file in automatically:
+#
+#   PUBLOADER_INGRESS=direct
+#   PUBLOADER_HOSTNAME=publoader.ardax.dev
+#   ACME_EMAIL=you@example.com
+#
+#   ./scripts/publoader prod up -d
+#
+# What you must have in place first (there is no way around either):
+#   - DNS: an A record for PUBLOADER_HOSTNAME -> this host's public IPv4, plus
+#     an AAAA record if the host has public IPv6. Verify with
+#     `dig +short publoader.ardax.dev` from OFF this machine before starting.
+#   - Firewall/NAT: inbound tcp/80 AND tcp/443 open to this host. Port 80 is
+#     required for the ACME HTTP-01 challenge, not just for redirects.
+#
+# Compared with the tunnel: the tunnel needs no open ports, no public IP and no
+# certificate handling, and hides the host address. This publishes the host
+# directly and makes it your job to keep 80/443 exposed safely. Prefer the
+# tunnel unless you specifically want to run without Cloudflare.
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    # The only service in the whole stack that binds a public interface.
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      PUBLOADER_HOSTNAME: ${PUBLOADER_HOSTNAME:?set PUBLOADER_HOSTNAME in .env (the public hostname, e.g. publoader.ardax.dev)}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env (Let's Encrypt registration + expiry warnings)}
+    volumes:
+      - ./ingress/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account keys. Losing this volume means
+      # re-issuing certificates, which Let's Encrypt rate-limits — keep it.
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      # `edge` only: the proxy has no business reaching the database plane.
+      - edge
+    depends_on:
+      core-api:
+        condition: service_started
+    cap_drop:
+      - ALL
+    # Binding 80/443 as a non-root user needs this one capability back; Caddy
+    # drops the rest and does not need a writable root filesystem beyond /data.
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    healthcheck:
+      # Caddy answers the ACME/redirect vhost on 80 even before a certificate
+      # exists, so this is a real check of "the proxy is serving".
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  caddy-data: {}
+  caddy-config: {}

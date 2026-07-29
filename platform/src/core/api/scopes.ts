@@ -29,6 +29,7 @@ export const SCOPES = [
   "bundles:write",
   "untracked:read",
   "untracked:write",
+  "settings:read",
   "settings:write",
   "users:admin",
   "audit:read",
@@ -100,11 +101,15 @@ export function scopesForRole(role: "OWNER" | "ADMIN"): string[] {
  * path.
  */
 export const SCOPE_PRESETS: Record<string, Scope[]> = {
+  // settings:write is deliberate: pausing the platform from chat during an
+  // incident is the single most valuable thing the bot does, and /pause,
+  // /resume and /removal-mode all live behind that scope.
   "discord-bot": [
     "runs:write",
     "workers:read",
     "extensions:read",
     "untracked:write",
+    "settings:write",
     "stats:read",
     "audit:read",
   ],

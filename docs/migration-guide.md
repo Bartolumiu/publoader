@@ -149,14 +149,21 @@ What it does:
 | `uploaded_ids` | `uploaded_ids` | `extension` + `chapter_id` |
 | `edited` | `edited_chapters` (with the `edits[]` history preserved) | `md_chapter_id` |
 | `unavailable` | `unavailable_chapters` | `md_chapter_id` |
+| `deleted` | `deleted_chapters` | `md_chapter_id` |
 | `to_upload` | `upload_tasks` kind `UPLOAD` | `chapterId\|chapterNumber\|chapterLanguage` |
 | `to_edit` | `upload_tasks` kind `EDIT` | `md_chapter_id` |
 | `to_delete` | `upload_tasks` kind `DELETE` | `md_chapter_id` |
 | `to_unavailable` | `upload_tasks` kind `UNAVAILABLE` | `md_chapter_id` |
 | GridFS bucket `images` | `artifacts` rows, referenced from the task's `chapter.imageArtifacts` | new UUID per image |
 
-Field names are converted snake_case → camelCase throughout; datetimes become
-ISO-8601 strings inside JSONB and real `timestamptz` values in indexed columns.
+Field names are converted snake_case → camelCase throughout. The four chapter
+history tables store the chapter in **typed columns**, so datetimes land as real
+timestamps there; the transient `upload_tasks.chapter` payload keeps them as
+ISO-8601 strings inside JSONB. Any key a legacy document carries that has no
+column (`_id`, the GridFS `images` list, `archivedAt`) is parked in that table's
+nullable `extra` JSONB rather than dropped, so a migrated row stays traceable
+back to Mongo — see §3.1 of `target-architecture.md`. The importer reports any
+key it dropped from a *queue* payload at the end of the run.
 Images larger than 20 MiB are skipped with a warning (they are not real pages).
 
 > **Not migrated here:** `manga_id_map.json` and `override_options.json` never
@@ -541,13 +548,23 @@ duplicate chapters.
 did and load it into Mongo's `uploaded`/`uploaded_ids` collections:
 
 ```bash
-# 1. Everything the platform recorded as uploaded since cutover.
+# 1. Everything the platform recorded as uploaded since cutover. The chapter
+#    lives in typed columns now, so rebuild the legacy document shape from them.
 docker compose exec -T postgres psql -U publoader -d publoader -At -c "
-  SELECT json_agg(data) FROM uploaded_chapters
+  SELECT json_agg(jsonb_build_object(
+    'mdChapterId', md_chapter_id, 'extensionName', extension,
+    'chapterId', chapter_id, 'chapterUrl', chapter_url,
+    'chapterNumber', chapter_number, 'chapterTitle', chapter_title,
+    'chapterVolume', chapter_volume, 'chapterLanguage', chapter_language,
+    'chapterTimestamp', chapter_timestamp, 'chapterExpire', chapter_expire,
+    'chapterLookup', chapter_lookup, 'mangaId', manga_id,
+    'mangaName', manga_name, 'mangaUrl', manga_url,
+    'mdMangaId', md_manga_id, 'mdGroupId', md_group_id))
+  FROM uploaded_chapters
   WHERE created_at > TIMESTAMPTZ '2026-08-01 00:00:00+00';" > /tmp/post-cutover.json
 
-# 2. Load into Mongo. The `data` JSONB is camelCase; legacy expects snake_case,
-#    so convert on the way in. Sanity-check a few documents by hand first.
+# 2. Load into Mongo. The rebuilt document is camelCase; legacy expects
+#    snake_case, so convert on the way in. Sanity-check a few by hand first.
 mongoimport --uri="$MONGODB_URI" --collection=uploaded --jsonArray \
   --file=/tmp/post-cutover-snake.json --mode=upsert --upsertFields=md_chapter_id
 ```

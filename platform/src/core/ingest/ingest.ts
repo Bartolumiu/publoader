@@ -118,8 +118,19 @@ export class IngestService {
   }
 
   /**
-   * Enforce the manifest as policy on the DATA, using the core's copy of the
-   * manifest for the job's pinned bundle — a worker cannot vouch for itself.
+   * Enforce the manifest and the database as policy on the DATA.
+   *
+   * The rule this function exists to uphold: **every field the downstream
+   * pipeline trusts must be checked here**, because a worker is untrusted and
+   * this is the only gate between it and canonical state. That is easy to get
+   * subtly wrong — an earlier version validated three fields while the
+   * processor went on to consume a dozen, and the gap was exploitable: a
+   * worker holding one legitimate lease could name any MangaDex title in
+   * `mdMangaId`, send `allChapters: []`, and have the processor conclude that
+   * every chapter the group owns on that title had vanished upstream and queue
+   * it for deletion. So the checks below are deliberately exhaustive over the
+   * envelope, and anything the processor reads that is NOT checked here must
+   * instead be re-derived from the database (see processor.ts).
    */
   private async validatePolicy(envelope: ResultEnvelope, bundleSha256: string): Promise<string | null> {
     if (envelope.bundleSha256 !== bundleSha256) {
@@ -138,17 +149,66 @@ export class IngestService {
       return `mangadex group id ${envelope.mangadexGroupId} does not match manifest ${m.mangadex_group_id}`;
     }
 
-    const allowedLanguages = new Set([
-      ...m.languages,
-      ...Object.values((envelope.overrideOptions.custom_language ?? {}) as Record<string, string>),
-    ]);
+    // Languages come from the manifest ONLY. The worker also sends
+    // `overrideOptions.custom_language`, and unioning that in here would have
+    // let the envelope widen the very allowlist meant to constrain it.
+    const allowedLanguages = new Set(m.languages);
+    for (const language of envelope.extensionLanguages) {
+      if (!allowedLanguages.has(language)) {
+        return `extension language ${language} not declared by manifest`;
+      }
+    }
+
+    // The set of MangaDex titles this extension is allowed to speak about.
+    // Authoritative, from the database — the same map the worker was handed on
+    // lease, so an honest worker can only ever echo back ids that are in here.
+    const tracked = new Set(
+      (
+        await this.prisma.trackedManga.findMany({
+          where: { extension: m.name },
+          select: { mdMangaId: true },
+        })
+      ).map((row) => row.mdMangaId),
+    );
+
     const chapters = [...envelope.updatedChapters, ...(envelope.allChapters ?? [])];
     for (const chapter of chapters) {
       if (chapter.chapterUrl && !hostAllowed(chapter.chapterUrl, m.allowed_hosts)) {
         return `chapter url host not in manifest allowed_hosts: ${chapter.chapterUrl}`;
       }
+      if (chapter.mangaUrl && !hostAllowed(chapter.mangaUrl, m.allowed_hosts)) {
+        return `manga url host not in manifest allowed_hosts: ${chapter.mangaUrl}`;
+      }
       if (chapter.chapterLanguage && !allowedLanguages.has(chapter.chapterLanguage)) {
         return `chapter language ${chapter.chapterLanguage} not declared by manifest`;
+      }
+      // Grouping key for every downstream decision, including removal.
+      if (chapter.mdMangaId !== null && !tracked.has(chapter.mdMangaId)) {
+        return `chapter names untracked mangadex title ${chapter.mdMangaId}; this extension may only report titles in its tracked map`;
+      }
+      // A chapter claiming another extension's name would file its bookkeeping
+      // (and its uploads) under that extension.
+      if (chapter.extensionName !== null && chapter.extensionName !== m.name) {
+        return `chapter claims extension ${chapter.extensionName} but the job is ${m.name}`;
+      }
+    }
+
+    // Consumed by the processor as the candidate set for "tracked on MangaDex
+    // but gone upstream" sweeps, i.e. as a removal list.
+    for (const id of envelope.trackedMangadexIds) {
+      if (!tracked.has(id)) {
+        return `envelope claims tracking of untracked mangadex title ${id}`;
+      }
+    }
+
+    // Untracked-manga reports become MangaDex titles and Discord links, so
+    // their urls are attacker-controlled text if unchecked.
+    for (const manga of envelope.untrackedManga) {
+      if (!hostAllowed(manga.mangaUrl, m.allowed_hosts)) {
+        return `untracked manga url host not in manifest allowed_hosts: ${manga.mangaUrl}`;
+      }
+      if (!allowedLanguages.has(manga.mangaLanguage)) {
+        return `untracked manga language ${manga.mangaLanguage} not declared by manifest`;
       }
     }
     return null;

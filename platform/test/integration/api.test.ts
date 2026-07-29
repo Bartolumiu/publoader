@@ -276,9 +276,79 @@ describe.skipIf(!dbReady())("control-plane API", () => {
       },
     });
     expect(submit.json().outcome).toBe("quarantined");
+
+    // The envelope is quarantined and NO canonical state moves — that is the
+    // part that matters. The job goes back to PENDING rather than straight to
+    // DEAD_LETTER: a policy failure is produced by a worker, so a hostile or
+    // broken one could otherwise dead-letter every job it managed to lease.
+    // Retrying costs an attempt and is very likely leased elsewhere.
     const job = await prisma.job.findUniqueOrThrow({ where: { id: leased.job.jobId } });
-    expect(job.state).toBe("DEAD_LETTER");
+    expect(job.state).toBe("PENDING");
     expect(job.errorClass).toBe("POLICY");
+    expect(await prisma.uploadTask.count()).toBe(0);
+    expect(await prisma.resultSubmission.count({ where: { state: "QUARANTINED" } })).toBe(1);
+  });
+
+  it("a persistently policy-violating job still dead-letters once attempts run out", async () => {
+    const sha = await publishBundle();
+    const { token } = await enrollWorker();
+    const headers = { authorization: `Bearer ${token}` };
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/runs",
+      headers: admin,
+      payload: { extension: "mangaplus" },
+    });
+
+    const badEnvelope = (jobId: string, leaseId: string, attempt: number) => ({
+      envelopeVersion: 1,
+      jobId,
+      leaseId,
+      segmentKey: null,
+      extension: "mangaplus",
+      bundleSha256: sha,
+      idempotencyKey: `res:${jobId}:${attempt}`,
+      status: "ok",
+      error: null,
+      updatedChapters: [
+        {
+          chapterId: "666",
+          chapterNumber: "1",
+          chapterLanguage: "en",
+          chapterUrl: "https://evil.example.com/injected",
+          mangaId: "100001",
+          mdMangaId: "b3c7e5d1-0000-4000-8000-000000000001",
+        },
+      ],
+      allChapters: null,
+      untrackedManga: [],
+      trackedMangadexIds: [],
+      mangadexGroupId: manifest.mangadex_group_id,
+      overrideOptions: {},
+      extensionLanguages: ["en"],
+      stats: {},
+    });
+
+    // Lease → submit garbage → repeat. maxAttempts defaults to 3, so the third
+    // rejection is terminal. notBefore is cleared each round because the retry
+    // backoff is not what this test is about.
+    let state = "";
+    for (let round = 0; round < 4; round++) {
+      await prisma.job.updateMany({ data: { notBefore: new Date() } });
+      const lease = await app.inject({ method: "POST", url: "/api/v1/worker/lease", headers, payload: {} });
+      if (lease.statusCode !== 200) break;
+      const leased = lease.json();
+      const submit = await app.inject({
+        method: "POST",
+        url: `/api/v1/worker/jobs/${leased.job.jobId}/results`,
+        headers,
+        payload: badEnvelope(leased.job.jobId, leased.leaseId, leased.job.attempt),
+      });
+      expect(submit.json().outcome).toBe("quarantined");
+      state = (await prisma.job.findUniqueOrThrow({ where: { id: leased.job.jobId } })).state;
+      if (state === "DEAD_LETTER") break;
+    }
+    expect(state).toBe("DEAD_LETTER");
     expect(await prisma.uploadTask.count()).toBe(0);
   });
 

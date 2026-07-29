@@ -241,8 +241,19 @@ export class JobStore {
   }
 
   /**
-   * Report a failed attempt. TRANSIENT errors requeue with backoff until
-   * maxAttempts; PERMANENT/POLICY dead-letter immediately.
+   * Report a failed attempt.
+   *
+   * TRANSIENT and POLICY errors requeue with backoff until maxAttempts;
+   * PERMANENT dead-letters immediately.
+   *
+   * POLICY used to dead-letter on the first occurrence, on the reasoning that a
+   * rejected envelope would be rejected again. But the envelope is produced by a
+   * *worker*, and a hostile or broken one can fail policy on demand — so that
+   * reasoning handed any single worker the ability to dead-letter every job it
+   * could lease, and `advanceRuns` then killed those runs along with their
+   * healthy segments. Retrying costs one more attempt and, because the next
+   * attempt is very likely leased elsewhere, routes around the bad worker.
+   * A genuinely bad bundle still dead-letters — it just takes maxAttempts.
    */
   async fail(
     jobId: string,
@@ -254,7 +265,7 @@ export class JobStore {
     if (!job) return "rejected";
     const truncated = message.slice(0, 8000);
 
-    if (errorClass !== "TRANSIENT" || job.attempt >= job.maxAttempts) {
+    if (errorClass === "PERMANENT" || job.attempt >= job.maxAttempts) {
       const res = await this.prisma.job.updateMany({
         where: { id: jobId, leaseId, state: { in: ["LEASED", "RUNNING"] } },
         data: {
@@ -349,20 +360,41 @@ export class JobStore {
     return flagged.count === 1 ? "flagged" : "rejected";
   }
 
-  /** Operator replay of a dead-lettered job: back to PENDING with fresh budget. */
+  /**
+   * Operator replay of a dead-lettered job: back to PENDING with fresh budget.
+   *
+   * The parent run must be revived too. `advanceRuns` only ever moves a run out
+   * of PENDING/EXECUTING, so a run that already reached DEAD_LETTER is
+   * terminal: replaying its job alone made the job succeed and then sit there,
+   * with the run never advancing to INGESTING and the chapters never uploaded —
+   * while the API answered `{ok: true}` and the job disappeared from the
+   * dead-letter list. The retry looked like it worked and silently did nothing,
+   * which is worse than refusing. Both are reset in one transaction.
+   */
   async replayDeadLetter(jobId: string): Promise<boolean> {
-    const res = await this.prisma.job.updateMany({
-      where: { id: jobId, state: "DEAD_LETTER" },
-      data: {
-        state: "PENDING",
-        attempt: 0,
-        notBefore: new Date(),
-        errorClass: null,
-        lastError: null,
-        cancelRequested: false,
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const job = await tx.job.findUnique({ where: { id: jobId } });
+      if (!job || job.state !== "DEAD_LETTER") return false;
+
+      const res = await tx.job.updateMany({
+        where: { id: jobId, state: "DEAD_LETTER" },
+        data: {
+          state: "PENDING",
+          attempt: 0,
+          notBefore: new Date(),
+          errorClass: null,
+          lastError: null,
+          cancelRequested: false,
+        },
+      });
+      if (res.count !== 1) return false;
+
+      await tx.run.updateMany({
+        where: { id: job.runId, state: { in: ["DEAD_LETTER", "FAILED", "CANCELLED"] } },
+        data: { state: "EXECUTING", completedAt: null, error: null },
+      });
+      return true;
     });
-    return res.count === 1;
   }
 
   /**

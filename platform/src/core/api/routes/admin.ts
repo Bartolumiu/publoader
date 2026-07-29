@@ -267,7 +267,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     });
 
     // ---- removal mode ----
-    scope.get("/api/v1/admin/removal-mode", { preHandler: requireScope("settings:write") }, async () => ({
+    scope.get("/api/v1/admin/removal-mode", { preHandler: requireScope("settings:read") }, async () => ({
       mode: await ctx.settings.getRemovalMode(),
       validModes: VALID_REMOVAL_MODES,
     }));

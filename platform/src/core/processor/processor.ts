@@ -3,6 +3,7 @@ import type { Logger } from "../../logging.js";
 import { ResultEnvelope } from "../../contracts/envelope.js";
 import { OverrideOptions, type MangaRecord } from "../../contracts/records.js";
 import { Manifest } from "../../contracts/manifest.js";
+import { uploadedChapterColumns } from "../md/chapterRows.js";
 import { chapterFromRecord, type Chapter, type MdApi, type MdChapter } from "../md/types.js";
 import { ResultStore } from "../store/results.js";
 import { SettingsStore, type RemovalMode } from "../store/settings.js";
@@ -443,18 +444,13 @@ export class RunProcessor {
     for (const chapter of chapters) {
       if (!chapter.mdChapterId) continue;
 
-      const fields = {
-        extension,
-        chapterId: chapter.chapterId,
-        mdMangaId: chapter.mdMangaId,
-        chapterLanguage: chapter.chapterLanguage,
-        chapterNumber: chapter.chapterNumber,
-        chapter: chapter as unknown as Prisma.InputJsonValue,
-      };
+      // The run's extension is authoritative over whatever the envelope named,
+      // as it was before these fields became columns.
+      const columns = { ...uploadedChapterColumns(chapter), extension };
       await this.prisma.uploadedChapter.upsert({
         where: { mdChapterId: chapter.mdChapterId },
-        create: { mdChapterId: chapter.mdChapterId, ...fields },
-        update: fields,
+        create: { mdChapterId: chapter.mdChapterId, ...columns },
+        update: columns,
       });
 
       // uploaded_ids is insert-only: the FIRST MangaDex chapter an extension

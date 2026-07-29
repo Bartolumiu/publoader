@@ -3,6 +3,7 @@ import type { Config } from "../../config.js";
 import type { Logger } from "../../logging.js";
 import { metrics } from "../../metrics.js";
 import { generateChapterCard } from "./card.js";
+import { chapterFromJson, chapterToColumns, uploadedChapterColumns } from "./chapterRows.js";
 import type { MdChapterDetail, MdExtendedApi } from "./client.js";
 import type { DiscordEmbedInput, DiscordNotifier } from "./webhook.js";
 import type { Chapter } from "./types.js";
@@ -59,7 +60,7 @@ export class UploadTaskWorkers {
       dedupeKey: task.dedupeKey,
     });
     const raw = asRecord(task.chapter) ?? {};
-    const chapter = toChapter(raw);
+    const chapter = chapterFromJson(raw);
 
     switch (task.kind) {
       case "UPLOAD":
@@ -306,11 +307,11 @@ export class UploadTaskWorkers {
       new: payload,
     } as unknown as Prisma.InputJsonValue);
 
-    const snapshot = toJson({ ...chapter, mdChapterId });
+    const columns = chapterToColumns({ ...chapter, mdChapterId });
     await prisma.editedChapter.upsert({
       where: { mdChapterId },
-      create: { mdChapterId, chapter: snapshot, edits },
-      update: { chapter: snapshot, edits, lastEditedAt: new Date() },
+      create: { mdChapterId, ...columns, edits },
+      update: { ...columns, edits, lastEditedAt: new Date() },
     });
   }
 
@@ -335,9 +336,18 @@ export class UploadTaskWorkers {
       throw new TaskError(message);
     }
 
+    // Archive first, then drop the live row — deletion is irreversible, so the
+    // record of what was removed outlives it (legacy deleter.py appended to the
+    // `deleted` collection for exactly this reason).
+    const columns = chapterToColumns({ ...chapter, mdChapterId });
+    await this.deps.prisma.deletedChapter.upsert({
+      where: { mdChapterId },
+      create: { mdChapterId, ...columns },
+      update: { ...columns, deletedAt: new Date() },
+    });
     await this.deps.prisma.uploadedChapter.deleteMany({ where: { mdChapterId } });
     metrics.uploadsTotal.inc({ outcome: "delete_ok" });
-    log.info({ mdChapterId }, "chapter deleted from MangaDex");
+    log.info({ mdChapterId }, "chapter deleted from MangaDex and archived");
     this.queue("Delete", chapter, mdChapterId, true);
   }
 
@@ -480,15 +490,16 @@ export class UploadTaskWorkers {
     chapter: Chapter,
     detail: MdChapterDetail | null,
   ): Promise<void> {
-    const snapshot = toJson({
-      ...chapter,
-      mdChapterId,
-      ...(detail ? { mdAttributes: detail.attributes } : {}),
-    });
+    // The MangaDex attribute snapshot is an external API resource, not our
+    // shape, so it is one of the few things `extra` legitimately carries.
+    const columns = chapterToColumns(
+      { ...chapter, mdChapterId },
+      detail ? { mdAttributes: detail.attributes } : {},
+    );
     await this.deps.prisma.unavailableChapter.upsert({
       where: { mdChapterId },
-      create: { mdChapterId, chapter: snapshot },
-      update: { chapter: snapshot, unavailableAt: new Date() },
+      create: { mdChapterId, ...columns },
+      update: { ...columns, unavailableAt: new Date() },
     });
     await this.deps.prisma.uploadedChapter.deleteMany({ where: { mdChapterId } });
   }
@@ -497,27 +508,20 @@ export class UploadTaskWorkers {
 
   private async recordUploadedChapter(chapter: Chapter, mdChapterId: string): Promise<void> {
     const { prisma } = this.deps;
-    const extension = chapter.extensionName ?? "";
-    const snapshot = toJson({ ...chapter, mdChapterId });
-    const fields = {
-      extension,
-      chapterId: chapter.chapterId,
-      mdMangaId: chapter.mdMangaId,
-      chapterLanguage: chapter.chapterLanguage,
-      chapterNumber: chapter.chapterNumber,
-      chapter: snapshot,
-    };
+    const columns = uploadedChapterColumns({ ...chapter, mdChapterId });
 
     await prisma.uploadedChapter.upsert({
       where: { mdChapterId },
-      create: { mdChapterId, ...fields },
-      update: fields,
+      create: { mdChapterId, ...columns },
+      update: columns,
     });
 
-    if (extension && chapter.chapterId) {
+    if (columns.extension && chapter.chapterId) {
       await prisma.uploadedId.upsert({
-        where: { extension_chapterId: { extension, chapterId: chapter.chapterId } },
-        create: { extension, chapterId: chapter.chapterId, mdChapterId },
+        where: {
+          extension_chapterId: { extension: columns.extension, chapterId: chapter.chapterId },
+        },
+        create: { extension: columns.extension, chapterId: chapter.chapterId, mdChapterId },
         update: { mdChapterId },
       });
     }
@@ -583,41 +587,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function readString(source: Record<string, unknown>, key: string): string | null {
   const value = source[key];
   return typeof value === "string" && value !== "" ? value : null;
-}
-
-/**
- * Tolerant read of the task's chapter JSON. EDIT rows carry `payload`/`oldInfo`
- * alongside the chapter fields, so the strict ChapterRecord schema can't be used
- * here; unknown keys are simply ignored.
- */
-function toChapter(raw: Record<string, unknown>): Chapter {
-  const artifacts = raw.imageArtifacts;
-  return {
-    chapterLookup: readString(raw, "chapterLookup"),
-    chapterTimestamp: readString(raw, "chapterTimestamp"),
-    chapterExpire: readString(raw, "chapterExpire"),
-    chapterLanguage: readString(raw, "chapterLanguage"),
-    chapterNumber: readString(raw, "chapterNumber"),
-    chapterTitle: readString(raw, "chapterTitle"),
-    chapterVolume: readString(raw, "chapterVolume"),
-    chapterId: readString(raw, "chapterId"),
-    chapterUrl: readString(raw, "chapterUrl"),
-    mdChapterId: readString(raw, "mdChapterId"),
-    mangaId: readString(raw, "mangaId"),
-    mdMangaId: readString(raw, "mdMangaId"),
-    mdGroupId: readString(raw, "mdGroupId"),
-    mangaName: readString(raw, "mangaName"),
-    mangaUrl: readString(raw, "mangaUrl"),
-    extensionName: readString(raw, "extensionName"),
-    imageArtifacts: Array.isArray(artifacts)
-      ? artifacts.filter((id): id is string => typeof id === "string")
-      : [],
-  };
-}
-
-/** Chapters are JSON-safe by construction (strings, nulls and string arrays). */
-function toJson(value: Record<string, unknown>): Prisma.InputJsonObject {
-  return value as unknown as Prisma.InputJsonObject;
 }
 
 /**

@@ -34,8 +34,33 @@ export function buildServer(ctx: AppContext): FastifyInstance {
     loggerInstance: ctx.log.child({ component: "api" }),
     bodyLimit: 1024 * 1024,
     genReqId: () => randomUUID(),
-    trustProxy: true,
+    // Exactly ONE hop is trusted (the tunnel/reverse proxy in front). `true`
+    // would make req.ip the leftmost X-Forwarded-For entry, which is supplied by
+    // the client — defeating every IP-keyed rate limit (login, admin-token
+    // guessing, worker enrollment) and letting an attacker write arbitrary
+    // source addresses into the audit trail.
+    trustProxy: 1,
   }) as unknown as FastifyInstance;
+
+  // Many admin actions take no body (resume, drain, revoke, skip, retry…).
+  // Fastify's default JSON parser rejects an empty body outright when the
+  // client sets `content-type: application/json`, which most HTTP clients do
+  // by default — so a perfectly correct call would 400. Treat empty as {}.
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "string" },
+    (_req, body, done) => {
+      const text = typeof body === "string" ? body.trim() : "";
+      if (text.length === 0) return done(null, {});
+      try {
+        done(null, JSON.parse(text));
+      } catch (err) {
+        const failure = err as Error & { statusCode?: number };
+        failure.statusCode = 400;
+        done(failure, undefined);
+      }
+    },
+  );
 
   // Raw-binary parsing for artifact/bundle uploads only.
   for (const type of ["application/zip", "application/octet-stream", "image/png", "image/jpeg", "image/gif", "image/webp"]) {

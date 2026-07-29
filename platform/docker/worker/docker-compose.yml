@@ -29,7 +29,7 @@ services:
     # Built from this repo by default. Once images are published, set
     # PUBLOADER_WORKER_IMAGE to a digest-pinned tag in .env and remove nothing
     # else — worker hosts should not need a source checkout to run.
-    image: ${PUBLOADER_WORKER_IMAGE:-publoader/worker:local}
+    image: ${PUBLOADER_WORKER_IMAGE:-ardax/publoader-worker:2.0.0}
     build:
       context: ../..
       dockerfile: docker/worker/Dockerfile

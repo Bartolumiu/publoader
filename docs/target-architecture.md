@@ -94,15 +94,57 @@ Core tables (all with `createdAt`/`updatedAt`; ids UUID):
   `manifest` (validated JSONB), `sourceCommit`, `data` (bytea zip), `yanked`.
 - **UploadTask** — replaces Mongo `to_upload`/`to_edit`/`to_delete`/`to_unavailable`:
   `id`, `kind` (`UPLOAD|EDIT|DELETE|UNAVAILABLE`), `state`
-  (`PENDING|LEASED|DONE|FAILED|DEAD_LETTER`), `chapter` (JSONB canonical shape),
+  (`PENDING|LEASED|DONE|FAILED|DEAD_LETTER`), `chapter` (**JSONB** — see below),
   `dedupeKey` (**unique per kind**: upload = `chapterId+number+language`,
   others = `mdChapterId`), lease fields, attempts. Insert uses
   `ON CONFLICT DO NOTHING` — same effective semantics as today's
   `$setOnInsert` upserts.
-- **UploadedChapter** — canonical mirror of Mongo `uploaded`
-  (unique `mdChapterId`) and **UploadedId** — mirror of `uploaded_ids`
-  (unique `chapterId+extension`); **EditedChapter**, **UnavailableChapter**
-  mirrors for `edited`/`unavailable`.
+- **The four chapter tables** — **UploadedChapter** (canonical mirror of Mongo
+  `uploaded`, unique `mdChapterId`), **DeletedChapter**, **UnavailableChapter**
+  and **EditedChapter** (mirrors of `deleted`/`unavailable`/`edited`), plus
+  **UploadedId** — mirror of `uploaded_ids` (unique `chapterId+extension`).
+  All four carry the **same typed column set** for the canonical chapter shape:
+  `mdChapterId`, `extension`, `chapterId`, `chapterUrl`, `chapterNumber`,
+  `chapterTitle`, `chapterVolume`, `chapterLanguage`, `chapterTimestamp`,
+  `chapterExpire`, `chapterLookup` (timestamps), `mangaId`, `mangaName`,
+  `mangaUrl`, `mdMangaId`, `mdGroupId` — plus one nullable `extra` JSONB for
+  genuinely open-ended leftovers, and their own event stamp
+  (`updatedAt`/`deletedAt`/`unavailableAt`/`lastEditedAt`). `EditedChapter` also
+  keeps `edits` as JSONB: an append-only `{editedAt, old, new}` history of
+  variable length. The single `Chapter` ↔ columns mapping lives in
+  `platform/src/core/md/chapterRows.ts`, which is what stops the four tables
+  from drifting apart.
+
+### 3.1 Why typed columns, not JSONB
+
+These four tables originally stored the whole chapter as one opaque JSONB
+document with a handful of promoted columns beside it. The chapter shape is
+**fixed and known** — 16 fields, declared once in `src/core/md/types.ts` and
+mirrored on the wire by `ChapterRecord` in `src/contracts/records.ts` — so the
+document bought no flexibility and cost:
+
+- no type enforcement (a timestamp was whatever string a worker sent),
+- no useful indexes, and `chapter->>'x'` in any query that wanted a field,
+- silent field drift between the four tables, each written by different code,
+- larger rows: every row repeated all 16 key names.
+
+`extra` is deliberately narrow, and is for things that are *actually*
+open-ended: page-artifact ids, the MangaDex attribute snapshot the unavailable
+flow keeps at takedown time, and keys a legacy Mongo document carried that have
+no column (`_id`, the old GridFS `images` list, `archivedAt`). Unknown keys are
+parked there rather than dropped, so a migrated row stays traceable back to
+Mongo.
+
+`UploadTask.chapter` stays JSONB, and the asymmetry is intentional: it is a
+transient queue payload consumed once by one worker and never queried by field,
+and it is *not* the canonical shape — `EDIT` rows carry `payload`/`oldInfo` and
+`UNAVAILABLE` rows carry `unavailableAt` alongside the chapter fields, which
+columns would have to model as a union.
+
+The `normalise_chapter_storage` migration is hand-written for exactly this
+reason: `prisma migrate dev` generates drop-and-add, which would have discarded
+every chapter snapshot in the database. It adds the columns, copies the document
+into them, computes `extra` as the residue, and only then drops `chapter`.
 - **UploadLog** — append-only record of every MangaDex upload commit attempt
   (`dedupeKey`, `mdChapterId`, outcome) — closes today's crash window between
   "MD commit succeeded" and "queue row deleted".
@@ -247,7 +289,31 @@ idempotency keys (creation), lease CAS (execution), commit markers (ingestion),
 `dedupeKey` unique constraints (task queueing), `UploadLog` + MD-side dedup
 (upload).
 
-## 8. Worker trust & security model
+## 8. Credential model, trust & security
+
+### 8.0 Credentials and blast radius
+
+Four credential kinds, each scoped to the smallest useful area, so an exposure
+is contained rather than total:
+
+| Credential | Carrier | Authority | If exposed |
+|---|---|---|---|
+| `ADMIN_TOKEN` (env) | operator vault only — never in a client | wildcard `*`, owner-equivalent; the way back in when the accounts table is the problem | total: rotate immediately (it is the one credential worth alarming on) |
+| `pa_…` API token (`api_tokens`) | one per machine client (bot, CI publisher, monitoring) | exactly its stored scopes; **never** owner, so it can neither mint tokens nor manage accounts | confined to that client's area; revoke the row, mint a replacement |
+| Dashboard session (`admin_sessions`) | HttpOnly SameSite=Strict cookie | scopes from role: OWNER `*`, ADMIN everything except `users:admin` | one operator's browser; revoke that session row (others keep working) |
+| `pw_…` worker token (`workers`) | one per worker host | worker-audience routes only: lease/renew/submit for its own leases | one worker: revoke it; it can never reach admin routes or the database |
+
+Scope taxonomy is `<area>:read` / `<area>:write` over runs, workers, enroll,
+extensions, bundles, untracked, settings, users, audit, stats; `write` implies
+`read` in the same area and nothing else. Every admin route declares its
+required scope, and a 403 names the missing scope so operators fix
+under-granting rather than reaching for the wildcard. Minting credentials and
+managing accounts require the **owner role**, which no API token holds — that
+is what removes the self-escalation path a wildcard token would otherwise have.
+Audit actors are kind-prefixed (`user:`, `token:`, `worker:`, `ip:`), and a
+token acting for a human records both (`token:discord-bot for discord:alice`).
+
+### 8.1 Worker trust
 
 - **Enrollment**: operator mints a single-use, expiring enroll token (CLI /
   admin API). The worker exchanges it once for `{workerId, workerToken}`; only

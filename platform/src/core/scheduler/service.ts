@@ -42,7 +42,17 @@ export class SchedulerService {
     if (await this.settings.isPaused()) {
       this.log.debug("scheduler paused; skipping slot creation");
     } else {
-      await this.createDueRuns(now);
+      // Isolated deliberately. Slot creation touches bundles, manifests and
+      // settings, so it has plenty of ways to throw; letting it abort the tick
+      // also skipped the lease sweeper and run advancement below, which is how
+      // a single bad manifest could quietly stop the whole queue — visible only
+      // as one log line every 30 seconds. Recovery work must not depend on
+      // scheduling work succeeding.
+      try {
+        await this.createDueRuns(now);
+      } catch (err) {
+        this.log.error({ err }, "creating due runs failed; continuing with sweep and advance");
+      }
     }
 
     const { requeued, deadLettered } = await this.jobs.sweepExpiredLeases();

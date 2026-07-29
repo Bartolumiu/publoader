@@ -860,11 +860,26 @@ tokens
   .requiredOption("--scopes <list>", "comma-separated scopes, or a preset name from `tokens scopes`")
   .option("--ttl-days <n>", "expire after N days (omit for no expiry)")
   .action(async (opts: { name: string; scopes: string; ttlDays?: string }) => {
-    const scopes = opts.scopes
+    // A preset NAME is accepted as well as a scope list, because that is what
+    // the help promises and because the presets are the least-privilege path we
+    // want people on. Resolve it here rather than posting the name, which the
+    // server would reject as an unknown scope.
+    const requested = opts.scopes
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
-    if (scopes.length === 0) fail("--scopes must list at least one scope");
+    if (requested.length === 0) fail("--scopes must list at least one scope");
+
+    const { presets } = (await api("/api/v1/admin/tokens/scopes")) as {
+      presets: Record<string, string[]>;
+    };
+    const scopes = [
+      ...new Set(requested.flatMap((entry) => presets[entry] ?? [entry])),
+    ];
+    const expanded = requested.filter((entry) => presets[entry]);
+    if (expanded.length > 0) {
+      console.log(`expanded preset(s) ${expanded.join(", ")} -> ${scopes.join(", ")}`);
+    }
     const json: Record<string, unknown> = { name: opts.name, scopes };
     if (opts.ttlDays !== undefined) {
       const days = Number(opts.ttlDays);

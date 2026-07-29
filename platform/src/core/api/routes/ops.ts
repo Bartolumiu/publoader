@@ -226,7 +226,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
      * The tokens themselves are never returned — only whether they exist and
      * when the access token stops being usable.
      */
-    scope.get("/api/v1/admin/mangadex/auth", { preHandler: requireScope("settings:write") }, async () => {
+    scope.get("/api/v1/admin/mangadex/auth", { preHandler: requireScope("settings:read") }, async () => {
       const [access, refresh] = await Promise.all([
         ctx.settings.getSetting(MD_ACCESS_KEY),
         ctx.settings.getSetting(MD_REFRESH_KEY),

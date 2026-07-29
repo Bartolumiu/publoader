@@ -5,6 +5,12 @@
 
 generator client {
   provider = "prisma-client-js"
+  // Pinned explicitly rather than left to build-host detection. The runtime
+  // images are Debian with OpenSSL 3, but `prisma generate` guesses from the
+  // BUILD stage — and when that stage had no openssl it guessed 1.1.x, so the
+  // engine silently failed to load at runtime. Listing both architectures also
+  // means one image build works on arm64 and amd64 hosts.
+  binaryTargets = ["native", "linux-arm64-openssl-3.0.x", "debian-openssl-3.0.x"]
 }
 
 datasource db {
@@ -222,9 +228,17 @@ model Bundle {
 }
 
 model UploadTask {
-  id             String          @id @default(uuid())
-  kind           UploadTaskKind
-  dedupeKey      String          @map("dedupe_key")
+  id        String         @id @default(uuid())
+  kind      UploadTaskKind
+  dedupeKey String         @map("dedupe_key")
+  /**
+   * Stays JSONB while the four chapter tables use typed columns, and the
+   * asymmetry is deliberate: this is a transient queue payload consumed once by
+   * one worker, never queried by field. It is also NOT the canonical chapter
+   * shape — EDIT rows carry `payload`/`oldInfo` and UNAVAILABLE rows carry
+   * `unavailableAt` alongside the chapter, which columns would have to model as
+   * a union. The row is deleted-by-state as soon as it is done.
+   */
   chapter        Json
   state          UploadTaskState @default(PENDING)
   attempt        Int             @default(0)
@@ -241,17 +255,35 @@ model UploadTask {
   @@map("upload_tasks")
 }
 
+/// The canonical record of what each extension has on MangaDex — the mirror of
+/// Mongo `uploaded`. The chapter shape is fixed and known, so it lives in typed
+/// columns rather than a JSONB document; see src/core/md/chapterRows.ts for the
+/// single Chapter <-> columns mapping all four chapter tables share.
 model UploadedChapter {
-  id              String   @id @default(uuid())
-  mdChapterId     String   @unique @map("md_chapter_id")
-  extension       String
-  chapterId       String?  @map("chapter_id")
-  mdMangaId       String?  @map("md_manga_id")
-  chapterLanguage String?  @map("chapter_language")
-  chapterNumber   String?  @map("chapter_number")
-  chapter         Json
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  id               String    @id @default(uuid())
+  mdChapterId      String    @unique @map("md_chapter_id")
+  /// Mirrors Chapter.extensionName. NOT NULL here because every lookup of this
+  /// table filters on it; "" stands in for an unattributed chapter.
+  extension        String
+  chapterId        String?   @map("chapter_id")
+  chapterUrl       String?   @map("chapter_url")
+  chapterNumber    String?   @map("chapter_number")
+  chapterTitle     String?   @map("chapter_title")
+  chapterVolume    String?   @map("chapter_volume")
+  chapterLanguage  String?   @map("chapter_language")
+  chapterTimestamp DateTime? @map("chapter_timestamp")
+  chapterExpire    DateTime? @map("chapter_expire")
+  chapterLookup    DateTime? @map("chapter_lookup")
+  mangaId          String?   @map("manga_id")
+  mangaName        String?   @map("manga_name")
+  mangaUrl         String?   @map("manga_url")
+  mdMangaId        String?   @map("md_manga_id")
+  mdGroupId        String?   @map("md_group_id")
+  /// Open-ended leftovers only: page-artifact ids, and any key a legacy Mongo
+  /// document carried that has no column (`_id`, `images`, …). NULL when empty.
+  extra            Json?
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
 
   @@index([extension])
   @@index([extension, chapterId])
@@ -270,23 +302,87 @@ model UploadedId {
 }
 
 model EditedChapter {
-  id           String   @id @default(uuid())
-  mdChapterId  String   @unique @map("md_chapter_id")
-  chapter      Json
-  edits        Json     @default("[]")
-  lastEditedAt DateTime @default(now()) @map("last_edited_at")
-  createdAt    DateTime @default(now()) @map("created_at")
+  id               String    @id @default(uuid())
+  mdChapterId      String    @unique @map("md_chapter_id")
+  extension        String?
+  chapterId        String?   @map("chapter_id")
+  chapterUrl       String?   @map("chapter_url")
+  chapterNumber    String?   @map("chapter_number")
+  chapterTitle     String?   @map("chapter_title")
+  chapterVolume    String?   @map("chapter_volume")
+  chapterLanguage  String?   @map("chapter_language")
+  chapterTimestamp DateTime? @map("chapter_timestamp")
+  chapterExpire    DateTime? @map("chapter_expire")
+  chapterLookup    DateTime? @map("chapter_lookup")
+  mangaId          String?   @map("manga_id")
+  mangaName        String?   @map("manga_name")
+  mangaUrl         String?   @map("manga_url")
+  mdMangaId        String?   @map("md_manga_id")
+  mdGroupId        String?   @map("md_group_id")
+  extra            Json?
+  /// Stays JSONB: an append-only {editedAt, old, new} history of genuinely
+  /// variable length and shape. Columns cannot model it and nothing queries
+  /// into it.
+  edits            Json      @default("[]")
+  lastEditedAt     DateTime  @default(now()) @map("last_edited_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
 
   @@map("edited_chapters")
 }
 
 model UnavailableChapter {
-  id            String   @id @default(uuid())
-  mdChapterId   String   @unique @map("md_chapter_id")
-  chapter       Json
-  unavailableAt DateTime @default(now()) @map("unavailable_at")
+  id               String    @id @default(uuid())
+  mdChapterId      String    @unique @map("md_chapter_id")
+  extension        String?
+  chapterId        String?   @map("chapter_id")
+  chapterUrl       String?   @map("chapter_url")
+  chapterNumber    String?   @map("chapter_number")
+  chapterTitle     String?   @map("chapter_title")
+  chapterVolume    String?   @map("chapter_volume")
+  chapterLanguage  String?   @map("chapter_language")
+  chapterTimestamp DateTime? @map("chapter_timestamp")
+  chapterExpire    DateTime? @map("chapter_expire")
+  chapterLookup    DateTime? @map("chapter_lookup")
+  mangaId          String?   @map("manga_id")
+  mangaName        String?   @map("manga_name")
+  mangaUrl         String?   @map("manga_url")
+  mdMangaId        String?   @map("md_manga_id")
+  mdGroupId        String?   @map("md_group_id")
+  /// Also holds the `mdAttributes` snapshot of the chapter as MangaDex had it
+  /// at takedown time — an external API resource, not our shape.
+  extra            Json?
+  unavailableAt    DateTime  @default(now()) @map("unavailable_at")
 
   @@map("unavailable_chapters")
+}
+
+// Archive of chapters hard-deleted from MangaDex, mirroring the legacy
+// `deleted` collection that workers/deleter.py appended to. Deletion is the
+// one irreversible action the platform takes, so the record of what was
+// removed (and when) is kept rather than dropped.
+model DeletedChapter {
+  id               String    @id @default(uuid())
+  mdChapterId      String    @unique @map("md_chapter_id")
+  extension        String?
+  chapterId        String?   @map("chapter_id")
+  chapterUrl       String?   @map("chapter_url")
+  chapterNumber    String?   @map("chapter_number")
+  chapterTitle     String?   @map("chapter_title")
+  chapterVolume    String?   @map("chapter_volume")
+  chapterLanguage  String?   @map("chapter_language")
+  chapterTimestamp DateTime? @map("chapter_timestamp")
+  chapterExpire    DateTime? @map("chapter_expire")
+  chapterLookup    DateTime? @map("chapter_lookup")
+  mangaId          String?   @map("manga_id")
+  mangaName        String?   @map("manga_name")
+  mangaUrl         String?   @map("manga_url")
+  mdMangaId        String?   @map("md_manga_id")
+  mdGroupId        String?   @map("md_group_id")
+  extra            Json?
+  deletedAt        DateTime  @default(now()) @map("deleted_at")
+
+  @@index([extension])
+  @@map("deleted_chapters")
 }
 
 model UploadLog {

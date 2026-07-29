@@ -90,7 +90,7 @@ x-core-build: &core-build
   # referencing the same `image:` tag everywhere means all four are guaranteed
   # to run the identical build — a mixed-version control plane is a class of
   # bug that is very hard to see.
-  image: ${PUBLOADER_CORE_IMAGE:-publoader/core:local}
+  image: ${PUBLOADER_CORE_IMAGE:-ardax/publoader-core:2.0.0}
   build:
     context: ../..
     dockerfile: docker/core/Dockerfile
@@ -162,7 +162,7 @@ services:
       context: ../..
       dockerfile: docker/core/Dockerfile
       target: migrate
-    image: ${PUBLOADER_MIGRATE_IMAGE:-publoader/core-migrate:local}
+    image: ${PUBLOADER_MIGRATE_IMAGE:-ardax/publoader-core-migrate:2.0.0}
     restart: "no"
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://publoader:${POSTGRES_PASSWORD}@postgres:5432/publoader?schema=public&connection_limit=5}
@@ -321,6 +321,9 @@ services:
   # bypasses the WAF and rate limits that protect the admin API; the default
   # keeps one enforcement path for every client.
   publoader-bot:
+    # Optional: started only with `--profile bot` (the switcher's
+    # `./scripts/publoader <env> up -d --profile bot`). Without it the core runs Discord-free.
+    profiles: ["bot"]
     <<: [*app-security, *core-build, *public-dns]
     depends_on:
       core-api:
@@ -328,11 +331,11 @@ services:
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # The bot token from the Discord Developer Portal (Bot → Reset Token).
-      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:?set DISCORD_BOT_TOKEN in .env}
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
       CORE_URL: ${CORE_URL:-https://publoader.ardax.dev}
       # A SCOPED `pa_…` token minted for this client alone — NOT ADMIN_TOKEN.
       # See docs/bot.md; mint with `publoader-admin tokens create`.
-      BOT_API_TOKEN: ${BOT_API_TOKEN:?set BOT_API_TOKEN in .env (a scoped pa_ token, never ADMIN_TOKEN)}
+      BOT_API_TOKEN: ${BOT_API_TOKEN:-}
       # Discord-side gating. With DISCORD_ADMIN_USERS or DISCORD_ALLOWED_CHANNELS
       # unset the bot refuses every state-changing command — it fails closed,
       # unlike the legacy bot which allowed everyone when unconfigured.
@@ -376,6 +379,9 @@ services:
   # It reaches core-api over `edge` and has NO route to postgres — it is
   # internet-facing software and gets nothing but the one hop it needs.
   cloudflared:
+    # Optional: started only with `--profile tunnel` (the switcher's
+    # `./scripts/publoader <env> up -d --profile tunnel`). Without it nothing is published publicly.
+    profiles: ["tunnel"]
     # Intentionally tracking latest: the tunnel client is the internet-facing
     # component, Cloudflare deprecates old clients, and it holds no state worth
     # pinning. Pin to a dated tag if you want change control here.
@@ -385,7 +391,7 @@ services:
     environment:
       # Created in the Zero Trust dashboard. This token IS the tunnel's
       # identity: anyone holding it can serve traffic on the hostname.
-      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
       TUNNEL_METRICS: 0.0.0.0:2000
     depends_on:
       core-api:

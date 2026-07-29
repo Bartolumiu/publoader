@@ -1,0 +1,40 @@
+# Staging-only overlay, applied automatically by `./scripts/publoader staging …`.
+#
+# It adds the MangaDex mock and points the two services that talk to MangaDex at
+# it. Keeping this in an overlay rather than in the base file means production
+# cannot accidentally inherit a mock, and staging cannot accidentally inherit the
+# real API just because someone edited the wrong service block.
+services:
+  # The same mock the dev stack and the e2e suite use, so staging behaves the way
+  # tests do. It records every write; GET /_test/uploads is the assertion surface.
+  mock-md:
+    build:
+      context: ../dev/mock-md
+    image: publoader/mock-md:staging
+    restart: unless-stopped
+    expose:
+      - "8200"
+    networks:
+      - edge
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+
+  # Publish the API on loopback so a browser on the host can reach the staging
+  # dashboard without a tunnel. Production publishes nothing.
+  core-api:
+    ports:
+      - "127.0.0.1:8100:8100"
+
+  core-processor:
+    depends_on:
+      mock-md:
+        condition: service_started
+
+  core-uploader:
+    depends_on:
+      mock-md:
+        condition: service_started

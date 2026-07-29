@@ -493,6 +493,166 @@ submission — the job is retried and re-run rather than the envelope being
 
 ---
 
+## Triage a stuck upload task
+
+Upload tasks are the MangaDex-facing half of the pipeline: one row per chapter
+to upload, edit, delete, or mark unavailable. A chapter that scraped fine but
+never appeared on MangaDex is stuck here, not in a job.
+
+```bash
+padmin queues list                                  # depths + rows
+padmin queues list --state DEAD_LETTER               # the ones that gave up
+padmin queues list --kind DELETE --state PENDING
+```
+
+Read the state first:
+
+| State | Meaning | What to do |
+|---|---|---|
+| `PENDING` | Waiting for an uploader to claim it. `NOT BEFORE` in the future means it is backing off after a failure. | Nothing, unless `NOT BEFORE` is long past and nothing moves — then `core-uploader` is not running. |
+| `LEASED` | An uploader is working on it right now. | Nothing. Look at `core-uploader`'s logs if it never leaves this state. |
+| `FAILED` / `DEAD_LETTER` | Retries exhausted, or a permanent MangaDex rejection. `ERROR` says which. | Fix the cause, then `padmin queues retry <id>`. |
+| `DONE` | Finished — or cancelled. A cancelled row says so in `ERROR`. | Nothing. |
+
+**Retry** once the cause is fixed. This clears the attempt counter, so the task
+gets a full budget rather than dead-lettering on the first hiccup:
+
+```bash
+padmin queues retry <taskId>
+```
+
+**Cancel** when the task should never run. There is no `CANCELLED` state, so the
+row is marked `DONE` with an operator note in `lastError` — a bare `DONE` would
+be indistinguishable from a chapter that actually uploaded:
+
+```bash
+padmin queues cancel <taskId>
+```
+
+Cancel refuses (409) on a `LEASED` row. An uploader owns that task; forcing it
+`DONE` would race that process into either a duplicate upload or a lost result.
+
+**Nothing is draining at all.** The usual cause is an uploader that died holding
+leases. Leases expire on their own, but you can reclaim them now:
+
+```bash
+padmin queues requeue-stale       # only touches leases already past expiry
+docker compose ps core-uploader
+docker compose logs --tail 100 core-uploader
+```
+
+If tasks are `PENDING` with `NOT BEFORE` in the past and `requeue-stale`
+reclaims nothing, the queue is fine and the consumer is not: check the pause
+gate (`padmin stats`) before anything else.
+
+**Everything that failed, in one list.** Dead-lettered jobs, failed upload
+tasks, and quarantined submissions merged and time-ordered — the fastest way to
+see whether a bad hour was one cause or three:
+
+```bash
+padmin errors --limit 100
+```
+
+This is deliberately *not* a log endpoint. **Container logs stay on the host**:
+work executes in containers (and on remote worker hosts) that the core cannot
+read, so `docker compose logs -f core-uploader` remains the way to read them.
+`padmin errors` reports platform state; `docker logs` reports processes. The
+same split holds in the dashboard: Errors shows the feed, and nothing in the UI
+tails a log file.
+
+---
+
+## Clear a bad MangaDex session
+
+The MangaDex token pair lives in the `settings` table (`mdauth_access` /
+`mdauth_refresh`) so a restarted or replaced container resumes the same session.
+The failure mode that creates is a *persistently* bad session: a refresh token
+MangaDex no longer honours survives a restart, and every upload keeps failing to
+authenticate.
+
+Check first — this never prints the tokens themselves:
+
+```bash
+padmin mangadex auth
+# accessToken   saved
+# refreshToken  saved
+# expiresAt     2026-07-29T22:41:03.000Z
+# expired       true
+# expiresIn     -12m
+```
+
+`expired true`, or repeated auth failures in `core-uploader`'s logs, means the
+saved pair is the problem:
+
+```bash
+padmin mangadex clear-auth
+```
+
+The next MangaDex call authenticates from `MANGADEX_USERNAME` /
+`MANGADEX_PASSWORD` / `MANGADEX_CLIENT_*` and writes a fresh pair. In-flight
+uploads may fail once and retry. The action is audit-logged.
+
+What this does **not** do:
+
+- It does not revoke anything MangaDex-side. If the credential itself leaked,
+  that is a rotation — see "MangaDex credentials" above, and revoke the client
+  in MangaDex first.
+- It does not change the configured credentials. If those are wrong, clearing
+  the session just makes the failure louder.
+
+`expiresAt unknown` is not a fault: the expiry is read from the access token's
+`exp` claim without verifying it, and a token shape we cannot parse is reported
+as unknown rather than assumed dead. Do not clear a session on that alone.
+
+---
+
+## Issue, rotate, and revoke a client token
+
+Machine clients (the Discord bot, CI, a monitoring probe) authenticate with a
+scoped `pa_…` token carrying only the scopes that client needs, so a leaked
+credential is confined to its area. `ADMIN_TOKEN` is break-glass only and should
+not be a client's day-to-day credential.
+
+**Issue.** Start from a preset — the easy path should also be the
+least-privilege one:
+
+```bash
+padmin tokens scopes                       # taxonomy + recommended sets
+padmin tokens create --name discord-bot \
+  --scopes runs:write,workers:read,extensions:read,untracked:write,stats:read,audit:read
+padmin tokens create --name ci-publisher --scopes bundles:write --ttl-days 90
+```
+
+The secret is printed once and is unrecoverable — the database stores only its
+sha256. Hand it over through a private channel.
+
+**Rotate.** There is no reveal endpoint, so rotation is mint-then-revoke, which
+also gives you an overlap window the `ADMIN_TOKEN` rotation does not have:
+
+```bash
+padmin tokens create --name discord-bot-2026-07 --scopes <same scopes>
+# update the client's config, restart it, confirm it works
+padmin tokens list                         # LAST USED confirms the new one is live
+padmin tokens revoke <oldTokenId>
+```
+
+**Revoke.** Immediate and irreversible:
+
+```bash
+padmin tokens revoke <tokenId>
+```
+
+Revoke on any suspicion. `LAST USED` (throttled to one write per token per
+minute, so treat it as approximate) is how you tell a dead credential from one
+still in use before pulling it.
+
+All of this is also in the dashboard's **Tokens** view, which is OWNER-only:
+minting a token can grant any scope, so it is privilege escalation and stays a
+human, owner-level action. No `pa_…` token — not even one scoped `*` — can mint
+another token or touch accounts.
+
+---
+
 ## Untracked series triage
 
 When an extension reports a series that has no `tracked_manga` mapping, the

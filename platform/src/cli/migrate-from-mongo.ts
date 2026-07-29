@@ -25,6 +25,13 @@
 import { randomUUID, createHash } from "node:crypto";
 import { GridFSBucket, MongoClient, ObjectId, type Db, type Document } from "mongodb";
 import { Prisma, PrismaClient } from "@prisma/client";
+import {
+  CHAPTER_JSON_KEYS,
+  chapterFromJson,
+  chapterToColumns,
+  residualJsonKeys,
+  type ChapterColumns,
+} from "../core/md/chapterRows.js";
 import { uploadDedupeKey } from "../core/store/uploadTasks.js";
 
 const BATCH = 500;
@@ -88,7 +95,15 @@ function toJson(value: unknown): unknown {
 }
 
 function asRecord(doc: Document): Record<string, unknown> {
-  return toJson(doc) as Record<string, unknown>;
+  const record = toJson(doc) as Record<string, unknown>;
+  // Live `uploaded` docs carry pydantic's private bookkeeping flag. It is not
+  // chapter data and nothing reads it, so it does not travel to Postgres.
+  // `_PydanticInitialised__` is what camel() makes of the real Mongo key
+  // `__pydantic_initialised__`, and is the spelling that actually shows up.
+  delete record["_PydanticInitialised__"];
+  delete record["__pydanticInitialised__"];
+  delete record["__pydantic_initialised__"];
+  return record;
 }
 
 function str(value: unknown): string | null {
@@ -106,27 +121,25 @@ function date(value: unknown): Date | null {
   return null;
 }
 
-/** The exact key set of ChapterRecord (contracts/records.ts), plus imageArtifacts. */
-const CHAPTER_KEYS = [
-  "chapterLookup",
-  "chapterTimestamp",
-  "chapterExpire",
-  "chapterLanguage",
-  "chapterNumber",
-  "chapterTitle",
-  "chapterVolume",
-  "chapterId",
-  "chapterUrl",
-  "mdChapterId",
-  "mangaId",
-  "mdMangaId",
-  "mdGroupId",
-  "mangaName",
-  "mangaUrl",
-  "extensionName",
-] as const;
-
 const droppedKeys = new Map<string, number>();
+
+/**
+ * A legacy history document mapped onto the typed chapter columns the four
+ * chapter tables now use. Nothing is dropped: every key without a column is
+ * parked in `extra` (`_id` so a row stays traceable back to Mongo, the legacy
+ * `images` GridFS ids, `archivedAt`, …).
+ *
+ * `ownColumns` names camelCased keys that have their own dedicated column on
+ * the target table — `edits` and `lastEditedAt` on edited_chapters,
+ * `unavailableAt` on unavailable_chapters — so they are not duplicated into
+ * `extra` alongside it.
+ */
+function chapterColumnsFromDoc(doc: Document, ownColumns: string[] = []): ChapterColumns {
+  const full = asRecord(doc);
+  const residue = residualJsonKeys(full);
+  for (const key of ownColumns) delete residue[key];
+  return chapterToColumns(chapterFromJson(full), residue);
+}
 
 /**
  * Project a legacy queue document down to the strict ChapterRecord shape the
@@ -136,11 +149,11 @@ const droppedKeys = new Map<string, number>();
 function toChapterRecord(doc: Document, imageArtifacts: string[]): Record<string, unknown> {
   const full = asRecord(doc);
   const out: Record<string, unknown> = {};
-  for (const key of CHAPTER_KEYS) out[key] = full[key] ?? null;
+  for (const key of CHAPTER_JSON_KEYS) out[key] = full[key] ?? null;
   out["imageArtifacts"] = imageArtifacts;
   for (const key of Object.keys(full)) {
     if (key === "_id" || key === "images") continue;
-    if (!(CHAPTER_KEYS as readonly string[]).includes(key)) {
+    if (!(CHAPTER_JSON_KEYS as readonly string[]).includes(key)) {
       droppedKeys.set(key, (droppedKeys.get(key) ?? 0) + 1);
     }
   }
@@ -152,6 +165,15 @@ function toChapterRecord(doc: Document, imageArtifacts: string[]): Record<string
 type Counts = { source: number; inserted: number; skipped: number; target: number };
 
 async function* batches(db: Db, collection: string): AsyncGenerator<Document[]> {
+  // A collection the source deployment never created is not an error: the live
+  // database has no `edited` collection because no chapter has been edited yet.
+  // Treat absent as empty so a migration is not blocked by a feature the source
+  // never exercised.
+  const present = await db.listCollections({ name: collection }).hasNext();
+  if (!present) {
+    log(`${collection}: not present in source database, skipping`);
+    return;
+  }
   const cursor = db.collection(collection).find({}, { batchSize: BATCH });
   let buffer: Document[] = [];
   for await (const doc of cursor) {
@@ -168,19 +190,20 @@ async function migrateUploaded(db: Db, prisma: PrismaClient): Promise<Counts> {
   const counts: Counts = { source: 0, inserted: 0, skipped: 0, target: 0 };
   for await (const docs of batches(db, "uploaded")) {
     counts.source += docs.length;
-    const rows = docs
+    const rows: Prisma.UploadedChapterCreateManyInput[] = docs
       .filter((d) => str(d["md_chapter_id"]) !== null)
-      .map((d) => ({
-        id: randomUUID(),
-        mdChapterId: str(d["md_chapter_id"]) as string,
-        extension: str(d["extension_name"]) ?? "unknown",
-        chapterId: str(d["chapter_id"]),
-        mdMangaId: str(d["md_manga_id"]),
-        chapterLanguage: str(d["chapter_language"]),
-        chapterNumber: str(d["chapter_number"]),
-        chapter: asRecord(d) as Prisma.InputJsonValue,
-        createdAt: date(d["chapter_lookup"]) ?? new Date(),
-      }));
+      .map((d) => {
+        const columns = chapterColumnsFromDoc(d);
+        return {
+          id: randomUUID(),
+          mdChapterId: str(d["md_chapter_id"]) as string,
+          ...columns,
+          // uploaded_chapters.extension is NOT NULL, and "unknown" is the
+          // long-standing stand-in for a legacy doc that never named one.
+          extension: columns.extension ?? "unknown",
+          createdAt: date(d["chapter_lookup"]) ?? new Date(),
+        };
+      });
     counts.skipped += docs.length - rows.length;
     if (DRY_RUN) {
       counts.inserted += rows.length;
@@ -191,17 +214,10 @@ async function migrateUploaded(db: Db, prisma: PrismaClient): Promise<Counts> {
       counts.skipped += rows.length - res.count;
       if (REFRESH && res.count < rows.length) {
         for (const row of rows) {
-          await prisma.uploadedChapter.updateMany({
-            where: { mdChapterId: row.mdChapterId },
-            data: {
-              extension: row.extension,
-              chapterId: row.chapterId,
-              mdMangaId: row.mdMangaId,
-              chapterLanguage: row.chapterLanguage,
-              chapterNumber: row.chapterNumber,
-              chapter: row.chapter,
-            },
-          });
+          // Everything but the identity and the insert-only timestamp, so the
+          // refresh cannot drift from the insert as the column set grows.
+          const { id: _id, mdChapterId, createdAt: _createdAt, ...columns } = row;
+          await prisma.uploadedChapter.updateMany({ where: { mdChapterId }, data: columns });
         }
       }
     }
@@ -213,9 +229,11 @@ async function migrateUploaded(db: Db, prisma: PrismaClient): Promise<Counts> {
 
 async function migrateUploadedIds(db: Db, prisma: PrismaClient): Promise<Counts> {
   const counts: Counts = { source: 0, inserted: 0, skipped: 0, target: 0 };
+  // Run-scoped so duplicates spanning batch boundaries are counted honestly
+  // (see the note in migrateUnavailable).
+  const seen = new Set<string>();
   for await (const docs of batches(db, "uploaded_ids")) {
     counts.source += docs.length;
-    const seen = new Set<string>();
     const rows: Prisma.UploadedIdCreateManyInput[] = [];
     for (const d of docs) {
       const chapterId = str(d["chapter_id"]);
@@ -261,10 +279,9 @@ async function migrateEdited(db: Db, prisma: PrismaClient): Promise<Counts> {
         counts.skipped += 1;
         continue;
       }
-      const full = asRecord(d);
       // The edits array is the audit history — never collapsed or truncated.
       const edits = (toJson(d["edits"]) ?? []) as Prisma.InputJsonValue;
-      delete full["edits"];
+      const columns = chapterColumnsFromDoc(d, ["edits", "lastEditedAt"]);
       if (DRY_RUN) {
         counts.inserted += 1;
         continue;
@@ -274,7 +291,7 @@ async function migrateEdited(db: Db, prisma: PrismaClient): Promise<Counts> {
           {
             id: randomUUID(),
             mdChapterId,
-            chapter: full as Prisma.InputJsonValue,
+            ...columns,
             edits,
             lastEditedAt: date(d["last_edited_at"]) ?? new Date(),
           },
@@ -287,7 +304,7 @@ async function migrateEdited(db: Db, prisma: PrismaClient): Promise<Counts> {
         if (REFRESH) {
           await prisma.editedChapter.updateMany({
             where: { mdChapterId },
-            data: { chapter: full as Prisma.InputJsonValue, edits },
+            data: { ...columns, edits },
           });
         }
       }
@@ -298,11 +315,64 @@ async function migrateEdited(db: Db, prisma: PrismaClient): Promise<Counts> {
   return counts;
 }
 
+/**
+ * `deleted` — the archive of chapters hard-deleted from MangaDex, appended by
+ * the legacy workers/deleter.py. Pure history: nothing reads it during a run,
+ * but it is the only record of what was removed, so it migrates rather than
+ * being dropped.
+ */
+async function migrateDeleted(db: Db, prisma: PrismaClient): Promise<Counts> {
+  const counts: Counts = { source: 0, inserted: 0, skipped: 0, target: 0 };
+  // The archive has no unique index in Mongo, so the same chapter can appear
+  // more than once (deleted, re-uploaded, deleted again). Keep the first, and
+  // track ids across batches so the dedupe survives streaming.
+  const seen = new Set<string>();
+
+  for await (const docs of batches(db, "deleted")) {
+    counts.source += docs.length;
+    const rows: Prisma.DeletedChapterCreateManyInput[] = [];
+
+    for (const d of docs) {
+      const mdChapterId = str(d["md_chapter_id"]);
+      if (!mdChapterId || seen.has(mdChapterId)) {
+        counts.skipped += 1;
+        continue;
+      }
+      seen.add(mdChapterId);
+      rows.push({
+        id: randomUUID(),
+        mdChapterId,
+        ...chapterColumnsFromDoc(d),
+        deletedAt: date(d["chapter_lookup"]) ?? date(d["chapter_timestamp"]) ?? new Date(),
+      });
+    }
+
+    if (DRY_RUN) {
+      counts.inserted += rows.length;
+    } else if (rows.length > 0) {
+      const res = await prisma.deletedChapter.createMany({ data: rows, skipDuplicates: true });
+      counts.inserted += res.count;
+      counts.skipped += rows.length - res.count;
+    }
+  }
+  // Report the table's real size, like every other collection does, so the
+  // verification table is comparable across a re-run.
+  counts.target = await prisma.deletedChapter.count();
+  log(`deleted: ${counts.source} read, ${counts.inserted} inserted, ${counts.skipped} skipped`);
+  return counts;
+}
+
 async function migrateUnavailable(db: Db, prisma: PrismaClient): Promise<Counts> {
   const counts: Counts = { source: 0, inserted: 0, skipped: 0, target: 0 };
+  // Run-scoped, not per-batch: the same chapter can be marked unavailable more
+  // than once, and those repeats need not land in the same 500-doc batch. A
+  // per-batch set lets cross-batch duplicates through, which the unique index
+  // then absorbs — harmless for the data, but it made the dry-run report claim
+  // more inserts than the collection has distinct chapters, and that report is
+  // what an operator uses to judge whether the migration looks right.
+  const seen = new Set<string>();
   for await (const docs of batches(db, "unavailable")) {
     counts.source += docs.length;
-    const seen = new Set<string>();
     const rows: Prisma.UnavailableChapterCreateManyInput[] = [];
     for (const d of docs) {
       const mdChapterId = str(d["md_chapter_id"]);
@@ -314,7 +384,9 @@ async function migrateUnavailable(db: Db, prisma: PrismaClient): Promise<Counts>
       rows.push({
         id: randomUUID(),
         mdChapterId,
-        chapter: asRecord(d) as Prisma.InputJsonValue,
+        // `unavailableAt` has its own column; the legacy `archivedAt` stamp
+        // does not, so it stays in `extra`.
+        ...chapterColumnsFromDoc(d, ["unavailableAt"]),
         unavailableAt: date(d["unavailable_at"]) ?? new Date(),
       });
     }
@@ -488,6 +560,7 @@ async function main(): Promise<void> {
     report["uploaded_ids"] = await migrateUploadedIds(db, prisma);
     report["edited"] = await migrateEdited(db, prisma);
     report["unavailable"] = await migrateUnavailable(db, prisma);
+    report["deleted"] = await migrateDeleted(db, prisma);
 
     for (const [collection, kind] of [
       ["to_upload", "UPLOAD"],

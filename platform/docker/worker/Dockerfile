@@ -24,6 +24,13 @@ ARG PNPM_VERSION=10.12.1
 
 # --- stage: base ------------------------------------------------------------
 FROM ${NODE_IMAGE} AS base
+
+# openssl in the BUILD stage as well as the runtime: `prisma generate` picks its
+# query-engine target from what it can detect here, and a mismatch between that
+# guess and the runtime is a failure that only appears once deployed.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 ARG PNPM_VERSION
 ENV PNPM_HOME=/pnpm \
     PATH=/pnpm:$PATH \
@@ -61,6 +68,15 @@ RUN pnpm prune --prod && \
 
 # --- stage: runtime ---------------------------------------------------------
 FROM ${NODE_IMAGE} AS runtime
+
+# Prisma's query engine links against libssl at runtime. Without it Prisma logs
+# "failed to detect the libssl/openssl version to use ... may not work as
+# expected" and falls back to a guess — so install it rather than rely on the
+# guess being right. ca-certificates is needed for outbound TLS (MangaDex,
+# Discord webhooks, Atlas during a migration).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends openssl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 publoader \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin publoader

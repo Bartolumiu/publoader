@@ -333,6 +333,56 @@ in a compose file committed by accident. Prefer this for anything above.
 
 ---
 
+## 3a. Credential inventory and blast radius
+
+§3 covers where each secret lives. This covers what an attacker gets by holding
+one — the question that decides which credential a given client should carry.
+
+| Credential | Who should hold it | Authority | Blast radius if leaked | Containment |
+|---|---|---|---|---|
+| `ADMIN_TOKEN` (root, bearer) | **Nobody, routinely.** Vault-only break-glass. Its only standing use is the dashboard's token-login form when the accounts table is the problem. | `["*"]`, and owner-equivalent by construction — the one credential that reaches account administration and token minting. | Total control plane: mint credentials, delete operator accounts, revoke every worker, publish bundles, trigger destructive `CLEAN` runs. Not MangaDex write access (no MD credential) and not the database. | Not a scope problem — a storage problem. Keep it out of client configs, rotate per `docs/operations.md` → "Admin token", and give clients `pa_…` tokens instead. Rotation has **no overlap window**. |
+| Dashboard session, `OWNER` | Named humans | `["*"]` | Everything `ADMIN_TOKEN` reaches, from one browser. | Individually revocable (`DELETE /sessions/:id`), TTL-bounded, HttpOnly + `SameSite=Strict`, and cookie-authed writes need `x-requested-with: publoader-dash`. |
+| Dashboard session, `ADMIN` | Named humans | Every scope **except** `users:admin` | Full operational authority: runs, workers, bundles, pause, settings, upload queues. Cannot see or change who else has access, and cannot mint a token. | Same revocation story, plus the role boundary: an ADMIN cannot promote themselves, invite anyone, or read the accounts list. |
+| `pa_…` client token | One machine client each | Exactly its stored scopes; never owner-equivalent whatever it holds | Confined to its areas. A `bundles:write` token publishes bundles and does nothing else; a `stats:read` token reads counters and 403s everywhere else. | Per-client naming (the audit log names the token), optional TTL, immediate revocation, `LAST USED` to spot dead credentials. Mint from `SCOPE_PRESETS`. |
+| `pw_…` worker token | One worker host each | `/api/v1/worker/*` only — lease, submit, upload artifacts, heartbeat, self-rotate | Its own job stream. Cannot reach `/api/v1/admin/*` **at all** — rejected by audience, before any permission check — and cannot write to MangaDex or the database. See §4. | Hashed at rest; worker-initiated atomic rotation; `workers drain` / `revoke`. Trust tier gates which bundles it can ever see. |
+| `pe_…` enroll token | The operator, then one host, once | Exchange for exactly one `pw_…` | One unauthorized worker joins the fleet at the tier the token was minted for. §2 is the analysis of what that worker can then do — lie within a schema, not act. | Single-use and TTL-bounded by construction. Mint `COMMUNITY` unless the host is yours. |
+| Operator password | The operator | Authenticates to a session; the session's role is the authority | Whatever that account's role grants. | scrypt at rest, never returned by any endpoint, login rate-limited per IP (5/min), unapproved accounts refused even with the right password. |
+
+**Recommended scope sets** (`SCOPE_PRESETS` in
+`platform/src/core/api/scopes.ts`, surfaced by `padmin tokens scopes` and the
+dashboard's mint form, so the easy path is the least-privilege one):
+
+| Preset | Scopes | For |
+|---|---|---|
+| `discord-bot` | `runs:write`, `workers:read`, `extensions:read`, `untracked:write`, `stats:read`, `audit:read` | The bot: trigger runs, approve untracked series, report status. Deliberately no `bundles:write`, no `workers:write`, no `settings:write`. |
+| `ci-publisher` | `bundles:write` | A pipeline that publishes extension bundles and must not be able to do anything else. |
+| `monitoring` | `stats:read`, `audit:read` | A read-only probe. |
+| `worker-enroller` | `enroll:write`, `workers:read` | Automation that provisions worker hosts. |
+
+`<area>:write` implies `<area>:read` — a client that can trigger runs can
+obviously look at them, and making callers list both halves invites
+over-granting by copy-paste. Nothing else implies anything.
+
+**No token can mint tokens or manage accounts.** This is the one invariant to
+state without hedging, because it is what makes the table above hold:
+
+- `POST /api/v1/admin/tokens` requires the `users:admin` scope **and** the
+  `OWNER` role. API-token principals are assigned `ADMIN` in `adminAuthHook`
+  regardless of their scopes, so a `pa_…` token minted with `["*"]` still gets
+  403 there. Minting can grant any scope, so it is privilege escalation and
+  stays a human, owner-level action.
+- The same double gate covers `/api/v1/admin/users*`, `/sessions*`, and the
+  signup toggle: no token can create an operator, promote one, set someone's
+  password, or read the accounts list.
+- Consequence: a leaked client credential cannot widen itself, cannot issue a
+  second credential to outlive its own revocation, and cannot grant a human
+  persistent access. Revoking the row ends it.
+- `test/integration/tokens.test.ts` asserts both halves of this (a `["*"]`
+  token 403s on mint and on `/users`), and `test/integration/ops.test.ts` does
+  the same for the operational routes. The claim is tested, not just documented.
+
+---
+
 ## 4. What a worker can and cannot do
 
 Stated explicitly, because this is the question every prospective worker
