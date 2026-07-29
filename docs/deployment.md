@@ -11,6 +11,7 @@ is `https://publoader.ardax.dev`. Substitute your own hostname throughout.
 - [Core bring-up](#core-bring-up)
 - [First run](#first-run)
 - [Cloudflare tunnel and WAF](#cloudflare-tunnel-and-waf)
+- [Dashboard](#dashboard)
 - [Enrolling a worker host](#enrolling-a-worker-host)
 - [Scaling to multiple workers](#scaling-to-multiple-workers)
 - [Upgrading](#upgrading)
@@ -33,7 +34,7 @@ way in.
 
 **Workers** (`platform/docker/worker/`) run anywhere, including on machines you
 do not control. One container that long-polls the core API for a job, runs an
-extension in a Python sandbox, and posts back a result envelope. A worker holds
+extension under Node's permission model, and posts back a result envelope. A worker holds
 a single revocable token and nothing else. It cannot upload to MangaDex — only
 `core-uploader` can, and only after the result has passed validation, dedup and
 audit. See `docs/target-architecture.md` §8 for the full trust model.
@@ -61,7 +62,7 @@ repository today; each fails the build loudly if one ever goes missing:
 | --- | --- | --- |
 | `platform/pnpm-lock.yaml` | Images install with `--frozen-lockfile` so the dependency tree is the reviewed one | `cd platform && pnpm install`, commit the lockfile — do not drop the flag |
 | `platform/prisma/migrations/` | The `migrate` service runs `prisma migrate deploy`, which applies committed migrations and never infers a schema | `cd platform && pnpm prisma migrate dev --name init` against a scratch database, commit the result |
-| `platform/runner/` | The worker image installs `runner/requirements.txt` and ships the Python shim | Part of the worker runtime |
+| `platform/runner-node/` | The worker image ships `runner.mjs`, which executes extension API v2 bundles | Part of the worker runtime |
 
 The base image is pinned by digest in all three Dockerfiles — the multi-arch
 index digest of `node:24-bookworm-slim` as of 2026-07-29, so builds are
@@ -229,15 +230,19 @@ queue depths, fleet size and per-extension failure rates.
 → Block
 ```
 
-**Allow only the two API surfaces**, block the rest. There is no web UI on this
-hostname; anything else is probing.
+**Allow only the known surfaces**, block the rest. Anything else is probing.
 
 ```
 (http.host eq "publoader.ardax.dev" and
  not starts_with(http.request.uri.path, "/api/v1/worker/") and
- not starts_with(http.request.uri.path, "/api/v1/admin/"))
+ not starts_with(http.request.uri.path, "/api/v1/admin/") and
+ not starts_with(http.request.uri.path, "/dash") and
+ not http.request.uri.path eq "/")
 → Block
 ```
+
+The dashboard now answers `/` as well as `/dash`, so the root must be allowed —
+see "Dashboard" below. Those are the only browser-facing paths in the system.
 
 **Rate limit enrollment** (Security → WAF → Rate limiting rules).
 `/api/v1/worker/enroll` is the only unauthenticated write endpoint in the
@@ -268,6 +273,140 @@ Two settings worth checking while you are in the dashboard:
 - The lease endpoint long-polls for up to `LEASE_POLL_WAIT_SECONDS` (25s by
   default). Keep it comfortably below Cloudflare's ~100s idle timeout; if you
   raise one, check the other.
+
+## Dashboard
+
+`core-api` serves the operator dashboard at the domain root — `https://publoader.ardax.dev/`
+lands on the sign-in page, and `/dash` is kept as an alias. Same origin as the
+API, so there is no second deployment, no CORS, and no build step. The assets
+are static HTML/CSS/JS read once at boot from
+`platform/src/core/api/dashboard/` (copied into `dist/` by `pnpm build`).
+
+**This replaces the legacy `publoader-dash` container.** The tunnel's Public
+Hostname for `publoader.ardax.dev` points at `core-api:8100` and nothing else;
+retire the old dashboard route and container (`docs/migration-guide.md`,
+decommission checklist). Everything the dashboard can do, it does through
+`/api/v1/admin/*` — there is no privileged back channel.
+
+### Accounts
+
+Operator accounts live in Postgres (`admin_users`), each with a role:
+
+| Role | Can do |
+|---|---|
+| `OWNER` | Everything, including managing accounts, roles, the signup gate, and force-logout. |
+| `ADMIN` | Every control-plane operation, but cannot see or change who else has access. |
+
+`ADMIN_TOKEN` remains the break-glass credential and the bot/CLI credential. It
+is owner-equivalent and bypasses the accounts table entirely, which is what
+makes it the way back in when the accounts table *is* the problem.
+
+At startup core-api idempotently ensures an `OWNER` account exists for
+`DASH_OWNER_EMAIL` (default `iam@ardax.dev`) and logs whether it has
+credentials yet. It is seeded **without** a password, so first sign-in is:
+
+1. Open `/`, choose "Use the admin token instead", sign in with `ADMIN_TOKEN`.
+2. Go to **Users**, click **Set password** on the owner row (minimum 12
+   characters, scrypt-hashed at rest).
+3. Sign out and back in with email + password.
+
+From there, **Users → Invite** creates further accounts. An invited account is
+approved but has no credentials: they get in either by an owner setting a
+password for them, or by linking Discord with that email address.
+
+### Sessions
+
+Sessions are rows in `admin_sessions`, not self-contained tokens. The cookie is
+`${sessionId}.${secret}` and only a sha256 of the secret is stored, so the
+table is not a credential store and a session id appearing in a log or an admin
+list view is not a credential.
+
+Because the row is the authority, **an individual session can be revoked**:
+**Users → Live sessions → Revoke**, or `DELETE /api/v1/admin/sessions/:id`.
+Revocation takes effect on that session's next request. Deleting an account
+revokes its sessions by cascade.
+
+```bash
+# .env
+SESSION_TTL_MINUTES=720      # optional; 12h default
+SESSION_COOKIE_SECURE=true   # optional; see below
+SESSION_SECRET=$(openssl rand -base64 48)
+```
+
+`SESSION_SECRET` signs the short-lived OAuth state cookie. It is optional —
+without it the key is derived from `ADMIN_TOKEN` via HKDF and core-api warns at
+boot — but set it, or rotating `ADMIN_TOKEN` will break in-flight Discord
+logins.
+
+The `Secure` cookie attribute is set when the request arrives with
+`x-forwarded-proto: https`, which cloudflared sends. Set
+`SESSION_COOKIE_SECURE=true` if you front core-api with something that does not.
+
+### Discord OAuth (optional)
+
+Create an application at <https://discord.com/developers/applications>, then
+under **OAuth2**:
+
+- **Redirects**: add `https://publoader.ardax.dev/api/v1/admin/oauth/discord/callback`.
+  It must match `DASH_PUBLIC_URL` exactly — Discord compares the string, and a
+  trailing slash or an `http://` scheme is a different URI.
+- Copy the **Client ID** and **Client Secret**.
+
+```bash
+# .env
+DASH_PUBLIC_URL=https://publoader.ardax.dev
+DISCORD_CLIENT_ID=...
+DISCORD_CLIENT_SECRET=...
+```
+
+No bot, no gateway, no invite: the scopes are `identify email` only. Leave
+either variable blank and the "Sign in with Discord" button does not render.
+
+How a Discord login is matched, in order:
+
+1. **Already linked** — the `discordId` is on an account: sign in. An email
+   change on Discord's side cannot repoint the login.
+2. **Verified email matches an account** — link the Discord id to it and sign
+   in. *Unverified* email never matches, because it is attacker-choosable.
+3. **Neither** — if `dash_signups_enabled` is on, create an unapproved `ADMIN`
+   account and show "awaiting approval"; otherwise show "signups are closed".
+
+Self-signup is **off by default**. Turn it on from **Users → Self-signup**, and
+remember that it only creates accounts — an owner still has to approve each one
+before it can sign in.
+
+Nothing from Discord is persisted beyond id, username and email, and neither
+the authorisation code nor the access token is ever logged.
+
+### Gate it with Cloudflare Access
+
+Still worth doing, even with accounts. Put Zero Trust Access in front of `/`,
+`/dash` and `/api/v1/admin/session` so a stolen password is not sufficient:
+
+```
+Application:  Self-hosted
+Domain:       publoader.ardax.dev
+Path:         (leave blank for the whole host, or "dash")
+Policy:       Allow → Emails / IdP group of your operators
+```
+
+Do **not** put Access in front of `/api/v1/worker/*` — worker agents cannot
+complete an interactive login. Putting it in front of all of `/api/v1/admin/*`
+also breaks the CLI and the bot unless you issue them service tokens.
+
+### Content security
+
+The assets are served with `default-src 'self'` and no `'unsafe-inline'`, so
+there are no inline scripts, no inline event handlers, and no external origins
+— a tampered asset cannot phone home, and `connect-src 'self'` means it cannot
+exfiltrate what it reads. `frame-ancestors 'none'` plus `X-Frame-Options: DENY`
+blocks clickjacking of the destructive buttons.
+
+Cookie-authenticated **writes** additionally require
+`x-requested-with: publoader-dash`. `SameSite=Strict` is the first line of CSRF
+defence; the header is the second, and it is one no cross-origin form or image
+tag can set. Bearer clients are exempt and should not send it.
+
 
 ## Enrolling a worker host
 

@@ -17,7 +17,8 @@
     ]
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && pnpm run copy:dashboard",
+    "copy:dashboard": "mkdir -p dist/src/core/api/dashboard && cp -r src/core/api/dashboard/. dist/src/core/api/dashboard/",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src test",
     "test": "vitest run test/unit",
@@ -47,6 +48,7 @@
     "@types/adm-zip": "^0.5.5",
     "@types/node": "^22.15.0",
     "@types/pg": "^8.20.0",
+    "esbuild": "^0.25.0",
     "eslint": "^9.24.0",
     "pg": "^8.22.0",
     "prisma": "^6.10.0",

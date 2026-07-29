@@ -1,9 +1,9 @@
 {
   "name": "e2etest",
-  "version": "1.0.0",
-  "publoader_api": "^1.0.0",
-  "entrypoint": "e2etest.py",
-  "class_name": "Extension",
+  "version": "2.0.0",
+  "publoader_api": "^2.0.0",
+  "runtime": "node",
+  "entrypoint": "index.mjs",
   "mangadex_group_id": "22222222-2222-4222-8222-222222222222",
   "languages": ["en"],
   "allowed_hosts": ["e2e.example.com"],

@@ -1,7 +1,7 @@
 # Build context = platform/. Keep it to exactly what the image needs: source,
-# manifests, prisma schema and the python runner. Everything else either
-# bloats the context, invalidates layer caches on every edit, or would ship
-# host-local state (and secrets) into the image.
+# manifests, prisma schema and runner-node/. Everything else either bloats the
+# context, invalidates layer caches on every edit, or would ship host-local
+# state (and secrets) into the image.
 
 # Installed on the build host, never copied in — the image installs its own
 # with the lockfile so the tree matches the target platform (sharp and the
@@ -25,10 +25,10 @@ test
 docker
 .dockerignore
 
-# …except the staged extension requirements, which the worker image installs
-# at build time (ARG EXTENSIONS_DIR in docker/worker/Dockerfile). Without this
-# re-inclusion the COPY has nothing to copy and the build fails.
-!docker/worker/extensions
+# The legacy Python runner. No image copies it any more — the worker runs
+# runner-node/runner.mjs — and it is kept in the repo only until the last
+# pre-v2 bundle is retired.
+runner
 
 # VCS / editor / CI noise.
 .git
@@ -44,9 +44,7 @@ docker
 .env.*
 !.env.example
 
-# Python build artefacts from running the runner shim locally. Host-compiled
-# .pyc files must never ship in the worker image: they are keyed to the host's
-# interpreter, and the image's read-only rootfs cannot replace a stale one.
+# Python build artefacts left over from the pre-v2 runner shim.
 __pycache__
 **/__pycache__
 *.py[cod]

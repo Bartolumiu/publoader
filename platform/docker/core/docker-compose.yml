@@ -196,6 +196,18 @@ services:
       # Bearer token for /api/v1/admin/*. If unset the admin API answers 503 —
       # it fails closed rather than open. Mint with: openssl rand -base64 48
       ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
+      # Dashboard sessions (/dash). core-api is the only service that serves
+      # browsers, so these live here rather than in the shared anchor. Leave
+      # SESSION_SECRET empty to derive it from ADMIN_TOKEN (logged as a warning).
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES:-720}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      # Operator accounts. The owner is seeded idempotently on every start, so
+      # a fresh database is never locked out of its own dashboard.
+      DASH_OWNER_EMAIL: ${DASH_OWNER_EMAIL:-iam@ardax.dev}
+      DASH_PUBLIC_URL: ${DASH_PUBLIC_URL:-https://publoader.ardax.dev}
+      DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
     expose:
       - "8100"
     networks:

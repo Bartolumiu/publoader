@@ -11,6 +11,8 @@ import { IngestService } from "../ingest/ingest.js";
 import { SchedulerService } from "../scheduler/service.js";
 import type { TitleService } from "../md/titleService.js";
 import { RateLimiter } from "./ratelimit.js";
+import { deriveSigningKey } from "./session.js";
+import { AdminUserStore } from "../store/adminUsers.js";
 
 export interface AppContext {
   prisma: PrismaClient;
@@ -30,6 +32,11 @@ export interface AppContext {
   enrollLimiter: RateLimiter;
   workerLimiter: RateLimiter;
   adminLimiter: RateLimiter;
+  sessionLimiter: RateLimiter;
+  /** Dashboard accounts and their revocable sessions. */
+  adminUsers: AdminUserStore;
+  /** HMAC key for short-lived signed cookies (OAuth state); null when unset. */
+  signingKey: Buffer | null;
 }
 
 export function buildContext(prisma: PrismaClient, config: Config, log: Logger): AppContext {
@@ -53,5 +60,9 @@ export function buildContext(prisma: PrismaClient, config: Config, log: Logger):
     // Worker API budget: bursts of 60, ~10 rps sustained per worker.
     workerLimiter: new RateLimiter(60, 10),
     adminLimiter: new RateLimiter(120, 20),
+    // Dashboard logins are password-equivalent: 5 attempts, refill 5/min.
+    sessionLimiter: new RateLimiter(5, 5 / 60),
+    adminUsers: new AdminUserStore(prisma),
+    signingKey: deriveSigningKey(config, log),
   };
 }

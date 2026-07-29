@@ -12,7 +12,14 @@ export const Manifest = z
     name: z.string().regex(EXTENSION_NAME_RE),
     version: z.string().min(1).max(32),
     publoader_api: z.string().default("^1.0.0"),
-    entrypoint: z.string().regex(/^[a-zA-Z0-9_./-]+\.py$/),
+    entrypoint: z.string().regex(/^[a-zA-Z0-9_./-]+\.(py|mjs|js)$/),
+    /**
+     * Execution runtime. "node" (extension API v2, TypeScript/ESM) is the
+     * enforced runtime for new bundles; "python" survives only as the legacy
+     * v1 marker so historical bundles remain describable. Inferred from
+     * publoader_api when omitted.
+     */
+    runtime: z.enum(["node", "python"]).optional(),
     class_name: z.string().default("Extension"),
     mangadex_group_id: z.string().uuid(),
     languages: z.array(z.string().min(2).max(16)).min(1),
@@ -70,6 +77,13 @@ export const Manifest = z
   })
   .passthrough();
 export type Manifest = z.infer<typeof Manifest>;
+
+/** Effective runtime for a manifest: explicit field, else publoader_api major. */
+export function manifestRuntime(manifest: Manifest): "node" | "python" {
+  if (manifest.runtime) return manifest.runtime;
+  const major = manifest.publoader_api.replace(/^[^0-9]*/, "").split(".")[0];
+  return major === "1" ? "python" : "node";
+}
 
 /** Hostname (exact or subdomain) membership check against allowed_hosts. */
 export function hostAllowed(url: string, allowedHosts: string[]): boolean {

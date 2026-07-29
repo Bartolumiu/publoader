@@ -13,8 +13,9 @@
  *   USER                  sent as X-Actor so the audit trail names a human
  */
 import { Command } from "commander";
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import AdmZip from "adm-zip";
 
 const DEFAULT_API_URL = "https://publoader.ardax.dev";
@@ -628,6 +629,9 @@ removalMode
 // ---- bundles ----
 const bundle = program.command("bundle").description("extension bundle publishing");
 
+/** Never shipped in a bundle: build inputs and caches, not the program. */
+const ZIP_EXCLUDED = new Set(["__pycache__", ".git", "node_modules", "dist", ".turbo"]);
+
 /** Zip every file under `dir` with paths relative to it, so manifest.json is at the root. */
 function zipDirectory(dir: string): Buffer {
   const zip = new AdmZip();
@@ -635,7 +639,7 @@ function zipDirectory(dir: string): Buffer {
     for (const entry of readdirSync(current, { withFileTypes: true }).sort((a, b) =>
       a.name.localeCompare(b.name),
     )) {
-      if (entry.name === "__pycache__" || entry.name === ".git") continue;
+      if (ZIP_EXCLUDED.has(entry.name)) continue;
       const full = join(current, entry.name);
       if (entry.isDirectory()) walk(full, `${prefix}${entry.name}/`);
       else if (entry.isFile()) zip.addFile(`${prefix}${entry.name}`, readFileSync(full));
@@ -645,11 +649,117 @@ function zipDirectory(dir: string): Buffer {
   return zip.toBuffer();
 }
 
+/** What esbuild's `build` looks like to us. See buildEntrypoint for why it is typed here. */
+interface EsbuildModule {
+  build(options: Record<string, unknown>): Promise<{ errors: { text: string }[] }>;
+}
+
+/**
+ * A bundle ships ONE self-contained ESM file. When the extension directory has
+ * TypeScript sources (or a package.json build script implying a toolchain),
+ * esbuild produces that file here, at publish time, on the operator's machine
+ * — never on a worker. Workers receive pre-built, content-addressed code and
+ * have no compiler, no package manager, and no reason to acquire either.
+ *
+ * `external: []` means dependencies are inlined: what the sha256 pins is the
+ * complete program, so a worker's execution cannot be changed by anything
+ * resolving differently later.
+ */
+async function buildEntrypoint(root: string, source: string, outFile: string): Promise<void> {
+  let esbuild: EsbuildModule;
+  try {
+    // Resolved at run time so the CLI still works for plain-.mjs extensions on
+    // an install without esbuild (it is a devDependency, not a runtime one).
+    const specifier = "esbuild";
+    esbuild = (await import(specifier)) as EsbuildModule;
+  } catch {
+    return fail(
+      `${source} needs a build step but esbuild is not installed. ` +
+        "Run `pnpm install` in platform/, or ship a prebuilt index.mjs instead.",
+    );
+  }
+  console.log(`building ${source} -> index.mjs (esbuild)`);
+  const result = await esbuild.build({
+    entryPoints: [join(root, source)],
+    outfile: outFile,
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    target: "node24",
+    external: [],
+    sourcemap: false,
+    logLevel: "silent",
+  });
+  if (result.errors.length > 0) {
+    fail(`esbuild failed:\n${result.errors.map((e) => `  ${e.text}`).join("\n")}`);
+  }
+}
+
+/** The TS entrypoint to build, or null when the directory is already plain ESM. */
+function detectSourceEntrypoint(root: string): string | null {
+  for (const candidate of ["index.ts", join("src", "index.ts")]) {
+    if (existsSync(join(root, candidate))) return candidate;
+  }
+  const pkgPath = join(root, "package.json");
+  if (existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
+        scripts?: Record<string, string>;
+        main?: string;
+      };
+      if (pkg.scripts?.["build"]) {
+        const main = pkg.main ?? "index.ts";
+        if (existsSync(join(root, main))) return main;
+        fail(`package.json declares a build script but ${main} does not exist`);
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes("build script")) throw err;
+      // An unparseable package.json is not our problem unless it claimed a build.
+    }
+  }
+  return null;
+}
+
+/**
+ * Stage what actually gets zipped: the built index.mjs, a manifest whose
+ * entrypoint points at it, and the declared data files. Source, tests,
+ * node_modules and lockfiles are deliberately left behind — a bundle is the
+ * program, not the project.
+ */
+function stageBuiltBundle(
+  root: string,
+  manifest: Record<string, unknown>,
+  builtFile: string,
+): string {
+  const staging = mkdtempSync(join(tmpdir(), "publoader-bundle-"));
+  copyFileSync(builtFile, join(staging, "index.mjs"));
+  writeFileSync(
+    join(staging, "manifest.json"),
+    JSON.stringify({ ...manifest, entrypoint: "index.mjs" }, null, 2) + "\n",
+  );
+  const dataFiles = (manifest["data_files"] as Record<string, string> | undefined) ?? {};
+  for (const relative of Object.values(dataFiles)) {
+    const from = join(root, relative);
+    if (!existsSync(from)) {
+      fail(`manifest data_files references ${relative}, which is not in ${root}`);
+    }
+    const to = join(staging, relative);
+    mkdirSync(dirname(to), { recursive: true });
+    copyFileSync(from, to);
+  }
+  return staging;
+}
+
 bundle
   .command("publish <dir>")
-  .description("zip an extension directory and publish it as a content-addressed bundle")
+  .description("build (if needed), zip, and publish an extension as a content-addressed bundle")
   .option("--source-commit <sha>", "record the source repo commit this was built from")
-  .action(async (dir: string, opts: { sourceCommit?: string }) => {
+  .option(
+    "--allow-legacy-runtime",
+    "republish a pre-v2 python bundle (audit-logged; new extensions must use API v2)",
+    false,
+  )
+  .action(async (dir: string, opts: { sourceCommit?: string; allowLegacyRuntime: boolean }) => {
     const root = resolve(dir);
     try {
       if (!statSync(root).isDirectory()) fail(`${root} is not a directory`);
@@ -658,7 +768,7 @@ bundle
     }
     // Validate locally so an operator gets an immediate, obvious error rather
     // than a 422 after uploading tens of megabytes.
-    let manifest: { name?: string; version?: string };
+    let manifest: Record<string, unknown> & { name?: string; version?: string };
     try {
       manifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
     } catch (err) {
@@ -668,19 +778,36 @@ bundle
       fail("manifest.json must declare both `name` and `version`");
     }
 
-    const zipData = zipDirectory(root);
+    const source = detectSourceEntrypoint(root);
+    let zipData: Buffer;
+    let staging: string | null = null;
+    try {
+      if (source === null) {
+        // Plain ESM (or a legacy python bundle): ship the directory as-is.
+        zipData = zipDirectory(root);
+      } else {
+        staging = mkdtempSync(join(tmpdir(), "publoader-build-"));
+        const builtFile = join(staging, "index.mjs");
+        await buildEntrypoint(root, source, builtFile);
+        const publishDir = stageBuiltBundle(root, manifest, builtFile);
+        zipData = zipDirectory(publishDir);
+        rmSync(publishDir, { recursive: true, force: true });
+      }
+    } finally {
+      if (staging) rmSync(staging, { recursive: true, force: true });
+    }
+
     console.log(
       `publishing ${manifest.name}@${manifest.version} (${(zipData.length / 1024).toFixed(1)} KiB)`,
     );
+    const headers: Record<string, string> = {};
+    if (opts.sourceCommit) headers["x-source-commit"] = opts.sourceCommit;
+    if (opts.allowLegacyRuntime) headers["x-allow-legacy-runtime"] = "true";
     const res = await api<{ extension: string; version: string; sha256: string; created: boolean }>(
       "/api/v1/admin/bundles",
       {
         method: "POST",
-        raw: {
-          body: zipData,
-          contentType: "application/zip",
-          ...(opts.sourceCommit ? { headers: { "x-source-commit": opts.sourceCommit } } : {}),
-        },
+        raw: { body: zipData, contentType: "application/zip", headers },
       },
     );
     kv({

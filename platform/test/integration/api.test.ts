@@ -25,10 +25,15 @@ describe.skipIf(!dbReady())("control-plane API", () => {
 
   const admin = { authorization: "Bearer test-admin-token-0123456789" };
 
+  // An extension API v2 bundle: a single ESM entrypoint with a default-exported
+  // factory. Publishing refuses python bundles outright, so this is also the
+  // only shape these tests can legitimately push through the admin route.
   const manifest = {
     name: "mangaplus",
     version: "0.3.00",
-    entrypoint: "mangaplus.py",
+    publoader_api: "^2.0.0",
+    runtime: "node",
+    entrypoint: "index.mjs",
     mangadex_group_id: "4f1de6a2-f0c5-4ac5-bce5-02c7dbb67deb",
     languages: ["en", "es"],
     allowed_hosts: ["jumpg-webapi.tokyo-cdn.com", "mangaplus.shueisha.co.jp"],
@@ -37,7 +42,10 @@ describe.skipIf(!dbReady())("control-plane API", () => {
   const makeBundleZip = (): Buffer => {
     const zip = new AdmZip();
     zip.addFile("manifest.json", Buffer.from(JSON.stringify(manifest)));
-    zip.addFile("mangaplus.py", Buffer.from("class Extension:\n    pass\n"));
+    zip.addFile(
+      "index.mjs",
+      Buffer.from("export default () => ({ async collect() { return {}; } });\n"),
+    );
     zip.addFile(
       "manga_id_map.json",
       Buffer.from(JSON.stringify({ "b3c7e5d1-0000-4000-8000-000000000001": ["100001"] })),

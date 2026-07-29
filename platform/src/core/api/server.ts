@@ -3,6 +3,10 @@ import { randomUUID } from "node:crypto";
 import type { AppContext } from "./context.js";
 import { registerWorkerRoutes } from "./routes/worker.js";
 import { registerAdminRoutes } from "./routes/admin.js";
+import { registerSessionRoutes } from "./session.js";
+import { registerOAuthRoutes } from "./oauth.js";
+import { registerUserRoutes } from "./routes/users.js";
+import { registerDashboardRoutes } from "./dashboard.js";
 import { renderMetrics } from "../../metrics.js";
 
 /**
@@ -17,6 +21,8 @@ import { renderMetrics } from "../../metrics.js";
  *  - binary parsers only for the exact content types that need them
  *  - /metrics and /healthz intended for the internal network only —
  *    do NOT expose them through the public tunnel hostname.
+ *  - /dash serves the operator dashboard (static, CSP-locked); it is the only
+ *    browser-facing surface and authenticates via /api/v1/admin/session.
  */
 export function buildServer(ctx: AppContext): FastifyInstance {
   // Cast away the pino-instance generic: fastify narrows its logger type
@@ -58,7 +64,14 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   });
 
   registerWorkerRoutes(app, ctx);
+  // Session login/logout and the OAuth dance are the authentication step, so
+  // they register outside the admin scope and guard themselves with the
+  // per-IP login limiter.
+  registerSessionRoutes(app, ctx);
+  registerOAuthRoutes(app, ctx);
   registerAdminRoutes(app, ctx);
+  registerUserRoutes(app, ctx);
+  registerDashboardRoutes(app);
 
   app.setErrorHandler((err: FastifyError, req, reply) => {
     req.log.error({ err }, "request failed");

@@ -24,6 +24,115 @@ padmin dead-letter  # what has already given up
 
 ---
 
+## The dashboard
+
+Everything in this document can also be done from a browser at
+`https://publoader.ardax.dev/`. It is the same admin API with a login screen,
+so the CLI remains authoritative and the two are interchangeable — every
+dashboard action lands in `padmin audit` exactly like a CLI one.
+
+**Sign in** with your email and password, or with Discord if this deployment
+has OAuth configured. Your account name becomes the audit actor, so "who paused
+the platform" is answerable without anyone having to set a header.
+
+If you have no account yet, or nobody does — a fresh database seeds one `OWNER`
+(`DASH_OWNER_EMAIL`) with no credentials — use **"Use the admin token
+instead"** on the login page, then **Users → Set password**. That is the
+bootstrap path and the break-glass path both.
+
+Sessions last `SESSION_TTL_MINUTES` (12h default) and are individually
+revocable from **Users → Live sessions**. Full setup, including the Discord
+OAuth application, is in `docs/deployment.md` → "Dashboard".
+
+### Someone left the team
+
+```
+Users → their row → Delete        # revokes their sessions by cascade
+```
+
+If you want to keep the account but cut access now, **Revoke** each of their
+live sessions and change their password — a password change on its own does
+*not* invalidate sessions already issued.
+
+To take away only their ability to manage other operators, set them to `ADMIN`.
+Be clear-eyed about what that does and does not contain: an `ADMIN` still has
+full control-plane authority, including publishing bundles, which is code
+execution on every worker. It is not a safe role for someone you no longer
+trust — deletion is.
+
+### Approving a new operator
+
+With self-signup on (**Users → Self-signup**), a Discord login by someone
+unknown creates an unapproved `ADMIN` row and shows them "awaiting approval".
+Nothing else happens until you act: they cannot sign in, and no endpoint is
+reachable. Approve from **Users**, or leave it and delete the row.
+
+With self-signup off (the default), an unknown Discord login is refused
+outright. Invite them instead — **Users → Invite** with their email — and they
+get in by linking Discord with that same verified email, or by you setting a
+password for them.
+
+Three operational flows are worth calling out because they are easier to get
+wrong in a UI than on a command line.
+
+### Enrol a worker from the dashboard
+
+**Workers → Enroll new worker.** Pick the trust tier (leave `COMMUNITY` unless
+you control the machine), a note naming the host, and a TTL.
+
+The token is displayed **once**, inside a ready-made compose snippet with
+`CORE_URL` and `ENROLL_TOKEN` already filled in. Copy it before closing the
+dialog — there is no way to retrieve it, and the only recovery is minting
+another and letting the first expire. Send it over a private channel; it is a
+bearer credential until it is spent.
+
+Everything else matches the CLI flow below: the agent exchanges the token for a
+permanent one on first contact, and the row appears under **Workers** once it
+heartbeats.
+
+### Approve an untracked series
+
+**Untracked → filter `NEW` → Approve.** This creates a real MangaDex title
+synchronously and **cannot be undone from the dashboard**, so it asks for
+confirmation first.
+
+Check the series name, language, and source URL before approving — the common
+mistake is approving something that already exists on MangaDex under a
+different name, which produces a duplicate title. When it already exists, use
+**Extensions → Configure → Tracked manga** to point the external id at the
+existing MangaDex UUID instead, and **Skip** the untracked row.
+
+On success the toast contains the new `https://mangadex.org/title/<id>` link,
+and the row moves to `TRACKED` with the same link in the table.
+
+### Trigger a run — and what `Clean` means
+
+**Extensions** gives each published bundle three buttons:
+
+| Button | Kind | What it does |
+|---|---|---|
+| Run | `UPDATE` | Normal incremental run. |
+| Force | `FORCE` | Ignores the schedule and the already-posted set. |
+| Clean | `CLEAN` | Re-reads the extension's entire back catalogue. |
+
+`Clean` is destructive and confirms before firing. A clean run compares the
+full catalogue against what is on MangaDex and can queue **deletions** for
+chapters the extension no longer reports — a source-side outage that hides
+chapters therefore looks identical to chapters being removed. Check the
+extension is healthy first — **Runs** tab, or `padmin runs list`.
+
+Note you cannot pre-pause as a safety net: `POST /runs` returns 409 while the
+platform is paused. The recovery lever is the other way round — if a clean run
+does queue deletions you did not want, hit **Pause** on the Overview tab
+immediately. The uploader honours the pause gate, so queued upload tasks stop
+before they execute and you can inspect them.
+
+Runs started from the dashboard get a server-generated idempotency key, so
+double-clicking creates two runs. Watch the **Runs** tab rather than clicking
+again.
+
+---
+
 ## Enrol a worker
 
 Workers are outbound-only: they need no inbound ports, no static IP, and no
@@ -204,6 +313,25 @@ becomes incompatible, `workers revoke` is the enforcement mechanism.
 
 ## Rotate secrets
 
+### Dashboard credentials
+
+An operator password: **Users → Set password** (owner), or the operator does it
+themselves from their own row. Minimum 12 characters, scrypt-hashed at rest.
+Then revoke their live sessions — a password change does *not* invalidate
+sessions already issued.
+
+To sign *everyone* out there is no single lever: revoke each session under
+**Users → Live sessions**, or in an emergency go straight at the table.
+
+```bash
+psql "$DATABASE_URL" -c "UPDATE admin_sessions SET revoked = true"
+```
+
+Rotating `SESSION_SECRET` does not log anyone out — it signs the OAuth state
+cookie only, so rotating it breaks Discord logins that are mid-flight and
+nothing else. Rotating `ADMIN_TOKEN` likewise leaves existing sessions alive,
+including any created with the old token.
+
 ### Worker token
 
 Workers can rotate their own credential without operator involvement — the swap
@@ -220,8 +348,10 @@ alternative is `workers revoke` + re-enrol, which also changes the worker id.
 
 ### Admin token
 
-The admin token is held by you, the Discord bot, and the dashboard. Rotating it
-breaks all three until they are updated, so do it in this order:
+The admin token is held by you and the Discord bot. (The dashboard no longer
+holds a copy — operators sign in with their own accounts, and the token is only
+its break-glass path.) Rotating it breaks the CLI and the bot until they are
+updated, so do it in this order:
 
 ```bash
 NEW=$(openssl rand -base64 48)
@@ -229,7 +359,7 @@ NEW=$(openssl rand -base64 48)
 # 1. Update .env: ADMIN_TOKEN=$NEW
 # 2. Restart only core-api — the other services do not read it.
 docker compose up -d core-api
-# 3. Update your own shell, then the bot's and dashboard's config, then restart them.
+# 3. Update your own shell, then the bot's config, then restart it.
 export PUBLOADER_ADMIN_TOKEN=$NEW
 padmin stats
 ```

@@ -260,16 +260,21 @@ idempotency keys (creation), lease CAS (execution), commit markers (ingestion),
   Discord/GitHub credentials, no docker.sock, no shared volumes with core.
 - **Runtime isolation** (worker compose defaults): non-root user, read-only
   root fs + tmpfs scratch, `cap_drop: ALL`, `no-new-privileges`, memory/CPU/pids
-  limits. The Python runner shim runs as a subprocess with wall-clock timeout
-  and an in-process egress allowlist built from the manifest's `allowed_hosts`
-  (requests/aiohttp hooks — same technique as the existing rotation hooks), so
-  the manifest is enforced policy, not documentation.
+  limits. The Node runner runs as a subprocess with a wall-clock timeout, under
+  Node's permission model (`--permission` with fs read/write scoped to the
+  bundle, runner and job workdir; `child_process` and `worker_threads` denied;
+  `--disallow-code-generation-from-strings`), and reaches the network only
+  through a guarded fetch that enforces the manifest's `allowed_hosts` on the
+  initial request and on every redirect hop — so the manifest is enforced
+  policy, not documentation. Caveat: the permission model does not restrict
+  sockets, so the allowlist remains a guardrail rather than a containment
+  boundary (§1.10 of the trust model).
 - **Supply chain**: bundles are content-addressed (sha256) zips built from the
   extensions repos at a recorded commit; workers verify the hash against the
-  job's pin before execution; manifests are validated at publish; the existing
-  AST static scan is retained as a publish-time gate. Base images pinned by
-  digest; npm dependencies locked (`pnpm-lock.yaml` + `--frozen-lockfile`);
-  Python runner deps pinned in the worker image.
+  job's pin before execution; manifests are validated at publish, and a bundle
+  is built to one self-contained ESM file with its dependencies inlined, so the
+  sha256 pins the whole program. Base images pinned by digest; npm dependencies
+  locked (`pnpm-lock.yaml` + `--frozen-lockfile`).
 - **Trust tiers**: workers are `TRUSTED` or `COMMUNITY`. Manifests may set
   `min_trust`; private-repo extensions default to trusted-only. Sensitive jobs
   are never leased to lower tiers.
@@ -291,8 +296,10 @@ idempotency keys (creation), lease CAS (execution), commit markers (ingestion),
   exchanged and persisted to a named volume). Hardened per §8. No shared
   filesystem with core.
 - Multi-stage Dockerfiles (build → prune → distroless-ish runtime), pinned
-  bases, non-root user, `HEALTHCHECK`s; the worker image layers Python 3.11 +
-  pinned extension deps on the Node runtime.
+  bases, non-root user, `HEALTHCHECK`s. The worker image is the core image's
+  Node build plus `runner-node/`; it carries no interpreter and no
+  per-extension dependencies, so publishing an extension no longer requires
+  rebuilding and redeploying workers.
 - Local dev/e2e: `platform/docker/dev/docker-compose.yml` = core + postgres +
   2 workers + mock-MangaDex on one network for end-to-end tests.
 
@@ -312,25 +319,86 @@ idempotency keys (creation), lease CAS (execution), commit markers (ingestion),
 - The Discord bot and dashboard migrate from Unix-socket IPC to the admin API;
   a compatibility table maps every existing IPC command to its endpoint.
 
-## 11. Extension API strategy
+## 11. Extension API v2 — the TypeScript contract
 
-**Retain + wrap.** The Python class contract (`Extension`,
-`get_updated_chapters`, …) is unchanged — every existing extension runs
-unmodified inside the worker's Python runner shim. What changes around it:
+**Replace, don't wrap.** Extension API v2 (`publoader_api: ^2.0.0`,
+`runtime: "node"`) is THE extension API. Extensions are TypeScript/ESM modules
+executed by `platform/runner-node/runner.mjs`. Python is gone: the worker image
+carries no interpreter, `BundleStore.publish()` refuses `runtime: "python"`
+bundles, and the v1 runner survives only so bundles pinned before the cutover
+remain executable (behind a loud deprecation warning and an audit-logged
+`x-allow-legacy-runtime: true` publish override).
 
-- `manifest.json` becomes **required and enforced** (validated at bundle
-  publish; hosts/permissions enforced at runtime; schedule/languages/group id
-  consumed by the platform). A zod schema + published JSON Schema define it.
-- Dependencies: declared in the extension's `requirements.txt`, installed at
-  **worker image build time**, never in a long-lived credential-holding
-  process.
-- New optional capability: `partition` (§6). Extensions need no code change to
-  be partitionable thanks to shim-side filtering, but may implement
-  `set_tracked_subset(ids)` to also *fetch* less.
-- `publoader_api: ^1.0.0` in the manifest is the protocol version; the runner
-  shim is versioned with it.
-- mangaplus ships as the reference migrated extension; its manifest already
-  conforms.
+**The contract** (`src/contracts/extensionApi.ts`). A bundle default-exports an
+`ExtensionFactory`:
+
+```ts
+import type { ExtensionFactory } from "publoader-extension-api";
+
+const factory: ExtensionFactory = (ctx) => ({
+  async collect({ postedChapterIds, cleanRun, trackedSubset }) {
+    const res = await ctx.fetch("https://example.com/api/updates");
+    return { updatedChapters: [...], allChapters: null, untrackedManga: [] };
+  },
+});
+export default factory;
+```
+
+One method replaces v1's five methods and six attributes. Identity (name, group
+id, languages) comes from the manifest; configuration (tracked map, override
+options, schedule) comes from the database (§12). An extension no longer
+duplicates, and can no longer contradict, either.
+
+- `collect(input)` receives `postedChapterIds` (empty on clean runs),
+  `cleanRun`, and `trackedSubset` — the segment's manga ids, or null. Honouring
+  the subset is an optimisation: **the runner filters the output to it
+  regardless** (§6), so non-overlapping segment output is structural.
+- It resolves to `{updatedChapters, allChapters, untrackedManga}`. `allChapters`
+  is `null` when no catalogue was gathered — absence means "no removal
+  information", never "everything was removed".
+- Chapters may omit `mdMangaId`; the runner fills it from the platform's
+  tracked map and **drops chapters whose external id has no mapping**, the same
+  filter v1 applied.
+
+**The context** is the extension's entire world:
+
+- `ctx.fetch` — the only sanctioned I/O. Enforces `allowed_hosts` (exact or
+  subdomain) before connecting *and on every redirect hop*, applies a per-host
+  politeness delay, a wall-clock timeout, bounded retries on 5xx/transport
+  failures, and honours `Retry-After` on 429. Implemented in
+  `src/extsdk/guardedFetch.ts` and duplicated inline in the runner, which
+  cannot import from the platform tree.
+- `ctx.mangaIdMap` — external id → MangaDex title id, inverted from the
+  database-authoritative lease payload, so titles auto-tracked since the bundle
+  was published are visible without republishing.
+- `ctx.dataFile(name)` — a bundled data file, resolved through the manifest's
+  `data_files` and refused if it escapes the bundle directory.
+- `ctx.log(message, fields)` — JSON lines on **stderr**. stdout is the envelope
+  channel; the runner redirects `process.stdout` and `console.*` to stderr
+  before any bundle code runs.
+
+**Build at publish, not at run.** `publoader-admin bundle publish <dir>` detects
+a TypeScript source (`index.ts`, `src/index.ts`, or a `package.json` build
+script) and runs esbuild (`format: "esm"`, `platform: "node"`,
+`target: "node24"`, `bundle: true`, `external: []`) to a single self-contained
+`index.mjs`, then zips that plus the manifest and data files. Directories that
+are already plain `.mjs` are zipped as-is. Consequences:
+
+- dependencies are **inlined into the artefact**, so the sha256 pins the
+  complete program — nothing resolves differently later on a worker;
+- workers need no compiler, no package manager, and no network to a registry;
+- adding an extension no longer means rebuilding and redeploying worker images,
+  which was the worst ergonomic cost of the Python design.
+
+Publish-time validation rejects a node bundle whose entrypoint is missing,
+empty, not `.mjs`/`.js`, or has no default export.
+
+**Execution.** The worker spawns `process.execPath` with Node's permission
+model on: `--permission` with `--allow-fs-read` scoped to the bundle, the
+runner directory and the job workdir, `--allow-fs-write` scoped to the output
+and workdir, plus `--disallow-code-generation-from-strings`. That also denies
+`child_process` and `worker_threads`, so an extension cannot shell out around
+the guarded fetch (§8).
 
 ## 12. Database-authoritative configuration (no JSON config files)
 
@@ -341,9 +409,9 @@ Operator directive: runtime configuration lives in PostgreSQL, not files.
   `override_options.json`. Bundle publishing seeds both **once** from the
   bundle's data files (migration convenience); afterwards the DB wins and is
   edited via the admin API/CLI.
-- Workers receive the map and override options in the lease payload; the
-  runner's `open_manga_id_map` compat shim serves the platform-provided map,
-  so extensions pick up newly tracked titles without a bundle republish.
+- Workers receive the map and override options in the lease payload; the runner
+  inverts the map and serves it as `ctx.mangaIdMap`, so extensions pick up
+  newly tracked titles without a bundle republish.
 - The processor ignores worker-supplied override options entirely and reads
   them from `ExtensionConfig` — config can never be injected through a result
   envelope.

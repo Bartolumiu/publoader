@@ -23,6 +23,21 @@ const ConfigSchema = z.object({
   host: z.string().default("0.0.0.0"),
   /** Admin bearer token for operator endpoints (bot/dash/CLI). */
   adminToken: z.string().min(16).optional(),
+  /**
+   * HMAC key for short-lived signed cookies (currently the OAuth state
+   * cookie). Session cookies are DB-backed and do not depend on it. Optional:
+   * when unset a key is derived from adminToken via HKDF, with a boot warning.
+   */
+  sessionSecret: z.string().min(32).optional(),
+  sessionTtlMinutes: z.coerce.number().int().min(5).max(10080).default(720),
+  /**
+   * Force the `Secure` cookie attribute. Normally inferred per-request from
+   * `x-forwarded-proto`; set this when the proxy does not send that header.
+   */
+  sessionCookieSecure: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
   logLevel: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
 
   // Lease/queue tuning
@@ -48,12 +63,26 @@ const ConfigSchema = z.object({
   // Discord notifications (core only)
   discordWebhookUrls: z.string().default(""),
 
+  // Dashboard accounts and Discord OAuth (core-api only)
+  /** Seeded OWNER account, created idempotently at core-api startup. */
+  dashOwnerEmail: z.string().email().default("iam@ardax.dev"),
+  /** Public origin the browser reaches; the OAuth redirect URI is derived. */
+  dashPublicUrl: z.string().url().default("https://publoader.ardax.dev"),
+  /** Both must be set for the "Login with Discord" button to appear. */
+  discordClientId: z.string().optional(),
+  discordClientSecret: z.string().optional(),
+
   // Worker agent settings (worker process only)
   coreUrl: z.string().optional(),
   workerToken: z.string().optional(),
   enrollToken: z.string().optional(),
   workerName: z.string().optional(),
   workerStatePath: z.string().default("/var/lib/publoader-worker"),
+  /**
+   * DEPRECATED. Only used for bundles published before extension API v2; the
+   * worker image no longer ships an interpreter, so this needs an explicitly
+   * provisioned python3 to work at all.
+   */
   runnerPython: z.string().default("python3"),
   runnerExtraArgs: z.string().default(""),
 });
@@ -61,12 +90,21 @@ const ConfigSchema = z.object({
 export type Config = z.infer<typeof ConfigSchema>;
 
 export function loadConfig(overrides: Partial<Record<string, string>> = {}): Config {
-  const get = (n: string) => overrides[n] ?? env(n);
+  // A blank value means "not set". Compose interpolates unset variables to the
+  // empty string and .env templates ship keys with no value, so without this a
+  // commented-out optional knob would fail schema validation at boot.
+  const get = (n: string) => {
+    const raw = overrides[n] ?? env(n);
+    return raw === "" ? undefined : raw;
+  };
   return ConfigSchema.parse({
     databaseUrl: get("DATABASE_URL") ?? "",
     port: get("PORT"),
     host: get("HOST"),
     adminToken: get("ADMIN_TOKEN"),
+    sessionSecret: get("SESSION_SECRET"),
+    sessionTtlMinutes: get("SESSION_TTL_MINUTES"),
+    sessionCookieSecure: get("SESSION_COOKIE_SECURE"),
     logLevel: get("LOG_LEVEL"),
     leaseTtlSeconds: get("LEASE_TTL_SECONDS"),
     sweepIntervalSeconds: get("SWEEP_INTERVAL_SECONDS"),
@@ -83,6 +121,10 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): Con
     mdRatelimitMs: get("MANGADEX_RATELIMIT_MS"),
     uploadRetry: get("UPLOAD_RETRY"),
     discordWebhookUrls: get("DISCORD_WEBHOOK_URLS"),
+    dashOwnerEmail: get("DASH_OWNER_EMAIL"),
+    dashPublicUrl: get("DASH_PUBLIC_URL"),
+    discordClientId: get("DISCORD_CLIENT_ID"),
+    discordClientSecret: get("DISCORD_CLIENT_SECRET"),
     coreUrl: get("CORE_URL"),
     workerToken: get("WORKER_TOKEN"),
     enrollToken: get("ENROLL_TOKEN"),

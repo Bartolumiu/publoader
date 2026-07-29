@@ -574,7 +574,14 @@ current Postgres backup.
 - [ ] **Migrate the Discord bot** to the admin API. Until this is done the bot
       is talking to a stopped scheduler. See `docs/ipc-to-api-mapping.md` — note
       the gaps section, some commands need new endpoints first.
-- [ ] **Migrate the dashboard** the same way.
+- [ ] **Retire `publoader-dash`.** There is nothing to migrate: the platform
+      ships its own dashboard, served by `core-api` at the domain root, and it
+      already covers every admin endpoint. Point the tunnel's Public Hostname
+      for `publoader.ardax.dev` at `core-api:8100`, delete the old dashboard's
+      Public Hostname route, then stop and remove the container and its image.
+      Operators sign in with their own accounts now (`docs/deployment.md` →
+      "Dashboard"), so also revoke the copy of `ADMIN_TOKEN` the old dashboard
+      held and the Discord OAuth app it used, if it had one of its own.
 - [ ] **Remove the `docker.sock` mount** from `publoader-bot`. The bot mounted
       the Docker socket so `/start`, `/shutdown` and `/restart` could control
       the scheduler container. That mount is root-equivalent access to the host
@@ -604,7 +611,9 @@ current Postgres backup.
 - [ ] **Revoke the MangaDex session** the legacy stack held (`mdauth.json`) and
       confirm only `core-uploader` holds MD credentials now.
 - [ ] **Remove the legacy Cloudflare tunnel hostnames** for the webhook (8080)
-      and old dashboard (8090) if they are no longer routed.
+      and old dashboard (8090). The dashboard route is no longer optional to
+      clean up: `publoader.ardax.dev/` now serves the platform's own dashboard,
+      so a stale route pointing at 8090 is two UIs claiming one hostname.
 - [ ] **`docker compose down -v`** on the legacy stack, and remove the images.
 - [ ] Set up backups for the new world: `pgdata` volume, on a schedule. See
       `docs/operations.md` → "Backup and restore".

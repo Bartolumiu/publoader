@@ -321,10 +321,22 @@ export class MdClient implements MdExtendedApi {
     }
   }
 
-  private static tokenUsable(token: string | null): boolean {
+  /** Set when the current access token has no decodable `exp` claim. */
+  private opaqueTokenIssuedAt: number | null = null;
+  /** Grace lifetime for tokens without a readable expiry (non-JWT). */
+  private static readonly OPAQUE_TOKEN_TTL_SECONDS = 60;
+
+  private tokenUsable(token: string | null): boolean {
+    if (!token) return false;
     const exp = MdClient.tokenExpiry(token);
-    if (exp === null) return false;
-    return exp - TOKEN_SKEW_SECONDS > Date.now() / 1000;
+    if (exp !== null) return exp - TOKEN_SKEW_SECONDS > Date.now() / 1000;
+    // Not a decodable JWT (test doubles, or an upstream format change): trust
+    // it briefly instead of re-authenticating on every request — a 401 still
+    // forces an immediate refresh through the normal retry path.
+    return (
+      this.opaqueTokenIssuedAt !== null &&
+      Date.now() / 1000 - this.opaqueTokenIssuedAt < MdClient.OPAQUE_TOKEN_TTL_SECONDS
+    );
   }
 
   private async loadTokens(): Promise<void> {
@@ -357,10 +369,10 @@ export class MdClient implements MdExtendedApi {
    */
   private async ensureAuth(force = false): Promise<void> {
     await this.loadTokens();
-    if (!force && MdClient.tokenUsable(this.accessToken)) return;
+    if (!force && this.tokenUsable(this.accessToken)) return;
     if (this.authFlight) {
       await this.authFlight;
-      if (!force || MdClient.tokenUsable(this.accessToken)) return;
+      if (!force || this.tokenUsable(this.accessToken)) return;
     }
     this.authFlight = this.authenticate(force).finally(() => {
       this.authFlight = null;
@@ -369,7 +381,7 @@ export class MdClient implements MdExtendedApi {
   }
 
   private async authenticate(force: boolean): Promise<void> {
-    if (!force && MdClient.tokenUsable(this.accessToken)) return;
+    if (!force && this.tokenUsable(this.accessToken)) return;
 
     // An opaque (non-JWT) refresh token has no readable expiry — try it anyway
     // rather than burning a password grant on every startup.

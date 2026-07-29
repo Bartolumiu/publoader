@@ -2,6 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 
 const PAUSE_KEY = "pause_until";
 const REMOVAL_MODE_KEY = "chapter_removal_mode";
+const SIGNUPS_KEY = "dash_signups_enabled";
 export const VALID_REMOVAL_MODES = ["unavailable", "delete"] as const;
 export type RemovalMode = (typeof VALID_REMOVAL_MODES)[number];
 export const DEFAULT_REMOVAL_MODE: RemovalMode = "unavailable";
@@ -58,6 +59,20 @@ export class SettingsStore {
 
   async setRemovalMode(mode: RemovalMode): Promise<void> {
     await this.setSetting(REMOVAL_MODE_KEY, mode);
+  }
+
+  // -- dashboard self-signup gate --
+
+  /**
+   * Off unless explicitly turned on: with signups enabled, anyone who can
+   * complete a Discord login creates an (unapproved) account row.
+   */
+  async getSignupsEnabled(): Promise<boolean> {
+    return (await this.getSetting(SIGNUPS_KEY)) === "true";
+  }
+
+  async setSignupsEnabled(enabled: boolean): Promise<void> {
+    await this.setSetting(SIGNUPS_KEY, enabled ? "true" : "false");
   }
 
   // -- schedule overrides --

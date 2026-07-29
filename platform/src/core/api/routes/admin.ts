@@ -1,9 +1,11 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook } from "../auth.js";
+import { sessionAuthenticator } from "../session.js";
 import { Manifest, EXTENSION_NAME_RE } from "../../../contracts/manifest.js";
 import { VALID_REMOVAL_MODES } from "../../store/settings.js";
+import { BundleRejectedError } from "../../store/bundles.js";
 import AdmZip from "adm-zip";
 
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
@@ -15,14 +17,22 @@ const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
  */
 export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.register(async (scope) => {
-    scope.addHook("preHandler", adminAuthHook(ctx.config.adminToken));
+    scope.addHook(
+      "preHandler",
+      adminAuthHook({
+        adminToken: ctx.config.adminToken,
+        session: sessionAuthenticator(ctx),
+      }),
+    );
     scope.addHook("preHandler", async (req, reply) => {
       if (!ctx.adminLimiter.allow(req.ip)) {
         await reply.code(429).send({ error: "rate limited" });
       }
     });
-    const actor = (req: { headers: Record<string, unknown> }) =>
-      `admin:${(req.headers["x-actor"] as string | undefined)?.slice(0, 64) ?? "unknown"}`;
+    // Bearer clients (bot, CLI) name themselves with X-Actor. Dashboard
+    // sessions carry the operator name in the cookie, so they need no header.
+    const actor = (req: FastifyRequest) =>
+      `admin:${(req.headers["x-actor"] as string | undefined)?.slice(0, 64) ?? req.adminActor ?? "unknown"}`;
 
     // ---- worker fleet ----
     scope.post("/api/v1/admin/enroll-tokens", async (req) => {
@@ -272,16 +282,27 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           return reply.code(422).send({ error: "invalid zip" });
         }
         const sourceCommit = (req.headers["x-source-commit"] as string | undefined)?.slice(0, 64);
+        // Republishing a pre-v2 python bundle is deliberately awkward and
+        // always leaves a trace: the header alone is recorded even when the
+        // publish then fails for some other reason.
+        const allowLegacy = req.headers["x-allow-legacy-runtime"] === "true";
+        if (allowLegacy) {
+          await ctx.audit.record(actor(req), "bundle.publish.legacy_runtime_override", "requested", {
+            sourceCommit,
+          });
+        }
         try {
           const { bundle, created } = await ctx.bundles.publish({
             zipData: req.body,
             manifest: manifestRaw,
             sourceCommit,
+            allowLegacy,
           });
           await ctx.audit.record(actor(req), "bundle.publish", `${bundle.extension}@${bundle.version}`, {
             sha256: bundle.sha256,
             sourceCommit,
             created,
+            ...(allowLegacy ? { allowLegacy: true } : {}),
           });
           return reply.code(created ? 201 : 200).send({
             extension: bundle.extension,
@@ -290,6 +311,11 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
             created,
           });
         } catch (err) {
+          // A rejected bundle already carries an operator-readable reason;
+          // wrapping it in "manifest validation failed" would only bury it.
+          if (err instanceof BundleRejectedError) {
+            return reply.code(422).send({ error: err.message });
+          }
           return reply.code(422).send({ error: `manifest validation failed: ${String(err)}` });
         }
       },

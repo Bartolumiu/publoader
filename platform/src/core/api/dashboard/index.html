@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>publoader · control plane</title>
+    <link rel="stylesheet" href="/dash/style.css" />
+    <script src="/dash/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>publoader<span class="dim"> control plane</span></h1>
+      <span id="pause-pill" class="pill" hidden></span>
+      <span class="grow"></span>
+      <span id="whoami" class="dim"></span>
+      <button id="logout" type="button" hidden>Sign out</button>
+    </header>
+
+    <main>
+      <section id="login" class="login" hidden>
+        <div class="card">
+          <h2>Sign in</h2>
+
+          <form id="login-form" autocomplete="on">
+            <label for="login-email">Email</label>
+            <input id="login-email" name="email" type="email" required maxlength="320"
+                   autocomplete="username" placeholder="you@example.com" />
+            <label for="login-password">Password</label>
+            <input id="login-password" name="password" type="password" required maxlength="1024"
+                   autocomplete="current-password" />
+            <button type="submit" class="primary">Sign in</button>
+          </form>
+
+          <p id="login-discord-wrap" hidden>
+            <a id="login-discord" class="button-link" href="/api/v1/admin/oauth/discord/start">
+              Sign in with Discord
+            </a>
+          </p>
+          <p id="login-signups" class="dim" hidden>
+            New Discord accounts are accepted, but an owner must approve them before first use.
+          </p>
+
+          <p><button id="login-token-toggle" type="button" class="linkish">Use the admin token instead</button></p>
+
+          <form id="login-token-form" autocomplete="off" hidden>
+            <p class="dim">
+              Break-glass access. The token is exchanged for a session cookie and is not stored in
+              the browser.
+            </p>
+            <label for="login-actor">Display name</label>
+            <input id="login-actor" name="actor" type="text" maxlength="64" placeholder="ardax" />
+            <label for="login-token">Admin token</label>
+            <input id="login-token" name="token" type="password" required maxlength="512" />
+            <button type="submit">Sign in with token</button>
+          </form>
+
+          <p id="login-error" class="error" role="alert"></p>
+        </div>
+      </section>
+
+      <section id="app" hidden>
+        <nav id="tabs" class="tabs" role="tablist" aria-label="Dashboard sections"></nav>
+        <div id="view" role="tabpanel" tabindex="-1"></div>
+      </section>
+    </main>
+
+    <dialog id="modal" aria-labelledby="modal-title">
+      <form method="dialog" class="modal-head">
+        <h2 id="modal-title"></h2>
+        <button type="submit" aria-label="Close">Close</button>
+      </form>
+      <div id="modal-body"></div>
+    </dialog>
+
+    <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+  </body>
+</html>

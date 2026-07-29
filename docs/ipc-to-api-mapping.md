@@ -7,20 +7,34 @@ bot and the dashboard. Both currently speak JSON-RPC over a Unix socket to
 `run.py`'s in-process IPC server (`_setup_ipc_server`, 27 registered commands).
 Both must move to HTTPS against the core admin API.
 
+**The dashboard half is already done.** It is no longer a separate app holding
+its own copy of the credential: core-api serves it as static assets at the
+domain root (`platform/src/core/api/dashboard/`) and it calls the same
+`/api/v1/admin/*` endpoints as everything else. Operators sign in with their
+own accounts — email + password or Discord — and get a revocable session
+cookie; the admin token is the break-glass path only. The "Dashboard" column
+below is the migration map for the old UI, and it covers every admin endpoint.
+What remains to port is the bot.
+
 ## How the transport changes
 
 | | Legacy | Platform |
 |---|---|---|
 | Transport | Unix domain socket, newline-delimited JSON | HTTPS, JSON bodies |
 | Location | same host, same container as the scheduler | `https://publoader.ardax.dev` (any host) |
-| Auth | filesystem permissions on the socket | `Authorization: Bearer $PUBLOADER_ADMIN_TOKEN` |
+| Auth | filesystem permissions on the socket | `Authorization: Bearer $PUBLOADER_ADMIN_TOKEN`, or a `publoader_session` cookie (per-operator account, revocable) for the dashboard |
+| Roles | none | bearer = `OWNER`; accounts are `OWNER` or `ADMIN`, and only `OWNER` manages accounts |
 | Attribution | none | `X-Actor: <name>` header, recorded in `audit_events` |
 | Errors | `{"ok": false, "error": "..."}` | HTTP status + `{"error": "..."}` |
-| Rate limit | none | per-IP limiter on the admin scope (429) |
+| Rate limit | none | per-IP limiter on the admin scope (429); 5/min on login |
 
 Every mutating endpoint writes an `AuditEvent` naming the actor, so the bot
 should forward the invoking Discord user in `X-Actor`
-(e.g. `X-Actor: discord:ardax#0001`).
+(e.g. `X-Actor: discord:ardax#0001`). Dashboard sessions carry the operator
+name inside the cookie and need no header; `X-Actor` still wins if sent.
+
+Cookie-authenticated **writes** must also send `x-requested-with:
+publoader-dash` (CSRF). Bearer clients are unaffected and should not send it.
 
 ## Command mapping
 
@@ -29,49 +43,49 @@ Base path for every endpoint below is `/api/v1/admin`. "CLI" is the
 
 ### Direct equivalents
 
-| Legacy IPC | Endpoint | CLI | Notes |
-|---|---|---|---|
-| `run` | `POST /runs` | `runs trigger <ext> [--kind]` | `force: true` → `kind: "FORCE"`; `clean: true` → `kind: "CLEAN"`; neither → `UPDATE`. One extension per call — the legacy `extensions: [...]` list becomes N calls. Returns `{runId, created}`; `created: false` means the idempotency key already existed. Returns 409 while paused, matching the legacy paused rejection. |
-| `list_schedule` | `GET /schedules` | `schedules list` | Returns `{defaults, overrides}`. `defaults` now comes from each bundle's `manifest.json` rather than `schedule*.json` files on disk. |
-| `set_schedule` | `PUT /schedules/:name` | `schedules set <ext> <hour> <minute> [--day]` | Body `{hour, minute, day?}`. No explicit reschedule step: the scheduler recomputes due slots every tick, so the change takes effect within one `SCHEDULER_INTERVAL_SECONDS`. |
-| `remove_schedule` | `DELETE /schedules/:name` | `schedules remove <ext>` | Returns `{removed: boolean}`, same "no override existed" semantics. |
-| `get_removal_mode` | `GET /removal-mode` | `removal-mode get` | Returns `{mode, validModes}`. The legacy `explicit` / `default` fields are dropped — read `settings` if you need to distinguish. |
-| `set_removal_mode` | `POST /removal-mode` | `removal-mode set <mode>` | Body `{mode}`, validated against `unavailable \| delete`. |
-| `list_extensions` | `GET /extensions` | `extensions list` | Source of truth changes: the legacy version scanned `publoader/extensions/src/` on the local disk; this lists **published bundles** with version, sha256, and disabled flag. An extension that exists in the repo but was never published does not appear — that is the intended behaviour. |
-| `disable_extension` | `POST /extensions/:name/disable` | `extensions disable <name>` | |
-| `enable_extension` | `POST /extensions/:name/enable` | `extensions enable <name>` | |
-| `run_history` | `GET /runs?limit=&extension=` | `runs list` | Richer than the SQLite `run_history` rows: state machine state, segment count, bundle pin. Use `GET /runs/:id` (`runs show`) for per-job detail including `lastError`. |
-| `stats` | `GET /stats` | `stats` | Returns job counts by state, upload-task depths by (kind, state), worker counts by status, quarantine count, pause flag. Replaces both `stats` and the queue-length half of `status`. |
-| `pause` | `POST /pause` | `pause [--minutes]` | Body `{minutes?}`; omit for indefinite. Unlike the legacy version the pause is authoritative in Postgres, so it is honoured by every replica immediately rather than by one process's global. |
-| `resume` | `POST /resume` | `resume` | |
-| `status` | `GET /stats` + `GET /workers` | `stats`, `workers list` | Split in two. `pid` and the in-process `schedule` job list have no equivalent — see below. |
-| `queue_peek` | `GET /stats` (depths only) | `stats` | **Partial.** Depths are covered; per-row sampling is not — see gaps. |
+| Legacy IPC | Endpoint | CLI | Dashboard | Notes |
+|---|---|---|---|---|
+| `run` | `POST /runs` | `runs trigger <ext> [--kind]` | Extensions → Run / Force / Clean | `force: true` → `kind: "FORCE"`; `clean: true` → `kind: "CLEAN"`; neither → `UPDATE`. One extension per call — the legacy `extensions: [...]` list becomes N calls. Returns `{runId, created}`; `created: false` means the idempotency key already existed. Returns 409 while paused, matching the legacy paused rejection. |
+| `list_schedule` | `GET /schedules` | `schedules list` | Extensions → Configure → Schedule | Returns `{defaults, overrides}`. `defaults` now comes from each bundle's `manifest.json` rather than `schedule*.json` files on disk. |
+| `set_schedule` | `PUT /schedules/:name` | `schedules set <ext> <hour> <minute> [--day]` | Extensions → Configure → Schedule → Save override | Body `{hour, minute, day?}`. No explicit reschedule step: the scheduler recomputes due slots every tick, so the change takes effect within one `SCHEDULER_INTERVAL_SECONDS`. |
+| `remove_schedule` | `DELETE /schedules/:name` | `schedules remove <ext>` | Extensions → Configure → Schedule → Remove override | Returns `{removed: boolean}`, same "no override existed" semantics. |
+| `get_removal_mode` | `GET /removal-mode` | `removal-mode get` | Extensions → Settings | Returns `{mode, validModes}`. The legacy `explicit` / `default` fields are dropped — read `settings` if you need to distinguish. |
+| `set_removal_mode` | `POST /removal-mode` | `removal-mode set <mode>` | Extensions → Settings → Save | Body `{mode}`, validated against `unavailable \| delete`. |
+| `list_extensions` | `GET /extensions` | `extensions list` | Extensions | Source of truth changes: the legacy version scanned `publoader/extensions/src/` on the local disk; this lists **published bundles** with version, sha256, and disabled flag. An extension that exists in the repo but was never published does not appear — that is the intended behaviour. |
+| `disable_extension` | `POST /extensions/:name/disable` | `extensions disable <name>` | Extensions → Disable | |
+| `enable_extension` | `POST /extensions/:name/enable` | `extensions enable <name>` | Extensions → Enable | |
+| `run_history` | `GET /runs?limit=&extension=` | `runs list` | Runs | Richer than the SQLite `run_history` rows: state machine state, segment count, bundle pin. Use `GET /runs/:id` (`runs show`) for per-job detail including `lastError`. |
+| `stats` | `GET /stats` | `stats` | Overview | Returns job counts by state, upload-task depths by (kind, state), worker counts by status, quarantine count, pause flag. Replaces both `stats` and the queue-length half of `status`. |
+| `pause` | `POST /pause` | `pause [--minutes]` | Overview → Pause | Body `{minutes?}`; omit for indefinite. Unlike the legacy version the pause is authoritative in Postgres, so it is honoured by every replica immediately rather than by one process's global. |
+| `resume` | `POST /resume` | `resume` | Overview → Resume | |
+| `status` | `GET /stats` + `GET /workers` | `stats`, `workers list` | Overview + Workers | Split in two. `pid` and the in-process `schedule` job list have no equivalent — see below. |
+| `queue_peek` | `GET /stats` (depths only) | `stats` | Overview → Upload tasks (depths only) | **Partial.** Depths are covered; per-row sampling is not — see gaps. |
 
 ### New capabilities with no legacy counterpart
 
 These have no IPC command to migrate from, but the bot and dashboard should
 surface them because they are where operational problems now appear.
 
-| Endpoint | CLI | What it is |
-|---|---|---|
-| `POST /enroll-tokens` | `enroll-token create` | Mint a single-use worker enrollment token. |
-| `GET /workers` | `workers list` | Fleet inventory with heartbeat age and trust tier. |
-| `POST /workers/:id/{drain,activate,revoke}` | `workers drain\|activate\|revoke` | Worker lifecycle. |
-| `GET /runs/:id` | `runs show <id>` | Run detail with every job, attempt count, lease holder, and error. |
-| `POST /jobs/:id/cancel` | `jobs cancel <id>` | Cancel one job. |
-| `POST /jobs/:id/retry` | `jobs retry <id>` | Replay a dead-lettered job. |
-| `GET /dead-letter` | `dead-letter` | Jobs that exhausted retries or hit a permanent/policy error. |
-| `GET /quarantine` | `quarantine` | Result envelopes rejected by schema or policy validation — the signal that a worker is misbehaving. |
-| `POST /bundles` | `bundle publish <dir>` | Publish a content-addressed extension bundle. Also performs the one-time seed of `manga_id_map.json` / `override_options.json` into the database. |
-| `GET /audit` | `audit` | Who did what, when. |
-| `GET /extensions/:name/tracked` | `tracked list <ext>` | The external-id → MangaDex-id mapping. **Replaces `manga_id_map.json`** — the database is the config authority. |
-| `PUT /extensions/:name/tracked` | `tracked set <ext> <mangaId> <mdMangaId>` | Add or repoint a mapping. |
-| `DELETE /extensions/:name/tracked/:mangaId` | `tracked remove <ext> <mangaId>` | Stop tracking a manga. Does not touch MangaDex. |
-| `GET /extensions/:name/config` | `ext-config get <ext>` | Override options as JSON. **Replaces `override_options.json`.** |
-| `PUT /extensions/:name/config` | `ext-config set <ext> [file]` | Replace the override options (whole-document, not a merge). CLI reads a file or stdin. |
-| `GET /untracked?state=` | `untracked list [--state]` | Series an extension reported with no MangaDex title yet. |
-| `POST /untracked/:id/approve` | `untracked approve <id>` | Create the MangaDex title now and start tracking it. Synchronous; returns the new `mdMangaId`. |
-| `POST /untracked/:id/skip` | `untracked skip <id>` | Never create a title for this series. |
+| Endpoint | CLI | Dashboard | What it is |
+|---|---|---|---|
+| `POST /enroll-tokens` | `enroll-token create` | Workers → Enroll new worker (shows the token once, with a compose snippet) | Mint a single-use worker enrollment token. |
+| `GET /workers` | `workers list` | Workers | Fleet inventory with heartbeat age and trust tier. |
+| `POST /workers/:id/{drain,activate,revoke}` | `workers drain\|activate\|revoke` | Workers → Drain / Activate / Revoke | Worker lifecycle. |
+| `GET /runs/:id` | `runs show <id>` | Runs → click a run (drawer with every job) | Run detail with every job, attempt count, lease holder, and error. |
+| `POST /jobs/:id/cancel` | `jobs cancel <id>` | Runs → run drawer → Cancel | Cancel one job. |
+| `POST /jobs/:id/retry` | `jobs retry <id>` | Runs → run drawer → Retry, or Dead letter → Replay | Replay a dead-lettered job. |
+| `GET /dead-letter` | `dead-letter` | Runs → Dead letter | Jobs that exhausted retries or hit a permanent/policy error. |
+| `GET /quarantine` | `quarantine` | Quarantine | Result envelopes rejected by schema or policy validation — the signal that a worker is misbehaving. |
+| `POST /bundles` | `bundle publish <dir>` | Extensions → Settings → Publish bundle (.zip) | Publish a content-addressed extension bundle. Also performs the one-time seed of `manga_id_map.json` / `override_options.json` into the database. |
+| `GET /audit` | `audit` | Audit | Who did what, when. |
+| `GET /extensions/:name/tracked` | `tracked list <ext>` | Extensions → Configure → Tracked manga | The external-id → MangaDex-id mapping. **Replaces `manga_id_map.json`** — the database is the config authority. |
+| `PUT /extensions/:name/tracked` | `tracked set <ext> <mangaId> <mdMangaId>` | Extensions → Configure → Tracked manga → Add / repoint | Add or repoint a mapping. |
+| `DELETE /extensions/:name/tracked/:mangaId` | `tracked remove <ext> <mangaId>` | Extensions → Configure → Tracked manga → Remove | Stop tracking a manga. Does not touch MangaDex. |
+| `GET /extensions/:name/config` | `ext-config get <ext>` | Extensions → Configure → Override options | Override options as JSON. **Replaces `override_options.json`.** |
+| `PUT /extensions/:name/config` | `ext-config set <ext> [file]` | Extensions → Configure → Override options → Save (JSON validated) | Replace the override options (whole-document, not a merge). CLI reads a file or stdin. |
+| `GET /untracked?state=` | `untracked list [--state]` | Untracked (state filter) | Series an extension reported with no MangaDex title yet. |
+| `POST /untracked/:id/approve` | `untracked approve <id>` | Untracked → Approve (confirms; links the new title) | Create the MangaDex title now and start tracking it. Synchronous; returns the new `mdMangaId`. |
+| `POST /untracked/:id/skip` | `untracked skip <id>` | Untracked → Skip | Never create a title for this series. |
 
 ### Retired — and what replaces the capability
 

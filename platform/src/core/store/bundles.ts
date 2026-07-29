@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
 import AdmZip from "adm-zip";
 import type { PrismaClient, Bundle } from "@prisma/client";
-import { Manifest } from "../../contracts/manifest.js";
+import { Manifest, manifestRuntime } from "../../contracts/manifest.js";
+
+/** A bundle that cannot be accepted as published. Surfaces as a 422. */
+export class BundleRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BundleRejectedError";
+  }
+}
 
 /**
  * Content-addressed extension bundles. A bundle is a zip of one extension
@@ -16,8 +24,27 @@ export class BundleStore {
     zipData: Buffer;
     manifest: unknown;
     sourceCommit?: string;
+    /**
+     * Escape hatch for republishing a pre-v2 python bundle (operator-only,
+     * audit-logged at the route). Not for new work — it exists so a rollback
+     * to a known-good legacy bundle is possible without a code change.
+     */
+    allowLegacy?: boolean;
   }): Promise<{ bundle: Bundle; created: boolean }> {
     const manifest = Manifest.parse(opts.manifest);
+    const runtime = manifestRuntime(manifest);
+
+    if (runtime === "python" && opts.allowLegacy !== true) {
+      throw new BundleRejectedError(
+        "python bundles are no longer accepted; port to extension API v2 " +
+          '(set publoader_api "^2.0.0", runtime "node", and default-export an ' +
+          "ExtensionFactory from a single ESM entrypoint)",
+      );
+    }
+    if (runtime === "node") {
+      assertNodeEntrypoint(manifest, opts.zipData);
+    }
+
     const sha256 = createHash("sha256").update(opts.zipData).digest("hex");
 
     const existing = await this.prisma.bundle.findUnique({ where: { sha256 } });
@@ -139,5 +166,44 @@ export class BundleStore {
       data: { yanked: true },
     });
     return res.count === 1;
+  }
+}
+
+/**
+ * Best-effort check that a node bundle's entrypoint is actually there and
+ * actually an ES module with a default export.
+ *
+ * This is not a parser and does not try to be one — the real validation is
+ * that the runner imports the file and refuses it if `default` is not a
+ * function. The point is to fail at publish, where an operator is watching,
+ * rather than on a worker an hour later.
+ */
+function assertNodeEntrypoint(manifest: Manifest, zipData: Buffer): void {
+  let zip: AdmZip;
+  try {
+    zip = new AdmZip(zipData);
+  } catch {
+    throw new BundleRejectedError("bundle is not a readable zip");
+  }
+  const entry = zip.getEntry(manifest.entrypoint);
+  if (!entry) {
+    throw new BundleRejectedError(
+      `entrypoint ${manifest.entrypoint} is missing from the bundle`,
+    );
+  }
+  if (!/\.(mjs|js)$/.test(manifest.entrypoint)) {
+    throw new BundleRejectedError(
+      `entrypoint ${manifest.entrypoint} must be .mjs or .js for a node bundle`,
+    );
+  }
+  const source = entry.getData().toString("utf8");
+  if (source.trim().length === 0) {
+    throw new BundleRejectedError(`entrypoint ${manifest.entrypoint} is empty`);
+  }
+  if (!source.includes("export default") && !source.includes("exports.default")) {
+    throw new BundleRejectedError(
+      `entrypoint ${manifest.entrypoint} has no default export; an extension must ` +
+        "default-export an ExtensionFactory",
+    );
   }
 }

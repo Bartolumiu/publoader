@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Logger } from "../logging.js";
 import type { Config } from "../config.js";
 import { ResultEnvelope, resultIdempotencyKey } from "../contracts/envelope.js";
+import { manifestRuntime } from "../contracts/manifest.js";
 import type { ChapterRecord } from "../contracts/records.js";
 import type { CoreApiClient, LeasedJob } from "./coreApi.js";
 import type { BundleCache } from "./bundleCache.js";
@@ -43,7 +44,7 @@ interface RunnerImageBatch {
   files: string[];
 }
 
-/** The exact JSON the Python runner prints as its last stdout line. */
+/** The exact JSON a runner prints as its last stdout line. */
 interface RunnerOutput {
   runnerVersion?: number;
   status: "ok" | "error";
@@ -68,21 +69,18 @@ interface RunnerInvocation {
 }
 
 /**
- * Locate runner.py.
+ * Locate a runner script that ships alongside this module.
  *
- * Two layouts are probed relative to this module: runner/ sitting beside dist/
- * (what docker/worker/Dockerfile builds, where the agent runs from
- * /app/dist/src/worker and the shim lives at /app/runner), and runner/ one
- * level up from src/ (running straight from source under tsx). Either env var
- * overrides the probe — PUBLOADER_RUNNER is the name the worker image sets.
+ * Two layouts are probed: `<dir>/` sitting beside dist/ (what
+ * docker/worker/Dockerfile builds, where the agent runs from
+ * /app/dist/src/worker and the runner lives at /app/<dir>), and `<dir>/` one
+ * level up from src/ (running straight from source under tsx).
  */
-export async function resolveRunnerPath(): Promise<string> {
-  const override = process.env["RUNNER_PATH"] ?? process.env["PUBLOADER_RUNNER"];
-  if (override) return override;
+async function probeRunner(dir: string, file: string, envHint: string): Promise<string> {
   const here = fileURLToPath(new URL(".", import.meta.url));
   const candidates = [
-    join(here, "..", "..", "runner", "runner.py"),
-    join(here, "..", "..", "..", "runner", "runner.py"),
+    join(here, "..", "..", dir, file),
+    join(here, "..", "..", "..", dir, file),
   ];
   for (const candidate of candidates) {
     try {
@@ -93,13 +91,34 @@ export async function resolveRunnerPath(): Promise<string> {
     }
   }
   throw new Error(
-    `runner.py not found (tried ${candidates.join(", ")}); set RUNNER_PATH to its location`,
+    `${file} not found (tried ${candidates.join(", ")}); set ${envHint} to its location`,
   );
 }
 
 /**
- * Runs one leased job end to end: materialise the bundle, drive the Python
- * runner, upload page images as artifacts, and build the result envelope.
+ * Locate runner.mjs, the extension API v2 runner. NODE_RUNNER_PATH overrides
+ * the probe — PUBLOADER_NODE_RUNNER is the name the worker image sets.
+ */
+export async function resolveNodeRunnerPath(): Promise<string> {
+  const override = process.env["NODE_RUNNER_PATH"] ?? process.env["PUBLOADER_NODE_RUNNER"];
+  if (override) return override;
+  return probeRunner("runner-node", "runner.mjs", "NODE_RUNNER_PATH");
+}
+
+/**
+ * Locate runner.py. DEPRECATED: python bundles are no longer accepted at
+ * publish (see core/store/bundles.ts), so this only serves jobs pinned to a
+ * bundle published before the v2 cutover.
+ */
+export async function resolveRunnerPath(): Promise<string> {
+  const override = process.env["RUNNER_PATH"] ?? process.env["PUBLOADER_RUNNER"];
+  if (override) return override;
+  return probeRunner("runner", "runner.py", "RUNNER_PATH");
+}
+
+/**
+ * Runs one leased job end to end: materialise the bundle, drive the runner,
+ * upload page images as artifacts, and build the result envelope.
  *
  * The executor never writes to the control plane's state itself — its only
  * output is an envelope for the caller to submit.
@@ -151,10 +170,16 @@ export class JobExecutor {
         ),
       );
 
+      // The runner creates this too, but Node's permission model is happier
+      // granting a path that exists, and it keeps the grant unambiguous.
+      await mkdir(outputDir, { recursive: true });
+
       const invocation = await this.runRunner({
         bundleDir,
+        workdir,
         jobFile,
         outputDir,
+        runtime: job.manifest ? manifestRuntime(job.manifest) : "node",
         timeoutSeconds: job.timeoutSeconds,
         signal,
         log,
@@ -259,18 +284,69 @@ export class JobExecutor {
     });
   }
 
-  private async runRunner(opts: {
+  /**
+   * Build the argv for the extension API v2 runner.
+   *
+   * The permission flags are the sandbox. Each was verified against Node 24;
+   * note in particular that a comma-separated path list is NO LONGER accepted
+   * (Node warns and honours only the first), so every path gets its own flag.
+   *
+   *   --disallow-code-generation-from-strings
+   *       eval()/new Function() throw. A bundle is a single pre-built ESM file
+   *       reviewed at publish; fetching code and evaluating it at run time is
+   *       never legitimate here.
+   *   --permission
+   *       turns on the permission model. Beyond the fs grants below this also
+   *       denies child_process and worker_threads outright, which is most of
+   *       the reason to use it: an extension cannot shell out or spawn a
+   *       thread to escape the guarded fetch.
+   *   --allow-fs-read=<bundleDir>   the extension's own code and data files
+   *   --allow-fs-read=<runnerDir>   so Node can load runner.mjs itself
+   *   --allow-fs-read=<workdir>     job.json
+   *   --allow-fs-write=<outputDir>  page images
+   *   --allow-fs-write=<workdir>    scratch (outputDir lives under it)
+   *
+   * Directory grants ARE recursive, so nested data files resolve. Network is
+   * deliberately NOT restricted by the permission model — it has no network
+   * component — DNS and TLS work with no further grants, and egress control is
+   * the guarded fetch's job.
+   */
+  private async nodeRunnerArgv(opts: {
     bundleDir: string;
+    workdir: string;
     jobFile: string;
     outputDir: string;
+  }): Promise<{ command: string; args: string[]; runnerPath: string }> {
+    const runnerPath = await resolveNodeRunnerPath();
+    const runnerDir = join(runnerPath, "..");
+    return {
+      command: process.execPath,
+      runnerPath,
+      args: [
+        "--disallow-code-generation-from-strings",
+        "--permission",
+        `--allow-fs-read=${opts.bundleDir}`,
+        `--allow-fs-read=${runnerDir}`,
+        `--allow-fs-read=${opts.workdir}`,
+        `--allow-fs-write=${opts.outputDir}`,
+        `--allow-fs-write=${opts.workdir}`,
+        runnerPath,
+      ],
+    };
+  }
+
+  private async runRunner(opts: {
+    bundleDir: string;
+    workdir: string;
+    jobFile: string;
+    outputDir: string;
+    runtime: "node" | "python";
     timeoutSeconds: number;
     signal: AbortSignal;
     log: Logger;
   }): Promise<RunnerInvocation> {
-    const runnerPath = await resolveRunnerPath();
     const extraArgs = this.config.runnerExtraArgs.split(/\s+/).filter(Boolean);
-    const args = [
-      runnerPath,
+    const jobArgs = [
       "--bundle",
       opts.bundleDir,
       "--job",
@@ -280,24 +356,49 @@ export class JobExecutor {
       ...extraArgs,
     ];
 
-    opts.log.info({ python: this.config.runnerPython, runnerPath }, "spawning runner");
+    let command: string;
+    let args: string[];
+    let env: Record<string, string>;
+
+    const baseEnv = {
+      PATH: process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin",
+      HOME: opts.outputDir,
+      TMPDIR: opts.outputDir,
+      LANG: process.env["LANG"] ?? "C.UTF-8",
+    };
+
+    if (opts.runtime === "python") {
+      const runnerPath = await resolveRunnerPath();
+      opts.log.warn(
+        { runnerPath },
+        "DEPRECATED: running a python (extension API v1) bundle. Python bundles are " +
+          "no longer accepted at publish; port this extension to extension API v2 " +
+          "(TypeScript/ESM) — the legacy runner will be removed.",
+      );
+      command = this.config.runnerPython;
+      args = [runnerPath, ...jobArgs];
+      env = {
+        ...baseEnv,
+        PYTHONUNBUFFERED: "1",
+        PYTHONDONTWRITEBYTECODE: "1",
+        PYTHONHASHSEED: "0",
+      };
+    } else {
+      const node = await this.nodeRunnerArgv(opts);
+      opts.log.info({ runnerPath: node.runnerPath }, "spawning node runner");
+      command = node.command;
+      args = [...node.args, ...jobArgs];
+      env = baseEnv;
+    }
 
     // Deliberately minimal environment: the extension is untrusted code and
     // must not be able to read the worker token, core URL, or anything else
     // this process was configured with.
-    const child = spawn(this.config.runnerPython, args, {
+    const child = spawn(command, args, {
       cwd: opts.bundleDir,
       detached: true, // own process group, so a timeout kills grandchildren too
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        PATH: process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin",
-        HOME: opts.outputDir,
-        TMPDIR: opts.outputDir,
-        LANG: process.env["LANG"] ?? "C.UTF-8",
-        PYTHONUNBUFFERED: "1",
-        PYTHONDONTWRITEBYTECODE: "1",
-        PYTHONHASHSEED: "0",
-      },
+      env,
     });
 
     const stdoutChunks: Buffer[] = [];

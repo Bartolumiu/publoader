@@ -23,7 +23,7 @@ export async function resetDb(prisma: PrismaClient): Promise<void> {
       uploaded_chapters, uploaded_ids, edited_chapters, unavailable_chapters,
       upload_log, schedule_overrides, disabled_extensions, settings,
       audit_events, workers, enroll_tokens, untracked_manga, tracked_manga,
-      extension_configs
+      extension_configs, admin_sessions, admin_users
     CASCADE
   `);
 }

@@ -2,8 +2,8 @@
 # End-to-end proof against the docker/dev compose stack:
 #   1. publish the fixture extension bundle
 #   2. trigger a FORCE run
-#   3. watch it lease to one of two real workers, execute in the Python
-#      runner, ingest, process, and upload to the mock MangaDex
+#   3. watch it lease to one of two real workers, execute in the Node runner
+#      (extension API v2), ingest, process, and upload to the mock MangaDex
 #   4. assert uploads + untracked-series persistence
 #   5. failover: switch the fixture into slow mode, kill the worker holding
 #      the lease, and assert the OTHER worker completes the run
@@ -73,9 +73,14 @@ echo "run: $run_id"
 wait_run "$run_id" 180
 
 say "3/5 assert mock MangaDex received the uploads"
-uploads="$(curl -fsS "$MOCK/_test/uploads")"
-count="$(echo "$uploads" | json "len(d['commits'])")"
-[ "$count" -ge 2 ] || { echo "$uploads"; fail "expected >=2 committed uploads on mock-md, got $count"; }
+# Upload tasks drain asynchronously after the run is PROCESSED — poll.
+count=0
+for _ in $(seq 1 30); do
+  count="$(curl -fsS "$MOCK/_test/uploads" | json "len(d['commits'])")"
+  [ "$count" -ge 2 ] && break
+  sleep 2
+done
+[ "$count" -ge 2 ] || { curl -fsS "$MOCK/_test/uploads"; fail "expected >=2 committed uploads on mock-md, got $count"; }
 echo "mock-md committed uploads: $count"
 
 say "4/5 assert untracked series was persisted for the title pipeline"

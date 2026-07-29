@@ -76,9 +76,14 @@ COPY src ./src
 # before tsc because the TypeScript in src/ imports the generated types.
 RUN pnpm exec prisma generate
 RUN pnpm exec tsc -p tsconfig.json
+# The dashboard is static assets, not TypeScript, so tsc does not emit them.
+# core-api reads them at boot and would crash without them.
+RUN mkdir -p dist/src/core/api/dashboard \
+    && cp -r src/core/api/dashboard/. dist/src/core/api/dashboard/
 # Fail the build here rather than at 03:00 in production if the entrypoint the
 # compose files reference was never emitted.
 RUN test -f dist/src/services/api.js || (echo "build produced no dist/src/services/api.js" >&2; exit 1)
+RUN test -f dist/src/core/api/dashboard/index.html || (echo "build produced no dashboard assets" >&2; exit 1)
 
 
 # --- stage: migrate ---------------------------------------------------------

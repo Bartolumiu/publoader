@@ -372,6 +372,48 @@ model Setting {
   @@map("settings")
 }
 
+enum AdminRole {
+  OWNER
+  ADMIN
+}
+
+// Dashboard operator accounts. ALL auth state lives in Postgres: accounts,
+// Discord linkage, and revocable sessions. The bearer ADMIN_TOKEN remains the
+// break-glass path and the bot/CLI credential.
+model AdminUser {
+  id              String         @id @default(uuid())
+  email           String         @unique
+  displayName     String?        @map("display_name")
+  role            AdminRole      @default(ADMIN)
+  /** Signups (when enabled) create unapproved accounts; an OWNER approves. */
+  approved        Boolean        @default(true)
+  /** scrypt "salt:hash" — null when the account is Discord-only. */
+  passwordHash    String?        @map("password_hash")
+  discordId       String?        @unique @map("discord_id")
+  discordUsername String?        @map("discord_username")
+  lastLoginAt     DateTime?      @map("last_login_at")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  sessions        AdminSession[]
+
+  @@map("admin_users")
+}
+
+model AdminSession {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  user      AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique @map("token_hash")
+  actor     String
+  expiresAt DateTime  @map("expires_at")
+  revoked   Boolean   @default(false)
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("admin_sessions")
+}
+
 model AuditEvent {
   id        String   @id @default(uuid())
   actor     String

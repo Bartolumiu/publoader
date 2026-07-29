@@ -22,6 +22,25 @@ if (config.mdUsername && config.mdPassword) {
 }
 const server = buildServer(ctx);
 
+/**
+ * Make sure there is always a way in. A fresh database has no accounts, so
+ * without this the dashboard would be reachable only with the break-glass
+ * admin token forever.
+ */
+const seedOwner = async (): Promise<void> => {
+  const owner = await ctx.adminUsers.ensureOwner(config.dashOwnerEmail);
+  log.info(
+    {
+      email: owner.email,
+      hasPassword: owner.passwordHash !== null,
+      discordLinked: owner.discordId !== null,
+    },
+    owner.passwordHash === null && owner.discordId === null
+      ? "owner account has no credentials yet: sign in with ADMIN_TOKEN and set a password from the Users view"
+      : "owner account ready",
+  );
+};
+
 const shutdown = async (signal: string) => {
   log.info({ signal }, "shutting down");
   await server.close();
@@ -31,8 +50,8 @@ const shutdown = async (signal: string) => {
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("SIGINT", () => void shutdown("SIGINT"));
 
-server
-  .listen({ port: config.port, host: config.host })
+seedOwner()
+  .then(() => server.listen({ port: config.port, host: config.host }))
   .then(() => log.info({ port: config.port }, "core-api listening"))
   .catch((err) => {
     log.error({ err }, "failed to start");

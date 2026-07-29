@@ -1,0 +1,422 @@
+/* Operator dashboard. Dark, dense, system fonts only — no external assets,
+   because the page is served under a CSP that forbids other origins. */
+
+:root {
+  --bg: #0d1117;
+  --panel: #151b23;
+  --panel-2: #1c232e;
+  --line: #2a323d;
+  --text: #e6edf3;
+  --dim: #8d97a5;
+  --accent: #4f9cf9;
+  --ok: #3fb950;
+  --bad: #f85149;
+  --warn: #d29922;
+  --radius: 10px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.55 var(--font);
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: 600;
+}
+
+a {
+  color: var(--accent);
+}
+
+.dim {
+  color: var(--dim);
+}
+
+.grow {
+  flex: 1;
+}
+
+.error {
+  color: var(--bad);
+  min-height: 1.2em;
+  margin: 8px 0 0;
+}
+
+/* ---- chrome ---- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 5;
+}
+
+.topbar h1 {
+  font-size: 15px;
+  letter-spacing: 0.3px;
+}
+
+main {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+  margin-bottom: 18px;
+}
+
+.tabs button {
+  background: none;
+  border: 1px solid transparent;
+}
+
+.tabs button[aria-selected="true"] {
+  background: var(--panel-2);
+  border-color: var(--line);
+  color: var(--text);
+}
+
+/* ---- controls ---- */
+
+button {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 6px 11px;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+button.primary {
+  background: #16324f;
+  border-color: #26557f;
+}
+
+button.danger {
+  background: #3a1d1d;
+  border-color: #5a2a28;
+}
+
+input,
+select,
+textarea {
+  background: #0b1017;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 6px 9px;
+  font: inherit;
+  font-size: 13px;
+}
+
+textarea {
+  font-family: var(--mono);
+  font-size: 12px;
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+}
+
+label {
+  display: block;
+  color: var(--dim);
+  font-size: 12px;
+  margin: 10px 0 4px;
+}
+
+/* ---- layout blocks ---- */
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.card > h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--dim);
+  margin-bottom: 12px;
+}
+
+.grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.row.tight {
+  gap: 4px;
+}
+
+.stat {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.stat .n {
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat .k {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.login {
+  display: grid;
+  place-items: center;
+  min-height: 60vh;
+}
+
+.login .card {
+  width: min(400px, 100%);
+}
+
+.login input {
+  width: 100%;
+}
+
+.login form > button {
+  margin-top: 14px;
+  width: 100%;
+}
+
+/* An anchor that has to read as the primary action next to real buttons. */
+.button-link {
+  display: block;
+  text-align: center;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 7px 11px;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.button-link:hover {
+  border-color: var(--accent);
+}
+
+/* Reveals the break-glass form; a button for keyboard/AT, styled as a link. */
+.linkish {
+  background: none;
+  border: none;
+  color: var(--accent);
+  padding: 0;
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* ---- data ---- */
+
+.scroll {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+th {
+  color: var(--dim);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+td.actions {
+  white-space: nowrap;
+}
+
+code,
+pre {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+pre {
+  background: #080c12;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  overflow: auto;
+  max-height: 340px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.pill,
+.chip {
+  display: inline-block;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 9px;
+  font-size: 11px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.chip.ok {
+  color: var(--ok);
+  border-color: #27432b;
+}
+
+.chip.bad {
+  color: var(--bad);
+  border-color: #5a2a28;
+}
+
+.chip.warn {
+  color: var(--warn);
+  border-color: #4a3c1d;
+}
+
+.chip.busy {
+  color: var(--accent);
+  border-color: #234670;
+}
+
+.pill.warn {
+  color: var(--warn);
+  border-color: #4a3c1d;
+}
+
+.banner {
+  border: 1px solid #4a3c1d;
+  background: #241d0d;
+  color: var(--warn);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+
+/* ---- overlays ---- */
+
+dialog {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0;
+  width: min(860px, 92vw);
+  max-height: 86vh;
+  overflow: auto;
+}
+
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+
+.modal-head h2 {
+  font-size: 14px;
+  flex: 1;
+}
+
+#modal-body {
+  padding: 16px;
+}
+
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 20;
+}
+
+.toast {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 9px 12px;
+  max-width: 380px;
+  font-size: 13px;
+}
+
+.toast.ok {
+  border-left-color: var(--ok);
+}
+
+.toast.bad {
+  border-left-color: var(--bad);
+}

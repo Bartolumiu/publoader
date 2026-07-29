@@ -33,10 +33,9 @@ services:
     build:
       context: ../..
       dockerfile: docker/worker/Dockerfile
-      args:
-        # Directory in the build context holding <extension>/requirements.txt
-        # files to bake into the image. Empty by default; see the Dockerfile.
-        EXTENSIONS_DIR: ${EXTENSIONS_DIR:-docker/worker/extensions}
+      # No build args: extensions are self-contained ESM bundles built at
+      # publish time, so the image has no per-extension dependencies to bake in
+      # and adding an extension no longer requires rebuilding workers.
     # No `container_name:` on purpose — a fixed name would make it impossible
     # to run a second worker on the same machine with `-p`, since the two
     # projects would collide on the container name.
@@ -60,9 +59,6 @@ services:
       WORKER_TOKEN: ${WORKER_TOKEN:-}
       WORKER_STATE_PATH: /var/lib/publoader-worker
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      # The venv interpreter baked into the image. Override only if you know
-      # exactly why.
-      RUNNER_PYTHON: ${RUNNER_PYTHON:-/opt/venv/bin/python3}
       RUNNER_EXTRA_ARGS: ${RUNNER_EXTRA_ARGS:-}
 
     volumes:
