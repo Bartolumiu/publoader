@@ -39,6 +39,29 @@ def make_webhook():
 webhook = make_webhook()
 COLOUR = "B86F8C"
 
+# Discord embed limits: the 6000 cap applies to the combined characters of
+# every embed attached to a single message, not per embed.
+EMBED_TOTAL_LIMIT = 6000
+EMBED_TITLE_LIMIT = 256
+EMBED_DESCRIPTION_LIMIT = 4096
+EMBED_FIELD_NAME_LIMIT = 256
+EMBED_FIELD_VALUE_LIMIT = 1024
+EMBED_FOOTER_TEXT_LIMIT = 2048
+EMBED_AUTHOR_NAME_LIMIT = 256
+EMBED_MAX_FIELDS = 25
+EMBEDS_PER_MESSAGE = 10
+# Worst-case size of one truncated field; a fresh embed must leave this much
+# headroom so at least one field always fits (guarantees splitting terminates).
+_FIELD_BUDGET = EMBED_FIELD_NAME_LIMIT + EMBED_FIELD_VALUE_LIMIT
+
+
+def _clip(text: Optional[str], limit: int) -> Optional[str]:
+    if text is None or len(text) <= limit:
+        return text
+    if limit <= 0:
+        return ""
+    return text[: limit - 1] + "…"
+
 # Thread-local guard so the error log handler can't recurse into itself when
 # the webhook send path itself logs at ERROR.
 _emit_guard = threading.local()
@@ -130,59 +153,123 @@ class WebhookHelper:
             return embed
         return dict(embed.__dict__)
 
-    def _calculate_embed_size(self, embed: Union[DiscordEmbed, dict]) -> int:
-        embed_dict = self._embed_as_dict(embed)
+    @staticmethod
+    def _base_embed_size(embed_dict: dict) -> int:
+        """Character count of everything except fields, per Discord's rules:
+        title + description + footer.text + author.name."""
         embed_len = len(embed_dict.get("title") or "")
         embed_len += len(embed_dict.get("description") or "")
         footer = embed_dict.get("footer") or {}
-        embed_len += len(footer.get("text") or "") if isinstance(footer, dict) else 0
+        if isinstance(footer, dict):
+            embed_len += len(footer.get("text") or "")
+        author = embed_dict.get("author") or {}
+        if isinstance(author, dict):
+            embed_len += len(author.get("name") or "")
+        return embed_len
 
+    def _calculate_embed_size(self, embed: Union[DiscordEmbed, dict]) -> int:
+        embed_dict = self._embed_as_dict(embed)
+        embed_len = self._base_embed_size(embed_dict)
         for field in embed_dict.get("fields") or []:
             embed_len += len(field.get("name") or "") + len(field.get("value") or "")
         return embed_len
 
-    def _make_multiple_embeds(
-        self, embed: Union["DiscordEmbed", dict], list_fields: List[List[dict]]
-    ):
-        embed_dict = self._embed_as_dict(embed)
-        new_embeds = []
-        for fields in list_fields:
-            new_embed = DiscordEmbed(footer=self.footer)
-            new_embed.__dict__.update(embed_dict)
-            new_embed.fields = fields
+    @staticmethod
+    def _truncated_copy(embed_dict: dict) -> dict:
+        """Deep-enough copy with every component clipped to its Discord limit.
+        Copies footer/author/fields so shared dicts (e.g. self.footer) are
+        never mutated."""
+        embed_dict = dict(embed_dict)
+        embed_dict["title"] = _clip(embed_dict.get("title"), EMBED_TITLE_LIMIT)
+        embed_dict["description"] = _clip(
+            embed_dict.get("description"), EMBED_DESCRIPTION_LIMIT
+        )
 
-            embed_len = self._calculate_embed_size(new_embed)
-            new_embed_split = self._check_embed_length(new_embed, embed_len)
-            if new_embed_split is None:
-                new_embeds.append(new_embed)
-            else:
-                new_embeds.extend(new_embed_split)
-        return new_embeds
+        footer = embed_dict.get("footer")
+        if isinstance(footer, dict):
+            footer = dict(footer)
+            footer["text"] = _clip(footer.get("text"), EMBED_FOOTER_TEXT_LIMIT)
+            embed_dict["footer"] = footer
 
-    def _check_embed_length(self, embed: Union["DiscordEmbed", dict], embed_len: int):
-        if embed_len < 6000:
-            return None
+        author = embed_dict.get("author")
+        if isinstance(author, dict):
+            author = dict(author)
+            author["name"] = _clip(author.get("name"), EMBED_AUTHOR_NAME_LIMIT)
+            embed_dict["author"] = author
 
-        embed_dict = self._embed_as_dict(embed)
-        num_fields = embed_dict.get("fields") or []
-        splitter = 6
-
-        fields_split = [
-            num_fields[elem : elem + splitter]
-            for elem in range(0, len(num_fields), splitter)
+        embed_dict["fields"] = [
+            {
+                **field,
+                "name": _clip(field.get("name"), EMBED_FIELD_NAME_LIMIT),
+                "value": _clip(field.get("value"), EMBED_FIELD_VALUE_LIMIT),
+            }
+            for field in embed_dict.get("fields") or []
         ]
+        return embed_dict
 
-        return self._make_multiple_embeds(embed_dict, fields_split)
+    def _split_embed(self, embed: Union["DiscordEmbed", dict]) -> List[dict]:
+        """Split one embed into as many embeds as needed so each stays within
+        every Discord limit (per-component caps, 25 fields, and small enough
+        that no single embed exceeds the 6000 total). Title, description,
+        footer and colour are repeated on each continuation embed."""
+        embed_dict = self._truncated_copy(self._embed_as_dict(embed))
+        fields = embed_dict.pop("fields")
+        base_len = self._base_embed_size(embed_dict)
+
+        # The non-field content must leave headroom for at least one
+        # worst-case field, otherwise no field could ever be placed. Clip the
+        # description (the only unbounded-ish component) until it does.
+        max_base = EMBED_TOTAL_LIMIT - (_FIELD_BUDGET if fields else 0)
+        if base_len > max_base:
+            description = embed_dict.get("description") or ""
+            embed_dict["description"] = _clip(
+                description, max(0, len(description) - (base_len - max_base))
+            )
+            base_len = self._base_embed_size(embed_dict)
+
+        if not fields:
+            return [{**embed_dict, "fields": []}]
+
+        field_chunks: List[List[dict]] = [[]]
+        current_len = base_len
+        for field in fields:
+            field_len = len(field.get("name") or "") + len(field.get("value") or "")
+            if field_chunks[-1] and (
+                len(field_chunks[-1]) >= EMBED_MAX_FIELDS
+                or current_len + field_len > EMBED_TOTAL_LIMIT
+            ):
+                field_chunks.append([])
+                current_len = base_len
+            field_chunks[-1].append(field)
+            current_len += field_len
+
+        return [{**embed_dict, "fields": chunk} for chunk in field_chunks]
 
     def check_embeds_size(self, local_webhook: DiscordWebhook):
-        embeds = local_webhook.get_embeds()
-        for index, embed in enumerate(embeds):
-            embed_len = self._calculate_embed_size(embed)
-            split_embeds = self._check_embed_length(embed, embed_len)
+        """Replace every oversized embed with its split parts. Embeds are kept
+        as plain dicts — the same representation DiscordWebhook.add_embed
+        stores — so the payload stays JSON-serialisable."""
+        split_embeds: List[dict] = []
+        for embed in local_webhook.get_embeds():
+            split_embeds.extend(self._split_embed(embed))
+        local_webhook.embeds[:] = split_embeds
 
-            if split_embeds is not None:
-                local_webhook.embeds.pop(index)
-                local_webhook.embeds[index:index] = split_embeds
+    def _batch_embeds(self, embeds: List[Union[DiscordEmbed, dict]]) -> List[list]:
+        """Group embeds into messages of at most 10 embeds whose combined
+        character count stays under the 6000 message-wide cap."""
+        batches: List[list] = [[]]
+        batch_len = 0
+        for embed in embeds:
+            embed_len = self._calculate_embed_size(embed)
+            if batches[-1] and (
+                len(batches[-1]) >= EMBEDS_PER_MESSAGE
+                or batch_len + embed_len > EMBED_TOTAL_LIMIT
+            ):
+                batches.append([])
+                batch_len = 0
+            batches[-1].append(embed)
+            batch_len += embed_len
+        return [batch for batch in batches if batch]
 
     def send_webhook(self, local_webhook: DiscordWebhook = webhook):
         if not webhook_urls:
@@ -193,10 +280,7 @@ class WebhookHelper:
 
         self.check_embeds_size(local_webhook)
 
-        embeds_split = [
-            local_webhook.embeds[elem : elem + 10]
-            for elem in range(0, len(local_webhook.embeds), 10)
-        ]
+        embeds_split = self._batch_embeds(local_webhook.embeds)
         local_webhook.embeds.clear()
 
         for count, embed in enumerate(embeds_split, start=1):
