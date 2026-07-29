@@ -1,0 +1,5 @@
+# Placeholder so the default EXTENSIONS_DIR always exists in the build
+# context. Stage per-extension requirements files next to it, e.g.
+#   docker/worker/extensions/mangaplus/requirements.txt
+# and they are pip-installed into the worker image at build time.
+# See docker/worker/Dockerfile (ARG EXTENSIONS_DIR) and docs/deployment.md.
