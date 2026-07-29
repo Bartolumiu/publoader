@@ -8,6 +8,10 @@
  * radius of a compromised bot host is exactly the set of scopes on that token.
  */
 import type { Logger } from "../logging.js";
+// The scope taxonomy is shared with the server rather than restated here: a
+// scope name the bot invents is a 403 nobody can act on, and scopes.ts is a
+// dependency-free constant module, so importing it costs the bot nothing.
+import type { Scope } from "../core/api/scopes.js";
 
 /**
  * Where the bot looks for the control plane when CORE_URL is unset. Matches
@@ -16,37 +20,7 @@ import type { Logger } from "../logging.js";
  */
 export const DEFAULT_CORE_URL = "https://publoader.ardax.dev";
 
-/**
- * Scope names attached to each call so a 403 can say *which* grant is missing
- * rather than "forbidden".
- *
- * These are the names the scoped-token work (`pa_…` per-client tokens) is
- * expected to use; until it lands the server accepts only the root ADMIN_TOKEN
- * and never returns 403 for scope reasons, so this is documentation that
- * becomes enforcement later. It is deliberately declared here rather than
- * imported from the server: the bot must not gain a compile-time dependency on
- * core internals it does not otherwise touch.
- */
-export type Scope =
-  | "audit:read"
-  | "enroll:write"
-  | "extensions:read"
-  | "extensions:write"
-  | "jobs:write"
-  | "platform:write"
-  | "runs:read"
-  | "runs:write"
-  | "schedules:read"
-  | "schedules:write"
-  | "settings:read"
-  | "settings:write"
-  | "stats:read"
-  | "tracked:read"
-  | "tracked:write"
-  | "untracked:read"
-  | "untracked:write"
-  | "workers:read"
-  | "workers:write";
+export type { Scope };
 
 /** Any non-2xx answer from the admin API. */
 export class AdminApiError extends Error {
@@ -55,6 +29,12 @@ export class AdminApiError extends Error {
   readonly detail: string;
   readonly scope: Scope;
   readonly retryAfterSeconds: number | undefined;
+  /**
+   * Scopes the token actually holds. A 403 from `requireScope` reports them,
+   * which is the difference between "forbidden" and "you have A and B, you
+   * need C".
+   */
+  readonly held: readonly string[] | undefined;
 
   constructor(opts: {
     status: number;
@@ -63,6 +43,7 @@ export class AdminApiError extends Error {
     method: string;
     path: string;
     retryAfterSeconds?: number | undefined;
+    held?: readonly string[] | undefined;
   }) {
     super(`${opts.status} from ${opts.method} ${opts.path}: ${opts.detail}`);
     this.name = "AdminApiError";
@@ -70,6 +51,7 @@ export class AdminApiError extends Error {
     this.detail = opts.detail;
     this.scope = opts.scope;
     this.retryAfterSeconds = opts.retryAfterSeconds;
+    this.held = opts.held;
   }
 
   /** True when the credential itself was rejected, as opposed to the request. */
@@ -101,11 +83,16 @@ export function describeApiError(err: unknown): string {
           "and it must be sent to the right `CORE_URL`. If the token was rotated, " +
           "redeploy the bot with the new value."
         );
-      case 403:
+      case 403: {
+        const holds =
+          err.held && err.held.length > 0
+            ? `\nThe token currently holds: ${err.held.map((s) => `\`${s}\``).join(", ")}.`
+            : "";
         return (
-          `**403 — the bot's API token lacks the \`${err.scope}\` scope.** The API said: \`${err.detail}\`\n` +
-          `Mint a replacement token that includes \`${err.scope}\`, or accept that this command is not available to the bot.`
+          `**403 — the bot's API token lacks the \`${err.scope}\` scope.** The API said: \`${err.detail}\`${holds}\n` +
+          `Mint a replacement token that includes \`${err.scope}\` (\`publoader-admin tokens create\`), or accept that this command is not available to the bot.`
         );
+      }
       case 404:
         return `**404 — not found.** The API said: \`${err.detail}\``;
       case 409:
@@ -246,6 +233,44 @@ export interface TriggerRunResult {
   created: boolean;
 }
 
+/** A row from the uploader's queue — the view legacy `queue_peek` gave. */
+export interface UploadTask {
+  id: string;
+  kind: string;
+  state: string;
+  dedupeKey: string;
+  attempt: number;
+  maxAttempts: number;
+  notBefore?: string | null;
+  leaseExpiresAt?: string | null;
+  lastError?: string | null;
+  updatedAt: string;
+}
+
+/**
+ * MangaDex session state. Deliberately says whether a token exists and when it
+ * goes stale, never what it is.
+ */
+export interface MdAuthState {
+  hasAccess: boolean;
+  hasRefresh: boolean;
+  expiresAt: string | null;
+  expired: boolean;
+  expiresInSeconds: number | null;
+}
+
+/** One entry in the merged error feed that stands in for legacy `logs`. */
+export interface ErrorEntry {
+  at: string;
+  kind: string;
+  subject: string;
+  message: string;
+  id: string;
+}
+
+export type UploadTaskKind = "UPLOAD" | "EDIT" | "DELETE" | "UNAVAILABLE";
+export type UploadTaskState = "PENDING" | "LEASED" | "DONE" | "FAILED" | "DEAD_LETTER";
+
 /**
  * What the bot can say about its own credential. `scopes` is populated only if
  * the deployment exposes token introspection; see `tokenSelf()`.
@@ -286,6 +311,8 @@ export class AdminApiClient {
   private readonly token: string;
   private readonly log: Logger | undefined;
   private readonly fetchImpl: typeof fetch;
+  /** Learned from a 403's `held` array; see `request()`. */
+  private lastKnownScopes: readonly string[] | undefined;
 
   constructor(opts: AdminApiClientOptions) {
     this.baseUrl = (opts.baseUrl ?? DEFAULT_CORE_URL).replace(/\/+$/, "");
@@ -313,6 +340,15 @@ export class AdminApiClient {
    */
   get looksScoped(): boolean {
     return this.token.startsWith("pa_");
+  }
+
+  /**
+   * Scopes observed on this token, if any command has been refused for lacking
+   * one. Not authoritative — it is empty until the first 403 — but it is the
+   * only scope information available without an introspection endpoint.
+   */
+  get observedScopes(): readonly string[] | undefined {
+    return this.lastKnownScopes;
   }
 
   private async request<T>(spec: RequestSpec): Promise<T> {
@@ -351,6 +387,10 @@ export class AdminApiClient {
     const text = await res.text().catch(() => "");
     if (!res.ok) {
       const retryAfter = Number(res.headers.get("retry-after"));
+      const held = extractHeldScopes(text);
+      // A 403 is the only place the API volunteers what the token can do. Keep
+      // it so `/whoami` can answer honestly without an introspection endpoint.
+      if (held) this.lastKnownScopes = held;
       throw new AdminApiError({
         status: res.status,
         detail: extractError(text) ?? `${res.status} ${res.statusText}`,
@@ -358,6 +398,7 @@ export class AdminApiClient {
         method: spec.method,
         path: url.pathname,
         retryAfterSeconds: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : undefined,
+        held,
       });
     }
     this.log?.debug({ method: spec.method, path: url.pathname, status: res.status }, "admin api call");
@@ -388,11 +429,13 @@ export class AdminApiClient {
   /**
    * Best-effort token introspection.
    *
-   * No such endpoint exists while the root ADMIN_TOKEN is the only admin
-   * credential, so a 404/405 is the expected answer today and means "this
-   * deployment cannot describe the token" — not an error. When scoped tokens
-   * land, `/whoami` becomes the honest answer to "what may this bot do?" and
-   * `/whoami` in Discord starts listing real scopes with no bot change.
+   * There is no self-describe endpoint today: `/api/v1/admin/tokens/*` manages
+   * *other* tokens and is gated on `users:admin` + OWNER, which a bot token can
+   * never hold. So a 404 here is the expected answer and means "this deployment
+   * cannot describe the token" rather than a failure. The probe stays because
+   * the day such an endpoint exists, `/whoami` starts listing real scopes with
+   * no change to the bot. A 403 is also treated as "cannot tell" — it still
+   * yields the held-scope list via `observedScopes`.
    */
   async tokenSelf(actor: string): Promise<TokenIdentity | null> {
     try {
@@ -403,7 +446,7 @@ export class AdminApiClient {
         actor,
       });
     } catch (err) {
-      if (err instanceof AdminApiError && (err.status === 404 || err.status === 405)) return null;
+      if (err instanceof AdminApiError && [403, 404, 405].includes(err.status)) return null;
       throw err;
     }
   }
@@ -414,7 +457,7 @@ export class AdminApiClient {
     return this.request({
       method: "POST",
       path: "/api/v1/admin/pause",
-      scope: "platform:write",
+      scope: "settings:write",
       actor,
       json: { minutes },
     });
@@ -424,7 +467,7 @@ export class AdminApiClient {
     return this.request({
       method: "POST",
       path: "/api/v1/admin/resume",
-      scope: "platform:write",
+      scope: "settings:write",
       actor,
       json: {},
     });
@@ -470,7 +513,7 @@ export class AdminApiClient {
     return this.request({
       method: "POST",
       path: `/api/v1/admin/jobs/${encodeURIComponent(id)}/cancel`,
-      scope: "jobs:write",
+      scope: "runs:write",
       actor,
       json: {},
     });
@@ -480,7 +523,7 @@ export class AdminApiClient {
     return this.request({
       method: "POST",
       path: `/api/v1/admin/jobs/${encodeURIComponent(id)}/retry`,
-      scope: "jobs:write",
+      scope: "runs:write",
       actor,
       json: {},
     });
@@ -501,6 +544,83 @@ export class AdminApiClient {
       path: "/api/v1/admin/quarantine",
       scope: "runs:read",
       actor,
+    });
+  }
+
+  // ---- upload-task queues (routes/ops.ts) ----
+
+  uploadTasks(
+    actor: string,
+    opts: { kind?: UploadTaskKind; state?: UploadTaskState; limit: number },
+  ): Promise<{ tasks: UploadTask[]; counts: { kind: string; state: string; count: number }[] }> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/upload-tasks",
+      scope: "runs:read",
+      actor,
+      query: { kind: opts.kind, state: opts.state, limit: opts.limit },
+    });
+  }
+
+  retryUploadTask(actor: string, id: string): Promise<{ ok: boolean; state: string }> {
+    return this.request({
+      method: "POST",
+      path: `/api/v1/admin/upload-tasks/${encodeURIComponent(id)}/retry`,
+      scope: "runs:write",
+      actor,
+      json: {},
+    });
+  }
+
+  cancelUploadTask(actor: string, id: string): Promise<{ ok: boolean; state: string }> {
+    return this.request({
+      method: "POST",
+      path: `/api/v1/admin/upload-tasks/${encodeURIComponent(id)}/cancel`,
+      scope: "runs:write",
+      actor,
+      json: {},
+    });
+  }
+
+  requeueStaleUploadTasks(actor: string): Promise<{ ok: boolean; requeued: number }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/upload-tasks/requeue-stale",
+      scope: "runs:write",
+      actor,
+      json: {},
+    });
+  }
+
+  // ---- MangaDex session visibility (routes/ops.ts) ----
+
+  mdAuth(actor: string): Promise<MdAuthState> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/mangadex/auth",
+      scope: "settings:write",
+      actor,
+    });
+  }
+
+  clearMdAuth(actor: string): Promise<{ ok: boolean; cleared: boolean }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/mangadex/auth/clear",
+      scope: "settings:write",
+      actor,
+      json: {},
+    });
+  }
+
+  /** The merged failure feed: dead-lettered jobs, failed tasks, quarantines. */
+  errors(actor: string, limit: number): Promise<{ errors: ErrorEntry[] }> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/errors",
+      scope: "runs:read",
+      actor,
+      query: { limit },
     });
   }
 
@@ -531,7 +651,7 @@ export class AdminApiClient {
     return this.request({
       method: "GET",
       path: "/api/v1/admin/schedules",
-      scope: "schedules:read",
+      scope: "extensions:read",
       actor,
     });
   }
@@ -544,7 +664,7 @@ export class AdminApiClient {
     return this.request({
       method: "PUT",
       path: `/api/v1/admin/schedules/${encodeURIComponent(name)}`,
-      scope: "schedules:write",
+      scope: "extensions:write",
       actor,
       json: entry,
     });
@@ -554,7 +674,7 @@ export class AdminApiClient {
     return this.request({
       method: "DELETE",
       path: `/api/v1/admin/schedules/${encodeURIComponent(name)}`,
-      scope: "schedules:write",
+      scope: "extensions:write",
       actor,
     });
   }
@@ -565,7 +685,7 @@ export class AdminApiClient {
     return this.request({
       method: "GET",
       path: "/api/v1/admin/removal-mode",
-      scope: "settings:read",
+      scope: "settings:write",
       actor,
     });
   }
@@ -655,7 +775,7 @@ export class AdminApiClient {
     return this.request({
       method: "GET",
       path: `/api/v1/admin/extensions/${encodeURIComponent(extension)}/tracked`,
-      scope: "tracked:read",
+      scope: "extensions:read",
       actor,
     });
   }
@@ -668,7 +788,7 @@ export class AdminApiClient {
     return this.request({
       method: "PUT",
       path: `/api/v1/admin/extensions/${encodeURIComponent(extension)}/tracked`,
-      scope: "tracked:write",
+      scope: "extensions:write",
       actor,
       json: entry,
     });
@@ -680,10 +800,28 @@ export class AdminApiClient {
       path:
         `/api/v1/admin/extensions/${encodeURIComponent(extension)}` +
         `/tracked/${encodeURIComponent(mangaId)}`,
-      scope: "tracked:write",
+      scope: "extensions:write",
       actor,
     });
   }
+}
+
+/**
+ * Pull the `held` array out of a `requireScope` 403 body
+ * (`{error: "missing scope: x", held: [...]}`). Absent on any other error.
+ */
+function extractHeldScopes(body: string): readonly string[] | undefined {
+  if (!body) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed && typeof parsed === "object" && "held" in parsed) {
+      const held = (parsed as { held: unknown }).held;
+      if (Array.isArray(held) && held.every((s) => typeof s === "string")) return held;
+    }
+  } catch {
+    // Not JSON; nothing to learn.
+  }
+  return undefined;
 }
 
 /** Pull `{error: "..."}` out of an API response body, if that is its shape. */

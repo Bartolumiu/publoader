@@ -10,7 +10,7 @@ import {
   type BotCommand,
   type OptionReader,
 } from "../../src/bot/commands.js";
-import { actorFor } from "../../src/bot/bot.js";
+import { actorFor, FatalBotConfigError, translateLoginError } from "../../src/bot/bot.js";
 
 const log = pino({ level: "silent" });
 
@@ -76,7 +76,7 @@ describe("command table", () => {
   it("covers every legacy command that has no platform equivalent", () => {
     // The list the migration doc calls retired; if one is dropped here, someone
     // typing it gets "unknown command" instead of a pointer.
-    for (const legacy of ["logs", "queue", "kill", "restart-workers", "config", "mdauth", "login", "logout", "pull", "reload", "restart"]) {
+    for (const legacy of ["logs", "kill", "restart-workers", "config", "login", "logout", "pull", "reload", "restart"]) {
       expect(COMMANDS_BY_NAME.has(legacy)).toBe(true);
     }
   });
@@ -416,7 +416,7 @@ describe("/jobs, /dead-letter, /quarantine", () => {
   it("explains a 409 from cancel instead of claiming success", async () => {
     const api = fakeApi({
       cancelJob: vi.fn().mockRejectedValue(
-        new AdminApiError({ status: 409, detail: "job not cancellable", scope: "jobs:write", method: "POST", path: "/x" }),
+        new AdminApiError({ status: 409, detail: "job not cancellable", scope: "runs:write", method: "POST", path: "/x" }),
       ),
     });
     const reply = await invoke("jobs", api, { id: "job-1" }, "cancel");
@@ -577,7 +577,7 @@ describe("/whoami", () => {
     expect(reply.text).toContain("https://core.example");
     expect(reply.text).toContain("pa_a…z999");
     expect(reply.text).toContain("discord:ardax");
-    expect(reply.text).toContain("does not expose token introspection");
+    expect(reply.text).toContain("no token-introspection endpoint");
   });
 
   it("lists real scopes when the deployment exposes them", async () => {
@@ -622,5 +622,238 @@ describe("actorFor", () => {
 
   it("never produces a bare prefix for a username of only stripped characters", () => {
     expect(actorFor("！！！")).toBe("discord:unknown");
+  });
+});
+
+describe("translateLoginError", () => {
+  it("turns an invalid Discord token into a fatal config error naming the fix", () => {
+    const translated = translateLoginError(Object.assign(new Error("An invalid token was provided."), { code: "TokenInvalid" }));
+    expect(translated).toBeInstanceOf(FatalBotConfigError);
+    expect((translated as Error).message).toContain("Reset Token");
+  });
+
+  it("explains a disallowed-intents rejection", () => {
+    const translated = translateLoginError(Object.assign(new Error("x"), { code: "DisallowedIntents" }));
+    expect(translated).toBeInstanceOf(FatalBotConfigError);
+    expect((translated as Error).message).toContain("Privileged Gateway Intents");
+  });
+
+  it("passes anything else through, so a network blip stays retryable", () => {
+    // Declaring a transient failure unfixable would stop the supervisor
+    // retrying a login that would have succeeded a second later.
+    const original = Object.assign(new Error("ECONNRESET"), { code: "ECONNRESET" });
+    expect(translateLoginError(original)).toBe(original);
+    const bare = new Error("no code at all");
+    expect(translateLoginError(bare)).toBe(bare);
+  });
+});
+
+describe("/queue (upload tasks)", () => {
+  const listing = {
+    tasks: [
+      {
+        id: "task-uuid-1",
+        kind: "UPLOAD",
+        state: "DEAD_LETTER",
+        dedupeKey: "mangaplus:1001:5",
+        attempt: 3,
+        maxAttempts: 3,
+        lastError: "MangaDex 429",
+        updatedAt: "2026-07-29T15:00:00Z",
+      },
+    ],
+    counts: [
+      { kind: "UPLOAD", state: "PENDING", count: 12 },
+      { kind: "UPLOAD", state: "DONE", count: 0 },
+    ],
+  };
+
+  it("lists rows and depth totals, dropping empty buckets", async () => {
+    const api = fakeApi({ uploadTasks: vi.fn().mockResolvedValue(listing) });
+    const reply = await invoke("queue", api, {}, "list");
+    expect(reply.text).toContain("UPLOAD/PENDING=12");
+    expect(reply.text).not.toContain("DONE=0");
+    expect(reply.text).toContain("MangaDex 429");
+  });
+
+  it("passes kind and state filters through", async () => {
+    const uploadTasks = vi.fn().mockResolvedValue(listing);
+    await invoke("queue", fakeApi({ uploadTasks }), { kind: "EDIT", state: "FAILED", limit: 5 }, "list");
+    expect(uploadTasks).toHaveBeenCalledWith("discord:ardax", { limit: 5, kind: "EDIT", state: "FAILED" });
+  });
+
+  it("still shows depths when no row matches the filter", async () => {
+    const api = fakeApi({ uploadTasks: vi.fn().mockResolvedValue({ tasks: [], counts: listing.counts }) });
+    const reply = await invoke("queue", api, {}, "list");
+    expect(reply.text).toContain("No matching upload tasks");
+    expect(reply.text).toContain("UPLOAD/PENDING=12");
+  });
+
+  it("retries a dead-lettered task", async () => {
+    const retryUploadTask = vi.fn().mockResolvedValue({ ok: true, state: "PENDING" });
+    await invoke("queue", fakeApi({ retryUploadTask }), { id: "task-1" }, "retry");
+    expect(retryUploadTask).toHaveBeenCalledWith("discord:ardax", "task-1");
+  });
+
+  it("refuses to cancel without confirmation — the chapter would never upload", async () => {
+    const cancelUploadTask = vi.fn();
+    const reply = await invoke("queue", fakeApi({ cancelUploadTask }), { id: "task-1" }, "cancel");
+    expect(cancelUploadTask).not.toHaveBeenCalled();
+    expect(reply.text).toContain("never sent to");
+  });
+
+  it("cancels when confirmed", async () => {
+    const cancelUploadTask = vi.fn().mockResolvedValue({ ok: true, state: "DONE" });
+    await invoke("queue", fakeApi({ cancelUploadTask }), { id: "task-1", confirm: true }, "cancel");
+    expect(cancelUploadTask).toHaveBeenCalledWith("discord:ardax", "task-1");
+  });
+
+  it("explains the LEASED 409 rather than claiming the cancel worked", async () => {
+    const api = fakeApi({
+      cancelUploadTask: vi.fn().mockRejectedValue(
+        new AdminApiError({
+          status: 409,
+          detail: "upload task is LEASED by a worker; wait for the lease to expire or requeue stale leases first",
+          scope: "runs:write",
+          method: "POST",
+          path: "/x",
+        }),
+      ),
+    });
+    const reply = await invoke("queue", api, { id: "task-1", confirm: true }, "cancel");
+    expect(reply.text).toContain("LEASED by a worker");
+  });
+
+  it("reports how many stale leases were swept, including none", async () => {
+    const some = fakeApi({ requeueStaleUploadTasks: vi.fn().mockResolvedValue({ ok: true, requeued: 4 }) });
+    expect((await invoke("queue", some, {}, "requeue-stale")).text).toContain("**4**");
+
+    const none = fakeApi({ requeueStaleUploadTasks: vi.fn().mockResolvedValue({ ok: true, requeued: 0 }) });
+    expect((await invoke("queue", none, {}, "requeue-stale")).text).toContain("Nothing to requeue");
+  });
+
+  it("gates cancel as destructive and the rest as read/mutate", () => {
+    const queue = COMMANDS_BY_NAME.get("queue") as BotCommand;
+    expect(resolveSensitivity(queue, "list")).toBe("read");
+    expect(resolveSensitivity(queue, "retry")).toBe("mutate");
+    expect(resolveSensitivity(queue, "requeue-stale")).toBe("mutate");
+    expect(resolveSensitivity(queue, "cancel")).toBe("destructive");
+  });
+});
+
+describe("/mdauth", () => {
+  it("reports a healthy session with its remaining lifetime", async () => {
+    const api = fakeApi({
+      mdAuth: vi.fn().mockResolvedValue({
+        hasAccess: true,
+        hasRefresh: true,
+        expiresAt: "2026-07-29T16:00:00Z",
+        expired: false,
+        expiresInSeconds: 1800,
+      }),
+    });
+    const reply = await invoke("mdauth", api, {}, "status");
+    expect(reply.text).toContain("access token stored");
+    expect(reply.text).toContain("~30 min");
+  });
+
+  it("says an expired access token is normal, so nobody clears a working session", async () => {
+    const api = fakeApi({
+      mdAuth: vi.fn().mockResolvedValue({
+        hasAccess: true,
+        hasRefresh: true,
+        expiresAt: "2026-07-29T10:00:00Z",
+        expired: true,
+        expiresInSeconds: -600,
+      }),
+    });
+    const reply = await invoke("mdauth", api, {}, "status");
+    expect(reply.text).toContain("**expired**");
+    expect(reply.text).toContain("normal");
+  });
+
+  it("does not report an unparseable token as dead", async () => {
+    const api = fakeApi({
+      mdAuth: vi.fn().mockResolvedValue({
+        hasAccess: true,
+        hasRefresh: false,
+        expiresAt: null,
+        expired: false,
+        expiresInSeconds: null,
+      }),
+    });
+    expect((await invoke("mdauth", api, {}, "status")).text).toContain("does not mean it is bad");
+  });
+
+  it("flags a completely absent session", async () => {
+    const api = fakeApi({
+      mdAuth: vi.fn().mockResolvedValue({
+        hasAccess: false,
+        hasRefresh: false,
+        expiresAt: null,
+        expired: false,
+        expiresInSeconds: null,
+      }),
+    });
+    expect((await invoke("mdauth", api, {}, "status")).text).toContain("No MangaDex session is stored");
+  });
+
+  it("refuses to clear without confirmation, and says it is not a revocation", async () => {
+    const clearMdAuth = vi.fn();
+    const reply = await invoke("mdauth", fakeApi({ clearMdAuth }), {}, "clear");
+    expect(clearMdAuth).not.toHaveBeenCalled();
+    expect(reply.text).toContain("revoke anything on MangaDex's side");
+  });
+
+  it("clears when confirmed", async () => {
+    const clearMdAuth = vi.fn().mockResolvedValue({ ok: true, cleared: true });
+    const reply = await invoke("mdauth", fakeApi({ clearMdAuth }), { confirm: true }, "clear");
+    expect(clearMdAuth).toHaveBeenCalledWith("discord:ardax");
+    expect(reply.text).toContain("cleared");
+  });
+});
+
+describe("/errors", () => {
+  it("merges the failure sources into one list", async () => {
+    const api = fakeApi({
+      errors: vi.fn().mockResolvedValue({
+        errors: [
+          { at: "2026-07-29T15:00:00Z", kind: "job:DEAD_LETTER", subject: "mangaplus · segment 1/2", message: "upstream 500", id: "job-1" },
+          { at: "2026-07-29T14:00:00Z", kind: "upload-task:FAILED", subject: "UPLOAD · key", message: "MD 429", id: "task-1" },
+        ],
+      }),
+    });
+    const reply = await invoke("errors", api, { limit: 5 });
+    expect(reply.text).toContain("job:DEAD_LETTER");
+    expect(reply.text).toContain("upload-task:FAILED");
+    expect(reply.text).toContain("2 recent failure(s)");
+  });
+
+  it("says so when nothing has failed", async () => {
+    const api = fakeApi({ errors: vi.fn().mockResolvedValue({ errors: [] }) });
+    expect((await invoke("errors", api)).text).toContain("Nothing has failed recently");
+  });
+});
+
+describe("retired pointers stay accurate as endpoints land", () => {
+  it("sends /logs to /errors now that a failure feed exists", async () => {
+    expect((await invoke("logs", fakeApi())).text).toContain("/errors");
+  });
+
+  it("sends /logout and /login to /mdauth clear", async () => {
+    expect((await invoke("logout", fakeApi())).text).toContain("/mdauth clear");
+    expect((await invoke("login", fakeApi())).text).toContain("/mdauth clear");
+  });
+
+  it("no longer registers queue or mdauth as retired — they are real commands", () => {
+    const retiredNames = RETIRED_COMMANDS.map((r) => r.name);
+    expect(retiredNames).not.toContain("queue");
+    expect(retiredNames).not.toContain("mdauth");
+  });
+
+  it("sends /kill to both cancel paths", async () => {
+    const reply = await invoke("kill", fakeApi());
+    expect(reply.text).toContain("/jobs cancel");
+    expect(reply.text).toContain("/queue cancel");
   });
 });

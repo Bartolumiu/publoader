@@ -162,7 +162,7 @@ describe("tokenSelf", () => {
 describe("token presentation", () => {
   it("masks the token so it can be printed in a reply", () => {
     const { api } = client({}, "pa_abcdefghijklmnop");
-    expect(api.tokenFingerprint).toBe("pa_a…mnop (18 chars)");
+    expect(api.tokenFingerprint).toBe("pa_a…mnop (19 chars)");
     expect(api.tokenFingerprint).not.toContain("efghijkl");
   });
 

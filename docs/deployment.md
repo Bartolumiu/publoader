@@ -407,6 +407,39 @@ Cookie-authenticated **writes** additionally require
 defence; the header is the second, and it is one no cross-origin form or image
 tag can set. Bearer clients are exempt and should not send it.
 
+### Operational controls need no configuration
+
+Everything an operator does day to day is a database row reachable through the
+admin API, not an environment variable — so none of it needs a redeploy, and
+none of it needs a shell on a container:
+
+| Control | Where it lives | Dashboard | CLI |
+|---|---|---|---|
+| Pause / resume | `settings.pause_until` | Overview | `padmin pause` / `resume` |
+| Schedules, removal mode, per-extension overrides | `schedule_overrides`, `settings`, `extension_configs` | Extensions | `padmin schedules`, `removal-mode`, `ext-config` |
+| Tracked manga mapping | `tracked_manga` | Extensions → Configure | `padmin tracked` |
+| Upload queue triage | `upload_tasks` | Queues | `padmin queues` |
+| Failure feed | `jobs`, `upload_tasks`, `result_submissions` | Errors | `padmin errors` |
+| Saved MangaDex session | `settings.mdauth_*` | Overview → MangaDex session | `padmin mangadex auth` / `clear-auth` |
+| Client credentials | `api_tokens` | Tokens (OWNER only) | `padmin tokens` |
+| Worker fleet | `workers` | Workers | `padmin workers` |
+
+The environment supplies only identity and connectivity — `DATABASE_URL`,
+`ADMIN_TOKEN`, `SESSION_SECRET`, the MangaDex credentials, the tunnel token.
+Two consequences worth planning around:
+
+- **A `.env` change is never how you fix a stuck queue.** If a runbook says to
+  restart a service, it is to restart a *consumer*, not to reload config.
+- **`padmin mangadex clear-auth` replaces "redeploy core-uploader to force a
+  re-login".** The token pair is persisted in `settings` so a replaced container
+  resumes the same MangaDex session; clearing it is what makes the next upload
+  authenticate afresh. See `docs/operations.md` → "Clear a bad MangaDex session".
+
+Container **logs** are the deliberate exception: they stay with the host log
+driver (`docker compose logs -f core-uploader`). Work runs in containers and on
+remote worker hosts the core cannot read, so there is no log API to expose — the
+Errors view reports platform state instead.
+
 
 ## Enrolling a worker host
 
@@ -759,3 +792,121 @@ file) and autoheal is deliberately absent, because autoheal requires mounting
 `docker.sock` into the stack — a much larger risk than the failure mode it
 fixes. Detect a wedged scheduler with the scheduler-lag metric on
 `/metrics`, and restart it by hand.
+
+## Discord bot
+
+Optional, and independent of everything above: the stack runs fine without it.
+Full setup, the command reference and the gating model are in `docs/bot.md` —
+this section is the deployment half.
+
+The `publoader-bot` service runs the same core image with a different
+entrypoint (`dist/src/services/bot.js`), like the other four. What makes it
+different is its attack surface, which is deliberately the smallest in the
+stack:
+
+- **No `DATABASE_URL`, and not attached to the `data` network.** It is an HTTPS
+  client of the admin API and has no route to Postgres at all.
+- **No `docker.sock`.** The legacy bot mounted it so `!restart` could restart
+  the scheduler container, which made a bot compromise equivalent to root on
+  the host. Those commands are gone; the bot tells you what to run instead.
+- **No MangaDex credential.** It cannot upload, delete, or authenticate to MD.
+- **One scoped `pa_…` token**, not `ADMIN_TOKEN`.
+
+So the bot is on the `edge` network only, and everything it can do to the
+platform is the scope list on its token.
+
+### Bring it up
+
+1. Create the Discord app and invite it (`docs/bot.md` §1). Copy the bot token.
+
+2. Mint the bot's own control-plane token from the core host:
+
+   ```
+   docker compose -f platform/docker/core/docker-compose.yml exec core-api \
+     node dist/src/cli/admin.js tokens create --name discord-bot \
+     --scopes runs:write,workers:read,extensions:read,untracked:write,stats:read,audit:read,settings:write
+   ```
+
+   That is the `discord-bot` preset plus `settings:write`, which is what makes
+   `/pause` and `/resume` work — the single most useful thing a chat bot does
+   during an incident. Add `extensions:write`, `workers:write` or
+   `enroll:write` if you want the commands they unlock (`docs/bot.md` §2).
+
+   **Never put `ADMIN_TOKEN` in `BOT_API_TOKEN`.** `ADMIN_TOKEN` resolves to
+   `*`, which includes `bundles:write` — publishing arbitrary code to the whole
+   worker fleet — and `users:admin`. The token is printed once and cannot be
+   recovered.
+
+3. Add to `platform/docker/core/.env` (annotated in `.env.example`):
+
+   ```
+   DISCORD_BOT_TOKEN=...        # from the Developer Portal
+   BOT_API_TOKEN=pa_...         # from step 2
+   DISCORD_GUILD_ID=...         # your guild id
+   DISCORD_ADMIN_USERS=...      # who may run write commands
+   DISCORD_ALLOWED_CHANNELS=... # where the bot accepts them
+   ```
+
+   The last two are not optional in practice: with no admins configured the bot
+   refuses every state-changing command, and with no channel allowlist it
+   refuses writes anywhere. It fails closed, unlike the legacy bot which
+   allowed everyone when unconfigured.
+
+4. Start it and watch the first ten seconds of log:
+
+   ```
+   docker compose -f platform/docker/core/docker-compose.yml up -d publoader-bot
+   docker compose -f platform/docker/core/docker-compose.yml logs -f publoader-bot
+   ```
+
+   A good start logs, in order: `admin API reachable; bot authorization model
+   loaded` (with a one-line summary of the gating), `discord bot connected`, and
+   `registered guild slash commands`.
+
+5. Verify from Discord: `/whoami` then `/status`. `/whoami` shows which API the
+   bot points at, a masked token fingerprint, and the actor string your commands
+   will be attributed to in the audit log. `/status` proves the token works.
+
+### Rotating the bot's token
+
+Create the replacement, update `BOT_API_TOKEN`, redeploy, then revoke the old
+one — in that order, so the bot is never without a working credential:
+
+```
+... tokens create --name discord-bot-2 --scopes <same list>
+# edit .env, then:
+docker compose -f platform/docker/core/docker-compose.yml up -d publoader-bot
+... tokens revoke <old-id>
+```
+
+### Troubleshooting the bot
+
+**Restart loop, with one `fatal` line about the token.** The API rejected
+`BOT_API_TOKEN` (or it is unset). The process exits 78 — `EX_CONFIG`, meaning
+restarting will not help — but `restart: unless-stopped` restarts it anyway, so
+read the *first* fatal line rather than the last. Check the token was not
+revoked and that `CORE_URL` points at the right deployment.
+
+**`Improper token` / login failure from Discord.** `DISCORD_BOT_TOKEN` is not a
+bot token, or was regenerated (which permanently revokes the old one). The
+client secret, public key and OAuth token are all different values and none of
+them work. Surrounding quotes are stripped automatically.
+
+**Commands do not appear in Discord.** With `DISCORD_GUILD_ID` set they register
+instantly, so this means registration failed — check the log for `failed to
+register slash commands`, and that the invite included the
+`applications.commands` scope. Without `DISCORD_GUILD_ID` the commands are
+global and can take up to an hour to propagate; the bot warns about this at
+startup.
+
+**Every command answers with a 403 naming a scope.** Working as intended: the
+token lacks that grant. The reply also lists the scopes it does hold. Mint a
+replacement with the extra scope (see above) rather than widening to `*`.
+
+**A command answers `:lock:` with a reason.** Discord-side gating, not the API.
+The reason names the variable to set — usually `DISCORD_ADMIN_USERS` or
+`DISCORD_ALLOWED_CHANNELS`. See `docs/bot.md` §4.
+
+**The bot cannot reach Discord.** It carries the same public-resolver override
+as the MangaDex-facing services (the `x-public-dns` anchor) because this host's
+LAN resolver filters. Remove it if your network does not.

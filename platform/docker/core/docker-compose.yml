@@ -302,6 +302,56 @@ services:
     # instead of leaving a half-uploaded session behind.
     stop_grace_period: 120s
 
+  # --- publoader-bot --------------------------------------------------------
+  # The Discord control bot. Replaces the legacy publoader/bot/server.py, and
+  # the interesting part is what it no longer has:
+  #
+  #   * NO DATABASE_URL. It is an HTTPS client of the admin API and nothing
+  #     else, so it is not attached to the `data` network and has no route to
+  #     postgres. The legacy bot imported the whole publoader package.
+  #   * NO docker.sock. The legacy bot mounted it to start/stop/restart the
+  #     scheduler container, which made "compromise the bot" equal "root on the
+  #     host". /start, /shutdown and /restart are gone; the bot answers with
+  #     what to run on the host instead.
+  #   * NO MangaDex credential. It cannot upload, delete or log in.
+  #
+  # It reaches core-api the same way any other client does — over the public
+  # hostname through the tunnel — so it is on `edge` only. Pointing CORE_URL at
+  # http://core-api:8100 works too and skips the round trip, but then the bot
+  # bypasses the WAF and rate limits that protect the admin API; the default
+  # keeps one enforcement path for every client.
+  publoader-bot:
+    <<: [*app-security, *core-build, *public-dns]
+    depends_on:
+      core-api:
+        condition: service_started
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # The bot token from the Discord Developer Portal (Bot → Reset Token).
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:?set DISCORD_BOT_TOKEN in .env}
+      CORE_URL: ${CORE_URL:-https://publoader.ardax.dev}
+      # A SCOPED `pa_…` token minted for this client alone — NOT ADMIN_TOKEN.
+      # See docs/bot.md; mint with `publoader-admin tokens create`.
+      BOT_API_TOKEN: ${BOT_API_TOKEN:?set BOT_API_TOKEN in .env (a scoped pa_ token, never ADMIN_TOKEN)}
+      # Discord-side gating. With DISCORD_ADMIN_USERS or DISCORD_ALLOWED_CHANNELS
+      # unset the bot refuses every state-changing command — it fails closed,
+      # unlike the legacy bot which allowed everyone when unconfigured.
+      DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-}
+      DISCORD_ADMIN_USERS: ${DISCORD_ADMIN_USERS:-}
+      DISCORD_ADMIN_ROLES: ${DISCORD_ADMIN_ROLES:-}
+      DISCORD_ALLOWED_CHANNELS: ${DISCORD_ALLOWED_CHANNELS:-}
+    networks:
+      - edge
+    command: ["node", "dist/src/services/bot.js"]
+    # An outbound gateway connection, no listening socket, so the image's HTTP
+    # probe cannot apply. A config error (missing or rejected token) exits 78 —
+    # `unless-stopped` still restarts it, so the symptom is a restart loop and
+    # the diagnosis is the one `fatal` line in `docker compose logs publoader-bot`.
+    healthcheck:
+      disable: true
+    mem_limit: 384m
+    stop_grace_period: 15s
+
   # --- cloudflared ----------------------------------------------------------
   # The single public entrance: https://publoader.ardax.dev -> core-api:8100.
   # Token-managed, like the legacy stack — the tunnel and its ingress rules are

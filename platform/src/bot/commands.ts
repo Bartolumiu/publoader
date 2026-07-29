@@ -23,6 +23,8 @@ import {
   type RemovalMode,
   type RunKind,
   type UntrackedState,
+  type UploadTaskKind,
+  type UploadTaskState,
   type WorkerAction,
 } from "./apiClient.js";
 import type { Sensitivity } from "./authz.js";
@@ -643,6 +645,208 @@ const commands: BotCommand[] = [
     },
   },
   {
+    // The legacy `queue peek` / `queue clear` pair, restored now that
+    // routes/ops.ts exposes upload tasks. `clear` is deliberately not restored:
+    // one Discord message could empty a queue of thousands of pending uploads,
+    // so cancellation is per task.
+    name: "queue",
+    description: "The uploader's task queue: inspect, retry, cancel, unstick.",
+    sensitivity: { list: "read", retry: "mutate", cancel: "destructive", "requeue-stale": "mutate" },
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("queue")
+      .setDescription("The uploader's task queue: inspect, retry, cancel, unstick.")
+      .addSubcommand((s) =>
+        s
+          .setName("list")
+          .setDescription("Upload tasks, newest first, with depth totals.")
+          .addStringOption((o) =>
+            o
+              .setName("kind")
+              .setDescription("Filter by task kind.")
+              .addChoices(
+                { name: "UPLOAD", value: "UPLOAD" },
+                { name: "EDIT", value: "EDIT" },
+                { name: "DELETE", value: "DELETE" },
+                { name: "UNAVAILABLE", value: "UNAVAILABLE" },
+              ),
+          )
+          .addStringOption((o) =>
+            o
+              .setName("state")
+              .setDescription("Filter by state.")
+              .addChoices(
+                { name: "PENDING", value: "PENDING" },
+                { name: "LEASED", value: "LEASED" },
+                { name: "DONE", value: "DONE" },
+                { name: "FAILED", value: "FAILED" },
+                { name: "DEAD_LETTER", value: "DEAD_LETTER" },
+              ),
+          )
+          .addIntegerOption((o) =>
+            o.setName("limit").setDescription("How many rows (1-50, default 15).").setMinValue(1).setMaxValue(50),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("retry")
+          .setDescription("Requeue a FAILED or DEAD_LETTER task with a fresh attempt budget.")
+          .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true)),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("cancel")
+          .setDescription("Abandon a task without ever sending it to MangaDex.")
+          .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true))
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Required: the chapter will never be uploaded."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("requeue-stale")
+          .setDescription("Sweep leases held by a dead uploader back onto the queue."),
+      ),
+    async run(ctx) {
+      const sub = ctx.options.subcommand();
+      if (sub === "list") {
+        const kind = ctx.options.string("kind");
+        const state = ctx.options.string("state");
+        const { tasks, counts } = await ctx.api.uploadTasks(ctx.actor, {
+          limit: ctx.options.integer("limit") ?? 15,
+          ...(kind ? { kind: kind as UploadTaskKind } : {}),
+          ...(state ? { state: state as UploadTaskState } : {}),
+        });
+        const depths = (counts ?? [])
+          .filter((c) => c.count > 0)
+          .map((c) => `${c.kind}/${c.state}=${c.count}`)
+          .join(" ");
+        if (tasks.length === 0) {
+          return { text: `No matching upload tasks.\n**Queue depths** — ${depths || "empty"}` };
+        }
+        const rendered = tasks.map(
+          (t) =>
+            `• \`${t.id.slice(0, 8)}\` ${t.kind}/${t.state} attempt ${t.attempt}/${t.maxAttempts} ` +
+            `${shortTime(t.updatedAt)}` +
+            (t.lastError ? `\n   \`${t.lastError.slice(0, 140)}\`` : ""),
+        );
+        return {
+          text: lines([
+            `**Queue depths** — ${depths || "empty"}`,
+            `**${tasks.length} task(s)** — ids are truncated above; use \`/queue list\` output with the full id from the dashboard for retry/cancel.`,
+            ...rendered,
+          ]),
+        };
+      }
+      if (sub === "requeue-stale") {
+        const result = await ctx.api.requeueStaleUploadTasks(ctx.actor);
+        return {
+          text:
+            result.requeued > 0
+              ? `:arrows_counterclockwise: Requeued **${result.requeued}** stale upload task(s).`
+              : "Nothing to requeue — no upload task is holding an expired lease.",
+        };
+      }
+      const id = requireString(ctx.options, "id");
+      if (sub === "retry") {
+        await ctx.api.retryUploadTask(ctx.actor, id);
+        return { text: `:arrows_counterclockwise: Upload task \`${id}\` requeued with a fresh attempt budget.` };
+      }
+      if (ctx.options.boolean("confirm") !== true) {
+        return {
+          text:
+            `:warning: **Upload task \`${id}\` not cancelled.** Cancelling means this chapter is never sent to ` +
+            "MangaDex; the task leaves the queue marked DONE with a note saying an operator abandoned it.\n" +
+            "Re-issue with `confirm: true` if that is what you want.",
+        };
+      }
+      await ctx.api.cancelUploadTask(ctx.actor, id);
+      return { text: `:octagonal_sign: Upload task \`${id}\` abandoned — it was never sent to MangaDex.` };
+    },
+  },
+  {
+    // Legacy `mdauth` / `logout`, restored via routes/ops.ts. There is still no
+    // "log in now" command: clearing the saved session makes the next MangaDex
+    // call re-authenticate, which is the same outcome by a safer route.
+    name: "mdauth",
+    description: "MangaDex session state, and forgetting a bad one.",
+    sensitivity: { status: "read", clear: "destructive" },
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("mdauth")
+      .setDescription("MangaDex session state, and forgetting a bad one.")
+      .addSubcommand((s) =>
+        s.setName("status").setDescription("Whether a MangaDex session is stored, and when it expires."),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("clear")
+          .setDescription("Forget the stored session so the next call re-authenticates.")
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Required: in-flight uploads may fail while it re-authenticates."),
+          ),
+      ),
+    async run(ctx) {
+      if (ctx.options.subcommand() === "status") {
+        const auth = await ctx.api.mdAuth(ctx.actor);
+        if (!auth.hasAccess && !auth.hasRefresh) {
+          return {
+            text: ":warning: No MangaDex session is stored. The next upload will authenticate from the configured credentials.",
+          };
+        }
+        const expiry =
+          auth.expiresAt === null
+            ? "expiry unknown (the stored token could not be parsed, which does not mean it is bad)"
+            : auth.expired
+              ? `**expired** at ${shortTime(auth.expiresAt)}`
+              : `expires ${shortTime(auth.expiresAt)} (in ~${Math.round((auth.expiresInSeconds ?? 0) / 60)} min)`;
+        return {
+          text: lines([
+            `${auth.expired ? ":red_circle:" : ":green_circle:"} **MangaDex session** — access token ${auth.hasAccess ? "stored" : "missing"}, refresh token ${auth.hasRefresh ? "stored" : "missing"}`,
+            `Access ${expiry}.`,
+            "An expired access token is normal — it is refreshed on demand. Only clear the session if refreshing keeps failing.",
+          ]),
+        };
+      }
+      if (ctx.options.boolean("confirm") !== true) {
+        return {
+          text:
+            ":warning: **MangaDex session not cleared.** Clearing forces a fresh login on the next call; an upload " +
+            "in flight at that moment can fail and be retried.\nRe-issue with `confirm: true` if refreshing is broken.\n" +
+            "This does *not* revoke anything on MangaDex's side — that is a credential rotation (`docs/operations.md`).",
+        };
+      }
+      await ctx.api.clearMdAuth(ctx.actor);
+      return {
+        text: ":wastebasket: Stored MangaDex session cleared. The next MangaDex call will authenticate from the configured credentials.",
+      };
+    },
+  },
+  {
+    // The closest thing to legacy `logs`: everything that failed, in one list,
+    // without needing a shell on the core host.
+    name: "errors",
+    description: "Everything that recently failed: dead-lettered jobs, failed uploads, quarantines.",
+    sensitivity: "read",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("errors")
+      .setDescription("Everything that recently failed: dead-lettered jobs, failed uploads, quarantines.")
+      .addIntegerOption((o) =>
+        o.setName("limit").setDescription("How many entries (1-30, default 10).").setMinValue(1).setMaxValue(30),
+      ),
+    async run(ctx) {
+      const { errors } = await ctx.api.errors(ctx.actor, ctx.options.integer("limit") ?? 10);
+      if (errors.length === 0) return { text: ":green_circle: Nothing has failed recently." };
+      const rendered = errors.map(
+        (e) =>
+          `• \`${shortTime(e.at)}\` **${e.kind}** ${e.subject}` +
+          (e.message ? `\n   \`${e.message.slice(0, 160)}\`` : ""),
+      );
+      return { text: lines([`**${errors.length} recent failure(s)**`, ...rendered]) };
+    },
+  },
+  {
     name: "workers",
     description: "Fleet inventory and worker lifecycle.",
     sensitivity: { list: "read", drain: "mutate", activate: "mutate", revoke: "destructive" },
@@ -929,15 +1133,18 @@ const commands: BotCommand[] = [
         );
       }
       const identity = await ctx.api.tokenSelf(ctx.actor);
-      if (identity?.scopes && identity.scopes.length > 0) {
-        parts.push(`**Scopes**: ${identity.scopes.map((s) => `\`${s}\``).join(", ")}`);
-        if (identity.scopes.includes("*")) {
+      const scopes = identity?.scopes ?? ctx.api.observedScopes;
+      if (scopes && scopes.length > 0) {
+        const source = identity?.scopes ? "" : " *(learned from an earlier refused command)*";
+        parts.push(`**Scopes**${source}: ${scopes.map((s) => `\`${s}\``).join(", ")}`);
+        if (scopes.includes("*")) {
           parts.push(":warning: `*` is every scope — that defeats the point of a scoped token.");
         }
       } else {
         parts.push(
-          "**Scopes**: this deployment does not expose token introspection, so the bot cannot list them. " +
-            "A command that needs a grant the token lacks will fail with a 403 naming the missing scope.",
+          "**Scopes**: the API has no token-introspection endpoint, so the bot cannot list them up front. " +
+            "A command needing a grant the token lacks fails with a 403 that names the missing scope *and* " +
+            "the ones it holds — run one and this command will report them afterwards.",
         );
       }
       return { text: lines(parts) };
@@ -962,17 +1169,12 @@ export const RETIRED_COMMANDS: RetiredCommand[] = [
   {
     name: "logs",
     replacement:
-      "There is no log API — work runs on machines the core cannot read. Use `docker compose logs -f core-api` on the core host, and for a failure follow `/runs show` → per-job error → `/dead-letter` → `/quarantine` → `/audit`.",
-  },
-  {
-    name: "queue",
-    replacement:
-      "Queue depths are in `/status`. Per-row inspection and bulk flushing have no equivalent: every unit of work is a durable row now, so cancel them individually with `/jobs cancel id:<id>`.",
+      "There is no log API — work runs on machines the core cannot read. For failures use `/errors`, which merges dead-lettered jobs, failed uploads and quarantines into one list. For process output, `docker compose logs -f core-api` on the core host.",
   },
   {
     name: "kill",
     replacement:
-      "There is no in-memory queue to drain. Cancel jobs individually with `/jobs cancel id:<id>`, or `/pause` the platform to stop new work.",
+      "There is no in-memory queue to drain. Cancel work individually — `/jobs cancel id:<id>` for scrape jobs, `/queue cancel id:<id>` for uploads — or `/pause` the platform to stop new work.",
   },
   {
     name: "restart-workers",
@@ -985,19 +1187,14 @@ export const RETIRED_COMMANDS: RetiredCommand[] = [
       "Configuration is environment- and Docker-secret-driven. Inspect it with `docker compose config` on the core host; nothing that holds a credential is readable or settable over the API, and certainly not from a chat message.",
   },
   {
-    name: "mdauth",
-    replacement:
-      "MangaDex auth state is not exposed yet — only `core-uploader` holds the credential. Tracked as a gap in `docs/ipc-to-api-mapping.md`.",
-  },
-  {
     name: "login",
     replacement:
-      "Forcing a MangaDex login is not an API operation. `core-uploader` manages its own token; if it is broken, check its logs and rotate the credential.",
+      "There is no \"log in now\" operation. `/mdauth clear confirm:true` forgets the stored session, and the next MangaDex call authenticates from the configured credentials — same outcome, without a command that holds a password.",
   },
   {
     name: "logout",
     replacement:
-      "Deliberately not provided. Revoking MangaDex access means rotating the credential and redeploying `core-uploader` — see `docs/operations.md`.",
+      "Use `/mdauth clear confirm:true` to forget the stored session. It does not revoke anything MangaDex-side — that is a credential rotation, see `docs/operations.md`.",
   },
   {
     name: "pull",

@@ -168,3 +168,128 @@ migration, but the bot loses a feature until they land.
   tokens with scopes are a follow-up; until then, treat the bot's token as
   equivalent to shell access to the platform's control plane and keep the bot's
   command surface allowlisted on the bot side.
+
+## Discord bot: the port, as built
+
+Date: 2026-07-29. The bot half of this document is now done. It lives at
+`platform/src/bot/` with its entrypoint at `platform/src/services/bot.ts`;
+setup and the command reference are in `docs/bot.md`.
+
+Two things above are now out of date and worth stating plainly:
+
+1. **"Token scope … per-client tokens with scopes are a follow-up"** — they have
+   landed. The bot holds a scoped `pa_…` token (`platform/src/core/api/scopes.ts`,
+   `routes/tokens.ts`), *not* `ADMIN_TOKEN`, and every admin route enforces a
+   scope. The bot's token is no longer equivalent to shell access to the control
+   plane; it is equivalent to its scope list.
+2. **The bot no longer holds a Docker socket.** The legacy `start` / `shutdown` /
+   `restart` commands drove `docker.sock` from inside the bot container. That
+   mount is gone, and with it the property that compromising the bot meant root
+   on the core host.
+
+### Every legacy command, and where it went
+
+`publoader/bot/server.py` registered 32 command paths (most as both a `!prefix`
+and a slash command). The new bot is slash-only.
+
+| Legacy | New command | Notes |
+|---|---|---|
+| `run [ext…]` | `/run <extension>` | One extension per invocation — the legacy list becomes N calls, matching `POST /runs`. Uses the Discord interaction id as the idempotency key. |
+| `force [ext…]` | `/run <extension> mode:FORCE` | |
+| `clean [ext…]` | `/run <extension> mode:CLEAN confirm:true` | Confirmation required; a CLEAN run can republish a lot of content. |
+| `status`, `ping` | `/status`, `/ping` | Split: `/status` is the state (from `GET /stats` + `GET /workers`), `/ping` is API reachability and latency. |
+| `stats` | `/stats` | Alias of `/status`, kept for muscle memory. |
+| `pause [minutes]` | `/pause [minutes]` | |
+| `resume` | `/resume` | |
+| `extensions` | `/extensions list` | Now lists **published bundles**, not directories on disk. |
+| `load <ext>` | `/extensions enable <extension>` | Renamed. |
+| `unload <ext>` | `/extensions disable <extension>` | Renamed. |
+| `schedule list` | `/schedule list` | Shows manifest defaults and overrides with the effective time. |
+| `schedule set` | `/schedule set` | |
+| `schedule remove` | `/schedule remove` | |
+| `removal show` | `/removal-mode get` | Renamed. Needs `settings:write` — the GET is guarded by the write scope server-side. |
+| `removal set` | `/removal-mode set` | Renamed. |
+| `history [ext]` | `/runs recent [extension] [limit]` | Renamed. Richer: run state, kind and trigger source. |
+| `queue peek <worker>` | `/queue list [kind] [state]` | Restored in full by `routes/ops.ts` (`GET /upload-tasks`), which returns rows *and* depth totals. Filters are by task kind and state rather than by worker name — upload tasks are no longer per-worker queues. |
+| `queue clear <worker>` | `/queue cancel <id> confirm:true` | **Per task, not bulk, on purpose.** The legacy command could empty a queue of thousands of pending uploads from one chat message. `/queue requeue-stale` covers the other reason people reached for it (an uploader died holding leases). |
+| `mdauth_status` | `/mdauth status` | Restored by `routes/ops.ts` (`GET /mangadex/auth`). Reports whether tokens are stored and when the access token goes stale; never returns the tokens. |
+| `logout` | `/mdauth clear confirm:true` | Restored as "forget the stored session", which is what the legacy command actually did. It does not revoke anything MangaDex-side. |
+| `force_login` | `/mdauth clear confirm:true` | No direct equivalent, and none is wanted: clearing the session makes the next MangaDex call authenticate from the configured credentials, which is the same outcome without a chat command that handles a password. |
+| `logs` | `/errors [limit]` (partial) | `GET /admin/errors` merges dead-lettered jobs, failed upload tasks and quarantined submissions into one time-ordered feed — the triage half of what `logs` was used for. Process output stays in `docker compose logs`. |
+| `kill`, `workers restart`, `config show`, `config set`, `pull`, `reload`, `restart`, `refresh`, `start`, `shutdown` | *(retired)* | See the table below. |
+
+### New commands with no legacy counterpart
+
+`/runs show <id>`, `/jobs cancel <id>`, `/jobs retry <id>`, `/dead-letter`,
+`/quarantine`, `/errors`, `/workers list|drain|activate|revoke`, `/enroll`,
+`/untracked list|approve|skip`, `/tracked list|set|remove`,
+`/queue retry|cancel|requeue-stale`, `/audit`, `/whoami` — the endpoints listed
+under "New capabilities" above plus those in `routes/ops.ts`, now reachable from
+chat.
+
+`/enroll` DMs the minted enrollment token to the invoker and never posts it to a
+channel, not even as an ephemeral reply: an ephemeral message still renders in a
+channel that may be screen-shared.
+
+### Retired commands still register, and say what replaced them
+
+Rather than answering "unknown command", the bot registers each retired name and
+replies with the replacement. That makes the migration self-documenting for
+anyone with the old commands in muscle memory.
+
+| Legacy command | The bot's reply points at |
+|---|---|
+| `/logs` | `/errors` for failures; `docker compose logs -f core-api` for process output. |
+| `/kill` | `/jobs cancel <id>` for scrape jobs, `/queue cancel <id>` for uploads, or `/pause` to stop new work. |
+| `/restart-workers` | `docker compose restart core-uploader` for upload workers; `/workers drain` → restart the agent → `/workers activate` for remote ones. |
+| `/config` | `docker compose config` on the host. Secrets are deliberately not exposed over the API. |
+| `/login`, `/logout` | `/mdauth clear confirm:true`. |
+| `/pull` | Build bundles in CI and `bundle publish --source-commit <sha>`. |
+| `/reload` | Publish a new bundle; there is no in-process module tree. |
+| `/restart` | `docker compose pull && docker compose up -d` on the host. |
+| `/refresh` | Was `pull` + `reload`; both are gone. |
+| `/shutdown` | The bot has no Docker socket. `/pause`, or `docker compose` on the host. |
+
+`/queue` and `/mdauth` were on this list until `routes/ops.ts` landed; both are
+now real commands.
+
+`/start` is the one legacy name not registered, because a globally-registered
+`/start` collides with Discord's own conventions; `/shutdown` carries the
+explanation for both.
+
+### Client migration notes, resolved
+
+Against the checklist above:
+
+- **Idempotency** — done. Every `/run` sends `idempotencyKey:
+  discord:<interactionId>`, so a Discord retry or a double-submit collapses into
+  one run. The reply distinguishes "started" from "already existed".
+- **Polling** — not implemented. `/run` returns the run id and points at
+  `/runs show <id>`. A bot that polled would either spam the channel or trip the
+  admin rate limiter; the run-complete notification path is still the existing
+  `DISCORD_WEBHOOK_URLS` webhook, which is unchanged.
+- **Rate limiting** — the client surfaces 429 with the `Retry-After` value
+  instead of retrying. There is no polling loop to trip it.
+- **Config is in the database now** — the bot reads nothing from disk. Tracked
+  manga come from `GET /extensions/:name/tracked` via `/tracked list`.
+- **`untracked approve` is destructive-ish** — gated: admin-only *and*
+  `confirm: true`.
+- **Command surface allowlisted on the bot side** — done, and it now fails
+  closed rather than open; see `docs/bot.md` §4.
+
+### Remaining gaps, from the bot's point of view
+
+Gaps 1 (MangaDex auth) and 2 (upload-task inspection) from the list above are
+closed by `routes/ops.ts`. What an operator will still notice missing from chat:
+
+1. **Bulk cancel.** `/jobs cancel` is one job at a time. `POST /runs/:id/cancel`
+   would give the bot a `/runs cancel <id>` covering the realistic case ("that
+   FORCE run was a mistake").
+2. **Next-fire times.** `/schedule list` shows configuration, not when an
+   extension runs next — gap 5 above. Adding `nextRunAt` to `GET /schedules`
+   would let the bot show a countdown.
+3. **Token introspection.** `/whoami` cannot list the bot's scopes up front —
+   `/api/v1/admin/tokens/*` is gated on `users:admin` + OWNER, which a bot token
+   can never hold. It reports them after any 403 (whose body includes the held
+   scope list), and probes a `GET /api/v1/admin/tokens/self` that does not exist
+   yet, so adding one would make `/whoami` complete with no bot change.

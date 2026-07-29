@@ -8,6 +8,7 @@
  */
 import {
   Client,
+  DiscordjsErrorCodes,
   Events,
   GatewayIntentBits,
   MessageFlags,
@@ -114,12 +115,22 @@ export class PubloaderBot {
         "admin API reachable; bot authorization model loaded",
       );
     } catch (err) {
-      if (err instanceof AdminApiError && err.isAuth) {
+      if (err instanceof AdminApiError && err.status === 401) {
         throw new FatalBotConfigError(
-          `the core API rejected BOT_API_TOKEN (${err.status}: ${err.detail}). ` +
+          `the core API rejected BOT_API_TOKEN (401: ${err.detail}). ` +
             "Mint a token for the bot and set BOT_API_TOKEN; the bot cannot work without one.",
           { cause: err },
         );
+      }
+      if (err instanceof AdminApiError && err.status === 403) {
+        // The token is valid, it just cannot read stats. Every other command
+        // may still work, so refusing to start would be an overreaction — and
+        // the 403 body has already told the client which scopes it holds.
+        this.log.warn(
+          { held: err.held, missing: err.scope },
+          "BOT_API_TOKEN is accepted but lacks stats:read, so /status and /ping will fail — add the scope if you want them",
+        );
+        return;
       }
       // Anything else (core down, DNS, 503) is transient: log loudly and start
       // anyway so the bot is online to report the outage rather than absent
@@ -133,7 +144,15 @@ export class PubloaderBot {
 
   async start(): Promise<void> {
     await this.selfCheck();
-    await this.client.login(this.discordToken);
+    try {
+      await this.client.login(this.discordToken);
+    } catch (err) {
+      // Discord rejecting the credential, or refusing the intents, is a config
+      // error dressed as a runtime one. Translating it here is what turns an
+      // opaque restart loop into one line naming the fix — the legacy bot had
+      // to hand-write this advice for the same two failures.
+      throw translateLoginError(err);
+    }
   }
 
   async stop(reason: string): Promise<void> {
@@ -307,6 +326,31 @@ export class PubloaderBot {
     this.extensionCache = { names, fetchedAt: Date.now() };
     return names;
   }
+}
+
+/**
+ * Map a discord.js login failure onto a fatal config error where that is what
+ * it is. Anything else is passed through untouched — a network blip during
+ * login should be retried by the supervisor, not declared unfixable.
+ */
+export function translateLoginError(err: unknown): unknown {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === DiscordjsErrorCodes.TokenInvalid || code === DiscordjsErrorCodes.TokenMissing) {
+    return new FatalBotConfigError(
+      "Discord rejected DISCORD_BOT_TOKEN. Copy it from the Developer Portal under Bot → Reset Token — " +
+        "the client secret, public key and OAuth token are different values and none of them work here. " +
+        "If the token was recently regenerated, the old one is permanently revoked.",
+      { cause: err },
+    );
+  }
+  if (code === DiscordjsErrorCodes.DisallowedIntents) {
+    return new FatalBotConfigError(
+      "Discord refused the requested gateway intents. This bot asks only for Guilds, which is not privileged, " +
+        "so this means the application is configured unusually — check Bot → Privileged Gateway Intents.",
+      { cause: err },
+    );
+  }
+  return err;
 }
 
 /** Adapt discord.js option access to the transport-free reader handlers use. */
