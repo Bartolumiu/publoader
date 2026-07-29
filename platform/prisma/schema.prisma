@@ -1,0 +1,386 @@
+// Publoader platform durable state. PostgreSQL is the single source of truth
+// for scheduling, leases, results, canonical chapter history, and audit.
+// Hot-path claim statements use $queryRaw with FOR UPDATE SKIP LOCKED — table
+// and column names are snake_case-mapped so raw SQL stays unquoted.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum WorkerStatus {
+  ACTIVE
+  DRAINED
+  REVOKED
+}
+
+enum TrustTier {
+  TRUSTED
+  COMMUNITY
+}
+
+enum RunKind {
+  UPDATE
+  CLEAN
+  FORCE
+}
+
+enum RunState {
+  PENDING
+  EXECUTING
+  INGESTING
+  PROCESSED
+  FAILED
+  DEAD_LETTER
+  CANCELLED
+}
+
+enum JobState {
+  PENDING
+  LEASED
+  RUNNING
+  SUCCEEDED
+  DEAD_LETTER
+  CANCELLED
+}
+
+enum ErrorClass {
+  TRANSIENT
+  PERMANENT
+  POLICY
+}
+
+enum ResultState {
+  RECEIVED
+  QUARANTINED
+  COMMITTED
+  SUPERSEDED
+}
+
+enum UploadTaskKind {
+  UPLOAD
+  EDIT
+  DELETE
+  UNAVAILABLE
+}
+
+enum UploadTaskState {
+  PENDING
+  LEASED
+  DONE
+  FAILED
+  DEAD_LETTER
+}
+
+model Worker {
+  id              String       @id @default(uuid())
+  name            String
+  tokenHash       String       @unique @map("token_hash")
+  status          WorkerStatus @default(ACTIVE)
+  trust           TrustTier    @default(COMMUNITY)
+  capabilities    Json         @default("{}")
+  lastHeartbeatAt DateTime?    @map("last_heartbeat_at")
+  agentVersion    String?      @map("agent_version")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+
+  @@map("workers")
+}
+
+model EnrollToken {
+  id             String    @id @default(uuid())
+  tokenHash      String    @unique @map("token_hash")
+  trust          TrustTier @default(COMMUNITY)
+  note           String?
+  expiresAt      DateTime  @map("expires_at")
+  singleUse      Boolean   @default(true) @map("single_use")
+  usedByWorkerId String?   @map("used_by_worker_id")
+  revoked        Boolean   @default(false)
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@map("enroll_tokens")
+}
+
+model Run {
+  id                 String    @id @default(uuid())
+  idempotencyKey     String    @unique @map("idempotency_key")
+  extension          String
+  extensionVersion   String    @map("extension_version")
+  bundleSha256       String    @map("bundle_sha256")
+  kind               RunKind
+  state              RunState  @default(PENDING)
+  segmentsTotal      Int       @default(1) @map("segments_total")
+  requireAllSegments Boolean   @default(true) @map("require_all_segments")
+  triggeredBy        String?   @map("triggered_by")
+  scheduledFor       DateTime? @map("scheduled_for")
+  startedAt          DateTime? @map("started_at")
+  completedAt        DateTime? @map("completed_at")
+  error              String?
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+  jobs               Job[]
+
+  @@index([state])
+  @@index([extension, createdAt])
+  @@map("runs")
+}
+
+model Job {
+  id               String      @id @default(uuid())
+  idempotencyKey   String      @unique @map("idempotency_key")
+  runId            String      @map("run_id")
+  run              Run         @relation(fields: [runId], references: [id])
+  extension        String
+  extensionVersion String      @map("extension_version")
+  bundleSha256     String      @map("bundle_sha256")
+  kind             RunKind
+  segmentIndex     Int         @default(0) @map("segment_index")
+  segmentTotal     Int         @default(1) @map("segment_total")
+  segmentKey       String?     @map("segment_key")
+  segmentMangaIds  Json?       @map("segment_manga_ids")
+  minTrust         TrustTier   @default(COMMUNITY) @map("min_trust")
+  state            JobState    @default(PENDING)
+  attempt          Int         @default(0)
+  maxAttempts      Int         @default(3) @map("max_attempts")
+  notBefore        DateTime    @default(now()) @map("not_before")
+  timeoutSeconds   Int         @default(3600) @map("timeout_seconds")
+  leaseId          String?     @map("lease_id")
+  leaseWorkerId    String?     @map("lease_worker_id")
+  leaseExpiresAt   DateTime?   @map("lease_expires_at")
+  cancelRequested  Boolean     @default(false) @map("cancel_requested")
+  errorClass       ErrorClass? @map("error_class")
+  lastError        String?     @map("last_error")
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+
+  @@index([state, notBefore])
+  @@index([runId])
+  @@index([leaseExpiresAt])
+  @@map("jobs")
+}
+
+model ResultSubmission {
+  id             String      @id @default(uuid())
+  idempotencyKey String      @unique @map("idempotency_key")
+  jobId          String      @map("job_id")
+  attempt        Int
+  leaseId        String      @map("lease_id")
+  workerId       String      @map("worker_id")
+  envelope       Json
+  state          ResultState @default(RECEIVED)
+  rejectReason   String?     @map("reject_reason")
+  createdAt      DateTime    @default(now()) @map("created_at")
+
+  // A partial unique index (one COMMITTED row per job) is added in the
+  // migration SQL — Prisma cannot express partial indexes declaratively:
+  //   CREATE UNIQUE INDEX result_committed_one_per_job
+  //     ON result_submissions (job_id) WHERE state = 'COMMITTED';
+  @@index([jobId])
+  @@map("result_submissions")
+}
+
+model Artifact {
+  id          String    @id @default(uuid())
+  sha256      String
+  size        Int
+  contentType String    @map("content_type")
+  data        Bytes
+  jobId       String?   @map("job_id")
+  workerId    String?   @map("worker_id")
+  expiresAt   DateTime? @map("expires_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([jobId])
+  @@index([expiresAt])
+  @@map("artifacts")
+}
+
+model Bundle {
+  id           String   @id @default(uuid())
+  extension    String
+  version      String
+  sha256       String   @unique
+  manifest     Json
+  sourceCommit String?  @map("source_commit")
+  data         Bytes
+  yanked       Boolean  @default(false)
+  publishedAt  DateTime @default(now()) @map("published_at")
+
+  @@unique([extension, version])
+  @@index([extension, publishedAt])
+  @@map("bundles")
+}
+
+model UploadTask {
+  id             String          @id @default(uuid())
+  kind           UploadTaskKind
+  dedupeKey      String          @map("dedupe_key")
+  chapter        Json
+  state          UploadTaskState @default(PENDING)
+  attempt        Int             @default(0)
+  maxAttempts    Int             @default(5) @map("max_attempts")
+  notBefore      DateTime        @default(now()) @map("not_before")
+  leaseId        String?         @map("lease_id")
+  leaseExpiresAt DateTime?       @map("lease_expires_at")
+  lastError      String?         @map("last_error")
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+
+  @@unique([kind, dedupeKey])
+  @@index([state, notBefore])
+  @@map("upload_tasks")
+}
+
+model UploadedChapter {
+  id              String   @id @default(uuid())
+  mdChapterId     String   @unique @map("md_chapter_id")
+  extension       String
+  chapterId       String?  @map("chapter_id")
+  mdMangaId       String?  @map("md_manga_id")
+  chapterLanguage String?  @map("chapter_language")
+  chapterNumber   String?  @map("chapter_number")
+  data            Json
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@index([extension])
+  @@index([extension, chapterId])
+  @@map("uploaded_chapters")
+}
+
+model UploadedId {
+  id          String   @id @default(uuid())
+  extension   String
+  chapterId   String   @map("chapter_id")
+  mdChapterId String?  @map("md_chapter_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@unique([extension, chapterId])
+  @@map("uploaded_ids")
+}
+
+model EditedChapter {
+  id           String   @id @default(uuid())
+  mdChapterId  String   @unique @map("md_chapter_id")
+  data         Json
+  edits        Json     @default("[]")
+  lastEditedAt DateTime @default(now()) @map("last_edited_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("edited_chapters")
+}
+
+model UnavailableChapter {
+  id            String   @id @default(uuid())
+  mdChapterId   String   @unique @map("md_chapter_id")
+  data          Json
+  unavailableAt DateTime @default(now()) @map("unavailable_at")
+
+  @@map("unavailable_chapters")
+}
+
+model UploadLog {
+  id          String   @id @default(uuid())
+  dedupeKey   String   @map("dedupe_key")
+  mdChapterId String?  @map("md_chapter_id")
+  outcome     String
+  detail      String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([dedupeKey])
+  @@map("upload_log")
+}
+
+enum UntrackedState {
+  NEW
+  CREATING
+  CREATED
+  TRACKED
+  FAILED
+  SKIPPED
+}
+
+model UntrackedManga {
+  id            String         @id @default(uuid())
+  extension     String
+  mangaId       String         @map("manga_id")
+  mangaName     String         @map("manga_name")
+  mangaLanguage String         @map("manga_language")
+  mangaUrl      String         @map("manga_url")
+  state         UntrackedState @default(NEW)
+  mdMangaId     String?        @map("md_manga_id")
+  attempts      Int            @default(0)
+  lastError     String?        @map("last_error")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  @@unique([extension, mangaId, mangaLanguage])
+  @@index([state])
+  @@map("untracked_manga")
+}
+
+model TrackedManga {
+  id        String   @id @default(uuid())
+  extension String
+  mangaId   String   @map("manga_id")
+  mdMangaId String   @map("md_manga_id")
+  source    String   @default("auto")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([extension, mangaId])
+  @@index([extension])
+  @@map("tracked_manga")
+}
+
+// Per-extension runtime configuration. The DATABASE is the source of truth
+// ("no JSON config files"): seeded once from the bundle's data files at first
+// publish for migration convenience, then owned and edited via the admin API.
+model ExtensionConfig {
+  extension       String   @id
+  overrideOptions Json     @default("{}") @map("override_options")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("extension_configs")
+}
+
+model ScheduleOverride {
+  extension String   @id
+  hour      Int
+  minute    Int
+  day       Int?
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("schedule_overrides")
+}
+
+model DisabledExtension {
+  extension String   @id
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("disabled_extensions")
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("settings")
+}
+
+model AuditEvent {
+  id        String   @id @default(uuid())
+  actor     String
+  action    String
+  subject   String?
+  detail    Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([action])
+  @@map("audit_events")
+}

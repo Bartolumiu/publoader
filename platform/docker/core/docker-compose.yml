@@ -1,0 +1,384 @@
+# Publoader core control plane.
+#
+#   docker compose -f platform/docker/core/docker-compose.yml up -d
+#
+# Runs on the operator's own host. Everything that holds a credential lives
+# here: the database, the MangaDex account, the Discord webhooks, the admin
+# token. Workers hold none of it (§8) and are not part of this file.
+#
+# Ingress: NOTHING is published on the host. The only path in is the
+# cloudflared tunnel at the bottom, which reaches core-api over the compose
+# network. That means the API cannot be hit by bypassing Cloudflare's WAF and
+# rate limits, and a host-level firewall mistake cannot expose it.
+#
+# Config: copy .env.example to .env in this directory. Docker secrets are
+# supported for every credential — see the note above `secrets:` at the end.
+
+# --- shared hardening -------------------------------------------------------
+# Applied to every application service. Extracted to an anchor so the posture
+# is defined once and a service cannot quietly drift from it; per-service
+# comments explain the exceptions.
+x-app-security: &app-security
+  # The image is complete at build time — no service writes to its own
+  # filesystem. With root-owned code and a non-root runtime user, this turns a
+  # code-execution bug into something that cannot persist across a restart.
+  read_only: true
+  tmpfs:
+    # The only writable path. noexec/nosuid so a dropped payload cannot be
+    # executed from it; size-capped so a runaway job cannot fill host memory.
+    - /tmp:rw,noexec,nosuid,size=256m
+  cap_drop:
+    - ALL
+  security_opt:
+    # Blocks setuid binaries from gaining privileges — nothing here needs to
+    # change uid after start.
+    - no-new-privileges:true
+  restart: unless-stopped
+  # Bounded logs: the default json-file driver grows without limit and has
+  # filled the disk on this host before.
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+# Every core service reads the same base config. Kept in one anchor so a new
+# tuning knob is added to all four at once rather than to whichever one the
+# operator remembered.
+x-core-env: &core-env
+  DATABASE_URL: ${DATABASE_URL:-postgresql://publoader:${POSTGRES_PASSWORD}@postgres:5432/publoader?schema=public&connection_limit=10}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  LEASE_TTL_SECONDS: ${LEASE_TTL_SECONDS:-300}
+  SWEEP_INTERVAL_SECONDS: ${SWEEP_INTERVAL_SECONDS:-30}
+  SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-30}
+  RETRY_BASE_SECONDS: ${RETRY_BASE_SECONDS:-60}
+  RETRY_MAX_SECONDS: ${RETRY_MAX_SECONDS:-3600}
+  LEASE_POLL_WAIT_SECONDS: ${LEASE_POLL_WAIT_SECONDS:-25}
+
+# MangaDex + Discord credentials. Only the services that actually talk to
+# MangaDex get these — core-api and core-scheduler never do, and a credential
+# not present in a process cannot leak from it.
+x-md-env: &md-env
+  MANGADEX_API_URL: ${MANGADEX_API_URL:-https://api.mangadex.org}
+  MANGADEX_AUTH_URL: ${MANGADEX_AUTH_URL:-https://auth.mangadex.org/realms/mangadex/protocol/openid-connect}
+  MANGADEX_USERNAME: ${MANGADEX_USERNAME:?set MANGADEX_USERNAME in .env}
+  MANGADEX_PASSWORD: ${MANGADEX_PASSWORD:?set MANGADEX_PASSWORD in .env}
+  MANGADEX_CLIENT_ID: ${MANGADEX_CLIENT_ID:?set MANGADEX_CLIENT_ID in .env}
+  MANGADEX_CLIENT_SECRET: ${MANGADEX_CLIENT_SECRET:?set MANGADEX_CLIENT_SECRET in .env}
+  MANGADEX_RATELIMIT_MS: ${MANGADEX_RATELIMIT_MS:-2000}
+  UPLOAD_RETRY: ${UPLOAD_RETRY:-3}
+  DISCORD_WEBHOOK_URLS: ${DISCORD_WEBHOOK_URLS:-}
+
+# Public resolvers for the containers that reach MangaDex. Carried over from
+# the legacy stack: this host's LAN resolver sinkholes mangadex.org (answers
+# ::/0.0.0.0), so every MangaDex call died with "Connection refused". Compose
+# service names still resolve through Docker's embedded DNS, which only
+# forwards external names to these servers. Delete this from both services if
+# your network does not filter.
+x-public-dns: &public-dns
+  dns:
+    - 1.1.1.1
+    - 8.8.8.8
+
+x-core-build: &core-build
+  # One image, four services (see docker/core/Dockerfile). Building here and
+  # referencing the same `image:` tag everywhere means all four are guaranteed
+  # to run the identical build — a mixed-version control plane is a class of
+  # bug that is very hard to see.
+  image: ${PUBLOADER_CORE_IMAGE:-publoader/core:local}
+  build:
+    context: ../..
+    dockerfile: docker/core/Dockerfile
+
+services:
+  # --- postgres -------------------------------------------------------------
+  # The single source of truth: scheduling, job queue and leases, result
+  # envelopes, artifacts, bundles, canonical chapter history, audit (§3).
+  # Losing it loses everything, which is why it is the one service with a
+  # persistent volume and the one thing the backup procedure covers.
+  #
+  # Security posture: attached ONLY to the internal `data` network, so it has
+  # no route to the internet and no route from the tunnel. No host port — a
+  # published 5432 has been the entry point in enough incidents that it is
+  # worth stating: if you need psql, use `docker compose exec`, not a port.
+  postgres:
+    # Pinned to a minor tag rather than `16` so a rebuild cannot jump a
+    # PostgreSQL minor unnoticed. To go further and pin by digest (recommended,
+    # matching the app images):
+    #   docker pull postgres:16.9-bookworm
+    #   docker inspect --format='{{index .RepoDigests 0}}' postgres:16.9-bookworm
+    # then append @sha256:… here. Never change the MAJOR version in place — 16
+    # to 17 requires a dump/restore (see docs/deployment.md "Upgrading").
+    image: postgres:16.9-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-publoader}
+      POSTGRES_DB: ${POSTGRES_DB:-publoader}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # Deterministic collation, so index ordering does not shift under a glibc
+      # upgrade (which silently corrupts text indexes).
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - data
+    # Gates `migrate` (and therefore everything else): "container started" is
+    # not "accepting connections", and starting migrations against a database
+    # still doing initdb is how a stack comes up half-migrated.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-publoader} -d ${POSTGRES_DB:-publoader}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    mem_limit: 2g
+    shm_size: 256m
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # --- migrate --------------------------------------------------------------
+  # One-shot schema migration; runs to completion and exits 0, and every app
+  # service waits on that exit code. This is why the app images do NOT contain
+  # the prisma CLI: exactly one short-lived container is ever able to alter the
+  # schema, and it is not one that stays online holding credentials.
+  #
+  # It is safe to re-run on every `up` — `migrate deploy` applies only
+  # migrations not yet in the _prisma_migrations table and never generates,
+  # resets, or drops anything.
+  migrate:
+    <<: [*app-security, *core-build]
+    # `migrate` is a separate Dockerfile target that keeps the prisma CLI.
+    build:
+      context: ../..
+      dockerfile: docker/core/Dockerfile
+      target: migrate
+    image: ${PUBLOADER_MIGRATE_IMAGE:-publoader/core-migrate:local}
+    restart: "no"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://publoader:${POSTGRES_PASSWORD}@postgres:5432/publoader?schema=public&connection_limit=5}
+    command: ["migrate", "deploy"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - data
+    mem_limit: 512m
+
+  # --- core-api -------------------------------------------------------------
+  # The only service with a listening socket, and the only thing workers ever
+  # talk to. Serves two audiences with strictly separated token types
+  # (§8/auth.ts): /api/v1/worker/* for the fleet, /api/v1/admin/* for the
+  # operator CLI, Discord bot and dashboard.
+  #
+  # Security posture: `expose` only — 8100 is reachable from the compose
+  # network (i.e. from cloudflared) and from nowhere else. Publishing it on the
+  # host would put the enroll endpoint and the admin API on the host's
+  # interfaces, reachable without passing the tunnel's WAF rules.
+  core-api:
+    <<: [*app-security, *core-build]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *core-env
+      PORT: "8100"
+      HOST: 0.0.0.0
+      # Bearer token for /api/v1/admin/*. If unset the admin API answers 503 —
+      # it fails closed rather than open. Mint with: openssl rand -base64 48
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
+    expose:
+      - "8100"
+    networks:
+      - data
+      - edge
+    command: ["node", "dist/src/services/api.js"]
+    # Uses the image's HEALTHCHECK (/healthz, liveness only). /readyz is the
+    # database-aware probe and is deliberately NOT the container healthcheck:
+    # a Postgres restart should not cascade into killing the API.
+    mem_limit: 768m
+    stop_grace_period: 20s
+
+  # --- core-scheduler -------------------------------------------------------
+  # The clock. Turns due schedule slots into runs and jobs, sweeps expired
+  # leases back onto the queue, applies retry backoff, and dead-letters what
+  # exhausts its attempts (§4/§5). This is what makes a worker dying mid-job a
+  # non-event: the lease expires and the job is re-queued for someone else.
+  #
+  # Exactly ONE replica. Scaling it does not increase throughput (workers are
+  # the throughput) and duplicate schedulers would race on slot creation.
+  core-scheduler:
+    <<: [*app-security, *core-build]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *core-env
+    networks:
+      - data
+    command: ["node", "dist/src/services/scheduler.js"]
+    # No listening socket and no heartbeat file, so the image's HTTP probe
+    # cannot apply. Docker restarts it if the process exits; a *hung* loop is
+    # detected out-of-band via scheduler lag on core-api's /metrics rather than
+    # by an autoheal container — deliberately, because autoheal requires
+    # mounting docker.sock into the stack, which is a far bigger risk than the
+    # failure mode it fixes.
+    healthcheck:
+      disable: true
+    mem_limit: 512m
+    stop_grace_period: 30s
+
+  # --- core-processor -------------------------------------------------------
+  # Committed result envelopes -> MangaDex-side dedup (the ported legacy
+  # logic) -> upload tasks (§7). It reads MangaDex but never writes to it, so
+  # a bug here cannot post anything; the worst case is a task not created.
+  core-processor:
+    <<: [*app-security, *core-build, *public-dns]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: [*core-env, *md-env]
+    networks:
+      - data
+      - edge
+    command: ["node", "dist/src/services/processor.js"]
+    healthcheck:
+      disable: true
+    # Chapter/manga fan-out over many extensions is the memory-hungriest read
+    # path in the control plane.
+    mem_limit: 1g
+    stop_grace_period: 30s
+
+  # --- core-uploader --------------------------------------------------------
+  # The ONLY process in the entire system permitted to write to MangaDex.
+  # Centralising the upload authority here is what makes it safe to let
+  # untrusted workers execute extension code: a worker can fabricate a result,
+  # but it cannot upload — everything passes validation, dedup and the audit
+  # log before this service acts on it (§8 "residual risks").
+  #
+  # Exactly ONE replica: the MangaDex upload session is per-account state, and
+  # two uploaders would clobber each other's session.
+  core-uploader:
+    <<: [*app-security, *core-build, *public-dns]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: [*core-env, *md-env]
+    networks:
+      - data
+      - edge
+    command: ["node", "dist/src/services/uploader.js"]
+    healthcheck:
+      disable: true
+    # Holds decoded page images in memory while committing a chapter.
+    mem_limit: 1536m
+    tmpfs:
+      # Larger scratch than the shared default: image work spills to $TMPDIR.
+      - /tmp:rw,noexec,nosuid,size=1g
+    # Long enough to finish committing an in-flight chapter on `compose down`
+    # instead of leaving a half-uploaded session behind.
+    stop_grace_period: 120s
+
+  # --- cloudflared ----------------------------------------------------------
+  # The single public entrance: https://publoader.ardax.dev -> core-api:8100.
+  # Token-managed, like the legacy stack — the tunnel and its ingress rules are
+  # configured in the Cloudflare Zero Trust dashboard, not in this file.
+  #
+  # SETUP (Zero Trust > Networks > Tunnels > this tunnel > Public Hostname):
+  #   Hostname: publoader.ardax.dev
+  #   Service:  http://core-api:8100      ("core-api" resolves on this network)
+  #
+  # WAF / rules — these are load-bearing, not optional. Configure in the
+  # Cloudflare dashboard (full rule text in docs/deployment.md):
+  #   * BLOCK /metrics, /healthz and /readyz from the internet. They are for
+  #     the internal network only (see server.ts) — /metrics leaks fleet and
+  #     queue topology, and none of the three requires authentication.
+  #   * RATE LIMIT /api/v1/worker/enroll hard (a handful per hour per IP). It
+  #     is the one unauthenticated write endpoint; the in-process limiter is a
+  #     backstop, not the front line.
+  #   * Allow only /api/v1/worker/* and /api/v1/admin/*; block everything else.
+  #   * Consider Zero Trust Access (service tokens) in front of /api/v1/admin/*
+  #     so the admin token is the second factor rather than the only one.
+  #
+  # It reaches core-api over `edge` and has NO route to postgres — it is
+  # internet-facing software and gets nothing but the one hop it needs.
+  cloudflared:
+    # Intentionally tracking latest: the tunnel client is the internet-facing
+    # component, Cloudflare deprecates old clients, and it holds no state worth
+    # pinning. Pin to a dated tag if you want change control here.
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      # Created in the Zero Trust dashboard. This token IS the tunnel's
+      # identity: anyone holding it can serve traffic on the hostname.
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?set TUNNEL_TOKEN in .env}
+      TUNNEL_METRICS: 0.0.0.0:2000
+    depends_on:
+      core-api:
+        condition: service_started
+    networks:
+      - edge
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # Database plane. `internal: true` removes the default gateway from this
+  # network, so postgres has no route off the host: it cannot be reached from
+  # the internet and cannot reach out. The app services are attached to both
+  # networks and keep their egress via `edge`.
+  data:
+    internal: true
+  # Egress + tunnel plane. Only services that need to talk to the internet
+  # (MangaDex, Discord, Cloudflare) or to the tunnel are attached.
+  edge: {}
+
+volumes:
+  # The only durable state in the stack. Back this up (docs/deployment.md);
+  # `docker compose down -v` deletes it.
+  pgdata: {}
+
+# --- Docker secrets ---------------------------------------------------------
+# Every credential above can come from a file instead of the environment:
+# config.ts honours the <VAR>_FILE convention for ALL variables, so a secret
+# never appears in `docker inspect`, in the shell history, or in a compose file
+# committed by accident.
+#
+# Uncomment and adapt:
+#
+# secrets:
+#   database_url:
+#     file: ./secrets/database_url
+#   admin_token:
+#     file: ./secrets/admin_token
+#   mangadex_password:
+#     file: ./secrets/mangadex_password
+#   mangadex_client_secret:
+#     file: ./secrets/mangadex_client_secret
+#
+# then on each service that needs them:
+#
+#   core-api:
+#     secrets: [database_url, admin_token]
+#     environment:
+#       DATABASE_URL_FILE: /run/secrets/database_url
+#       ADMIN_TOKEN_FILE: /run/secrets/admin_token
+#
+# Note postgres itself uses POSTGRES_PASSWORD_FILE (its own convention, same
+# idea) and the connection string must then be supplied via DATABASE_URL_FILE
+# since it embeds the password.
