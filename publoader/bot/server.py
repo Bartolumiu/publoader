@@ -1182,6 +1182,25 @@ def _register_commands(bot: PubloaderBot) -> None:
             return
         await bot._dispatch(ctx, "restart_workers")
 
+    # ----- /kill: drop queued tasks + abort worker processing -----
+
+    @bot.tree.command(
+        name="kill",
+        description="Kill all queued/running tasks: drop queued jobs and restart workers (admin-only).",
+    )
+    async def _slash_kill(interaction: discord.Interaction):
+        if not _is_admin(interaction.user):
+            await interaction.response.send_message("Not allowed.", ephemeral=True)
+            return
+        await bot._dispatch_slash(interaction, "kill_tasks")
+
+    @bot.command(name="kill")
+    async def _prefix_kill(ctx: commands.Context):
+        if not _is_admin(ctx.author):
+            await ctx.send("Not allowed.")
+            return
+        await bot._dispatch(ctx, "kill_tasks")
+
     # ----- /queue group: peek + clear worker queues -----
     queue_group = app_commands.Group(
         name="queue",

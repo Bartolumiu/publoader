@@ -947,6 +947,50 @@ def _setup_ipc_server(database_connection) -> IPCServer:
             return {"ok": False, "error": str(e)}
         return {"ok": True, "restarted": sorted(_worker_tables())}
 
+    def cmd_kill_tasks(_req):
+        """Kill every current task: drop all queued IPC jobs (releasing the
+        in-flight claims of dropped runs so they can be re-queued) and kill +
+        respawn the worker subprocesses to abort whatever they are processing.
+
+        A run already executing on the main thread can't be interrupted from
+        here — that needs a container `/restart` — so report it instead.
+        Queued Mongo documents are untouched; `/queue clear` handles those."""
+        dropped: dict = {}
+        while True:
+            try:
+                kind, payload = _ipc_jobs.get_nowait()
+            except queue.Empty:
+                break
+            dropped[kind] = dropped.get(kind, 0) + 1
+            if kind == JOB_RUN:
+                _release_extensions(payload.get("extension_names") or [])
+
+        try:
+            worker.kill()
+            worker.main(database_connection)
+            workers_restarted = True
+        except Exception as e:  # pragma: no cover - defensive
+            logger.exception("worker restart during kill_tasks failed")
+            workers_restarted = False
+            worker_error = str(e)
+        else:
+            worker_error = None
+
+        result = {
+            "ok": workers_restarted,
+            "dropped_jobs": dropped,
+            "workers_restarted": workers_restarted,
+            "run_in_progress": _run_lock.locked(),
+        }
+        if worker_error:
+            result["error"] = f"worker restart failed: {worker_error}"
+        if result["run_in_progress"]:
+            result["note"] = (
+                "an extension run is executing right now and can't be killed "
+                "in-place; use /restart to stop it."
+            )
+        return result
+
     def cmd_stats(_req):
         """Document counts for the worker queues plus the core collections."""
         out: dict = {"queues": {}, "collections": {}}
@@ -1151,6 +1195,7 @@ def _setup_ipc_server(database_connection) -> IPCServer:
     server.register("queue_peek", cmd_queue_peek)
     server.register("queue_clear", cmd_queue_clear)
     server.register("restart_workers", cmd_restart_workers)
+    server.register("kill_tasks", cmd_kill_tasks)
     server.register("stats", cmd_stats)
     server.register("config_show", cmd_config_show)
     server.register("config_set", cmd_config_set)
