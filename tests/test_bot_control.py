@@ -432,3 +432,64 @@ def test_logout_when_no_token_file(tmp_path, handlers, monkeypatch):
     result = h["logout"]({})
     assert result["ok"] is True
     assert result["file_removed"] is False
+
+
+# ---------- kill_tasks ----------
+
+
+@pytest.fixture(autouse=True)
+def _reset_task_state():
+    # kill_tasks drains the module-global job queue and claim set; keep tests
+    # isolated from each other and from cmd_run's side effects.
+    yield
+    while not run_module._ipc_jobs.empty():
+        run_module._ipc_jobs.get_nowait()
+    with run_module._inflight_lock:
+        run_module._inflight_extensions.clear()
+
+
+def test_kill_tasks_drops_queued_jobs_and_releases_claims(handlers, monkeypatch):
+    h, _db = handlers
+    monkeypatch.setattr(run_module.worker, "kill", lambda: None)
+    monkeypatch.setattr(run_module.worker, "main", lambda *_a, **_k: None)
+
+    queued = h["run"]({"extensions": ["demo"]})
+    assert queued["queued"] is True
+    run_module._ipc_jobs.put((run_module.JOB_PULL, {"repos": ["extensions"]}))
+
+    result = h["kill_tasks"]({})
+    assert result["ok"] is True
+    assert result["dropped_jobs"] == {run_module.JOB_RUN: 1, run_module.JOB_PULL: 1}
+    assert result["workers_restarted"] is True
+    assert result["run_in_progress"] is False
+    assert run_module._ipc_jobs.empty()
+    # The dropped run's claim is released, so the extension can be re-queued.
+    assert h["run"]({"extensions": ["demo"]})["queued"] is True
+
+
+def test_kill_tasks_reports_run_in_progress(handlers, monkeypatch):
+    h, _db = handlers
+    monkeypatch.setattr(run_module.worker, "kill", lambda: None)
+    monkeypatch.setattr(run_module.worker, "main", lambda *_a, **_k: None)
+
+    assert run_module._run_lock.acquire(blocking=False)
+    try:
+        result = h["kill_tasks"]({})
+    finally:
+        run_module._run_lock.release()
+    assert result["ok"] is True
+    assert result["run_in_progress"] is True
+    assert "restart" in result["note"]
+
+
+def test_kill_tasks_reports_worker_restart_failure(handlers, monkeypatch):
+    h, _db = handlers
+
+    def _boom():
+        raise RuntimeError("no docker")
+
+    monkeypatch.setattr(run_module.worker, "kill", _boom)
+    result = h["kill_tasks"]({})
+    assert result["ok"] is False
+    assert result["workers_restarted"] is False
+    assert "no docker" in result["error"]
