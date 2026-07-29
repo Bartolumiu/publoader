@@ -10,6 +10,15 @@ services:
     # compose network, i.e. the cloudflared tunnel below.
     expose:
       - "8080"
+    # Public resolvers instead of the LAN's DNS. The home network's filtering
+    # resolver sinkholes mangadex.org (answers `::`/0.0.0.0), so every MangaDex
+    # call died with "Connection refused" the moment an extension run started.
+    # This bypasses the filter for this container only; compose service names
+    # (publoader, cloudflared, ...) still resolve via Docker's embedded DNS,
+    # which forwards to these servers only for external names.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     volumes:
       - ./config.ini:/app/config.ini
       - ./logs:/app/logs
