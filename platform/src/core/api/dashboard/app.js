@@ -62,6 +62,11 @@ const store = {
   filters: {
     queueKind: "",
     queueState: "",
+    queueDedupeKey: "",
+    queueAttemptMin: "",
+    queueAttemptMax: "",
+    /** Keyset cursors already walked, so "Back" does not need a second scheme. */
+    queueCursors: [],
     untrackedState: "NEW",
     activitySeverity: "all",
     activityHours: 72,
@@ -2145,43 +2150,150 @@ const UPLOAD_TASK_STATES = ["PENDING", "LEASED", "DONE", "FAILED", "DEAD_LETTER"
  * `queue_clear` IPC commands, and for `restart_workers`: nothing here restarts a
  * process, because every unit of work is a durable row that can be requeued.
  */
+/**
+ * The MangaDex upload queues.
+ *
+ * Driven by `/queues/*`, which is the endpoint family that models the queue as
+ * rows an operator may act on rather than a read-only depth chart. Everything
+ * destructive here goes through the server's own guards rather than a local
+ * guess: a LEASED row belongs to a live uploader and is refused with a 409, and
+ * purge refuses to run without a dry run first.
+ *
+ * Paging is keyset, not offset. The queue drains while it is being read, so an
+ * offset page skips rows that moved and repeats rows that did not — which for a
+ * queue view means a task can silently never appear on any page.
+ */
 VIEWS.queues = (route) => {
-  const tasks = new Resource("upload-tasks", () => {
-    const query = new URLSearchParams({ limit: "200" });
-    if (store.filters.queueKind) query.set("kind", store.filters.queueKind);
-    if (store.filters.queueState) query.set("state", store.filters.queueState);
-    return api(`/upload-tasks?${query}`);
-  });
+  const f = () => store.filters;
 
-  if (route.tab === "depth") {
-    return card(
-      "Depth by kind and state",
+  const queryString = (extra = {}) => {
+    const q = new URLSearchParams({ limit: "100" });
+    if (f().queueKind) q.set("kind", f().queueKind);
+    if (f().queueState) q.set("state", f().queueState);
+    if (f().queueDedupeKey) q.set("dedupeKey", f().queueDedupeKey);
+    if (f().queueAttemptMin !== "") q.set("attemptMin", f().queueAttemptMin);
+    if (f().queueAttemptMax !== "") q.set("attemptMax", f().queueAttemptMax);
+    for (const [k, v] of Object.entries(extra)) if (v != null) q.set(k, v);
+    return q;
+  };
+
+  /** The filter as the bulk endpoints take it — same names, no paging keys. */
+  const activeFilter = () => {
+    const filter = {};
+    if (f().queueKind) filter.kind = f().queueKind;
+    if (f().queueState) filter.state = f().queueState;
+    if (f().queueDedupeKey) filter.dedupeKey = f().queueDedupeKey;
+    if (f().queueAttemptMin !== "") filter.attemptMin = Number(f().queueAttemptMin);
+    if (f().queueAttemptMax !== "") filter.attemptMax = Number(f().queueAttemptMax);
+    return filter;
+  };
+
+  const cursorNow = () => {
+    const walked = f().queueCursors;
+    return walked.length ? walked[walked.length - 1] : null;
+  };
+
+  const tasks = new Resource("queue-tasks", () =>
+    api(`/queues/tasks?${queryString({ cursor: cursorNow() })}`),
+  );
+
+  if (route.tab === "depth") return queueDepthPanel();
+
+  // Selection is by id and survives a refresh, but only for rows still present:
+  // acting on an id that has drained away is how a bulk action reports failures
+  // the operator did not cause.
+  const selected = new Set();
+  const reconcile = (rows) => {
+    const present = new Set(rows.map((r) => r.id));
+    for (const id of [...selected]) if (!present.has(id)) selected.delete(id);
+  };
+
+  const reload = () => {
+    void tasks.load({ force: true });
+  };
+  const resetPaging = () => {
+    setFilter({ queueCursors: [] });
+    selected.clear();
+    reload();
+  };
+
+  const filterCard = queueFilterCard(resetPaging);
+
+  return el(
+    "div",
+    {},
+    filterCard,
+    card(
+      null,
       live(
         [tasks],
-        ({ counts }) =>
-          counts.length
-            ? el(
-                "div",
-                { class: "grid tight" },
-                counts
-                  .slice()
-                  .sort((a, b) => a.kind.localeCompare(b.kind) || a.state.localeCompare(b.state))
-                  .map((entry) =>
-                    el(
-                      "div",
-                      { class: "stat" },
-                      el("div", { class: "n", text: String(entry.count) }),
-                      el("div", { class: "k" }, `${entry.kind} · `, chip(entry.state)),
-                    ),
-                  ),
-              )
-            : emptyState("No upload task has ever been queued."),
-        { reserve: 120, skeleton: () => skeletonGrid(6) },
+        (data) => {
+          const rows = data.tasks ?? [];
+          reconcile(rows);
+          return el(
+            "div",
+            {},
+            queueBulkBar(selected, activeFilter, rows, tasks, reload),
+            queueTable(rows, selected, tasks, reload),
+            queuePager(data, tasks, selected),
+          );
+        },
+        { reserve: 320, skeleton: () => skeletonTable(8, 8) },
       ),
-    );
-  }
+    ),
+  );
+};
 
-  const picker = (id, label, values, current, key) =>
+/** Depth by kind and state, from the same summary the list returns. */
+function queueDepthPanel() {
+  const depths = new Resource("queue-depths", () => api("/queues"));
+  return card(
+    "Depth by kind and state",
+    live(
+      [depths],
+      (data) => {
+        const counts = data.summary ?? [];
+        return counts.length
+          ? el(
+              "div",
+              { class: "grid tight" },
+              counts
+                .slice()
+                .sort((a, b) => a.kind.localeCompare(b.kind) || a.state.localeCompare(b.state))
+                .map((entry) =>
+                  el(
+                    "div",
+                    { class: "stat" },
+                    el("div", { class: "n", text: String(entry.count) }),
+                    el("div", { class: "k" }, `${entry.kind} · `, chip(entry.state)),
+                  ),
+                ),
+            )
+          : emptyState("No upload task has ever been queued.");
+      },
+      { reserve: 120, skeleton: () => skeletonGrid(6) },
+    ),
+  );
+}
+
+function queueFilterCard(onChange) {
+  const text = (id, label, key, attrs = {}) => {
+    const input = el("input", {
+      id,
+      type: attrs.type ?? "text",
+      value: store.filters[key],
+      placeholder: attrs.placeholder,
+      min: attrs.min,
+      max: attrs.max,
+      onchange: (event) => {
+        setFilter({ [key]: event.target.value });
+        onChange();
+      },
+    });
+    return el("span", { class: "row tight" }, el("label", { class: "inline", for: id, text: label }), input);
+  };
+
+  const picker = (id, label, values, key) =>
     el(
       "span",
       { class: "row tight" },
@@ -2192,109 +2304,660 @@ VIEWS.queues = (route) => {
           id,
           onchange: (event) => {
             setFilter({ [key]: event.target.value });
-            void tasks.load({ force: true });
+            onChange();
           },
         },
-        el("option", { value: "", text: "all", selected: current === "" }),
-        values.map((value) => el("option", { value, text: value, selected: value === current })),
+        el("option", { value: "", text: "all", selected: store.filters[key] === "" }),
+        values.map((value) =>
+          el("option", { value, text: value, selected: value === store.filters[key] }),
+        ),
       ),
     );
 
+  return card(
+    "Filter",
+    row(
+      picker("queue-kind", "Kind", UPLOAD_TASK_KINDS, "queueKind"),
+      picker("queue-state", "State", UPLOAD_TASK_STATES, "queueState"),
+      text("queue-dedupe", "Dedupe key", "queueDedupeKey", { placeholder: "substring or % wildcard" }),
+      text("queue-attempt-min", "Attempts ≥", "queueAttemptMin", { type: "number", min: "0", max: "1000" }),
+      text("queue-attempt-max", "≤", "queueAttemptMax", { type: "number", min: "0", max: "1000" }),
+      el("button", {
+        type: "button",
+        text: "Clear",
+        onclick: () => {
+          setFilter({
+            queueKind: "",
+            queueState: "",
+            queueDedupeKey: "",
+            queueAttemptMin: "",
+            queueAttemptMax: "",
+          });
+          onChange();
+        },
+      }),
+    ),
+    row(
+      gatedButton("runs:write", {
+        text: "Requeue stale leases",
+        title: "Only touches tasks whose lease has already expired",
+        onclick: (event) =>
+          act(
+            "upload_task.requeue_stale",
+            async () => {
+              const res = await api("/upload-tasks/requeue-stale", { method: "POST", body: {} });
+              toast(`${res.requeued} stale lease(s) requeued`);
+              return res;
+            },
+            { button: event.currentTarget, refresh: [summary] },
+          ),
+      }),
+      isOperator()
+        ? gatedButton("runs:write", {
+            text: "Add a task by hand",
+            onclick: () => queueManualAddDialog(),
+          })
+        : null,
+      gatedButton("runs:write", {
+        class: "danger",
+        text: "Purge…",
+        title: "Delete every row matching the current filter",
+        onclick: () => queuePurgeDialog(onChange),
+      }),
+    ),
+    el("p", {
+      class: "dim small",
+      text:
+        "Requeueing stale leases only touches tasks whose lease has already expired — a task a live uploader " +
+        "still holds is left alone, and every action here refuses a LEASED row for the same reason.",
+    }),
+  );
+}
+
+/** Bulk actions over the ticked rows, or over the whole filter. */
+function queueBulkBar(selected, activeFilter, rows, tasks, reload) {
+  const count = selected.size;
+  const ids = () => [...selected];
+
+  const bulk = (label, action, run) =>
+    gatedButton("runs:write", {
+      class: action === "remove" ? "danger" : null,
+      text: label,
+      disabled: count === 0,
+      onclick: async (event) => {
+        const button = event.currentTarget;
+        if (
+          action === "remove" &&
+          !(await confirmDialog({
+            title: `Delete ${count} queue row(s)`,
+            lead: "The rows are deleted permanently. Nothing is sent to MangaDex.",
+            points: [
+              "A LEASED row is refused: an uploader is holding it right now.",
+              "A DONE row is refused unless you tick “include completed” — DONE plus its upload log is what stops a chapter being uploaded twice.",
+            ],
+            confirmLabel: "Delete them",
+          }))
+        ) {
+          return;
+        }
+        const result = await act(label.toLowerCase(), () => run(ids()), {
+          button,
+          refresh: [tasks, summary],
+        });
+        if (result) {
+          reportQueueOutcome(result);
+          selected.clear();
+          reload();
+        }
+      },
+    });
+
   return el(
     "div",
-    {},
-    card(
-      "Filter",
-      row(
-        picker("queue-kind", "Kind", UPLOAD_TASK_KINDS, store.filters.queueKind, "queueKind"),
-        picker("queue-state", "State", UPLOAD_TASK_STATES, store.filters.queueState, "queueState"),
-        gatedButton("runs:write", {
-          text: "Requeue stale leases",
-          title: "Only touches tasks whose lease has already expired",
-          onclick: (event) =>
-            act(
-              "upload_task.requeue_stale",
-              async () => {
-                const res = await api("/upload-tasks/requeue-stale", { method: "POST", body: {} });
-                toast(`${res.requeued} stale lease(s) requeued`);
-                return res;
-              },
-              { button: event.currentTarget, refresh: [tasks, summary] },
-            ),
+    { class: "row bulk-bar" },
+    el("span", {
+      class: count ? null : "dim",
+      text: count ? `${count} selected` : "Tick rows to act on them",
+    }),
+    bulk("Retry", "retry", (ids) => api("/queues/retry", { method: "POST", body: { ids } })),
+    bulk("Remove", "remove", (ids) =>
+      api("/queues/remove", { method: "POST", body: { ids, confirm: true } }),
+    ),
+    gatedButton("runs:write", {
+      text: "Run next",
+      disabled: count === 0,
+      title: "Move to the front of the claim order",
+      onclick: (event) =>
+        void act("queue.reorder", () => api("/queues/reorder", { method: "POST", body: { ids: ids(), mode: "front" } }), {
+          button: event.currentTarget,
+          refresh: [tasks],
+        }).then((r) => {
+          if (r) {
+            selected.clear();
+            reload();
+          }
         }),
+    }),
+    gatedButton("runs:write", {
+      text: "Run last",
+      disabled: count === 0,
+      onclick: (event) =>
+        void act("queue.reorder", () => api("/queues/reorder", { method: "POST", body: { ids: ids(), mode: "back" } }), {
+          button: event.currentTarget,
+          refresh: [tasks],
+        }).then((r) => {
+          if (r) {
+            selected.clear();
+            reload();
+          }
+        }),
+    }),
+    gatedButton("runs:write", {
+      text: "Defer…",
+      disabled: count === 0,
+      title: "Hold these rows for a while before they can be claimed",
+      onclick: () => queueDeferDialog(ids(), tasks, () => {
+        selected.clear();
+        reload();
+      }),
+    }),
+    el("span", { class: "grow" }),
+    el("button", {
+      type: "button",
+      text: rows.length && count === rows.length ? "Select none" : "Select all on this page",
+      disabled: rows.length === 0,
+      onclick: () => {
+        if (count === rows.length) selected.clear();
+        else for (const row of rows) selected.add(row.id);
+        reload();
+      },
+    }),
+  );
+}
+
+/**
+ * Per-row results, reported rather than summarised.
+ *
+ * The bulk endpoints answer 200 with a per-id verdict: a request where four rows
+ * moved and one was LEASED is a success and a partial failure at once, and
+ * collapsing that to "ok" loses the only part the operator has to act on.
+ */
+function reportQueueOutcome(result) {
+  const results = Array.isArray(result.results) ? result.results : [];
+  const refused = results.filter((r) => !r.ok && r.reason);
+  if (refused.length === 0) {
+    toast(`${result.changed ?? results.length} row(s) updated`);
+    return;
+  }
+  toast(`${result.changed ?? 0} updated, ${refused.length} refused`, false);
+  openModal(
+    "Some rows were refused",
+    el(
+      "div",
+      {},
+      el("p", {
+        class: "dim small",
+        text: "The rest of the request was applied. These rows were not, and why:",
+      }),
+      el(
+        "ul",
+        { class: "errors" },
+        refused.slice(0, 50).map((r) => el("li", { text: `${r.id}: ${r.reason}` })),
       ),
+      el("div", { class: "row end" }, el("button", { type: "button", text: "Close", onclick: closeModal })),
+    ),
+  );
+}
+
+function queueTable(rows, selected, tasks, reload) {
+  return table(
+    ["", "Kind", "State", "Dedupe key", "Attempts", "Not before", "Last error", ""],
+    rows.map((task) => {
+      const retryable = task.state === "FAILED" || task.state === "DEAD_LETTER";
+      const editable = task.state === "PENDING";
+      const leased = task.state === "LEASED";
+      return [
+        el("input", {
+          type: "checkbox",
+          checked: selected.has(task.id),
+          "aria-label": `Select ${task.dedupeKey}`,
+          onchange: (event) => {
+            if (event.target.checked) selected.add(task.id);
+            else selected.delete(task.id);
+            reload();
+          },
+        }),
+        task.kind,
+        chip(task.state),
+        el("code", { text: task.dedupeKey }),
+        `${task.attempt}/${task.maxAttempts}`,
+        fmtTime(task.notBefore),
+        truncate(task.lastError, 160),
+        [
+          gatedButton("runs:write", {
+            class: retryable ? "primary" : null,
+            text: "Retry",
+            disabled: !retryable,
+            title: retryable ? "Requeue now with a fresh attempt budget" : `${task.state} tasks cannot be retried`,
+            onclick: (event) =>
+              act("queue.retry", () => api(`/queues/tasks/${task.id}/retry`, { method: "POST", body: {} }), {
+                button: event.currentTarget,
+                refresh: [tasks, summary],
+              }),
+          }),
+          gatedButton("runs:write", {
+            text: "Edit",
+            disabled: !editable,
+            title: leased
+              ? "An uploader holds this task; it cannot be edited while it is leased"
+              : editable
+                ? "Change when it runs, or its attempt budget"
+                : `${task.state} tasks cannot be edited`,
+            onclick: () => queueEditDialog(task, tasks, reload),
+          }),
+          gatedButton("runs:write", {
+            class: "danger",
+            text: "Remove",
+            disabled: leased,
+            title: leased
+              ? "An uploader holds this task; requeue stale leases first"
+              : "Delete this row permanently",
+            onclick: async (event) => {
+              const button = event.currentTarget;
+              if (
+                !(await confirmDialog({
+                  title: `Delete this ${task.kind} row`,
+                  lead: `${task.dedupeKey} will never be sent to MangaDex.`,
+                  points:
+                    task.state === "DONE"
+                      ? ["This row is DONE: it and its upload log are what stop the chapter being uploaded twice."]
+                      : ["This cannot be undone from here."],
+                  confirmLabel: "Delete it",
+                }))
+              ) {
+                return;
+              }
+              const done = await act(
+                "queue.remove",
+                () =>
+                  api(`/queues/tasks/${task.id}${task.state === "DONE" ? "?includeCompleted=true" : ""}`, {
+                    method: "DELETE",
+                  }),
+                { button, refresh: [tasks, summary] },
+              );
+              if (done) reload();
+            },
+          }),
+        ],
+      ];
+    }),
+    { empty: "No upload task matches this filter." },
+  );
+}
+
+/** Keyset paging: forward by the cursor the server issued, back by history. */
+function queuePager(data, tasks, selected) {
+  const walked = store.filters.queueCursors;
+  const go = (cursors) => {
+    setFilter({ queueCursors: cursors });
+    selected.clear();
+    void tasks.load({ force: true });
+  };
+
+  return el(
+    "div",
+    { class: "row pager" },
+    el("span", {
+      class: "dim small",
+      text: `${data.tasks?.length ?? 0} shown of ${data.total ?? 0} matching · claim order: ${data.order ?? "unknown"}`,
+    }),
+    el("span", { class: "grow" }),
+    el("button", {
+      type: "button",
+      text: "← Back",
+      disabled: walked.length === 0,
+      onclick: () => go(walked.slice(0, -1)),
+    }),
+    el("button", {
+      type: "button",
+      text: "Next →",
+      // No cursor means this is the last page; the server says so rather than
+      // the client inferring it from a short page, which is wrong when the page
+      // size happens to divide the total.
+      disabled: !data.nextCursor,
+      onclick: () => go([...walked, data.nextCursor]),
+    }),
+  );
+}
+
+function queueDeferDialog(ids, tasks, done) {
+  const amount = el("input", { id: "defer-amount", type: "number", min: "1", value: "15" });
+  const unit = el(
+    "select",
+    { id: "defer-unit" },
+    el("option", { value: "60", text: "minutes" }),
+    el("option", { value: "3600", text: "hours" }),
+    el("option", { value: "86400", text: "days" }),
+  );
+
+  openModal(
+    `Defer ${ids.length} row(s)`,
+    el(
+      "div",
+      {},
       el("p", {
         class: "dim small",
         text:
-          "Requeueing stale leases only touches tasks whose lease has already expired — a task a live uploader " +
-          "still holds is left alone.",
+          "The rows stay queued and become claimable again after the delay. Deferring is how you hold work " +
+          "back without deleting it — the attempt budget is untouched.",
       }),
-    ),
-    card(
-      null,
-      live(
-        [tasks],
-        ({ tasks: rows }) =>
-          table(
-            ["Kind", "State", "Dedupe key", "Attempts", "Not before", "Last error", ""],
-            rows.map((task) => {
-              const retryable = task.state === "FAILED" || task.state === "DEAD_LETTER";
-              const cancellable = task.state === "PENDING" || retryable;
-              return [
-                task.kind,
-                chip(task.state),
-                el("code", { text: task.dedupeKey }),
-                `${task.attempt}/${task.maxAttempts}`,
-                fmtTime(task.notBefore),
-                truncate(task.lastError, 160),
-                [
-                  gatedButton("runs:write", {
-                    class: retryable ? "primary" : null,
-                    text: "Retry",
-                    disabled: !retryable,
-                    title: retryable ? "Requeue now with a fresh attempt budget" : `${task.state} tasks cannot be retried`,
-                    onclick: (event) =>
-                      act("upload_task.retry", () => api(`/upload-tasks/${task.id}/retry`, { method: "POST", body: {} }), {
-                        button: event.currentTarget,
-                        refresh: [tasks, summary],
-                      }),
-                  }),
-                  gatedButton("runs:write", {
-                    class: "danger",
-                    text: "Cancel",
-                    disabled: !cancellable,
-                    title:
-                      task.state === "LEASED"
-                        ? "An uploader holds this task; requeue stale leases first"
-                        : cancellable
-                          ? "Drop this task without sending it to MangaDex"
-                          : `${task.state} tasks cannot be cancelled`,
-                    onclick: async (event) => {
-                      const button = event.currentTarget;
-                      if (!(await confirmDialog({
-                        title: `Cancel this ${task.kind} task`,
-                        lead: `${task.dedupeKey} will never be sent to MangaDex.`,
-                        points: ["This cannot be undone from here."],
-                        confirmLabel: "Cancel the task",
-                      }))) {
-                        return;
-                      }
-                      await act("upload_task.cancel", () => api(`/upload-tasks/${task.id}/cancel`, { method: "POST", body: {} }), {
-                        button,
-                        refresh: [tasks, summary],
-                      });
-                    },
-                  }),
-                ],
-              ];
-            }),
-            { empty: "No upload task matches this filter." },
-          ),
-        { reserve: 300, skeleton: () => skeletonTable(8, 7) },
+      row(el("label", { class: "inline", for: "defer-amount", text: "Hold for" }), amount, unit),
+      el(
+        "div",
+        { class: "row end" },
+        el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+        gatedButton("runs:write", {
+          class: "primary",
+          text: "Defer them",
+          onclick: async (event) => {
+            const seconds = Math.round(Number(amount.value) * Number(unit.value));
+            if (!Number.isFinite(seconds) || seconds < 1) {
+              toast("enter a positive delay", false);
+              return;
+            }
+            const result = await act(
+              "queue.defer",
+              () =>
+                api("/queues/reorder", {
+                  method: "POST",
+                  body: { ids, mode: "defer", deferSeconds: seconds },
+                }),
+              { button: event.currentTarget, refresh: [tasks] },
+            );
+            if (result) {
+              reportQueueOutcome(result);
+              closeModal();
+              done();
+            }
+          },
+        }),
       ),
     ),
   );
-};
+}
+
+function queueEditDialog(task, tasks, reload) {
+  const notBefore = el("input", {
+    id: "edit-not-before",
+    type: "datetime-local",
+    value: toLocalInput(task.notBefore),
+  });
+  const maxAttempts = el("input", {
+    id: "edit-max-attempts",
+    type: "number",
+    min: "1",
+    max: "50",
+    value: String(task.maxAttempts ?? 3),
+  });
+
+  openModal(
+    `Edit ${task.kind} task`,
+    el(
+      "div",
+      {},
+      el("p", { class: "dim small", text: task.dedupeKey }),
+      el("p", {
+        class: "dim small",
+        text:
+          "Only a PENDING row can be edited. If an uploader claims it while this dialog is open the save is " +
+          "refused rather than racing it.",
+      }),
+      el("label", { for: "edit-not-before", text: "Not before" }),
+      notBefore,
+      el("label", { for: "edit-max-attempts", text: "Attempt budget" }),
+      maxAttempts,
+      el(
+        "div",
+        { class: "row end" },
+        el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+        gatedButton("runs:write", {
+          class: "primary",
+          text: "Save",
+          onclick: async (event) => {
+            const body = {};
+            if (notBefore.value) body.notBefore = new Date(notBefore.value).toISOString();
+            const budget = Number(maxAttempts.value);
+            if (Number.isFinite(budget) && budget !== task.maxAttempts) body.maxAttempts = budget;
+            if (Object.keys(body).length === 0) {
+              toast("nothing changed", false);
+              return;
+            }
+            const result = await act(
+              "queue.edit",
+              () => api(`/queues/tasks/${task.id}`, { method: "PATCH", body }),
+              { button: event.currentTarget, refresh: [tasks] },
+            );
+            if (result) {
+              closeModal();
+              reload();
+            }
+          },
+        }),
+      ),
+    ),
+  );
+}
+
+/**
+ * Queue a task by hand.
+ *
+ * ADMIN-only on the server, because a hand-made row goes to MangaDex with the
+ * platform's credentials without any extension having produced it. The chapter
+ * payload is JSON on purpose: it is the same shape the processor writes, and
+ * inventing a form for it would guess at fields the uploader validates anyway.
+ */
+function queueManualAddDialog() {
+  const kind = el(
+    "select",
+    { id: "add-kind" },
+    UPLOAD_TASK_KINDS.map((k) => el("option", { value: k, text: k })),
+  );
+  const chapter = el("textarea", {
+    id: "add-chapter",
+    rows: "12",
+    spellcheck: "false",
+    value: JSON.stringify(
+      { mdMangaId: "", mdChapterId: "", chapterNumber: "1", language: "en", extensionName: "" },
+      null,
+      2,
+    ),
+  });
+  const status = el("div", {});
+
+  openModal(
+    "Add a task by hand",
+    el(
+      "div",
+      {},
+      el("p", {
+        class: "dim small",
+        text:
+          "This goes to MangaDex under the platform's account without an extension having produced it, which is " +
+          "why it needs the ADMIN role. The payload is validated server-side; anything it refuses is listed below.",
+      }),
+      el("label", { for: "add-kind", text: "Kind" }),
+      kind,
+      el("label", { for: "add-chapter", text: "Chapter payload (JSON)" }),
+      chapter,
+      status,
+      el(
+        "div",
+        { class: "row end" },
+        el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+        gatedButton("runs:write", {
+          class: "primary",
+          text: "Queue it",
+          onclick: async (event) => {
+            let parsed;
+            try {
+              parsed = JSON.parse(chapter.value);
+            } catch (err) {
+              setChildren(status, el("p", { class: "error", text: `Not valid JSON: ${err.message}` }));
+              return;
+            }
+            const result = await act(
+              "queue.add",
+              () => api("/queues/tasks", { method: "POST", body: { kind: kind.value, chapter: parsed } }),
+              { button: event.currentTarget },
+            );
+            if (result) closeModal();
+          },
+        }),
+      ),
+    ),
+  );
+}
+
+/**
+ * Purge every row matching the current filter.
+ *
+ * The dry run is not a courtesy, it is the contract: the endpoint defaults to
+ * `dryRun: true` and refuses to delete without an explicit confirm, so this
+ * dialog cannot offer a one-click purge even if it wanted to.
+ */
+function queuePurgeDialog(afterPurge) {
+  const includeCompleted = el("input", { type: "checkbox", id: "purge-done" });
+  const preview = el("div", {});
+  let previewed = null;
+
+  const body = (dryRun) => {
+    const out = { dryRun, includeCompleted: includeCompleted.checked };
+    const filter = {};
+    if (store.filters.queueKind) filter.kind = store.filters.queueKind;
+    if (store.filters.queueState) filter.state = store.filters.queueState;
+    if (store.filters.queueDedupeKey) filter.dedupeKey = store.filters.queueDedupeKey;
+    if (store.filters.queueAttemptMin !== "") filter.attemptMin = Number(store.filters.queueAttemptMin);
+    if (store.filters.queueAttemptMax !== "") filter.attemptMax = Number(store.filters.queueAttemptMax);
+    return { ...out, ...filter };
+  };
+
+  const applyButton = gatedButton("runs:write", {
+    class: "danger",
+    text: "Purge them",
+    disabled: true,
+    onclick: async (event) => {
+      if (
+        !(await confirmDialog({
+          title: `Purge ${previewed ?? 0} row(s)`,
+          lead: "Every row matching the current filter is deleted permanently.",
+          points: [
+            "LEASED rows are never deleted; an uploader is holding them.",
+            includeCompleted.checked
+              ? "DONE rows ARE included: their upload logs are what stop a chapter being uploaded twice."
+              : "DONE rows are excluded.",
+          ],
+          confirmLabel: "Purge them",
+        }))
+      ) {
+        return;
+      }
+      const result = await act(
+        "queue.purge",
+        () => api("/queues/purge", { method: "POST", body: { ...body(false), confirm: true } }),
+        { button: event.currentTarget, refresh: [summary] },
+      );
+      if (result) {
+        toast(`${result.deleted ?? 0} row(s) purged`);
+        closeModal();
+        // Reload the list in place. A full page reload would also work and is
+        // what this did first, but it throws away the operator's filter — which
+        // is the very thing they just purged against and will want to re-check.
+        afterPurge();
+      }
+    },
+  });
+
+  openModal(
+    "Purge the queue",
+    el(
+      "div",
+      {},
+      el("p", {
+        class: "dim small",
+        text: "Purge acts on the filter currently set on the Queues page, not on the ticked rows.",
+      }),
+      el("label", { class: "assign-row", for: "purge-done" }, includeCompleted, el("span", { text: "Include DONE rows" })),
+      el("p", {
+        class: "dim small",
+        text:
+          "A DONE row plus its upload log is what stops a chapter being uploaded to MangaDex twice. Deleting " +
+          "them makes a re-run upload duplicates.",
+      }),
+      row(
+        el("button", {
+          type: "button",
+          text: "Dry run",
+          onclick: async (event) => {
+            const result = await act("queue.purge.dry_run", () => api("/queues/purge", { method: "POST", body: body(true) }), {
+              button: event.currentTarget,
+            });
+            if (!result) return;
+            // `wouldDelete`, not `matched`: matched counts everything the filter
+            // selects INCLUDING rows the purge protects, and quoting that number
+            // back would promise a deletion the server will refuse to perform.
+            previewed = result.wouldDelete ?? 0;
+            applyButton.disabled = previewed === 0;
+            setChildren(
+              preview,
+              el("p", {
+                class: previewed ? "error" : "dim",
+                text: previewed
+                  ? `${previewed} row(s) would be deleted.`
+                  : "Nothing deletable matches this filter.",
+              }),
+              // The gap between the two is the point: it is what the operator's
+              // filter selected and the purge will not touch.
+              result.protectedRows
+                ? el("p", {
+                    class: "dim small",
+                    text: `${result.protectedRows} matching row(s) are protected and will be left alone (LEASED, or DONE while "include DONE" is off).`,
+                  })
+                : null,
+              result.capped
+                ? el("p", {
+                    class: "dim small",
+                    text: `Capped at ${result.cap} rows per purge — repeat to continue.`,
+                  })
+                : null,
+              Array.isArray(result.breakdown) && result.breakdown.length
+                ? el(
+                    "ul",
+                    { class: "errors" },
+                    result.breakdown.map((s) => el("li", { text: `${s.kind} · ${s.state}: ${s.count}` })),
+                  )
+                : null,
+            );
+          },
+        }),
+        applyButton,
+        el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+      ),
+      preview,
+    ),
+  );
+}
+
+/** ISO → the value a `datetime-local` input accepts, in local time. */
+function toLocalInput(value) {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  );
+}
 
 // ------------------------------------------------------------------- activity
 
@@ -3241,6 +3904,113 @@ function renderConfigOutcome(host, result) {
   );
 }
 
+/**
+ * One editable row of a key→value(s) relation.
+ *
+ * Returns its own node plus a `read()`, so the parent can collect the current
+ * state without the list having to re-render on every keystroke — re-rendering
+ * is what takes the caret with it.
+ */
+function relationRow(spec, initial, onRemove) {
+  const key = el("input", {
+    type: "text",
+    value: initial.key ?? "",
+    placeholder: spec.keyPlaceholder,
+    "aria-label": spec.keyLabel,
+  });
+  const value = el("input", {
+    type: "text",
+    value: initial.value ?? "",
+    placeholder: spec.valuePlaceholder,
+    "aria-label": spec.valueLabel,
+    list: spec.valueList,
+  });
+  const problem = el("span", { class: "field-error small" });
+
+  const validate = () => {
+    const message = spec.validate?.(key.value.trim(), value.value.trim()) ?? "";
+    problem.textContent = message;
+    return message === "";
+  };
+  key.addEventListener("input", validate);
+  value.addEventListener("input", validate);
+  validate();
+
+  const node = el(
+    "div",
+    { class: "relation-row" },
+    key,
+    el("span", { class: "dim", text: spec.separator ?? "→" }),
+    value,
+    el("button", { type: "button", class: "danger", text: "Remove", onclick: () => onRemove(node) }),
+    problem,
+  );
+  return { node, read: () => ({ key: key.value.trim(), value: value.value.trim() }), validate };
+}
+
+/**
+ * An editable list for one of the three typed relations.
+ *
+ * These used to be three keys inside a JSON textarea. They are separate tables
+ * with separate constraints — an alias has exactly one master, a language code
+ * must be one MangaDex accepts — and a free-text blob could express none of
+ * that, so a typo was only discovered when the server rejected the save.
+ */
+function relationList(spec, initialRows) {
+  const rows = [];
+  const host = el("div", { class: "relation-list" });
+
+  const removeRow = (node) => {
+    const index = rows.findIndex((r) => r.node === node);
+    if (index >= 0) {
+      rows.splice(index, 1);
+      node.remove();
+    }
+    if (rows.length === 0) host.append(emptyHint);
+  };
+
+  const emptyHint = el("p", { class: "dim small", text: spec.empty });
+
+  const addRow = (initial = {}) => {
+    emptyHint.remove();
+    const row = relationRow(spec, initial, removeRow);
+    rows.push(row);
+    host.append(row.node);
+    return row;
+  };
+
+  for (const initial of initialRows) addRow(initial);
+  if (rows.length === 0) host.append(emptyHint);
+
+  return {
+    node: el(
+      "div",
+      { class: "relation" },
+      el("h3", { text: spec.title }),
+      el("p", { class: "dim small", text: spec.blurb }),
+      host,
+      row(
+        el("button", {
+          type: "button",
+          text: spec.addLabel,
+          onclick: () => addRow().node.querySelector("input")?.focus(),
+        }),
+      ),
+    ),
+    /** Non-empty rows only: a blank pair the operator abandoned is not a row. */
+    read: () => rows.map((r) => r.read()).filter((r) => r.key !== "" || r.value !== ""),
+    problems: () => rows.filter((r) => !r.validate()).length,
+  };
+}
+
+/**
+ * Typed editors for the three normalised relations, plus the free-form remainder.
+ *
+ * The whole document still goes over the wire as one PUT, because that endpoint
+ * has replace semantics and splitting it into three would make a partial save
+ * possible — and `same` and `multi_chapters` decide what gets DELETED from
+ * MangaDex, so a half-applied config is worse than a refused one.
+ */
 function configPanel(name) {
   const config = new Resource(`config:${name}`, () => api(`/extensions/${encodeURIComponent(name)}/config`));
   const writable = can("extensions:write");
@@ -3254,28 +4024,135 @@ function configPanel(name) {
       live(
         [config],
         (data) => {
-          const editor = el("textarea", {
-            id: "config-json",
+          const allowed = data.mangadexLanguages ?? [];
+          const status = el("div", {});
+
+          // `same` is master → many aliases; the table stores one row per alias,
+          // and that is the shape an operator edits, so it is flattened here
+          // rather than presented as a list-of-lists.
+          const aliasRows = Object.entries(data.same ?? {}).flatMap(([master, aliases]) =>
+            (aliases ?? []).map((alias) => ({ key: master, value: alias })),
+          );
+          const multiRows = Object.entries(data.multi_chapters ?? {}).flatMap(([chapter, numbers]) =>
+            (numbers ?? []).map((n) => ({ key: chapter, value: n })),
+          );
+          const languageRows = Object.entries(data.custom_language ?? {}).map(([source, md]) => ({
+            key: source,
+            value: md,
+          }));
+
+          const aliases = relationList(
+            {
+              title: "Chapter aliases",
+              blurb:
+                "Duplicate chapters on the source that are the same chapter. The master is kept; every alias is " +
+                "treated as it and is a candidate for deletion from MangaDex.",
+              addLabel: "Add an alias",
+              empty: "No aliases.",
+              keyLabel: "Master chapter id",
+              valueLabel: "Alias chapter id",
+              keyPlaceholder: "master chapter id",
+              valuePlaceholder: "alias chapter id",
+              validate: (key, value) => {
+                if (!key || !value) return "both ids are required";
+                if (key === value) return "an alias cannot be its own master";
+                return "";
+              },
+            },
+            aliasRows,
+          );
+
+          const multi = relationList(
+            {
+              title: "Multi-chapter numbers",
+              blurb: "One source chapter that covers several chapter numbers.",
+              addLabel: "Add a number",
+              empty: "No multi-chapter numbers.",
+              keyLabel: "Chapter id",
+              valueLabel: "Chapter number",
+              keyPlaceholder: "chapter id",
+              valuePlaceholder: "chapter number",
+              validate: (key, value) => (key && value ? "" : "both fields are required"),
+            },
+            multiRows,
+          );
+
+          const languages = relationList(
+            {
+              title: "Language overrides",
+              blurb:
+                "Map a source language code onto the MangaDex one. Only codes MangaDex accepts are allowed — " +
+                "the same list the server validates against.",
+              addLabel: "Add a language",
+              empty: "No language overrides.",
+              keyLabel: "Source language",
+              valueLabel: "MangaDex language",
+              keyPlaceholder: "source code",
+              valuePlaceholder: "MangaDex code",
+              valueList: "md-languages",
+              validate: (key, value) => {
+                if (!key || !value) return "both codes are required";
+                if (allowed.length && !allowed.includes(value.toLowerCase())) {
+                  return `“${value}” is not a MangaDex language code`;
+                }
+                return "";
+              },
+            },
+            languageRows,
+          );
+
+          // Everything the platform does not model. Still JSON, deliberately: it
+          // is extension-private and the dashboard has no schema for it.
+          const passthrough = el("textarea", {
+            id: "config-passthrough",
+            rows: "10",
             spellcheck: "false",
             readonly: !writable,
-            "aria-label": "Override options JSON",
+            "aria-label": "Extension-private settings, JSON",
           });
-          editor.value = JSON.stringify(data.overrideOptions ?? {}, null, 2);
-          const status = el("p", { class: "field-error" });
+          passthrough.value = JSON.stringify(data.passthrough ?? {}, null, 2);
+          const passthroughError = el("p", { class: "field-error" });
 
-          const parse = () => {
+          const readPassthrough = () => {
             try {
-              const parsed = JSON.parse(editor.value || "{}");
+              const parsed = JSON.parse(passthrough.value || "{}");
               if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-                status.textContent = "Override options must be a JSON object.";
+                passthroughError.textContent = "Extension settings must be a JSON object.";
                 return null;
               }
-              status.textContent = "";
+              passthroughError.textContent = "";
               return parsed;
             } catch (err) {
-              status.textContent = `Invalid JSON: ${err.message}`;
+              passthroughError.textContent = `Invalid JSON: ${err.message}`;
               return null;
             }
+          };
+
+          const build = () => {
+            const rest = readPassthrough();
+            if (rest === null) return null;
+            const bad = aliases.problems() + multi.problems() + languages.problems();
+            if (bad > 0) {
+              setChildren(
+                status,
+                el("p", { class: "error", text: `${bad} row(s) are not valid — fix them before saving.` }),
+              );
+              return null;
+            }
+
+            const same = {};
+            for (const { key, value } of aliases.read()) (same[key] ??= []).push(value);
+            const multiChapters = {};
+            for (const { key, value } of multi.read()) (multiChapters[key] ??= []).push(value);
+            const customLanguage = {};
+            for (const { key, value } of languages.read()) customLanguage[key] = value.toLowerCase();
+
+            // Empty relations are sent as `{}` rather than omitted. The endpoint
+            // replaces rather than merges, so an omitted key and an empty one
+            // mean the same thing there — but being explicit is what makes
+            // "I deleted every alias" a saveable intention rather than a
+            // document that happens to lack a key.
+            return { ...rest, same, multi_chapters: multiChapters, custom_language: customLanguage };
           };
 
           return el(
@@ -3284,46 +4161,50 @@ function configPanel(name) {
             el("p", {
               class: "dim small",
               text: writable
-                ? "The database is the source of truth; this replaces the whole document."
+                ? "The database is the source of truth. Saving replaces the whole document."
                 : 'Read-only: editing extension configuration needs the "extensions:write" scope.',
             }),
-            editor,
+            el("datalist", { id: "md-languages" }, allowed.map((code) => el("option", { value: code }))),
+            aliases.node,
+            multi.node,
+            languages.node,
+            el("h3", { text: "Extension-private settings" }),
+            el("p", {
+              class: "dim small",
+              text:
+                "Anything the platform does not model — this extension reads it itself, so it stays free-form.",
+            }),
+            passthrough,
+            passthroughError,
             status,
             row(
-              el("button", {
-                type: "button",
-                text: "Validate & format",
-                onclick: () => {
-                  const parsed = parse();
-                  if (parsed) {
-                    editor.value = JSON.stringify(parsed, null, 2);
-                    toast("valid JSON");
-                  }
-                },
-              }),
               gatedButton("extensions:write", {
                 class: "primary",
                 text: "Save",
                 onclick: async (event) => {
-                  const parsed = parse();
-                  if (!parsed) return undefined;
+                  const document_ = build();
+                  if (!document_) return undefined;
                   const result = await act(
                     "extension_config.set",
                     () =>
                       api(`/extensions/${encodeURIComponent(name)}/config`, {
                         method: "PUT",
-                        body: { overrideOptions: parsed },
+                        body: { overrideOptions: document_ },
                       }),
                     { button: event.currentTarget, refresh: [config] },
                   );
-                  // The PUT answers 200 with a per-row verdict, and discarding it
+                  // The PUT answers 200 with a per-row verdict. Discarding it
                   // made a save that DROPPED rows the server refused read as
-                  // unqualified success — the operator's next belief being "my
-                  // aliases are saved". A 200 here means "stored what was valid",
-                  // not "stored everything".
+                  // unqualified success.
                   if (result) renderConfigOutcome(status, result);
                   return result;
                 },
+              }),
+              el("button", {
+                type: "button",
+                text: "Reload",
+                title: "Discard these edits and re-read the stored config",
+                onclick: () => void config.load({ force: true }),
               }),
             ),
           );
@@ -3411,7 +4292,16 @@ function versionsPanel(name) {
 const TRACKED_PAGE = 50;
 
 /** `externalId,mdMangaId` — the one format the paste box and the export share. */
-const mapLine = (item) => `${item.mangaId},${item.mdMangaId}`;
+/**
+ * One line of the paste/export format.
+ *
+ * The namespace is emitted only when the row has one, because the two-column
+ * form is what every existing map uses and the server treats a missing
+ * namespace as the default catalogue. Emitting an empty leading field would
+ * round-trip as a literal empty namespace instead.
+ */
+const mapLine = (item) =>
+  item.namespace ? `${item.namespace},${item.mangaId},${item.mdMangaId}` : `${item.mangaId},${item.mdMangaId}`;
 
 function seriesMapPanel(name) {
   const tracked = new Resource(`tracked:${name}`, () =>
@@ -3435,6 +4325,75 @@ function seriesMapPanel(name) {
  * complete file and lets the bulk editor preview a removal without a round
  * trip.
  */
+/**
+ * Repoint one external id at a different MangaDex title.
+ *
+ * Its own dialog rather than an inline field, because this is the one edit on
+ * this page that silently changes where future chapters land: the series keeps
+ * publishing, the uploads just start arriving on a different title. Needs
+ * `tracked:write` — `tracked:append` can add a mapping but must not move one,
+ * which is why a contributor sees this button refused rather than absent.
+ */
+function repointDialog(name, item, tracked) {
+  const encoded = encodeURIComponent(name);
+  const target = el("input", {
+    id: "repoint-md-id",
+    type: "text",
+    value: item.mdMangaId,
+    placeholder: "MangaDex UUID",
+  });
+
+  openModal(
+    `Repoint ${item.mangaId}`,
+    el(
+      "div",
+      {},
+      el("p", {
+        class: "dim small",
+        text:
+          item.namespace
+            ? `Catalogue “${item.namespace}”. Chapters for this id will be uploaded to whichever title it points at, from the next run onwards.`
+            : "Chapters for this id will be uploaded to whichever title it points at, from the next run onwards.",
+      }),
+      el("p", { class: "dim small" }, "Currently: ", mdTitleLink(item.mdMangaId)),
+      el("label", { for: "repoint-md-id", text: "New MangaDex id" }),
+      target,
+      el("p", {
+        class: "dim small",
+        text: "Nothing on MangaDex is changed or deleted; only where future chapters are sent.",
+      }),
+      el(
+        "div",
+        { class: "row end" },
+        el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+        gatedButton("tracked:write", {
+          class: "primary",
+          text: "Repoint it",
+          onclick: async (event) => {
+            const next = target.value.trim();
+            if (!next) return void toast("a MangaDex id is required", false);
+            if (next === item.mdMangaId) return void toast("that is where it already points", false);
+            const ok = await act(
+              "tracked_manga.set",
+              () =>
+                api(`/extensions/${encoded}/tracked`, {
+                  method: "PUT",
+                  body: {
+                    mangaId: item.mangaId,
+                    mdMangaId: next,
+                    ...(item.namespace ? { namespace: item.namespace } : {}),
+                  },
+                }),
+              { button: event.currentTarget, refresh: [tracked] },
+            );
+            if (ok) closeModal();
+          },
+        }),
+      ),
+    ),
+  );
+}
+
 function trackedCard(name, tracked) {
   const encoded = encodeURIComponent(name);
   let page = 0;
@@ -3448,6 +4407,15 @@ function trackedCard(name, tracked) {
   });
   const mangaId = el("input", { id: "tracked-manga-id", type: "text", placeholder: "external manga id" });
   const mdMangaId = el("input", { id: "tracked-md-id", type: "text", placeholder: "MangaDex UUID" });
+  // Free text rather than a picker: the first row of a new catalogue has to be
+  // addable before that catalogue exists in the list.
+  const namespaceInput = el("input", {
+    id: "tracked-namespace",
+    type: "text",
+    placeholder: "default",
+    list: "tracked-namespaces",
+    "aria-label": "Catalogue",
+  });
 
   const body = live(
     [tracked],
@@ -3456,7 +4424,7 @@ function trackedCard(name, tracked) {
       const needle = search.value.trim().toLowerCase();
       const matches = needle
         ? rows.filter((item) =>
-            [item.mangaId, item.mdMangaId, item.source].some((field) => (field || "").toLowerCase().includes(needle)),
+            [item.mangaId, item.mdMangaId, item.source, item.namespace].some((field) => (field || "").toLowerCase().includes(needle)),
           )
         : rows;
       const pages = Math.max(1, Math.ceil(matches.length / TRACKED_PAGE));
@@ -3466,14 +4434,29 @@ function trackedCard(name, tracked) {
       return el(
         "div",
         {},
+        // Suggestions for the Catalogue box. A datalist rather than a select so a
+        // brand-new catalogue can still be typed in.
+        el(
+          "datalist",
+          { id: "tracked-namespaces" },
+          (data.namespaces ?? []).filter(Boolean).map((ns) => el("option", { value: ns })),
+        ),
         table(
-          ["External id", "MangaDex id", "Source", "Added", ""],
+          ["Catalogue", "External id", "MangaDex id", "Source", "Added", ""],
           slice.map((item) => [
+            // "default" rather than blank: an empty cell reads as missing data,
+            // and the flat id space is a real answer.
+            item.namespace ? el("code", { text: item.namespace }) : el("span", { class: "dim", text: "default" }),
             item.mangaId,
             mdTitleLink(item.mdMangaId),
             item.source,
             fmtTime(item.createdAt),
             [
+              gatedButton("tracked:write", {
+                text: "Repoint",
+                title: "Point this external id at a different MangaDex title",
+                onclick: () => repointDialog(name, item, tracked),
+              }),
               gatedButton("tracked:write", {
                 class: "danger",
                 text: "Remove",
@@ -3493,11 +4476,20 @@ function trackedCard(name, tracked) {
                     "tracked_manga.remove",
                     () =>
                       tracked.optimistic(
-                        (current) => ({ ...current, tracked: current.tracked.filter((r) => r.mangaId !== item.mangaId) }),
+                        (current) => ({
+                          ...current,
+                          // Identity is (namespace, mangaId): filtering on the id
+                          // alone would drop the same id in every catalogue.
+                          tracked: current.tracked.filter(
+                            (r) => !(r.mangaId === item.mangaId && (r.namespace ?? "") === (item.namespace ?? "")),
+                          ),
+                        }),
                         () =>
-                          api(`/extensions/${encoded}/tracked/${encodeURIComponent(item.mangaId)}`, {
-                            method: "DELETE",
-                          }),
+                          api(
+                            `/extensions/${encoded}/tracked/${encodeURIComponent(item.mangaId)}` +
+                              (item.namespace ? `?namespace=${encodeURIComponent(item.namespace)}` : ""),
+                            { method: "DELETE" },
+                          ),
                       ),
                     { button },
                   );
@@ -3534,6 +4526,8 @@ function trackedCard(name, tracked) {
       mangaId,
       el("label", { class: "inline", for: "tracked-md-id", text: "MangaDex id" }),
       mdMangaId,
+      el("label", { class: "inline", for: "tracked-namespace", text: "Catalogue" }),
+      namespaceInput,
       gatedButton("tracked:append", {
         class: "primary",
         text: "Add mapping",
@@ -3546,13 +4540,22 @@ function trackedCard(name, tracked) {
             () =>
               api(`/extensions/${encoded}/tracked`, {
                 method: "PUT",
-                body: { mangaId: mangaId.value.trim(), mdMangaId: mdMangaId.value.trim() },
+                body: {
+                  mangaId: mangaId.value.trim(),
+                  mdMangaId: mdMangaId.value.trim(),
+                  // Omitted rather than sent empty: the server normalises a
+                  // missing namespace to the default catalogue.
+                  ...(namespaceInput.value.trim() ? { namespace: namespaceInput.value.trim() } : {}),
+                },
               }),
             { button: event.currentTarget, refresh: [tracked] },
           ).then((ok) => {
             if (ok) {
               mangaId.value = "";
               mdMangaId.value = "";
+              // The catalogue is deliberately kept: adding several rows to one
+              // catalogue is the common case, and re-typing it every time is
+              // how a row lands in the wrong one.
             }
           });
         },
@@ -3850,6 +4853,114 @@ VIEWS.tracked = () => {
 
 // -------------------------------------------------------------------- workers
 
+/**
+ * Pin a worker to a set of extensions, or let it take anything.
+ *
+ * The stored list is what the lease query filters on, so a change takes effect on
+ * that worker's next poll — no re-enrolment, no restart. The empty list means
+ * "anything", which is right for a dedicated host and wrong for a community one,
+ * so the dialog states which of the two you are choosing rather than leaving an
+ * empty set of checkboxes to be read either way.
+ *
+ * The extension list comes from what is actually published: offering a name no
+ * bundle exists for would let an operator pin a worker to nothing and see only an
+ * idle host with no explanation.
+ */
+function assignExtensionsDialog(worker, workers) {
+  const extensions = new Resource("extensions:for-assign", () => api("/extensions"));
+  const body = el("div", {});
+
+  const draw = (data) => {
+    const published = (data.extensions ?? []).map((e) => e.name ?? e).filter(Boolean).sort();
+    const assigned = new Set(worker.extensions ?? []);
+    // A name a worker holds that is no longer published still has to be shown, or
+    // saving the dialog would silently drop it.
+    const orphaned = [...assigned].filter((name) => !published.includes(name)).sort();
+    const boxes = new Map();
+
+    const anyRadio = el("input", { type: "radio", name: "assign-mode", id: "assign-any", checked: assigned.size === 0 });
+    const someRadio = el("input", { type: "radio", name: "assign-mode", id: "assign-some", checked: assigned.size > 0 });
+
+    const checkboxList = el(
+      "div",
+      { class: "assign-list" },
+      [...published, ...orphaned].map((name) => {
+        const box = el("input", {
+          type: "checkbox",
+          id: `assign-ext-${name}`,
+          checked: assigned.has(name),
+          onchange: () => {
+            // Ticking anything means "only these", so keep the radios honest
+            // rather than letting the two controls disagree.
+            if ([...boxes.values()].some((b) => b.checked)) someRadio.checked = true;
+            else anyRadio.checked = true;
+          },
+        });
+        boxes.set(name, box);
+        return el(
+          "label",
+          { class: "assign-row", for: `assign-ext-${name}` },
+          box,
+          el("span", { text: name }),
+          orphaned.includes(name)
+            ? el("span", { class: "dim small", text: " — no longer published" })
+            : null,
+        );
+      }),
+    );
+
+    const chosen = () => (anyRadio.checked ? [] : [...boxes].filter(([, b]) => b.checked).map(([n]) => n));
+
+    setChildren(
+      body,
+      el("p", {
+        class: "dim small",
+        text: `Takes effect on ${worker.name}'s next poll. No restart or re-enrolment.`,
+      }),
+      el("label", { class: "assign-row", for: "assign-any" }, anyRadio, el("span", { text: "Anything — take work from every extension" })),
+      el("label", { class: "assign-row", for: "assign-some" }, someRadio, el("span", { text: "Only the extensions ticked below" })),
+      published.length || orphaned.length
+        ? checkboxList
+        : el("p", { class: "dim", text: "No extension has been published yet, so there is nothing to pin to." }),
+      el(
+        "div",
+        { class: "row end" },
+        el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+        gatedButton("workers:write", {
+          class: "primary",
+          text: "Save assignment",
+          onclick: async (event) => {
+            const list = chosen();
+            if (!anyRadio.checked && list.length === 0) {
+              toast("tick at least one extension, or choose Anything", false);
+              return;
+            }
+            const ok = await act(
+              "worker.extensions.set",
+              () =>
+                api(`/workers/${worker.id}/extensions`, { method: "PUT", body: { extensions: list } }),
+              { button: event.currentTarget, refresh: [workers] },
+            );
+            if (ok) closeModal();
+          },
+        }),
+      ),
+    );
+  };
+
+  onTeardown(extensions.subscribe(() => {
+    if (extensions.status === "error") {
+      setChildren(body, el("p", { class: "error", text: `Could not list extensions: ${extensions.error?.message ?? "unknown error"}` }));
+    } else if (extensions.data) {
+      draw(extensions.data);
+    }
+  }));
+  setChildren(body, el("div", { class: "skeleton skeleton-line", style: { height: "120px" } }));
+  void extensions.load();
+
+  openModal(`Extensions for ${worker.name}`, body);
+}
+
 VIEWS.workers = (route) => {
   if (route.tab === "enrolment") return enrolmentPanel();
 
@@ -3910,7 +5021,19 @@ VIEWS.workers = (route) => {
             worker.trust,
             ago(worker.lastHeartbeatAt),
             worker.agentVersion,
-            (worker.extensions || []).join(", ") || "any",
+            el(
+              "div",
+              {},
+              el("div", {
+                text: (worker.extensions || []).join(", ") || "any",
+                class: (worker.extensions || []).length ? null : "dim",
+              }),
+              gatedButton("workers:write", {
+                class: "button-link inline",
+                text: "Change",
+                onclick: () => assignExtensionsDialog(worker, workers),
+              }),
+            ),
             [
               lifecycle(worker, "drain", "Drain", false),
               lifecycle(worker, "activate", "Activate", false),

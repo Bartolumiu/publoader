@@ -570,7 +570,6 @@ button {
   background: var(--panel-2);
   color: var(--text);
   border: 1px solid var(--line);
-  border-left: 0;
   border-radius: 7px;
   padding: 6px 11px;
   font: inherit;
@@ -1284,4 +1283,102 @@ dialog::backdrop {
   .defs dd {
     margin-bottom: 8px;
   }
+}
+
+/* ---- worker → extension assignment -------------------------------------- */
+
+.assign-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  /* The fleet can pin a worker to any published extension, and the list grows
+     with the catalogue; scroll it rather than letting the dialog outgrow the
+     viewport and push its own buttons off-screen. */
+  overflow: hidden auto;
+  margin: 6px 0 12px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-2);
+}
+
+.assign-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.assign-row:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.assign-row input {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+/* ---- typed relation editors --------------------------------------------- */
+
+.relation {
+  margin: 0 0 22px;
+}
+
+.relation h3 {
+  margin-bottom: 2px;
+}
+
+.relation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.relation-row {
+  display: grid;
+  /* key → value [remove], with the error spanning the full width underneath so a
+     message never shortens the inputs it belongs to. */
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.relation-row .field-error {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.relation-row input {
+  min-width: 0;
+}
+
+@media (max-width: 620px) {
+  .relation-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  /* The arrow is decoration; at this width the stacked inputs read fine without
+     it and it would otherwise eat a column. */
+  .relation-row > .dim {
+    display: none;
+  }
+}
+
+/* ---- queue bulk bar ------------------------------------------------------ */
+
+.bulk-bar {
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 10px;
+}
+
+.pager {
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
 }

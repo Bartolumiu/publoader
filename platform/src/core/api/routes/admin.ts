@@ -14,6 +14,7 @@ import {
 } from "../../store/trackedManga.js";
 import { sessionAuthenticator } from "../session.js";
 import { Manifest, EXTENSION_NAME_RE } from "../../../contracts/manifest.js";
+import { MANGADEX_LANGUAGES } from "../../../contracts/languages.js";
 import { VALID_REMOVAL_MODES } from "../../store/settings.js";
 import { BundleRejectedError } from "../../store/bundles.js";
 import AdmZip from "adm-zip";
@@ -608,7 +609,11 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     scope.get("/api/v1/admin/extensions/:name/config", { preHandler: requireScope("extensions:read") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
-      return ctx.extensionConfig.describe(name);
+      // The allowlist ships with the payload so the editor validates a language
+      // code against the exact list the write path enforces. A second copy in
+      // the dashboard would drift, and the failure mode of drift here is an
+      // operator being told a valid code is invalid — or worse, the reverse.
+      return { ...(await ctx.extensionConfig.describe(name)), mangadexLanguages: MANGADEX_LANGUAGES };
     });
 
     scope.put("/api/v1/admin/extensions/:name/config", { preHandler: requireScope("extensions:write") }, async (req, reply) => {

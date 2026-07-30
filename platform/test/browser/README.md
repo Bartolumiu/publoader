@@ -43,11 +43,12 @@ So: **jsdom for behaviour, this for what the operator can see.** A change to
 | File | What it is |
 | --- | --- |
 | `cdp.mjs` | Dependency-free Chrome DevTools Protocol driver, ~230 lines. Launches headless Chrome and talks to it over a WebSocket using Node's built-in client — no puppeteer, no playwright, nothing to keep up to date. |
-| `harness.mjs` | Shared login/navigation helpers and the assertion counter. |
 | `seed.mjs` | Fills the scratch database with enough to render every view. |
+| `seed-accounts.mjs` | Sets the owner password and creates a contributor, over HTTP — the API hashes passwords, so a direct column write would store something no login can match. |
 | `verify.mjs` | The main suite: login, routing, every sidebar destination, tabs, focus. |
 | `verify-untracked.mjs` | The untracked queue and its detail/edit view. |
 | `verify-modules.mjs` | The two dynamically-imported destinations, Maintenance and Docs. |
+| `verify-features.mjs` | Worker→extension assignment, queue management, the tracked catalogue column and repoint, and the typed config editor. |
 
 ## Not covered
 

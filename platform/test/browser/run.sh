@@ -75,7 +75,7 @@ node test/browser/seed.mjs
 # straight into the column, or no login would ever match them.
 ADMIN_TOKEN=dev-admin-not-a-secret node test/browser/seed-accounts.mjs
 
-SUITES=("${@:-verify.mjs verify-untracked.mjs verify-modules.mjs}")
+SUITES=("${@:-verify.mjs verify-untracked.mjs verify-modules.mjs verify-features.mjs}")
 # shellcheck disable=SC2068 -- intentional word splitting on the default list.
 for suite in ${SUITES[@]}; do
   echo "==> ${suite}"
