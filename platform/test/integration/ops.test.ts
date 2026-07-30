@@ -1228,6 +1228,76 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     expect(view.json().pendingChanges).toEqual([]);
   });
 
+  it("refuses a curator token, which holds untracked:write but is not a vetted human", async () => {
+    // The hole this closes: the gate used to refuse only the CONTRIBUTOR role,
+    // and `adminAuthHook` assigns every api token `adminRole = "ADMIN"` — meaning
+    // "not owner-equivalent", not "vetted human". So the `curator` preset, which
+    // carries untracked:write precisely so a community curator can work this
+    // queue, cleared a gate whose stated purpose is to stop that very person
+    // from editing a public catalogue. A leaked curator token could have rewritten
+    // MangaDex titles under the platform's shared account.
+    await bundle();
+    const row = await untracked({ state: "TRACKED", mdMangaId: MD_ID });
+    seedTitle(MD_ID, { en: "Mangled Nmae" }, "https://example.com/series/1");
+    const curator = await mint(["untracked:write", "untracked:read", "extensions:read"]);
+
+    // The token can still do its actual job: correcting the local row.
+    const patch = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/untracked/${row.id}`,
+      headers: curator,
+      payload: { mangaName: "Correct Name" },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const apply = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/untracked/${row.id}/apply-to-mangadex`,
+      headers: curator,
+    });
+    expect(apply.statusCode).toBe(403);
+    expect(apply.json().error).toContain("api tokens");
+    expect(md.edits, "MangaDex was edited by an api token").toEqual([]);
+
+    // The GET agrees with the POST, so the dashboard never offers a button that
+    // then 403s. These two checks live in different functions and drifted apart
+    // once already.
+    const view = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/untracked/${row.id}`,
+      headers: curator,
+    });
+    expect(view.json().applyBlockedReason).toContain("api tokens");
+  });
+
+  it("refuses a role outside the allow-list, rather than granting it by default", async () => {
+    // The gate is an allow-list because a deny-list on a role enum grants every
+    // role that does not exist yet, and CONTRIBUTOR was itself added to AdminRole
+    // after the fact. Asserted through the real OWNER/ADMIN paths: those two must
+    // pass and nothing else may, so adding a fourth role cannot silently inherit
+    // the right to edit a public catalogue.
+    await bundle();
+    for (const role of ["OWNER", "ADMIN"] as const) {
+      const row = await untracked({ state: "TRACKED", mdMangaId: MD_ID, mangaName: `Fix ${role}` });
+      seedTitle(MD_ID, { en: "Mangled Nmae" }, "https://example.com/series/1");
+      const res = await app.inject({
+        method: "POST",
+        url: `/api/v1/admin/untracked/${row.id}/apply-to-mangadex`,
+        headers: await session(role),
+      });
+      expect(res.statusCode, `${role} should be allowed to apply`).toBe(200);
+    }
+
+    const row = await untracked({ state: "TRACKED", mdMangaId: MD_ID, mangaName: "Fix contributor" });
+    const refused = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/untracked/${row.id}/apply-to-mangadex`,
+      headers: await session("CONTRIBUTOR"),
+    });
+    expect(refused.statusCode).toBe(403);
+    expect(refused.json().requiredRole).toBe("ADMIN");
+  });
+
   it("reports a version conflict rather than overwriting the other edit", async () => {
     const row = await untracked({ state: "TRACKED", mdMangaId: MD_ID, mangaName: "Correct Name" });
     seedTitle(MD_ID, { en: "Mangled Nmae" }, "https://example.com/series/1");

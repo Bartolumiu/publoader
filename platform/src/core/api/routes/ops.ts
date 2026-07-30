@@ -212,8 +212,39 @@ const APPLY_ROLE_REASON =
   "catalogue entry under the platform's MangaDex account. Correct the row and " +
   "ask an admin to apply it.";
 
+const APPLY_TOKEN_REASON =
+  "editing the MangaDex title is closed to api tokens however broadly they are " +
+  "scoped: it changes a public catalogue entry under the platform's MangaDex " +
+  "account, so it is attributable to a signed-in operator or nothing. Apply it " +
+  "from the dashboard.";
+
+/**
+ * May this caller push a row's corrections onto the public MangaDex entry?
+ *
+ * Written as an allow-list, and deliberately so. The obvious form — refuse
+ * CONTRIBUTOR — is a deny-list, and a deny-list on a role enum grants every role
+ * that does not exist yet. `CONTRIBUTOR` was itself added to `AdminRole` after
+ * the fact, so the next addition is not hypothetical, and it would silently
+ * arrive holding the right to edit a public catalogue. `requireOwner` already
+ * uses the allow-list form; this now matches it.
+ *
+ * API tokens are refused outright rather than judged on their role, because
+ * `adminAuthHook` assigns every api token `adminRole = "ADMIN"` — a deliberate
+ * default that means "not owner-equivalent", not "vetted human". Combined with a
+ * deny-list, that let the `curator` preset through: it carries `untracked:write`
+ * precisely so a community curator can work this queue, and it would then have
+ * cleared a gate whose stated purpose is to stop exactly that person from
+ * editing MangaDex. A leaked curator token could have mutated the public
+ * catalogue under the shared account, which is the blast radius scoped tokens
+ * exist to prevent. Nothing programmatic calls this endpoint — the dashboard is
+ * the only caller — so closing it to tokens costs no capability.
+ */
 async function requireApplyRole(req: FastifyRequest, reply: FastifyReply): Promise<void> {
-  if (req.adminRole === "CONTRIBUTOR") {
+  if (req.principal?.kind === "api-token") {
+    await reply.code(403).send({ error: APPLY_TOKEN_REASON, requiredRole: "ADMIN" });
+    return;
+  }
+  if (req.adminRole !== "OWNER" && req.adminRole !== "ADMIN") {
     await reply.code(403).send({ error: APPLY_ROLE_REASON, requiredRole: "ADMIN" });
   }
 }
@@ -1190,7 +1221,11 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
       row: { mdMangaId: string | null; state: string },
     ): string | null => {
       if (!hasScope(req.principal!, "untracked:write")) return "missing scope: untracked:write";
-      if (req.adminRole === "CONTRIBUTOR") return APPLY_ROLE_REASON;
+      // Mirrors requireApplyRole exactly, including the allow-list shape and the
+      // api-token refusal. If these two ever disagree the dashboard offers a
+      // button that 403s, which is the failure this function exists to avoid.
+      if (req.principal?.kind === "api-token") return APPLY_TOKEN_REASON;
+      if (req.adminRole !== "OWNER" && req.adminRole !== "ADMIN") return APPLY_ROLE_REASON;
       if (!row.mdMangaId) {
         return "this row has no MangaDex title yet; approving it creates one from the corrected values";
       }
