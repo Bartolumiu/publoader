@@ -718,15 +718,15 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     // the shell. The <noscript> block is what tells that operator which sections
     // exist — and it is derived from nothing, so it goes stale silently.
     //
-    // The tab labels are read out of the served app.js rather than hard-coded
+    // The section labels are read out of the served app.js rather than hard-coded
     // here: the point is that the two halves agree, and pinning the list in the
     // test would just move the staleness rather than catch it.
     const page = await app.inject({ method: "GET", url: "/dash" });
     const script = await app.inject({ method: "GET", url: "/dash/app.js" });
 
-    const registry = /const TABS = \[(.*?)\n\];/s.exec(script.body);
-    expect(registry, "app.js should declare a TABS registry").not.toBeNull();
-    const labels = [...registry![1]!.matchAll(/^\s*\["[a-z]+", "([^"]+)"/gm)].map((m) => m[1]!);
+    const registry = /const NAV = \[(.*?)\n\];/s.exec(script.body);
+    expect(registry, "app.js should declare a NAV registry").not.toBeNull();
+    const labels = [...registry![1]!.matchAll(/^\s{4}label: "([^"]+)"/gm)].map((m) => m[1]!);
     expect(labels.length).toBeGreaterThanOrEqual(10);
 
     for (const label of labels) {
@@ -734,9 +734,14 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     }
 
     // Credential minting and account administration need the OWNER role, not a
-    // scope — a wildcard api token holds users:admin but is never OWNER.
-    expect(script.body).toContain('["tokens", "Tokens", { owner: true }]');
-    expect(script.body).toContain('["users", "Users", { owner: true }]');
+    // scope — a wildcard api token holds users:admin but is never OWNER. Asserted
+    // on the id rather than the surrounding syntax, which is what went stale when
+    // the registry became objects: the regex above stopped matching anything and
+    // the loop silently checked an empty list.
+    for (const id of ["tokens", "users"]) {
+      const entry = new RegExp(`id: "${id}",[\\s\\S]{0,400}?owner: true`).exec(registry![1]!);
+      expect(entry, `${id} should still be owner-gated in NAV`).not.toBeNull();
+    }
 
     // A tab with no endpoint wired to it renders an empty panel; these are the
     // calls behind the sections this dashboard grew for queue and session triage.
@@ -749,6 +754,213 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
       "/tokens/scopes",
     ]) {
       expect(script.body, `${call} should be called by the dashboard`).toContain(call);
+    }
+  });
+
+  it("serves a shell with the sidebar, header and dialog landmarks the SPA fills in", async () => {
+    // The SPA builds every view client-side but NOT the shell: the sidebar, the
+    // header's live summary row and the modal are in the served HTML so the
+    // layout has its final shape before the first response lands. A rename here
+    // is a silent breakage — app.js finds its mount points by id — so the ids
+    // are pinned.
+    const page = await app.inject({ method: "GET", url: "/dash" });
+    expect(page.statusCode).toBe(200);
+
+    for (const id of [
+      "login", // the sign-in layer
+      "app", // the shell
+      "sidebar", // the persistent left menu
+      "nav", // where the destination list is built
+      "nav-collapse", // collapse to icons
+      "nav-toggle", // the drawer's hamburger
+      "nav-scrim",
+      "summary", // the live platform state in the header
+      "pause-pill",
+      "sum-workers",
+      "sum-jobs",
+      "sum-queue",
+      "sum-run",
+      "profile-toggle", // signed-in identity and its menu
+      "profile-menu",
+      "role-badge",
+      "logout",
+      "page-head",
+      "tabs", // in-page tabs
+      "view", // the routed panel
+      "modal",
+      "toasts",
+    ]) {
+      expect(page.body, `the shell should contain #${id}`).toContain(`id="${id}"`);
+    }
+
+    // Landmarks and the keyboard entry point, which no view can supply.
+    expect(page.body).toContain('<aside id="sidebar" class="sidebar" aria-label="Main">');
+    expect(page.body).toContain('<header class="topbar">');
+    expect(page.body).toContain('<main class="content">');
+    expect(page.body).toContain('class="skip-link"');
+    expect(page.body).toContain('role="tablist"');
+
+    // Two <main> elements exist — the sign-in layer and the shell — and that is
+    // only legal because exactly one of them is ever visible. Both must ship
+    // hidden, or a scripting-disabled browser sees both.
+    expect(page.body).toContain('<main id="login" class="login-layer" hidden>');
+    expect(page.body).toContain('<div id="app" class="shell" hidden>');
+
+    // The `hidden` attribute is how the shell shows one layer at a time, and an
+    // author-origin `display` rule silently defeats it (the UA rule is
+    // lower-precedence than any author declaration). This is the guard that
+    // stopped the sign-in card painting over a signed-in dashboard.
+    const styles = await app.inject({ method: "GET", url: "/dash/style.css" });
+    expect(styles.body).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important/);
+  });
+
+  // ---- audit filters ----
+
+  /** Audit rows, oldest first, so an id off the first page is addressable. */
+  async function seedAudit(count: number): Promise<{ id: string; action: string }[]> {
+    const rows: { id: string; action: string }[] = [];
+    for (let i = 0; i < count; i++) {
+      const row = await prisma.auditEvent.create({
+        data: {
+          actor: i % 2 === 0 ? "iam@ardax.dev" : "token:discord-bot",
+          action: ["run.trigger", "tracked_manga.set", "removal_mode.set"][i % 3]!,
+          subject: `mangaplus:${i}`,
+          detail: { index: i },
+          createdAt: new Date(Date.UTC(2026, 0, 1 + i, 12, 0, 0)),
+        },
+      });
+      rows.push({ id: row.id, action: row.action });
+    }
+    return rows;
+  }
+
+  const audit = async (cookie: string, query: string) =>
+    app.inject({ method: "GET", url: `/api/v1/admin/audit${query}`, headers: { cookie } });
+
+  it("resolves an audit event by id however far back it is", async () => {
+    const cookie = await loginWithToken();
+    const seeded = await seedAudit(30);
+    const oldest = seeded[0]!;
+
+    // The bug this fixes: the dashboard copied a permalink for a row, and
+    // resolving it meant fetching the most recent page and filtering in the
+    // browser. Anything pushed off that page was unreachable, and `id` was not a
+    // filter at all. Prove the oldest row is findable while absent from the
+    // recent page.
+    const recent = await audit(cookie, "?limit=5");
+    expect(recent.statusCode).toBe(200);
+    expect(recent.json().events.map((e: { id: string }) => e.id)).not.toContain(oldest.id);
+
+    const one = await audit(cookie, `?id=${oldest.id}`);
+    expect(one.statusCode).toBe(200);
+    expect(one.json().events).toHaveLength(1);
+    expect(one.json().events[0]).toMatchObject({ id: oldest.id, subject: "mangaplus:0" });
+    expect(one.json().events[0].detail).toEqual({ index: 0 });
+    expect(one.json().total).toBe(1);
+
+    // An id that does not exist is an empty result, not an error: the caller
+    // cannot tell a truncated id from a deleted row any other way.
+    const missing = await audit(cookie, "?id=00000000-0000-4000-8000-000000000000");
+    expect(missing.statusCode).toBe(200);
+    expect(missing.json()).toMatchObject({ events: [], total: 0 });
+  });
+
+  it("filters the audit log by actor, action, subject and time window", async () => {
+    const cookie = await loginWithToken();
+    await seedAudit(9);
+
+    const byActor = await audit(cookie, "?actor=discord-bot");
+    expect(byActor.statusCode).toBe(200);
+    expect(byActor.json().events.length).toBeGreaterThan(0);
+    for (const event of byActor.json().events) expect(event.actor).toContain("discord-bot");
+    // Substring and case-insensitive, so a partial name typed in a hurry works.
+    expect((await audit(cookie, "?actor=DISCORD")).json().total).toBe(byActor.json().total);
+
+    const byAction = await audit(cookie, "?action=removal_mode.set");
+    for (const event of byAction.json().events) expect(event.action).toBe("removal_mode.set");
+    expect(byAction.json().total).toBe(3);
+
+    const bySubject = await audit(cookie, "?subject=mangaplus:4");
+    expect(bySubject.json().total).toBe(1);
+
+    // The window is inclusive on both ends and is applied to the count as well
+    // as the page, which is what makes "12 events that day" trustworthy.
+    const window = await audit(
+      cookie,
+      "?since=2026-01-03T00:00:00.000Z&until=2026-01-05T23:59:59.000Z",
+    );
+    expect(window.json().total).toBe(3);
+    for (const event of window.json().events) {
+      expect(new Date(event.createdAt).getTime()).toBeGreaterThanOrEqual(Date.parse("2026-01-03T00:00:00Z"));
+      expect(new Date(event.createdAt).getTime()).toBeLessThanOrEqual(Date.parse("2026-01-05T23:59:59Z"));
+    }
+
+    // Filters combine rather than replace one another.
+    const both = await audit(cookie, "?actor=ardax&action=run.trigger");
+    for (const event of both.json().events) {
+      expect(event.actor).toContain("ardax");
+      expect(event.action).toBe("run.trigger");
+    }
+    expect(both.json().total).toBeLessThanOrEqual(byAction.json().total + 3);
+  });
+
+  it("pages the audit log by offset and by cursor, and caps the limit", async () => {
+    const cookie = await loginWithToken();
+    const seeded = await seedAudit(12);
+    const newestFirst = [...seeded].reverse().map((r) => r.id);
+    // Signing in wrote its own session.login row, and it is newer than every
+    // seeded one. Paging is asserted over a filter that matches only the seeded
+    // rows, so the arithmetic is about paging rather than about the fixture.
+    const mine = "&subject=mangaplus:";
+
+    const first = await audit(cookie, `?limit=5${mine}`);
+    expect(first.json()).toMatchObject({ total: 12, limit: 5, offset: 0 });
+    expect(first.json().events.map((e: { id: string }) => e.id)).toEqual(newestFirst.slice(0, 5));
+    expect(first.json().nextCursor).toBe(newestFirst[4]);
+
+    const second = await audit(cookie, `?limit=5&offset=5${mine}`);
+    expect(second.json().events.map((e: { id: string }) => e.id)).toEqual(newestFirst.slice(5, 10));
+
+    // The cursor is the id of the last row of the previous page, and paging with
+    // it must land on exactly the same rows offset would have — that is the whole
+    // claim, since the cursor exists to stay correct while rows are still being
+    // written.
+    const cursored = await audit(cookie, `?limit=5${mine}&cursor=${first.json().nextCursor}`);
+    expect(cursored.json().events.map((e: { id: string }) => e.id)).toEqual(newestFirst.slice(5, 10));
+    // Offset is reported as null when a cursor drove the page, so a caller
+    // cannot mistake one paging scheme for the other.
+    expect(cursored.json().offset).toBeNull();
+
+    const last = await audit(cookie, `?limit=5${mine}&cursor=${cursored.json().nextCursor}`);
+    expect(last.json().events).toHaveLength(2);
+    // Null on the last page, so a caller stops without an extra empty request.
+    expect(last.json().nextCursor).toBeNull();
+
+    // An unknown cursor is a client error: an empty page would read as "there is
+    // nothing older", which is a different and wrong answer.
+    const bogus = await audit(cookie, "?cursor=00000000-0000-4000-8000-000000000000");
+    expect(bogus.statusCode).toBe(400);
+    expect(bogus.json().error).toContain("unknown cursor");
+
+    // The cap survives: limit is validated, not trusted.
+    expect((await audit(cookie, "?limit=9999")).statusCode).toBe(400);
+    expect((await audit(cookie, "?limit=0")).statusCode).toBe(400);
+    expect((await audit(cookie, "?since=not-a-date")).statusCode).toBe(400);
+  });
+
+  it("keeps the audit filters behind audit:read", async () => {
+    // The filters widen what one request can ask for, so the scope has to hold
+    // for the filtered form and not merely for the unfiltered one.
+    const token = await ctx.apiTokens.mint({
+      name: "stats-only",
+      scopes: ["stats:read"],
+      createdBy: "test",
+    });
+    const headers = { authorization: `Bearer ${token.token}` };
+    for (const query of ["", "?id=whatever", "?actor=someone", "?since=2026-01-01T00:00:00.000Z"]) {
+      const res = await app.inject({ method: "GET", url: `/api/v1/admin/audit${query}`, headers });
+      expect(res.statusCode, `audit${query} should need audit:read`).toBe(403);
+      expect(res.json().error).toContain("audit:read");
     }
   });
 

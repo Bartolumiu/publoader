@@ -1,24 +1,58 @@
 /* Operator dashboard. Dark, dense, system fonts only — no external assets,
    because the page is served under a CSP that forbids other origins. */
 
+/* --------------------------------------------------------------------------
+   The `hidden` attribute, made to actually hide.
+
+   The UA stylesheet implements `hidden` as `[hidden] { display: none }`, at
+   user-agent origin — which loses to ANY author declaration of `display`, since
+   the cascade sorts by origin before it looks at specificity. `.login {
+   display: grid }` below therefore used to keep the sign-in card painted after
+   a successful sign-in, with the app rendering underneath it: the reported "the
+   login screen persists after signing in". `el.hidden` read `true` the whole
+   time, and jsdom agreed, because jsdom does not implement origin precedence —
+   only a real engine shows the defect.
+
+   One `!important` rule at author origin fixes the whole class of bug, so
+   `hidden` can be trusted anywhere in this file. Keep it first, and keep the
+   `!important`.
+   -------------------------------------------------------------------------- */
+[hidden] {
+  display: none !important;
+}
+
 :root {
   --bg: #0d1117;
   --panel: #151b23;
   --panel-2: #1c232e;
+  --panel-3: #222b37;
   --line: #2a323d;
+  --line-2: #384250;
   --text: #e6edf3;
   --dim: #8d97a5;
+  --dimmer: #6b7280;
   --accent: #4f9cf9;
+  --accent-dim: #234670;
   --ok: #3fb950;
   --bad: #f85149;
   --warn: #d29922;
   --radius: 10px;
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --nav-w: 232px;
+  --topbar-h: 56px;
 }
 
 * {
   box-sizing: border-box;
+}
+
+html,
+body {
+  /* The single most important pair of rules for the phone layout: a wide table
+     must scroll inside its own container, never take the page with it. */
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 body {
@@ -26,11 +60,13 @@ body {
   background: var(--bg);
   color: var(--text);
   font: 14px/1.55 var(--font);
+  -webkit-text-size-adjust: 100%;
 }
 
 h1,
 h2,
-h3 {
+h3,
+h4 {
   margin: 0;
   font-weight: 600;
 }
@@ -43,6 +79,10 @@ a {
   color: var(--dim);
 }
 
+.small {
+  font-size: 12px;
+}
+
 .grow {
   flex: 1;
 }
@@ -53,75 +93,498 @@ a {
   margin: 8px 0 0;
 }
 
-/* ---- chrome ---- */
-
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 20px;
-  border-bottom: 1px solid var(--line);
-  position: sticky;
-  top: 0;
-  background: var(--bg);
-  z-index: 5;
+.ok-text {
+  color: var(--ok);
+  margin: 8px 0 0;
 }
 
-.topbar h1 {
+:where(button, input, select, textarea, a, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 0 0 8px 0;
+  padding: 10px 14px;
+}
+
+.skip-link:focus {
+  left: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/* ---- sign-in ------------------------------------------------------------ */
+
+.login-layer {
+  display: grid;
+  place-items: center;
+  min-height: 100dvh;
+  padding: 24px 16px;
+}
+
+.login {
+  width: min(420px, 100%);
+}
+
+.login-brand {
   font-size: 15px;
   letter-spacing: 0.3px;
+  margin-bottom: 14px;
 }
 
-main {
-  max-width: 1180px;
-  margin: 0 auto;
+.login input {
+  width: 100%;
+}
+
+.login form > button {
+  margin-top: 14px;
+  width: 100%;
+}
+
+.noscript {
+  max-width: 720px;
+  margin: 40px auto;
+}
+
+/* ---- shell -------------------------------------------------------------- */
+
+.shell {
+  display: grid;
+  /* minmax(0, 1fr) rather than 1fr: a 1fr track takes its min-content size from
+     the widest table inside it, which is what makes a page scroll sideways. */
+  grid-template-columns: var(--nav-w) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas:
+    "sidebar topbar"
+    "sidebar content";
+  /* Locked to the viewport, with `.content` as the only scroll container, so the
+     sidebar and topbar cannot travel with the page. A sticky sidebar inside a
+     scrolling document nearly does this, but the sticky element still belongs to
+     a document that moves — momentum scrolling on a trackpad drags it, and its
+     own overflow fights the page's. One non-scrolling shell has neither problem. */
+  height: 100dvh;
+  overflow: hidden;
+}
+
+body.nav-collapsed {
+  --nav-w: 64px;
+}
+
+/* ---- sidebar ------------------------------------------------------------ */
+
+.sidebar {
+  grid-area: sidebar;
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #0a0e14;
+  border-right: 1px solid var(--line);
+  overflow: hidden auto;
+  overscroll-behavior: contain;
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: var(--topbar-h);
+  padding: 0 14px;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--line);
+}
+
+.brand {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  border-radius: 7px;
+  background: var(--accent-dim);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.brand-name {
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+
+.nav {
+  flex: 1 1 auto;
+  padding: 10px 8px;
+}
+
+.nav-group + .nav-group {
+  margin-top: 14px;
+}
+
+.nav-group h2 {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--dimmer);
+  padding: 0 8px 6px;
+}
+
+.nav ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.nav a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* 40px keeps the target usable with a thumb without loosening the desktop
+     rhythm too much. */
+  min-height: 40px;
+  padding: 0 9px;
+  border-radius: 8px;
+  color: var(--dim);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.nav a:hover {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+/* The current destination has to be unmistakable, so it is marked three ways:
+   filled, brighter text, and a left rule. `aria-current` is the source of
+   truth — the styling keys off it, so the two cannot drift. */
+.nav a[aria-current="page"] {
+  background: var(--panel-3);
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--accent);
+  font-weight: 600;
+}
+
+.nav a[aria-current="page"] .nav-icon {
+  color: var(--accent);
+}
+
+.nav-icon {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  color: var(--dimmer);
+}
+
+.nav-count {
+  margin-left: auto;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--dim);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 7px;
+}
+
+.nav-count.bad {
+  color: var(--bad);
+  border-color: #5a2a28;
+}
+
+.sidebar-foot {
+  flex: 0 0 auto;
+  padding: 8px;
+  border-top: 1px solid var(--line);
+}
+
+#nav-collapse {
+  width: 100%;
+  justify-content: flex-start;
+  gap: 10px;
+  color: var(--dim);
+}
+
+/* Collapsed: icons only. Labels are removed from the accessibility tree along
+   with the layout, and the link keeps its title so a pointer still explains it. */
+body.nav-collapsed .brand-name,
+body.nav-collapsed .nav-group h2,
+body.nav-collapsed .nav-label,
+body.nav-collapsed .nav-count,
+body.nav-collapsed .nav-collapse-label {
+  display: none;
+}
+
+body.nav-collapsed .nav a,
+body.nav-collapsed #nav-collapse {
+  justify-content: center;
+  padding: 0;
+}
+
+body.nav-collapsed .nav-group + .nav-group {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.nav-scrim {
+  display: none;
+}
+
+/* ---- topbar ------------------------------------------------------------- */
+
+.topbar {
+  grid-area: topbar;
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: var(--topbar-h);
+  padding: 8px 18px;
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
+  backdrop-filter: blur(6px);
+  border-bottom: 1px solid var(--line);
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  gap: 6px 18px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.summary-item {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+  min-width: 54px;
+}
+
+.summary-n {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  /* The row must not reshuffle when a number replaces the placeholder. */
+  min-height: 18px;
+}
+
+.summary-n.bad {
+  color: var(--bad);
+}
+
+.summary-k {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--dimmer);
+  white-space: nowrap;
+}
+
+.summary-item.wide {
+  min-width: 150px;
+}
+
+.topbar-end {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.profile {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: 1px solid transparent;
+  max-width: 260px;
+}
+
+.profile:hover {
+  border-color: var(--line);
+  background: var(--panel-2);
+}
+
+.profile-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  padding: 1px 7px;
+  color: var(--dim);
+}
+
+.badge.owner {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+
+.badge.contributor {
+  color: var(--warn);
+  border-color: #4a3c1d;
+}
+
+.menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  min-width: 240px;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 6px;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 45%);
+}
+
+.menu-detail {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--dim);
+  border-bottom: 1px solid var(--line);
+}
+
+.menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  padding: 8px 10px;
+  min-height: 36px;
+}
+
+.menu-item:hover {
+  background: var(--panel-2);
+}
+
+.menu-item.danger {
+  color: var(--bad);
+}
+
+/* ---- content ------------------------------------------------------------ */
+
+.content {
+  grid-area: content;
+  min-width: 0;
+  /* Full width beside the sidebar: no reading-measure cap. The dense tables this
+     dashboard is mostly made of are the reason — a queue or chapter table given
+     1280px wraps or scrolls sideways while the display sits empty to its right. */
+  width: 100%;
+  /* The shell does not scroll, so this is the scroll container. */
+  overflow: hidden auto;
+  overscroll-behavior: contain;
   padding: 20px;
+}
+
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-bottom: 14px;
+}
+
+.page-head h1 {
+  font-size: 19px;
+  letter-spacing: 0.2px;
+}
+
+.page-head .crumb {
+  font-size: 12px;
+  color: var(--dimmer);
+  width: 100%;
+}
+
+.page-head .blurb {
+  color: var(--dim);
+  font-size: 13px;
+  margin: 0;
 }
 
 .tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
   border-bottom: 1px solid var(--line);
-  padding-bottom: 10px;
   margin-bottom: 18px;
+}
+
+.tabs:empty {
+  display: none;
 }
 
 .tabs button {
   background: none;
   border: 1px solid transparent;
+  border-bottom: 2px solid transparent;
+  border-radius: 7px 7px 0 0;
+  color: var(--dim);
+  min-height: 38px;
+  margin-bottom: -1px;
 }
 
-.tabs button[aria-selected="true"] {
-  background: var(--panel-2);
-  border-color: var(--line);
+.tabs button:hover {
   color: var(--text);
 }
 
-/* ---- controls ---- */
+.tabs button[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+/* ---- controls ----------------------------------------------------------- */
 
 button {
   background: var(--panel-2);
   color: var(--text);
   border: 1px solid var(--line);
+  border-left: 0;
   border-radius: 7px;
   padding: 6px 11px;
   font: inherit;
   font-size: 13px;
+  min-height: 32px;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
 }
 
 button:hover:not(:disabled) {
   border-color: var(--accent);
-}
-
-button:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible,
-[tabindex]:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 
 button:disabled {
@@ -139,6 +602,45 @@ button.danger {
   border-color: #5a2a28;
 }
 
+button.ghost {
+  background: none;
+}
+
+.icon-button {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  flex: 0 0 auto;
+}
+
+.icon-button svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* A control that is running. The label is kept — swapping it for "…" loses the
+   only clue about what is in flight — and a spinner is added beside it. */
+button[data-pending="true"] {
+  color: var(--dim);
+  cursor: progress;
+}
+
+button[data-pending="true"]::after {
+  content: "";
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--line-2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 input,
 select,
 textarea {
@@ -149,6 +651,12 @@ textarea {
   padding: 6px 9px;
   font: inherit;
   font-size: 13px;
+  min-height: 32px;
+  max-width: 100%;
+}
+
+input[aria-invalid="true"] {
+  border-color: var(--bad);
 }
 
 textarea {
@@ -166,7 +674,58 @@ label {
   margin: 10px 0 4px;
 }
 
-/* ---- layout blocks ---- */
+/* Labels default to their own line, which is right above an input and wrong
+   beside one inside a .row. */
+label.inline {
+  display: inline;
+  margin: 0;
+  white-space: nowrap;
+}
+
+.field-error {
+  color: var(--bad);
+  font-size: 12px;
+  margin: 4px 0 0;
+  min-height: 1.1em;
+}
+
+.linkish {
+  background: none;
+  border: none;
+  color: var(--accent);
+  padding: 0;
+  min-height: 0;
+  font-size: 13px;
+  text-decoration: underline;
+  cursor: pointer;
+  display: inline;
+  text-align: left;
+}
+
+.button-link {
+  display: block;
+  text-align: center;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 7px 11px;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.button-link:hover {
+  border-color: var(--accent);
+}
+
+.button-link.inline {
+  display: inline-block;
+}
+
+input[type="search"] {
+  min-width: 240px;
+}
+
+/* ---- layout blocks ------------------------------------------------------ */
 
 .card {
   background: var(--panel);
@@ -184,10 +743,22 @@ label {
   margin-bottom: 12px;
 }
 
+.card h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--dim);
+  margin: 18px 0 8px;
+}
+
 .grid {
   display: grid;
-  gap: 16px;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+.grid.tight {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
 }
 
 .row {
@@ -201,16 +772,22 @@ label {
   gap: 4px;
 }
 
+.row.end {
+  justify-content: flex-end;
+}
+
 .stat {
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px 12px;
+  min-width: 0;
 }
 
 .stat .n {
   font-size: 22px;
   font-variant-numeric: tabular-nums;
+  min-height: 30px;
 }
 
 .stat .k {
@@ -218,56 +795,31 @@ label {
   font-size: 12px;
 }
 
-.login {
+.defs {
   display: grid;
-  place-items: center;
-  min-height: 60vh;
-}
-
-.login .card {
-  width: min(400px, 100%);
-}
-
-.login input {
-  width: 100%;
-}
-
-.login form > button {
-  margin-top: 14px;
-  width: 100%;
-}
-
-/* An anchor that has to read as the primary action next to real buttons. */
-.button-link {
-  display: block;
-  text-align: center;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 7px 11px;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 16px;
+  margin: 0;
   font-size: 13px;
-  text-decoration: none;
 }
 
-.button-link:hover {
-  border-color: var(--accent);
+.defs dt {
+  color: var(--dim);
 }
 
-/* Reveals the break-glass form; a button for keyboard/AT, styled as a link. */
-.linkish {
-  background: none;
-  border: none;
-  color: var(--accent);
-  padding: 0;
-  font-size: 13px;
-  text-decoration: underline;
-  cursor: pointer;
+.defs dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
-/* ---- data ---- */
+/* ---- data --------------------------------------------------------------- */
 
 .scroll {
   overflow-x: auto;
+  overscroll-behavior-x: contain;
+  /* Its own scroll container, so a 12-column table never widens the page. */
+  max-width: 100%;
 }
 
 table {
@@ -288,10 +840,17 @@ th {
   color: var(--dim);
   font-weight: 500;
   white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: var(--panel);
 }
 
 td.actions {
   white-space: nowrap;
+}
+
+tbody tr:hover {
+  background: #131923;
 }
 
 code,
@@ -339,7 +898,12 @@ pre {
 
 .chip.busy {
   color: var(--accent);
-  border-color: #234670;
+  border-color: var(--accent-dim);
+}
+
+.pill.ok {
+  color: var(--ok);
+  border-color: #27432b;
 }
 
 .pill.warn {
@@ -356,10 +920,10 @@ pre {
   margin-bottom: 14px;
 }
 
-/* Informational, not a warning: the role banner and similar "this is how it
-   works" notes must not read as something being wrong. */
+/* Informational, not a warning: "this is how it works" notes must not read as
+   something being wrong. */
 .banner.info {
-  border-color: #234670;
+  border-color: var(--accent-dim);
   background: #101c2b;
   color: var(--text);
 }
@@ -370,13 +934,12 @@ pre {
   color: var(--dim);
 }
 
-.ok-text {
-  color: var(--ok);
-  margin: 8px 0 0;
+.banner.bad {
+  border-color: #5a2a28;
+  background: #2a1616;
+  color: var(--bad);
 }
 
-/* A list of refusal reasons (a rejected bundle manifest), kept readable rather
-   than collapsed into one paragraph — each line is separately actionable. */
 ul.errors {
   color: var(--bad);
   margin: 8px 0 0;
@@ -387,23 +950,61 @@ ul.errors li {
   margin: 3px 0;
 }
 
-.card h3 {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
+/* ---- loading, empty, error --------------------------------------------- */
+
+/* A region that swaps content when data arrives. The reserved height is what
+   keeps the page from jumping under the operator's pointer. */
+.live {
+  min-height: var(--reserve, 0);
+}
+
+.skeleton {
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--panel-2) 25%, var(--panel-3) 50%, var(--panel-2) 75%);
+  background-size: 300% 100%;
+  animation: shimmer 1.3s ease-in-out infinite;
+  color: transparent;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 150% 0;
+  }
+  to {
+    background-position: -150% 0;
+  }
+}
+
+.skeleton-line {
+  height: 11px;
+  margin: 6px 0;
+}
+
+.empty {
+  text-align: center;
   color: var(--dim);
-  margin: 18px 0 8px;
+  padding: 26px 14px;
 }
 
-/* Labels default to their own line, which is right above an input and wrong
-   beside one inside a .row. */
-label.inline {
-  display: inline;
-  margin: 0;
-  white-space: nowrap;
+.empty h3 {
+  color: var(--text);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 14px;
+  margin-bottom: 4px;
 }
 
-/* ---- bundle drop zone ---- */
+.retry-row {
+  margin-top: 10px;
+}
+
+/* A refresh in flight over data already on screen: dim it, do not remove it. */
+.live[data-refreshing="true"] {
+  opacity: 0.62;
+  transition: opacity 0.15s ease-out;
+}
+
+/* ---- drop zone --------------------------------------------------------- */
 
 .dropzone {
   border: 1px dashed var(--line);
@@ -422,34 +1023,25 @@ label.inline {
   color: var(--text);
 }
 
-/* The drag feedback has to survive a pointer that is mid-drag over a child. */
 .dropzone.over {
   background: #101c2b;
 }
 
-.button-link.inline {
-  display: inline-block;
-}
-
-input[type="search"] {
-  min-width: 260px;
-}
-
-/* ---- overlays ---- */
+/* ---- overlays ---------------------------------------------------------- */
 
 dialog {
   background: var(--panel);
   color: var(--text);
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-2);
   border-radius: var(--radius);
   padding: 0;
-  width: min(860px, 92vw);
-  max-height: 86vh;
+  width: min(860px, 94vw);
+  max-height: 88dvh;
   overflow: auto;
 }
 
 dialog::backdrop {
-  background: rgba(0, 0, 0, 0.6);
+  background: rgb(0 0 0 / 62%);
 }
 
 .modal-head {
@@ -460,12 +1052,14 @@ dialog::backdrop {
   border-bottom: 1px solid var(--line);
   position: sticky;
   top: 0;
+  z-index: 1;
   background: var(--panel);
 }
 
 .modal-head h2 {
   font-size: 14px;
   flex: 1;
+  min-width: 0;
 }
 
 #modal-body {
@@ -476,20 +1070,29 @@ dialog::backdrop {
   position: fixed;
   right: 16px;
   bottom: 16px;
+  z-index: 30;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  z-index: 20;
+  max-width: min(380px, calc(100vw - 32px));
 }
 
 .toast {
   background: var(--panel-2);
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-2);
   border-left-width: 3px;
   border-radius: 8px;
   padding: 9px 12px;
-  max-width: 380px;
   font-size: 13px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+  animation: toast-in 0.18s ease-out;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
 }
 
 .toast.ok {
@@ -498,4 +1101,187 @@ dialog::backdrop {
 
 .toast.bad {
   border-left-color: var(--bad);
+}
+
+/* ---- responsive -------------------------------------------------------- */
+
+.drawer-only {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .summary-item.wide,
+  .summary-item:nth-of-type(3) {
+    display: none;
+  }
+}
+
+@media (max-width: 860px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "topbar"
+      "content";
+  }
+
+  .drawer-only {
+    display: inline-flex;
+  }
+
+  /* The sidebar becomes an off-canvas drawer. It stays in the DOM and stays
+     focusable only when open — `inert` is set from app.js alongside the class,
+     so a closed drawer cannot be tabbed into. */
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 12;
+    width: min(280px, 84vw);
+    height: 100dvh;
+    transform: translateX(-101%);
+    transition: transform 0.18s ease-out;
+    box-shadow: 0 0 40px rgb(0 0 0 / 55%);
+  }
+
+  body.nav-open .sidebar {
+    transform: none;
+  }
+
+  /* Icons-only makes no sense in a drawer that is already off-canvas. */
+  body.nav-collapsed .sidebar {
+    --nav-w: 280px;
+  }
+
+  body.nav-collapsed .brand-name,
+  body.nav-collapsed .nav-group h2,
+  body.nav-collapsed .nav-label,
+  body.nav-collapsed .nav-count {
+    display: revert;
+  }
+
+  body.nav-collapsed .nav a {
+    justify-content: flex-start;
+    padding: 0 9px;
+  }
+
+  .sidebar-foot {
+    display: none;
+  }
+
+  body.nav-open .nav-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 11;
+    background: rgb(0 0 0 / 55%);
+  }
+
+  .content {
+    padding: 16px 14px 40px;
+  }
+
+  .summary {
+    gap: 12px;
+  }
+}
+
+@media (max-width: 620px) {
+  /* Tables become stacked cards. Every cell carries its column name in
+     `data-label` (set in app.js from the header row), which is what makes a
+     one-column layout readable instead of a wall of unlabelled values. */
+  table.stack thead {
+    display: none;
+  }
+
+  table.stack,
+  table.stack tbody,
+  table.stack tr,
+  table.stack td {
+    display: block;
+    width: 100%;
+  }
+
+  table.stack tr {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 4px 10px;
+    margin-bottom: 10px;
+  }
+
+  table.stack td {
+    border-bottom: 1px dashed var(--line);
+    padding: 6px 0;
+    display: grid;
+    grid-template-columns: minmax(84px, 34%) minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  table.stack td:last-child {
+    border-bottom: none;
+  }
+
+  table.stack td::before {
+    content: attr(data-label);
+    color: var(--dim);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  /* An action cell has no useful label and needs the full width. */
+  table.stack td.actions {
+    grid-template-columns: minmax(0, 1fr);
+    white-space: normal;
+  }
+
+  table.stack td.actions::before {
+    display: none;
+  }
+
+  .page-head h1 {
+    font-size: 17px;
+  }
+
+  input[type="search"] {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .row > input,
+  .row > select {
+    flex: 1 1 160px;
+  }
+
+  /* Comfortable thumb targets once there is no pointer to be precise with.
+     `.linkish` is included deliberately: it is styled as inline text, so it
+     inherits a 20px line box and is the one control a thumb cannot reliably
+     hit. Padding rather than a height keeps it reading as a link. */
+  button,
+  .menu-item,
+  input,
+  select {
+    min-height: 40px;
+  }
+
+  .linkish {
+    display: inline-block;
+    min-height: 40px;
+    padding: 9px 0;
+  }
+
+  .toasts {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    max-width: none;
+  }
+
+  .defs {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .defs dd {
+    margin-bottom: 8px;
+  }
 }

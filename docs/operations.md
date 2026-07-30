@@ -1891,12 +1891,15 @@ service the next morning. And it is **acknowledged per service**
 (`restart_ack_<service>`): without that, a service back up in five seconds would
 see the still-fresh request and exit again, looping for as long as the TTL.
 
-Restart latency is therefore up to one loop interval — about 30s for the
-scheduler (`SCHEDULER_INTERVAL_SECONDS`), 15s for the processor, and up to the
-current task for the uploader, which finishes the upload it is on first. The API
-answers `202` and exits ~500ms later, so the response reaches the browser; the
-dashboard then waits for `/healthz` and reloads, and tells you plainly if it does
-not come back within 30 seconds.
+Restart latency is therefore up to one loop pass: about 30s for the scheduler
+(`SCHEDULER_INTERVAL_SECONDS`) and 15s for the processor. The uploader checks
+between iterations rather than mid-drain, so it finishes the queues it is
+currently draining before exiting — with a deep upload backlog that can be
+minutes, and that is the right trade: it means the process never exits holding a
+task lease, so no upload is abandoned half-done for the sweeper to reclaim. The
+API answers `202` and exits ~500ms later, so the response reaches the browser;
+the dashboard then waits for `/healthz` and reloads, and tells you plainly if it
+does not come back within 30 seconds.
 
 Every restart is audited with the actor and the target (`action:
 sysops.restart`).
@@ -1922,7 +1925,10 @@ The zip may contain a built extension (`manifest.json` + `index.mjs`) or the
 TypeScript source (`manifest.json` + `index.ts` / `src/`), which is built here with
 the same esbuild invocation the webhook uses. Zipping the folder itself rather
 than its contents is fine — the wrapper directory is unwrapped. A pre-v2 python
-bundle is refused with the porting message, as everywhere else.
+bundle is refused with the porting message, as everywhere else. Everything an
+uploaded or fetched archive is checked for before any of that happens is in
+§"What bundle intake does and does not protect against" below — read it before
+handing anyone `bundles:write`.
 
 For `install-github`, the ref is resolved to a real commit sha before anything is
 downloaded, so the new bundle records provenance and the "is it behind?" check
@@ -1956,6 +1962,83 @@ If the list comes back `available: false`, the docs were not copied into the ima
 (a custom build that dropped the `COPY docs ./docs` line, or a wrong `DOCS_PATH`).
 Everything else keeps working; you just read the docs on GitHub until the next
 build.
+
+---
+
+## What bundle intake does and does not protect against
+
+Both install paths — the zip an operator uploads and the archive fetched from
+GitHub — go through one intake (`platform/src/core/sysops/bundleIntake.ts`)
+before anything is written to disk or built. A repository is not treated as more
+trustworthy than an upload: the zipball is written by anyone who can push to that
+repo and arrives over the network.
+
+### What it stops
+
+| Class | What is refused |
+|---|---|
+| Decompression bombs | Per-file cap (10 MB), total cap (50 MB), entry count (2,000 in the extension, 20,000 in the archive), and a 200:1 ratio ceiling. Bytes are counted **as they are decompressed** — `zlib` is given a hard output ceiling, so an entry that declares 12 bytes and expands to 8 GB aborts mid-inflate. The declared sizes in the archive are checked first only because a cheap refusal is better than an expensive one; they are never believed. |
+| Nested archives | Refused by extension and by magic bytes (zip, gzip, bzip2, xz, 7z, rar, zstd, tar). A bundle has no reason to contain one, and one inside another defeats the ratio accounting. |
+| Zip slip / traversal | Names are normalised (backslashes, percent-encoding, `.` and `..` segments) before any path is built; absolute paths and drive letters are refused rather than stripped; the resolved path is re-checked against the extraction root immediately before the write. |
+| Symlinks and special files | Refused from the unix mode in the archive, not from the name — a symlink entry looks exactly like a small text file whose contents are a path, and honouring one is how an "extraction" writes somewhere else. |
+| Executables | An extension is source and data: only `.mjs`, `.js`, `.ts`, `.json`, `.proto`, `.md`, `.txt` and the paths the manifest declares in `data_files` are accepted, and every file is additionally sniffed for ELF/Mach-O/PE/wasm/dex magic and for a shebang. `manga_id_map.json` containing an ELF header is refused. |
+| Archive permissions | Never preserved. Everything is written `0600` into a `mkdtemp` directory (`0700`), so nothing extracted is executable and nothing else on the host can read it. An entry marked executable is refused outright. |
+| Dependency expectations | `node_modules/`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock` and dotfiles (`.npmrc`, `.git/`) are refused **with an explanation**, because nothing here installs dependencies and silently ignoring them would publish a bundle whose imports cannot resolve. |
+| Lifecycle scripts | No package manager is ever invoked — not npm, not pnpm, not yarn. There is no code path from intake to a lifecycle script, which is the only real guarantee that a `scripts.postinstall` in an uploaded `package.json` stays inert. A test asserts the sentinel file it would create does not appear. |
+| Third-party imports | A bare import fails the build with `dependency X cannot be resolved; extensions must be dependency-free or vendored`. Nothing is fetched. |
+| Build resource abuse | esbuild runs in a subprocess with a 30s wall clock, a 256 MB heap ceiling, its own process group (so a timeout kills esbuild's Go child too), cwd set to the extraction directory, and **no inherited environment** — this process holds `DATABASE_URL`, `ADMIN_TOKEN`, `GITHUB_TOKEN` and the MangaDex credentials, and none of it belongs near a build of code someone uploaded. |
+
+Every accepted and every refused archive is audited with its sha256, byte size,
+entry count and (for a refusal) the reason and the refusal code:
+
+```bash
+# what has been refused, and why
+curl -sH "Authorization: Bearer $ADMIN_TOKEN" \
+  "https://publoader.ardax.dev/api/v1/admin/audit/search?action=bundle.intake.refused" | jq
+```
+
+Two limits live on the endpoint rather than in the intake: the request body is
+capped at 8 MiB (a real extension is tens of kilobytes), and publishing is
+rate-limited **per credential** — six bursts, refilling one every two minutes —
+so a leaked `bundles:write` token cannot be used to grind the builder.
+
+### What it does not stop
+
+Be clear about this, because the checks above can read as more than they are.
+
+**Intake stops malformed and hostile ARCHIVES. It does not stop hostile INTENT in
+a well-formed extension.** Code that passes every check is still code, and an
+extension that is valid TypeScript with no dependencies can still be written to
+do something you did not want.
+
+What limits that is not intake, it is where extension code runs and what it is
+allowed to do:
+
+- the control plane **never executes** extension code. Publishing stores bytes
+  and builds them; running them happens on workers.
+- a worker runs the bundle under Node's permission model with no filesystem
+  writes, no subprocesses, and network egress limited to the `allowed_hosts` its
+  manifest declares. See [security-trust-model.md](security-trust-model.md).
+- results are not trusted either: ingest validates every envelope against the
+  manifest and the database, and quarantines what fails
+  (§"Quarantine triage" above).
+
+So the realistic residual risk from a malicious-but-well-formed extension is that
+it scrapes within its declared hosts and fabricates results — which is a
+quarantine and review problem, not an intake one.
+
+Two practical consequences:
+
+- **`bundles:write` is a trusted scope.** It means "may change the code every
+  worker executes". Hold it to operators; do not put it on a bot token that only
+  needed to read stats. The dashboard's install controls sit behind it, and the
+  audit trail names whoever used them.
+- **An anti-virus scan of the uploaded artifact would be a reasonable addition**
+  and is deliberately not implemented: it would mean a scanner dependency and a
+  signature database inside the control plane, which is a larger commitment than
+  it looks. The hook point is the intake's accepted-archive path in
+  `install-upload` — the archive bytes and their sha256 are already in hand there
+  — so adding a scan later is a local change and not a redesign.
 
 ---
 

@@ -21,6 +21,24 @@ import AdmZip from "adm-zip";
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
 
 /**
+ * Validate a query string and answer 400, not 500, when it is wrong.
+ *
+ * A bare `schema.parse` throws a ZodError, which nothing maps, so `?limit=9999`
+ * came back as an internal error — a client mistake reported as a server fault.
+ * Same helper as routes/ops.ts, routes/queues.ts and routes/sysops.ts; the
+ * duplication is theirs and is not worth a shared module for nine lines.
+ */
+function parseOrThrow<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infer<S> {
+  const result = schema.safeParse(value);
+  if (result.success) return result.data;
+  const issue = result.error.issues[0];
+  const where = issue && issue.path.length > 0 ? issue.path.join(".") : "request";
+  throw Object.assign(new Error(`invalid ${where}: ${issue?.message ?? "validation failed"}`), {
+    statusCode: 400,
+  });
+}
+
+/**
  * The audit subject for one tracked mapping. The default id space keeps the
  * `extension:mangaId` form every existing audit row uses; a namespaced row adds
  * the catalogue, because `709` alone does not identify a series once viz has
@@ -747,8 +765,8 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
      * would otherwise be able to swap places between pages.
      */
     scope.get("/api/v1/admin/audit", { preHandler: requireScope("audit:read") }, async (req, reply) => {
-      const query = z
-        .object({
+      const query = parseOrThrow(
+        z.object({
           id: z.string().max(64).optional(),
           actor: z.string().max(128).optional(),
           action: z.string().max(128).optional(),
@@ -760,8 +778,9 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           cursor: z.string().max(64).optional(),
           offset: z.coerce.number().int().min(0).max(100_000).default(0),
           limit: z.coerce.number().int().min(1).max(500).default(100),
-        })
-        .parse(req.query ?? {});
+        }),
+        req.query ?? {},
+      );
 
       const insensitive = { mode: "insensitive" } as const;
       const where: Prisma.AuditEventWhereInput = {
