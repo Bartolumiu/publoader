@@ -356,6 +356,30 @@ means the database was built by `prisma db push` or restored from a dump rather
 than migrated, so pending migrations cannot be computed — expect that on a dev
 stack, never on production.
 
+**If you deployed one service by hand, use `--force-recreate`.** Observed on this
+stack: after a container had been created by a `--no-deps` deploy, a subsequent
+plain `docker compose up -d core-api` brought it back attached to only `edge`,
+not `edge` **and** `data`, even though the compose file declares both. The
+symptom is a service that will not start, looping on
+
+```
+PrismaClientInitializationError: Can't reach database server at `postgres:5432`
+```
+
+while `docker ps` shows postgres up and healthy — because the two containers are
+on networks that cannot see each other. `data` is `internal: true`, so there is
+no route to fall back on. Check with:
+
+```bash
+docker inspect publoader-prod-core-api-1 \
+  --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}'
+# want: publoader-prod_data publoader-prod_edge
+```
+
+and repair with `docker compose up -d --force-recreate core-api`. The general
+lesson is the same as above: hand-deploying a single service skips the
+guarantees `docker compose up -d` gives you, so verify what you get.
+
 **Rolling back a core upgrade** is only safe if the migration was additive. If
 it was not, restore from backup (below) — which is why you take one before a
 schema-changing upgrade.
