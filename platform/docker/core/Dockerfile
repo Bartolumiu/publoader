@@ -62,7 +62,7 @@ WORKDIR /build
 # Dependency install is its own layer keyed only on the manifests, so editing
 # src/ does not re-download the dependency tree.
 FROM base AS deps
-COPY package.json pnpm-lock.yaml ./
+COPY platform/package.json platform/pnpm-lock.yaml ./
 # --frozen-lockfile: fail rather than silently resolve a different tree than
 # the one reviewed (§8). This REQUIRES pnpm-lock.yaml to be committed; if the
 # build errors with "no lockfile found", generate it with `pnpm install` in
@@ -76,9 +76,9 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 # prisma generate + tsc. Both need devDependencies, neither belongs in the
 # runtime image.
 FROM deps AS build
-COPY tsconfig.json ./
-COPY prisma ./prisma
-COPY src ./src
+COPY platform/tsconfig.json ./
+COPY platform/prisma ./prisma
+COPY platform/src ./src
 # Generates node_modules/.prisma/client against the committed schema. Runs
 # before tsc because the TypeScript in src/ imports the generated types.
 RUN pnpm exec prisma generate
@@ -175,7 +175,20 @@ ENV NODE_ENV=production \
 COPY --from=prune --chown=root:root /build/node_modules ./node_modules
 COPY --from=build --chown=root:root /build/dist ./dist
 COPY --from=build --chown=root:root /build/prisma ./prisma
-COPY --chown=root:root package.json ./
+COPY --chown=root:root platform/package.json ./
+# The docs the dashboard serves (GET /api/v1/admin/docs). They live at the repo
+# root because they document the whole project, not just platform/ — which is
+# why this image's build context is the repo root rather than platform/.
+#
+# The API finds this directory by walking up from its own module, so /app/docs is
+# what makes the "Read the docs" view work in the container (see
+# core/sysops/docsStore.ts; DOCS_PATH overrides the search). An EMPTY or absent
+# directory is reported as "not shipped with this build" rather than as "there is
+# no documentation" — so a build that drops this line degrades honestly, but it
+# does drop the feature.
+COPY --chown=root:root docs ./docs
+# Fail here rather than serving an empty docs list in production.
+RUN test -n "$(ls -A ./docs 2>/dev/null)" || (echo "no docs/ in the runtime image" >&2; exit 1)
 
 # Everything is owned by root and only readable by the service account: the
 # process can execute its own code but cannot rewrite it, which is what makes

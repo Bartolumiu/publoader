@@ -163,6 +163,7 @@ export class JobExecutor {
             // mangaIdMap into the workdir and serves it to the extension in
             // place of the bundle's own manga_id_map.json.
             mangaIdMap: job.mangaIdMap ?? {},
+            mangaIdMapNamespaced: job.mangaIdMapNamespaced ?? false,
             overrideOptions: job.overrideOptions ?? {},
           },
           null,

@@ -90,6 +90,27 @@ const ConfigSchema = z.object({
   githubToken: z.string().optional(),
   githubApiUrl: z.string().default("https://api.github.com"),
 
+  // Operator self-service (core-api only). See docs/operations.md §"Self-service".
+  /**
+   * Where the shipped documentation lives, for the dashboard's docs viewer.
+   * Empty means "look for a `docs/` directory next to the build", which is
+   * correct both in the container (/app/docs) and from a source checkout.
+   */
+  docsPath: z.string().default(""),
+  /**
+   * Whether the restart endpoint may exit the process.
+   *
+   * Restart is implemented as a graceful self-exit and depends entirely on the
+   * container runtime starting the service again (`restart: unless-stopped`).
+   * Set this false wherever that policy is absent — a bare `docker run` or a
+   * `docker compose up` with no restart policy — so the button refuses instead
+   * of taking the service down for good.
+   */
+  sysopsRestartEnabled: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
+
   // Worker agent settings (worker process only)
   coreUrl: z.string().optional(),
   workerToken: z.string().optional(),
@@ -149,6 +170,8 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): Con
     githubCoreRepo: get("GITHUB_CORE_REPO"),
     githubToken: get("GITHUB_TOKEN"),
     githubApiUrl: get("GITHUB_API_URL"),
+    docsPath: get("DOCS_PATH"),
+    sysopsRestartEnabled: get("SYSOPS_RESTART_ENABLED"),
     coreUrl: get("CORE_URL"),
     workerToken: get("WORKER_TOKEN"),
     enrollToken: get("ENROLL_TOKEN"),

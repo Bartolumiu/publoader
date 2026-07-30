@@ -41,10 +41,22 @@ export const MangaRecord = z
 export type MangaRecord = z.infer<typeof MangaRecord>;
 
 /**
- * Extension override options, preserved verbatim from the Python contract:
+ * Extension override options as they travel on the WIRE, preserved verbatim
+ * from the Python contract:
  * - same: master chapter id -> alternate ids that are the same chapter
  * - multi_chapters: chapter id -> chapter numbers it legitimately maps to
- * - custom_language: extension language code -> MangaDex language code
+ * - custom_language: extension-chosen key -> MangaDex language code
+ *
+ * At rest those three are tables, not a document — see
+ * src/core/store/extensionConfig.ts, which is the only thing that writes them
+ * and the only thing that decides which rows are acceptable. This schema stays
+ * deliberately TOLERANT because it also validates worker envelopes: the
+ * processor ignores the copy a worker reports (configuration authority is the
+ * database, see ProcessorService.loadOverrideOptions), so rejecting an envelope
+ * over a stale bundle's typo would quarantine a run's real results to no end.
+ * Validation that refuses bad data belongs on the admin write path, where an
+ * operator sees the rejection; `custom_language` values are checked against
+ * src/contracts/languages.ts there.
  */
 export const OverrideOptions = z
   .object({

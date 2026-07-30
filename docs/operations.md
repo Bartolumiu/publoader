@@ -623,6 +623,284 @@ tails a log file.
 
 ---
 
+## Queue management
+
+The section above is triage: look at a stuck task, retry it, cancel it. This one
+is the rest of the job — acting on many rows at once, emptying a queue, changing
+what runs next, and queueing or correcting a chapter by hand. Everything here
+lives under `/api/v1/admin/queues`, needs `runs:write` (`runs:read` to look),
+and is audit-logged with the acting principal.
+
+```bash
+API=https://publoader.ardax.dev
+AUTH="authorization: Bearer $ADMIN_TOKEN"
+```
+
+**Two rules hold everywhere in this section, and they are not configurable.**
+
+1. **A `LEASED` row is untouchable.** The lease means `core-uploader` is
+   mid-flight against MangaDex right now. Every endpoint below refuses one, and
+   the refusal names the lease id so you can find it in the uploader's logs. The
+   only safe interactions are to wait for the lease to expire (the sweeper
+   requeues it) or to stop the work upstream. If you are tempted to force it:
+   forcing a leased row races that process into either a duplicate chapter on
+   MangaDex or a result that is silently lost.
+2. **A `DONE` row is load-bearing.** See "Deleting a DONE row" below before you
+   delete one.
+
+### Look at a queue
+
+```bash
+# depth per kind and state, nothing else
+curl -fsS "$API/api/v1/admin/queues" -H "$AUTH"
+
+# the queue in the order it will actually drain
+curl -fsS "$API/api/v1/admin/queues/tasks?kind=UPLOAD&state=PENDING&limit=50" -H "$AUTH"
+
+# everything that gave up, oldest first, with the failure text
+curl -fsS "$API/api/v1/admin/queues/tasks?state=FAILED&state=DEAD_LETTER" -H "$AUTH"
+
+# one series' worth: dedupeKey is a case-insensitive substring
+curl -fsS "$API/api/v1/admin/queues/tasks?dedupeKey=1234%7C&attemptMin=3" -H "$AUTH"
+```
+
+This list is ordered by `notBefore` — the same ordering `core-uploader` claims
+in — so it answers *what runs next*. `GET /api/v1/admin/upload-tasks` (the older
+endpoint) orders the same rows by `updatedAt` and answers *what changed last*.
+Both are useful; do not mistake one for the other when checking a reorder.
+
+Paging is by cursor, not offset: `notBefore` changes constantly as the queue
+drains, so an offset page would skip and repeat rows. Pass the `nextCursor` from
+the previous response back as `?cursor=`. The `summary` is always global, so a
+narrow filter cannot hide a queue that is backing up, and `total` counts the
+whole filtered set rather than the page.
+
+`chapter` is omitted from the list (it is large and worker-supplied). Fetch one
+row to see it: `GET /api/v1/admin/queues/tasks/<id>`.
+
+### Retry in bulk
+
+Retry moves `FAILED`/`DEAD_LETTER` back to `PENDING`, resets `attempt` to 0, and
+makes the task due immediately. The budget reset is deliberate: you are
+asserting the cause is fixed, and leaving `attempt` at `maxAttempts` would
+dead-letter the task again on the first hiccup.
+
+```bash
+# by id
+curl -fsS -X POST "$API/api/v1/admin/queues/retry" -H "$AUTH" \
+  -H 'content-type: application/json' \
+  -d '{"ids":["<id>","<id>"]}'
+
+# everything that gave up on one queue — a filter is intersected with
+# FAILED/DEAD_LETTER, so this does not touch pending or completed rows
+curl -fsS -X POST "$API/api/v1/admin/queues/retry" -H "$AUTH" \
+  -H 'content-type: application/json' \
+  -d '{"filter":{"kind":"UPLOAD"}}'
+```
+
+Bulk calls always answer `200` with one result per requested id, plus `changed`
+and `refused` counts. Read `results`, not the status code: a select-all over 200
+rows where three are leased is a success with three skips. The single-row route
+(`POST /queues/tasks/<id>/retry`) answers `409` instead, which is what you want
+when you named one row.
+
+More than 1000 matching rows are capped; the response says `capped: true` and
+you call again.
+
+### Remove rows
+
+Remove deletes the row outright — there is no undo and no archive. It needs
+`confirm: true`, and it refuses `LEASED` always and `DONE` unless you also pass
+`includeCompleted: true`.
+
+```bash
+# one row
+curl -fsS -X DELETE "$API/api/v1/admin/queues/tasks/<id>" -H "$AUTH" \
+  -H 'content-type: application/json' -d '{"confirm":true}'
+
+# many
+curl -fsS -X POST "$API/api/v1/admin/queues/remove" -H "$AUTH" \
+  -H 'content-type: application/json' \
+  -d '{"ids":["<id>","<id>"],"confirm":true}'
+```
+
+The response names every row it deleted (id, kind, dedupe key, prior state), and
+so does the audit event — after the statement runs, that log line is the only
+record those rows ever existed.
+
+**Remove or cancel?** `POST /api/v1/admin/upload-tasks/<id>/cancel` marks the row
+`DONE` with an operator note in `lastError`, which keeps the dedupe slot occupied
+and so keeps the chapter from being re-enqueued by the next run. Removal frees
+the slot. Prefer **cancel** for "this chapter should never be uploaded" and
+**remove** for "this row is junk and I want the queue clean".
+
+### Purge a queue
+
+Purge empties a queue by kind and/or state. `dryRun` defaults to **true**, and
+that default is the safety property: a first call — including one from a client
+that forgot the field — reports what would go and writes nothing at all, not even
+an audit row.
+
+```bash
+# 1. see what it would take
+curl -fsS -X POST "$API/api/v1/admin/queues/purge" -H "$AUTH" \
+  -H 'content-type: application/json' \
+  -d '{"kind":"DELETE","state":"DEAD_LETTER"}'
+# -> {"dryRun":true,"matched":412,"wouldDelete":412,"protectedRows":0,
+#     "breakdown":[...],"sample":[...20 rows...]}
+
+# 2. take it
+curl -fsS -X POST "$API/api/v1/admin/queues/purge" -H "$AUTH" \
+  -H 'content-type: application/json' \
+  -d '{"kind":"DELETE","state":"DEAD_LETTER","dryRun":false,"confirm":true}'
+```
+
+`dryRun: false` without `confirm: true` is a 400. `matched` counts everything
+your filter selects and `wouldDelete` counts what may actually go, so
+`protectedRows` shows how many leased or completed rows are in your filter but
+not in the delete set. Purges are capped at 5000 rows per call and the response
+says how many are left.
+
+Asking to purge a protected state is a 400 that says why, rather than a cheerful
+"0 deleted": `{"state":"LEASED"}` is never purgeable, and `{"state":"DONE"}`
+needs `includeCompleted: true`.
+
+### Reorder: what runs next
+
+The queue has no priority column. It is ordered by `notBefore` — the claim query
+reads `WHERE state = 'PENDING' AND not_before <= now() ORDER BY not_before ASC`,
+so that one timestamp is both the readiness gate and the sort key. Reordering is
+therefore just rewriting it, which needs no schema change and leaves exactly one
+field deciding order.
+
+```bash
+reorder() {
+  curl -fsS -X POST "$API/api/v1/admin/queues/reorder" -H "$AUTH" \
+    -H 'content-type: application/json' -d "$1"
+}
+
+# these three run next, in this order
+reorder '{"ids":["<a>","<b>","<c>"],"mode":"front"}'
+
+# get out of the way of everything else
+reorder '{"ids":["<id>"],"mode":"back"}'
+
+# keep their place in the queue, fix their order among themselves
+reorder '{"ids":["<ch1>","<ch2>","<ch3>"],"mode":"sequence"}'
+
+# not for the next hour (rate-limited by the publisher, say)
+reorder '{"ids":["<id>"],"mode":"defer","deferSeconds":3600}'
+```
+
+| Mode | Effect |
+|---|---|
+| `front` | Claimed next, in the order given, and due immediately even if the rest of the queue is backing off into the future. |
+| `back` | Behind every other pending row. |
+| `sequence` | The group keeps its slot in the queue; only its internal order changes. Use this to make chapter 1 upload before chapter 2. |
+| `defer` | Each row pushed `deferSeconds` further out, measured from now for a row that is already due. |
+
+`PENDING` only. A `FAILED` or `DEAD_LETTER` row is not in the queue at all, so
+its `notBefore` means nothing until you retry it — reordering one is refused with
+`wrong_state`. The response's `ordered` array is the resulting claim order, so
+you can verify the change rather than trust it.
+
+### Queue a chapter by hand
+
+`POST /api/v1/admin/queues/tasks` creates a task from a chapter payload you
+supply. **This is the sharpest tool in the API**: an `UPLOAD` row queued here
+will, within minutes, create a real chapter on MangaDex under the group in the
+payload. It requires the `ADMIN` role or above (not just `runs:write`) and the
+whole payload goes into the audit log.
+
+```bash
+curl -fsS -X POST "$API/api/v1/admin/queues/tasks" -H "$AUTH" \
+  -H 'content-type: application/json' -d '{
+    "kind": "UPLOAD",
+    "chapter": {
+      "chapterId": "src-4001", "chapterNumber": "12", "chapterLanguage": "en",
+      "chapterTitle": "A Title", "chapterUrl": "https://example.com/12",
+      "mdMangaId": "<mangadex manga uuid>", "mdGroupId": "<group uuid>",
+      "mangaName": "Test Series", "extensionName": "mangaplus",
+      "imageArtifacts": ["<artifact uuid>", "..."]
+    }
+  }'
+```
+
+Required fields, by kind — a payload missing them is a 422 listing every problem
+at once, because each one is an error the uploader would otherwise raise *after*
+claiming the task and, for `UPLOAD`, after opening a MangaDex upload session:
+
+| Kind | Needs | Dedupe key |
+|---|---|---|
+| `UPLOAD` | `mdMangaId`, `mdGroupId`, `chapterLanguage` | `chapterId\|chapterNumber\|chapterLanguage` |
+| `EDIT` | `mdChapterId`, plus a non-empty `payload` object (the fields to change) | `mdChapterId` |
+| `DELETE` | `mdChapterId` | `mdChapterId` |
+| `UNAVAILABLE` | `mdChapterId` | `mdChapterId` |
+
+The dedupe key is derived by the same rule the processor uses, and page
+artifacts are checked to exist before the row is written. A duplicate is a 409
+naming the task that already holds the slot — that unique `(kind, dedupeKey)`
+constraint is exactly what makes a double upload impossible, so there is no flag
+to override it. If you genuinely need to re-upload a chapter, deal with the
+existing row first (retry it, or remove it and understand the note below).
+
+`UPLOAD` without `imageArtifacts` is legal and produces an external-only
+chapter — the same thing the pipeline creates for a publisher whose pages we do
+not host. That is rarely what you meant when queueing by hand.
+
+### Correct a queued task
+
+```bash
+curl -fsS -X PATCH "$API/api/v1/admin/queues/tasks/<id>" -H "$AUTH" \
+  -H 'content-type: application/json' \
+  -d '{"chapter":{"chapterTitle":"Fixed"},"notBefore":"2026-08-01T00:00:00Z","maxAttempts":9}'
+```
+
+`PENDING` only — a leased task is being executed and a `DONE` or dead one is
+history. `chapter` is a shallow merge, so you can fix one field without
+restating the payload; send `null` to clear a field. If the edit changes an
+identity field the dedupe key is recomputed, and a collision with another task's
+key is a 409 rather than a silent overwrite. A `FAILED` row must be retried
+first, which returns it to `PENDING`.
+
+### Deleting a DONE row
+
+A `DONE` upload task plus its `upload_logs` rows are what make reprocessing
+idempotent, and they work in that order:
+
+- The `DONE` row occupies the unique `(kind, dedupeKey)` slot, so the next run's
+  enqueue for that chapter is a no-op. **This is the first line of defence.**
+- The `COMMITTED` upload log carries the MangaDex chapter id. If a chapter is
+  enqueued again anyway, the uploader finds that log, re-checks the chapter still
+  exists on MangaDex, and skips. **This is the second, and it only exists on the
+  `UPLOAD` path.**
+
+So deleting a `DONE` row removes the first defence. For `UPLOAD` the second one
+usually catches it; for `EDIT`, `DELETE` and `UNAVAILABLE` there is nothing, and
+the task simply runs again against MangaDex. That is why `includeCompleted: true`
+is required on top of `confirm: true`, and why the response says so out loud.
+
+Delete `DONE` rows when you are pruning old completed work you are certain will
+never be re-derived, or when you deliberately want a chapter reprocessed and have
+checked what that will do. Do not delete them to "clean up the queue" — a `DONE`
+row costs one row and buys idempotency.
+
+### What the older endpoints still do
+
+`/api/v1/admin/upload-tasks/*` (documented in the triage section above) is not
+superseded and is not going away:
+
+| Need | Endpoint |
+|---|---|
+| What changed last, one filtered page | `GET /admin/upload-tasks` |
+| What runs next, filtered, paged, with a total | `GET /admin/queues/tasks` |
+| Retry one | either (`/admin/upload-tasks/<id>/retry`, `/admin/queues/tasks/<id>/retry`) |
+| Abandon a chapter, keeping its dedupe slot | `POST /admin/upload-tasks/<id>/cancel` |
+| Reclaim expired leases now | `POST /admin/upload-tasks/requeue-stale` |
+| Everything else on this page | `/admin/queues/*` |
+
+---
+
 ## Clear a bad MangaDex session
 
 The MangaDex token pair lives in the `settings` table (`mdauth_access` /
@@ -772,6 +1050,94 @@ configured.
 
 **Approval is not reversible from here.** There is no un-create — deleting a
 MangaDex title is a MangaDex-side operation. Read the row before approving.
+
+### Correct a row before approving it
+
+What the extension scraped is not always right: a mangled name, a title keyed to
+the wrong language, a source URL that moved. Approve and skip used to be the
+whole vocabulary, so the only way to fix a bad row was to skip it and hope the
+next run reported it better.
+
+```bash
+# What is on the row, and what MangaDex currently says about it.
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "$CORE_URL/api/v1/admin/untracked/$ID" | jq
+
+# Correct any of the three scraped fields. Local only — nothing is sent to
+# MangaDex by this call, ever.
+curl -s -X PATCH -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"mangaName":"Correct Name","mangaLanguage":"ja","mangaUrl":"https://example.com/series/9"}' \
+  "$CORE_URL/api/v1/admin/untracked/$ID" | jq
+
+# Then approve as usual: the title is created from the corrected values.
+padmin untracked approve $ID
+```
+
+`PATCH` refuses more than it accepts, because all three fields escape this
+platform — the name becomes a public MangaDex title and a Discord embed, and
+`mangaUrl` becomes `links.raw` on the catalogue entry:
+
+| Refusal | Why |
+|---|---|
+| 400 unknown language | Checked against the MangaDex allowlist (`src/contracts/languages.ts`), not a shape. `PT-BR` is accepted and stored as `pt-br`. |
+| 400 host not allowed | The URL must be in the extension manifest's `allowed_hosts` — the same allowlist the sandbox holds the extension to. |
+| 400 bad scheme / blank name / unknown field | A misspelled field name is an error, not an edit that changed nothing. |
+| 409 row is `CREATING` | A title service instance has claimed it and is calling MangaDex. Wait for it to land. |
+| 409 no published bundle | Without a manifest there is no `allowed_hosts` to check the URL against. Publish or un-yank a bundle first. |
+| 409 duplicate | `(extension, mangaId, mangaLanguage)` is unique; correcting the language collided with another row. Skip one of the two. |
+
+A language outside the extension's manifest `languages` is a **warning**, not a
+refusal — a series' name in its original language is legitimate. The warning
+comes back in `warnings[]`.
+
+### Fix a MangaDex title this pipeline already created
+
+A wrong title created by this platform is a wrong title on a public catalogue,
+so the correction has to reach MangaDex. It is a separate, explicit step:
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "$CORE_URL/api/v1/admin/untracked/$ID/apply-to-mangadex" | jq
+# -> {"ok":true,"applied":true,"titleUrl":"https://mangadex.org/title/…",
+#     "changes":[{"field":"title","from":{"en":"Mangled Nmae"},"to":{"ja":"正しい"}}]}
+```
+
+**This needs the ADMIN role, not just `untracked:write`.** A CONTRIBUTOR may
+correct rows all day and is refused here, with the reason in the response —
+editing a public entry under the platform's shared MangaDex account is a
+different act from fixing a local row. The dashboard disables the control and
+shows the same reason.
+
+What it sends, and what it deliberately does not:
+
+- **Only the fields that changed.** A title's description, authors, tags and
+  cover are absent from the request and survive it untouched. This matters most
+  for a title the pipeline did not create but was pointed at (see
+  `tracked set`), where those fields are somebody's curation.
+- **`title` and `links` are merged, not rebuilt.** MangaDex replaces whatever is
+  sent, so sending a bare `{"links":{"raw":…}}` would delete an entry's AniList
+  and MangaUpdates links. The one deliberate deletion: when the entry carries
+  exactly one name and the language was corrected, the name **moves** rather
+  than leaving the mangled one behind as an alternative title. An entry with
+  several names keeps them all and the response says so in `notes[]`.
+- **The version MangaDex currently holds**, read in the same request. A 409
+  `version-conflict` means somebody edited the entry in between; re-read the row
+  (`GET` shows the live fields) before deciding, because re-sending would clobber
+  their change. It is never retried automatically.
+
+Other answers: 409 `no-md-title` (nothing created yet — approve instead), 409
+`title-missing` (deleted or merged on MangaDex), 502 `rejected` (MangaDex
+refused a well-formed edit; its complaint is in `error` and on the row's
+`lastError`), 503 (this API instance holds no MangaDex credentials).
+
+`GET /api/v1/admin/untracked/:id` is the whole picture for one row:
+`mangadex` is the live entry, `pendingChanges` is exactly what an apply would
+send, and `appliedToMangaDex` is the last apply (who and when, from the audit
+log — `untracked.edit` and `untracked.mangadex_apply` are both recorded against
+the row id, so `padmin audit search --subject $ID` is the history). A MangaDex
+outage degrades this to `mangadex: null` plus `mangadexError` rather than
+failing the request: correcting the local row does not need MangaDex.
 
 ### Triaging `FAILED`
 
@@ -1440,6 +1806,156 @@ it costs is image size and one well-maintained package's CVE surface.
 Restoring is host-side regardless of any of this: it requires stopping the
 services that would write during it, and nothing that can take the API down
 should be reachable through the API.
+
+---
+
+## Self-service: fetch, restart, install, read
+
+Four things used to need a shell on the core host. They are all on the dashboard's
+**System** section now, and each has a caveat worth knowing before you press it.
+
+### Fetch the latest extension code from GitHub
+
+**Check GitHub for changes** compares the commit each live bundle was built from
+(`bundles.source_commit`) against the default-branch HEAD of every repo in
+`GITHUB_EXTENSIONS_REPOS`, and **Fetch and publish** builds and publishes the ones
+that are behind — the same download, the same esbuild step and the same
+`BundleStore.publish` the push webhook runs, so a bundle published by this button
+and one published by a push to the same commit are byte-identical.
+
+```bash
+# read-only
+curl -sH "Authorization: Bearer $ADMIN_TOKEN" \
+  https://publoader.ardax.dev/api/v1/admin/sysops/github/status | jq
+
+# what would happen, without doing it
+curl -sX POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"dryRun":true}' \
+  https://publoader.ardax.dev/api/v1/admin/sysops/github/sync | jq '.outcomes'
+```
+
+Read the `behind` field carefully, because it has three values and only one of
+them means "nothing to do":
+
+| `behind` | Meaning |
+|---|---|
+| `false` | The published commit *is* the repo HEAD. Current. |
+| `true` | HEAD has moved. `changedPaths` lists what changed under `src/<extension>/`; an empty list with HEAD moved means the repo advanced but this extension did not, so publishing would republish identical bytes. |
+| `null` | **The question could not be answered.** `reason` says why: no `GITHUB_TOKEN` for a private repo, GitHub unreachable or rate-limited, the commit force-pushed away, or a bundle published from a local directory with no `source_commit` at all. |
+
+`available: false` at the top level means the same thing for every extension —
+`GITHUB_EXTENSIONS_REPOS` unset, or none of the repos could be reached. It is
+never reported as "everything is current", because an operator who is told that
+does not look again.
+
+One failure never blocks the others: a sync answers `207` with per-extension
+outcomes when some extension fails to build, and the ones that worked are
+published. Every publish is audited with the acting operator and
+`detail.via = "sysops-github-sync"`.
+
+Anonymous GitHub reads are limited to 60/hour, so `GITHUB_TOKEN` is worth setting
+even when every repo is public — without it, a few refreshes exhaust the budget
+and the panel starts answering `null` for everything.
+
+### Restart a service
+
+**System → Restart** takes `api`, `scheduler`, `processor`, `uploader` or `all`.
+
+> **This depends entirely on the container restart policy.** A restart here is a
+> *graceful self-exit*: the service finishes what it is doing, closes its server,
+> disconnects from Postgres and exits 0. Something else has to start it again. Our
+> compose files give every core service `restart: unless-stopped`, which does
+> exactly that. A service started with `docker run` and no `--restart`, or from a
+> compose file without a restart policy, **will stay down** — the button is a stop
+> button there. Set `SYSOPS_RESTART_ENABLED=false` in such a deployment and the
+> endpoint refuses with a 503 explaining why, instead of taking the platform down.
+
+There is deliberately no Docker socket involved. Mounting `/var/run/docker.sock`
+into core-api would be the obvious implementation and it is the reason this one
+exists instead: the socket is root-equivalent access to the host, and core-api is
+reachable from the internet. It is absent from every compose file and must stay
+absent.
+
+The API can only exit *itself*. The other three services have no listening socket,
+so a restart aimed at them is recorded as a `restart_request` row in `settings`
+and each service acts on it during its next loop pass:
+
+```bash
+docker compose exec postgres psql -U publoader -d publoader \
+  -c "select key, value from settings where key like 'restart%'"
+```
+
+Two properties keep that from misfiring. It is **time-bounded**: a request older
+than 120 seconds is ignored, so a row left behind by a crash cannot restart a
+service the next morning. And it is **acknowledged per service**
+(`restart_ack_<service>`): without that, a service back up in five seconds would
+see the still-fresh request and exit again, looping for as long as the TTL.
+
+Restart latency is therefore up to one loop interval — about 30s for the
+scheduler (`SCHEDULER_INTERVAL_SECONDS`), 15s for the processor, and up to the
+current task for the uploader, which finishes the upload it is on first. The API
+answers `202` and exits ~500ms later, so the response reaches the browser; the
+dashboard then waits for `/healthz` and reloads, and tells you plainly if it does
+not come back within 30 seconds.
+
+Every restart is audited with the actor and the target (`action:
+sysops.restart`).
+
+### Install an extension that is not in a configured repo
+
+Two paths, both ending in the same builder and the same publish:
+
+```bash
+# from any repo/ref — a fork, a contributor's branch, a new source
+curl -sX POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"repo":"someone/their-extensions","ref":"main"}' \
+  https://publoader.ardax.dev/api/v1/admin/sysops/extensions/install-github | jq
+
+# from a folder on your laptop, not in git yet
+cd path/to/my-extension && zip -r /tmp/ext.zip . -x '*/node_modules/*' -x '.git/*'
+curl -sX POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/zip' \
+  --data-binary @/tmp/ext.zip \
+  https://publoader.ardax.dev/api/v1/admin/sysops/extensions/install-upload | jq
+```
+
+The zip may contain a built extension (`manifest.json` + `index.mjs`) or the
+TypeScript source (`manifest.json` + `index.ts` / `src/`), which is built here with
+the same esbuild invocation the webhook uses. Zipping the folder itself rather
+than its contents is fine — the wrapper directory is unwrapped. A pre-v2 python
+bundle is refused with the porting message, as everywhere else.
+
+For `install-github`, the ref is resolved to a real commit sha before anything is
+downloaded, so the new bundle records provenance and the "is it behind?" check
+above can answer for it later. If the repo holds several extensions the response
+lists them and asks for `path` rather than picking one.
+
+Both answer `isLatest`, which is the question that actually matters:
+
+```json
+{ "extension": "mangaplus", "version": "2.1.0", "status": "published", "isLatest": true }
+```
+
+`isLatest: false` means the bundle was stored but something published more
+recently is still what every new run pins — re-uploading last week's folder does
+that. `latest` names what is live instead.
+
+### Read the docs
+
+**System → Read the docs** serves this documentation set out of the running image
+(`/app/docs`, copied by `docker/core/Dockerfile`). It is the copy that matches the
+code you are running, which is the point: no repo checkout, no network, no
+guessing which branch the host has. `DOCS_PATH` overrides where the API looks.
+
+`GET /api/v1/admin/docs` lists what shipped and `GET /api/v1/admin/docs/<name>`
+returns one document's markdown, both behind `stats:read`. Names are validated
+against the shipped directory listing, and anything with a path separator, a
+leading dot or `..` is refused — the endpoint is a file reader exposed to the
+internet, and traversal is the risk it is built around.
+
+If the list comes back `available: false`, the docs were not copied into the image
+(a custom build that dropped the `COPY docs ./docs` line, or a wrong `DOCS_PATH`).
+Everything else keeps working; you just read the docs on GitHub until the next
+build.
 
 ---
 

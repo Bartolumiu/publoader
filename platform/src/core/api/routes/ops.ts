@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { Prisma } from "@prisma/client";
 import AdmZip from "adm-zip";
 import { z } from "zod";
@@ -13,7 +13,9 @@ import type { AppContext } from "../context.js";
 import { adminAuthHook, requireOwner, requireScope } from "../auth.js";
 import { hasScope } from "../scopes.js";
 import { sessionAuthenticator } from "../session.js";
-import { EXTENSION_NAME_RE, Manifest } from "../../../contracts/manifest.js";
+import { EXTENSION_NAME_RE, Manifest, hostAllowed } from "../../../contracts/manifest.js";
+import { normaliseMangadexLanguage } from "../../../contracts/languages.js";
+import { mangaEditPayload } from "../../md/titleService.js";
 
 /**
  * Operational visibility and triage that the legacy Discord IPC commands used
@@ -178,6 +180,44 @@ interface ActivityRow {
    * shows every sibling segment and the retry buttons.
    */
   runId?: string | null;
+}
+
+/**
+ * Membership in the MangaDex language allowlist, not a shape check.
+ *
+ * A well-formed code MangaDex does not know (`xx`) would be accepted by a regex
+ * and then rejected at apply time — after the row had been changed, by which
+ * point the operator has to undo an edit to find out what went wrong. The
+ * allowlist in src/contracts/languages.ts is the same list `custom_language`
+ * validates against, so a language is correct or refused in one place.
+ */
+const LANGUAGE_VALIDATION = "allowlist" as const;
+
+/** Titles reach a public catalogue and a Discord embed; keep them printable. */
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/;
+
+/**
+ * Second-stage guard for writes that leave this platform.
+ *
+ * `untracked:write` is deliberately in the CONTRIBUTOR scope set: working the
+ * untracked queue — correcting a mangled row, skipping a duplicate — is exactly
+ * the job that role exists for, and it is all local and reversible. Editing the
+ * MangaDex entry is a different act with a different blast radius: it changes a
+ * public catalogue, cannot be undone from here, and is attributed to the
+ * platform's shared MangaDex account rather than to the person who clicked. So
+ * it sits at ADMIN, and the 403 says why rather than just "forbidden" — a
+ * contributor who has correctly fixed a row needs to know the remaining step is
+ * someone else's, not that they did something wrong.
+ */
+const APPLY_ROLE_REASON =
+  "editing the MangaDex title requires the ADMIN role: it changes a public " +
+  "catalogue entry under the platform's MangaDex account. Correct the row and " +
+  "ask an admin to apply it.";
+
+async function requireApplyRole(req: FastifyRequest, reply: FastifyReply): Promise<void> {
+  if (req.adminRole === "CONTRIBUTOR") {
+    await reply.code(403).send({ error: APPLY_ROLE_REASON, requiredRole: "ADMIN" });
+  }
 }
 
 export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
@@ -1112,6 +1152,358 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
           })),
           tracked: trackedCount,
           untracked: Object.fromEntries(untrackedCounts.map((row) => [row.state, row._count])),
+        };
+      },
+    );
+
+    // ---- correcting an untracked series ----
+
+    /**
+     * What an extension scraped is not always right: a mangled name, a title
+     * keyed to the wrong language, a source URL that moved. Approve-or-skip was
+     * the whole vocabulary before these three routes, which meant the only way
+     * to fix a bad row was to skip it and wait for the extension to report it
+     * again — and if a title had already been created, the wrong name was
+     * already on a public catalogue with no way back through this API.
+     *
+     * The split is deliberate and load-bearing: PATCH corrects the LOCAL row and
+     * is a contributor's job; apply-to-mangadex changes a public entry and is an
+     * admin's. Nothing here touches MangaDex implicitly.
+     */
+
+    const untrackedId = z.object({ id: z.string().uuid() });
+
+    /** Manifest of the newest non-yanked bundle for an extension, or null. */
+    const manifestFor = async (extension: string): Promise<Manifest | null> => {
+      const bundle = await ctx.bundles.latest(extension);
+      if (!bundle) return null;
+      const parsed = Manifest.safeParse(bundle.manifest);
+      return parsed.success ? parsed.data : null;
+    };
+
+    /**
+     * Why the apply button must be disabled, or null when it is available.
+     * Returned by the GET so the dashboard can disable the control WITH the
+     * reason instead of letting an operator find out from a 403 — the role case
+     * in particular is not a mistake on their part and should not read like one.
+     */
+    const applyBlockedReason = (
+      req: FastifyRequest,
+      row: { mdMangaId: string | null; state: string },
+    ): string | null => {
+      if (!hasScope(req.principal!, "untracked:write")) return "missing scope: untracked:write";
+      if (req.adminRole === "CONTRIBUTOR") return APPLY_ROLE_REASON;
+      if (!row.mdMangaId) {
+        return "this row has no MangaDex title yet; approving it creates one from the corrected values";
+      }
+      if (row.state === "CREATING") return "a title creation is in flight for this row";
+      if (!ctx.titleService) {
+        return "this API instance holds no MangaDex credentials (see MD_USERNAME/MD_PASSWORD)";
+      }
+      return null;
+    };
+
+    /**
+     * One untracked row, plus what MangaDex currently says about the title it
+     * created.
+     *
+     * The live read is the point. An operator correcting a row is deciding what
+     * a public catalogue entry should say, and the scraped values in the row are
+     * the LEAST reliable description of it: the title may have been created days
+     * ago, corrected by hand on MangaDex since, or merged into another entry. So
+     * the fields come from MangaDex at request time, and `pendingChanges` says
+     * exactly what an apply would send.
+     *
+     * A MangaDex outage must not make the row unreadable — correcting the local
+     * row does not need MangaDex at all. The call failing is reported as
+     * `mangadex: null` plus `mangadexError`, and everything else still answers.
+     */
+    scope.get(
+      "/api/v1/admin/untracked/:id",
+      { preHandler: requireScope("untracked:read") },
+      async (req, reply) => {
+        const { id } = parseOrThrow(untrackedId, req.params);
+        const row = await ctx.prisma.untrackedManga.findUnique({ where: { id } });
+        if (!row) return reply.code(404).send({ error: "unknown untracked manga" });
+
+        const [manifest, lastApply] = await Promise.all([
+          manifestFor(row.extension),
+          ctx.prisma.auditEvent.findFirst({
+            where: { action: "untracked.mangadex_apply", subject: id },
+            orderBy: { createdAt: "desc" },
+            select: { actor: true, detail: true, createdAt: true },
+          }),
+        ]);
+
+        let mangadex: Record<string, unknown> | null = null;
+        let mangadexError: string | null = null;
+        let pendingChanges: unknown[] = [];
+        if (row.mdMangaId) {
+          if (!ctx.titleService) {
+            mangadexError =
+              "this API instance holds no MangaDex credentials, so the live title could not be read";
+          } else {
+            try {
+              const live = await ctx.titleService.mangadexTitle(row.mdMangaId);
+              if (!live) {
+                mangadexError = `MangaDex has no title ${row.mdMangaId}; it may have been deleted or merged`;
+              } else {
+                mangadex = {
+                  id: live.id,
+                  titleUrl: `https://mangadex.org/title/${live.id}`,
+                  titles: live.attributes.title,
+                  altTitles: live.attributes.altTitles,
+                  originalLanguage: live.attributes.originalLanguage ?? null,
+                  status: live.attributes.status ?? null,
+                  contentRating: live.attributes.contentRating ?? null,
+                  links: live.attributes.links ?? {},
+                  version: live.attributes.version,
+                };
+                pendingChanges = mangaEditPayload(live, row).changes;
+              }
+            } catch (err) {
+              mangadexError = err instanceof Error ? err.message : String(err);
+              ctx.log.warn({ err, mdMangaId: row.mdMangaId }, "live MangaDex title read failed");
+            }
+          }
+        }
+
+        const blocked = applyBlockedReason(req, row);
+        return {
+          untracked: row,
+          /** False while a create is in flight: the row is not the operator's to change. */
+          editable: row.state !== "CREATING",
+          extension: {
+            name: row.extension,
+            // Null manifest means no published, non-yanked bundle — which is
+            // also why a URL correction is refused for this row (see PATCH).
+            allowedHosts: manifest?.allowed_hosts ?? null,
+            languages: manifest?.languages ?? null,
+            autoCreateTitles: manifest?.auto_create_titles ?? null,
+            titleDefaults: manifest?.title_defaults ?? null,
+          },
+          mangadex,
+          mangadexError,
+          pendingChanges,
+          // The row is authoritative for WHETHER and WHEN, because it survives
+          // audit-log pruning; the log still supplies the detail of the last
+          // application, and answers for rows applied before those columns
+          // existed.
+          appliedToMangaDex: row.mdAppliedAt
+            ? {
+                at: row.mdAppliedAt,
+                actor: row.mdAppliedBy,
+                detail: lastApply?.detail ?? null,
+              }
+            : lastApply
+              ? { at: lastApply.createdAt, actor: lastApply.actor, detail: lastApply.detail }
+              : null,
+          canApplyToMangaDex: blocked === null,
+          applyBlockedReason: blocked,
+          languageValidation: LANGUAGE_VALIDATION,
+        };
+      },
+    );
+
+    /**
+     * Correct the scraped details on the LOCAL row. Nothing reaches MangaDex
+     * from here, including for a row that already has a title — that is the
+     * separate apply below, and conflating them would let a contributor edit a
+     * public catalogue entry by editing a database row.
+     *
+     * Every field is validated because every field escapes: the name goes into a
+     * public title and a Discord embed, and `mangaUrl` becomes `links.raw` on
+     * the MangaDex entry and a clickable link in chat. An unvalidated host there
+     * is a way to get the platform to publish a link to anywhere, attributed to
+     * its own account, so the URL is checked against the extension manifest's
+     * `allowed_hosts` — the same allowlist the sandbox enforces on the
+     * extension, applied to the operator correcting its output.
+     */
+    scope.patch(
+      "/api/v1/admin/untracked/:id",
+      { preHandler: requireScope("untracked:write") },
+      async (req, reply) => {
+        const { id } = parseOrThrow(untrackedId, req.params);
+        const body = parseOrThrow(
+          z
+            .object({
+              mangaName: z.string().min(1).max(256).optional(),
+              mangaLanguage: z.string().min(2).max(16).optional(),
+              mangaUrl: z.string().min(1).max(2048).optional(),
+            })
+            // A misspelled field name must not look like a successful edit that
+            // changed nothing.
+            .strict(),
+          req.body ?? {},
+        );
+        if (Object.keys(body).length === 0) {
+          return reply.code(400).send({ error: "nothing to change: send mangaName, mangaLanguage or mangaUrl" });
+        }
+
+        const row = await ctx.prisma.untrackedManga.findUnique({ where: { id } });
+        if (!row) return reply.code(404).send({ error: "unknown untracked manga" });
+        if (row.state === "CREATING") {
+          return reply.code(409).send({
+            error:
+              "this row is CREATING: a title service instance has claimed it and is calling " +
+              "MangaDex. Editing it now would create a title from values nobody reviewed.",
+          });
+        }
+
+        const manifest = await manifestFor(row.extension);
+        const warnings: string[] = [];
+        const data: { mangaName?: string; mangaLanguage?: string; mangaUrl?: string } = {};
+
+        if (body.mangaName !== undefined) {
+          const name = body.mangaName.trim();
+          if (name.length === 0) return reply.code(400).send({ error: "mangaName cannot be blank" });
+          if (CONTROL_CHARS_RE.test(name)) {
+            return reply.code(400).send({ error: "mangaName contains control characters" });
+          }
+          data.mangaName = name;
+        }
+
+        if (body.mangaLanguage !== undefined) {
+          const language = normaliseMangadexLanguage(body.mangaLanguage);
+          if (!language) {
+            return reply.code(400).send({
+              error:
+                `mangaLanguage ${JSON.stringify(body.mangaLanguage)} is not a language MangaDex ` +
+                `accepts (expected e.g. "en", "ja", "pt-br")`,
+            });
+          }
+          // The manifest's languages are the ones this extension is known to
+          // produce. A title in another language is unusual but legitimate (a
+          // series' name in its original language, say), so this is a warning
+          // and not a refusal — and it is returned rather than logged, because
+          // the person who typed it is the only one who can judge it.
+          if (manifest && !manifest.languages.includes(language)) {
+            warnings.push(
+              `${language} is not in ${row.extension}'s manifest languages ` +
+                `(${manifest.languages.join(", ")})`,
+            );
+          }
+          data.mangaLanguage = language;
+        }
+
+        if (body.mangaUrl !== undefined) {
+          const url = body.mangaUrl.trim();
+          let parsed: URL;
+          try {
+            parsed = new URL(url);
+          } catch {
+            return reply.code(400).send({ error: "mangaUrl is not a valid absolute URL" });
+          }
+          if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+            return reply
+              .code(400)
+              .send({ error: `mangaUrl scheme ${parsed.protocol} is not allowed (http or https only)` });
+          }
+          if (!manifest) {
+            // Without a manifest there is no allowlist to check against, and
+            // this URL can end up on a public catalogue entry. Refusing is the
+            // conservative half of that trade.
+            return reply.code(409).send({
+              error:
+                `no published bundle for ${row.extension}, so its allowed_hosts cannot be ` +
+                `checked; publish (or un-yank) a bundle before correcting the URL`,
+            });
+          }
+          if (!hostAllowed(url, manifest.allowed_hosts)) {
+            return reply.code(400).send({
+              error:
+                `mangaUrl host is not in ${row.extension}'s allowed_hosts ` +
+                `(${manifest.allowed_hosts.join(", ")}) — this URL is published on the MangaDex ` +
+                `entry and in Discord, so it has to be a host this extension actually scrapes`,
+              allowedHosts: manifest.allowed_hosts,
+            });
+          }
+          data.mangaUrl = url;
+        }
+
+        const before: Record<string, string> = {};
+        const after: Record<string, string> = {};
+        for (const [field, value] of Object.entries(data) as [keyof typeof data, string][]) {
+          if (row[field] === value) continue;
+          before[field] = row[field];
+          after[field] = value;
+        }
+        const changed = Object.keys(after);
+        if (changed.length === 0) {
+          return { ok: true, changed: [], warnings, untracked: row, mangadexNeedsApply: false };
+        }
+
+        let updated;
+        try {
+          updated = await ctx.prisma.untrackedManga.update({ where: { id }, data: after });
+        } catch (err) {
+          // (extension, mangaId, mangaLanguage) is unique, so correcting the
+          // language can collide with another row for the same series — usually
+          // the duplicate that prompted the correction in the first place.
+          if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+            return reply.code(409).send({
+              error:
+                `another untracked row already exists for ${row.extension}:${row.mangaId} in ` +
+                `${after.mangaLanguage ?? row.mangaLanguage}; skip one of the two rather than ` +
+                `making them identical`,
+            });
+          }
+          throw err;
+        }
+
+        await ctx.audit.record(actor(req), "untracked.edit", id, {
+          extension: row.extension,
+          mangaId: row.mangaId,
+          before,
+          after,
+        });
+
+        return {
+          ok: true,
+          changed,
+          warnings,
+          untracked: updated,
+          // The row and the MangaDex entry now disagree, and only an admin can
+          // reconcile them. Saying so is what stops a correction from being
+          // silently local.
+          mangadexNeedsApply: updated.mdMangaId !== null,
+          languageValidation: LANGUAGE_VALIDATION,
+        };
+      },
+    );
+
+    /**
+     * Push the corrected details onto the MangaDex title this row created.
+     *
+     * Two guards, not one. `untracked:write` says the caller may work this
+     * queue; the role check says they may change a public catalogue. A
+     * CONTRIBUTOR holds the scope and is still refused here, which is the whole
+     * reason the second guard exists (see APPLY_ROLE_REASON).
+     *
+     * Failure statuses are distinct on purpose: 409 is something the operator
+     * can resolve (no title yet, a create in flight, the entry moved under
+     * them), 502 is MangaDex refusing a well-formed request.
+     */
+    scope.post(
+      "/api/v1/admin/untracked/:id/apply-to-mangadex",
+      { preHandler: [requireScope("untracked:write"), requireApplyRole] },
+      async (req, reply) => {
+        const { id } = parseOrThrow(untrackedId, req.params);
+        if (!ctx.titleService) {
+          return reply.code(503).send({ error: "title service not available on this instance" });
+        }
+        const result = await ctx.titleService.applyToMangaDex(id, actor(req));
+        if (!result.ok) {
+          const status = result.reason === "unknown-row" ? 404 : result.reason === "rejected" ? 502 : 409;
+          return reply.code(status).send({ error: result.error, reason: result.reason });
+        }
+        return {
+          ok: true,
+          applied: result.applied,
+          mdMangaId: result.mdMangaId,
+          titleUrl: result.titleUrl,
+          changes: result.changes,
+          notes: result.notes,
         };
       },
     );

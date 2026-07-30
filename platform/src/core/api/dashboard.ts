@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FastifyInstance, FastifyReply } from "fastify";
 
@@ -13,11 +14,23 @@ import type { FastifyInstance, FastifyReply } from "fastify";
  * alongside this module (see the `build` script in package.json).
  */
 
-const ASSETS = [
-  ["index.html", "text/html; charset=utf-8"],
-  ["app.js", "text/javascript; charset=utf-8"],
-  ["style.css", "text/css; charset=utf-8"],
-] as const;
+/**
+ * Content types the dashboard directory may serve. The allowlist is by
+ * EXTENSION, and the file list is discovered from the directory at startup, so
+ * splitting the SPA into several modules needs no change here — but a file type
+ * that is not a page, a script or a stylesheet still cannot be served, and no
+ * request path is ever joined onto a filesystem path.
+ */
+const ASSET_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+};
+
+/** Must exist; anything else in the directory is optional. */
+const REQUIRED_ASSETS = ["index.html", "app.js", "style.css"] as const;
 
 /**
  * No inline scripts or styles, no external origins, and the page may not be
@@ -38,9 +51,27 @@ export const DASHBOARD_CSP = [
 
 function loadAssets(): Map<string, { body: Buffer; contentType: string }> {
   const assets = new Map<string, { body: Buffer; contentType: string }>();
-  for (const [name, contentType] of ASSETS) {
-    const path = fileURLToPath(new URL(`./dashboard/${name}`, import.meta.url));
-    assets.set(name, { body: readFileSync(path), contentType });
+  const dir = fileURLToPath(new URL("./dashboard/", import.meta.url));
+
+  // Read the directory ONCE at startup and serve only what was found then.
+  // Requests are matched against this map by exact basename, so a request can
+  // never address a file by path — traversal is not filtered, it is impossible.
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const contentType = ASSET_TYPES[extname(entry.name).toLowerCase()];
+    if (!contentType) continue;
+    assets.set(entry.name, { body: readFileSync(join(dir, entry.name)), contentType });
+  }
+
+  const missing = REQUIRED_ASSETS.filter((name) => !assets.has(name));
+  if (missing.length > 0) {
+    // A dashboard that boots without its own scripts serves a blank page and
+    // looks like an auth problem, so fail loudly at startup instead.
+    throw new Error(
+      `dashboard assets missing from ${dir}: ${missing.join(", ")}. ` +
+        "The build must copy src/core/api/dashboard alongside the compiled output " +
+        "(see the `build` script in package.json).",
+    );
   }
   return assets;
 }

@@ -127,13 +127,31 @@ export class SchedulerService {
       // — bundle data files only seed it at publish time.
       const tracked = await this.prisma.trackedManga.findMany({
         where: { extension: manifest.name },
-        select: { mangaId: true },
+        select: { namespace: true, mangaId: true },
       });
-      const mangaIds = tracked.map((t) => t.mangaId);
-      segments = computeSegments(manifest.name, opts.idempotencyKey, mangaIds, {
-        maxSegments: manifest.partition.maxSegments,
-        minMangaPerSegment: manifest.partition.minMangaPerSegment,
-      });
+      // `segmentMangaIds` is a flat list of external ids on the wire, so it
+      // cannot name WHICH catalogue an id belongs to. For an extension with more
+      // than one, `709` is ambiguous — it would either segment two different
+      // series as one or send the same id to two workers. Running the whole job
+      // unpartitioned is slower and correct; guessing is neither.
+      const namespaces = new Set(tracked.map((t) => t.namespace));
+      if (namespaces.size > 1 || (namespaces.size === 1 && !namespaces.has(""))) {
+        this.log.warn(
+          { extension: manifest.name, namespaces: [...namespaces] },
+          "extension has namespaced tracked ids; running unpartitioned because " +
+            "segmentMangaIds cannot express a namespace",
+        );
+      } else {
+        segments = computeSegments(
+          manifest.name,
+          opts.idempotencyKey,
+          tracked.map((t) => t.mangaId),
+          {
+            maxSegments: manifest.partition.maxSegments,
+            minMangaPerSegment: manifest.partition.minMangaPerSegment,
+          },
+        );
+      }
     }
 
     const { run, created } = await this.jobs.createRun({

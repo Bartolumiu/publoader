@@ -1,10 +1,11 @@
 import { Prisma, type PrismaClient, type UploadTaskKind } from "@prisma/client";
 import type { Logger } from "../../logging.js";
 import { ResultEnvelope } from "../../contracts/envelope.js";
-import { OverrideOptions, type MangaRecord } from "../../contracts/records.js";
+import { type MangaRecord } from "../../contracts/records.js";
 import { Manifest } from "../../contracts/manifest.js";
 import { uploadedChapterColumns } from "../md/chapterRows.js";
 import { chapterFromRecord, type Chapter, type MdApi, type MdChapter } from "../md/types.js";
+import { ExtensionConfigStore } from "../store/extensionConfig.js";
 import { ResultStore } from "../store/results.js";
 import { SettingsStore, type RemovalMode } from "../store/settings.js";
 import { UploadTaskStore, uploadDedupeKey } from "../store/uploadTasks.js";
@@ -67,6 +68,7 @@ export class RunProcessor {
   private readonly results: ResultStore;
   private readonly tasks: UploadTaskStore;
   private readonly settings: SettingsStore;
+  private readonly config: ExtensionConfigStore;
   /** manga id -> title; the replacement for the manga_data.json local cache. */
   private readonly mangaNames = new Map<string, string>();
   /** Per-run aggregate cache: volume backfill and the dupe sweep share it. */
@@ -82,6 +84,7 @@ export class RunProcessor {
     this.results = new ResultStore(prisma);
     this.tasks = new UploadTaskStore(prisma);
     this.settings = new SettingsStore(prisma);
+    this.config = new ExtensionConfigStore(prisma);
     this.maxRunsPerTick = options.maxRunsPerTick ?? 10;
   }
 
@@ -156,7 +159,7 @@ export class RunProcessor {
     // Override options come from extension_configs, and the tracked-manga set
     // is the union of what the database knows (including titles auto-created
     // since this run started) with what the worker reported.
-    merged.overrideOptions = await this.loadOverrideOptions(run.extension, log);
+    merged.overrideOptions = await this.loadOverrideOptions(run.extension);
     merged.trackedMangadexIds = await this.authoritativeTrackedIds(
       run.extension,
       merged.trackedMangadexIds,
@@ -334,17 +337,16 @@ export class RunProcessor {
    * arbitrarily old; worse, override options decide what counts as a duplicate
    * and which languages may stay on MangaDex, so taking them from worker
    * output would let a compromised worker steer deletions.
+   *
+   * The three relations the decision logic reads are typed tables now, so there
+   * is nothing left to validate here: a row that exists is a row the write path
+   * already accepted (an alias with exactly one master, a MangaDex language code
+   * from the allowlist). The previous safeParse-or-drop-everything behaviour
+   * could discard a whole extension's overrides over one bad key, which meant
+   * silently reverting to "no series is exempt from the removal pass".
    */
-  private async loadOverrideOptions(extension: string, log: Logger): Promise<OverrideOptionsLike> {
-    const row = await this.prisma.extensionConfig.findUnique({ where: { extension } });
-    if (!row) return {};
-
-    const parsed = OverrideOptions.safeParse(row.overrideOptions);
-    if (!parsed.success) {
-      log.error({ err: parsed.error.message }, "extension config override options are invalid");
-      return {};
-    }
-    return parsed.data as OverrideOptionsLike;
+  private async loadOverrideOptions(extension: string): Promise<OverrideOptionsLike> {
+    return this.config.loadForProcessor(extension);
   }
 
   /**

@@ -153,9 +153,62 @@ async function publishOne(
   deps: PushHandlerDeps,
   payload: PushPayload,
 ): Promise<PublishOutcome> {
+  return publishExtensionFromArchive(archive, extension, commit, deps, {
+    actor: `github:${repo}@${commit.slice(0, 7)}`,
+    via: "github-webhook",
+    ...(payload.ref ? { ref: payload.ref } : {}),
+  });
+}
+
+/**
+ * Who is publishing and by which route, for the audit entry.
+ *
+ * The webhook is not the only caller any more: the operator's "fetch latest
+ * changes" and "install this extension" actions run the same extract → build →
+ * publish path (see routes/sysops.ts). One publish path is the point — two
+ * would be two different programs producing bundles the sha256 pin claims are
+ * interchangeable — so the difference between callers is confined to this
+ * struct, which lands in the audit log rather than in the logic.
+ */
+export interface PublishAttribution {
+  /** Audit actor, e.g. `github:publoader-extensions@1a2b3c4` or `user:iam@ardax.dev`. */
+  actor: string;
+  /** `detail.via`: which path published this bundle. */
+  via: string;
+  /** Git ref, when the caller has one. */
+  ref?: string;
+}
+
+/** What publishing needs from the app context; the fetcher and clock are not used. */
+export type PublishDeps = Pick<PushHandlerDeps, "bundles" | "audit" | "log">;
+
+/**
+ * Extract one extension directory out of a repo archive and publish it.
+ *
+ * `extension` is the directory under `src/` AND the name the manifest must
+ * declare: the two disagreeing means a publish would silently write to a
+ * different extension than the caller named, which is refused rather than
+ * guessed at.
+ */
+export async function publishExtensionFromArchive(
+  archive: Buffer,
+  extension: string,
+  commit: string,
+  deps: PublishDeps,
+  attribution: PublishAttribution,
+  options: PublishFromArchiveOptions = {},
+): Promise<PublishOutcome> {
+  const from = options.subPath ?? extensionRepoPath(extension);
   const workDir = mkdtempSync(join(tmpdir(), `publoader-push-${extension}-`));
   try {
-    const files = extractSubtree(archive, extensionRepoPath(extension), workDir);
+    let files: number;
+    try {
+      files = extractSubtree(archive, from, workDir);
+    } catch (err) {
+      const detail = err instanceof RepoArchiveError ? err.message : "archive could not be read";
+      deps.log.error({ err, extension, commit }, "could not extract extension from archive");
+      return { extension, status: "failed", detail };
+    }
     if (files === 0) {
       // Every path of the extension was removed by this push. Nothing is taken
       // out of rotation here — retiring a live extension on the strength of a
@@ -163,46 +216,108 @@ async function publishOne(
       return {
         extension,
         status: "skipped",
-        detail: `src/${extension} is not present at ${commit}; if it was deleted, take it out of rotation with \`publoader-admin extensions disable ${extension}\``,
+        detail: `${from} is not present at ${commit}; if it was deleted, take it out of rotation with \`publoader-admin extensions disable ${extension}\``,
       };
     }
+    return await publishExtensionDirectory(workDir, deps, attribution, {
+      expectedName: options.requireName === false ? null : extension,
+      sourceCommit: commit,
+      origin: from,
+    });
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+}
 
-    const built = await buildExtensionBundle(workDir);
-    if (built.manifest.name !== extension) {
-      // The directory name is what the push payload told us changed; the
-      // manifest name is what the platform keys everything on. If they
-      // disagree, publishing would silently write to a different extension.
+export interface PublishFromArchiveOptions {
+  /** Repo-relative directory, when it is not the conventional `src/<extension>`. */
+  subPath?: string;
+  /**
+   * Whether the manifest must declare `extension`. The webhook needs it: the
+   * push payload names the directory, and a mismatch would publish to a
+   * different extension than the one that changed. An operator installing an
+   * explicit path has already said which directory they mean, so there the
+   * manifest is the only authority on the name.
+   */
+  requireName?: boolean;
+}
+
+export interface PublishDirectoryOptions {
+  /**
+   * Name the manifest must declare, when the caller already knows it (a repo
+   * directory name). Null accepts whatever the manifest says — the upload path,
+   * where the manifest is the only source of the name.
+   */
+  expectedName?: string | null;
+  /** Commit the directory came from, recorded on the bundle. */
+  sourceCommit?: string;
+  /** Human-readable origin for error messages, e.g. `src/mangaplus` or `upload`. */
+  origin?: string;
+}
+
+/**
+ * Build a staged extension directory into a bundle and publish it.
+ *
+ * The build (esbuild for TypeScript sources, deterministic zip) is
+ * bundleBuilder's; the acceptance rules (manifest schema, node entrypoint, no
+ * python) are BundleStore's. Everything here is bookkeeping: the name check, the
+ * audit entry, and turning a throw into an outcome an operator can read.
+ */
+export async function publishExtensionDirectory(
+  dir: string,
+  deps: PublishDeps,
+  attribution: PublishAttribution,
+  options: PublishDirectoryOptions = {},
+): Promise<PublishOutcome> {
+  const expected = options.expectedName ?? null;
+  const origin = options.origin ?? "the uploaded directory";
+  // Only used for reporting until the manifest is read.
+  let extension = expected ?? "(unknown)";
+  try {
+    const built = await buildExtensionBundle(dir);
+    if (expected !== null && built.manifest.name !== expected) {
+      // The directory name is what the caller told us changed; the manifest name
+      // is what the platform keys everything on. If they disagree, publishing
+      // would silently write to a different extension.
       return {
-        extension,
+        extension: expected,
         status: "failed",
-        detail: `src/${extension}/manifest.json declares name '${built.manifest.name}'; the directory and the manifest name must match`,
+        detail: `${origin}/manifest.json declares name '${built.manifest.name}'; the directory and the manifest name must match`,
       };
     }
+    extension = built.manifest.name;
 
     const { bundle, created } = await deps.bundles.publish({
       zipData: built.zipData,
       manifest: built.manifest,
-      sourceCommit: commit,
+      ...(options.sourceCommit ? { sourceCommit: options.sourceCommit } : {}),
     });
     await deps.audit.record(
-      `github:${repo}@${commit.slice(0, 7)}`,
+      attribution.actor,
       "bundle.publish",
       `${bundle.extension}@${bundle.version}`,
       {
         sha256: bundle.sha256,
-        sourceCommit: commit,
+        sourceCommit: options.sourceCommit,
         created,
-        via: "github-webhook",
-        ref: payload.ref,
+        via: attribution.via,
+        ref: attribution.ref,
         builtFrom: built.builtFrom,
       },
     );
     deps.log.info(
-      { extension, version: bundle.version, sha256: bundle.sha256, created, commit },
-      "webhook published bundle",
+      {
+        extension: bundle.extension,
+        version: bundle.version,
+        sha256: bundle.sha256,
+        created,
+        commit: options.sourceCommit,
+        via: attribution.via,
+      },
+      "published bundle",
     );
     return {
-      extension,
+      extension: bundle.extension,
       status: created ? "published" : "unchanged",
       version: bundle.version,
       sha256: bundle.sha256,
@@ -217,9 +332,7 @@ async function publishOne(
         : err instanceof RepoArchiveError
           ? err.message
           : "publish failed; see core-api logs";
-    deps.log.error({ err, extension, commit }, "webhook failed to publish extension");
+    deps.log.error({ err, extension, commit: options.sourceCommit }, "failed to publish extension");
     return { extension, status: "failed", detail };
-  } finally {
-    rmSync(workDir, { recursive: true, force: true });
   }
 }

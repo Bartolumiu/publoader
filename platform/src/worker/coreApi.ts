@@ -32,7 +32,14 @@ export interface LeasedJob {
    * shape so titles auto-tracked since the bundle was published reach the
    * extension without republishing it.
    */
-  mangaIdMap: Record<string, string[]>;
+  /**
+   * Flat `{mdId: [externalIds]}`, or `{namespace: {mdId: [externalIds]}}` for an
+   * extension whose ids are namespaced by catalogue. Read the sibling flag
+   * rather than sniffing the shape.
+   */
+  mangaIdMap: Record<string, string[]> | Record<string, Record<string, string[]>>;
+  /** True when `mangaIdMap` is keyed by catalogue. */
+  mangaIdMapNamespaced?: boolean;
   overrideOptions: Record<string, unknown>;
 }
 

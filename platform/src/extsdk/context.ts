@@ -24,7 +24,13 @@ export interface ExtensionContextOptions {
    * Inverted here — extensions want external -> MangaDex, the DB stores the
    * other direction because one title can have several external ids.
    */
-  mangaIdMap?: Record<string, string[]> | undefined;
+  mangaIdMap?: LeaseMangaIdMap | undefined;
+  /**
+   * Set by the control plane when `mangaIdMap` is keyed by catalogue. Carried
+   * explicitly because sniffing the shape fails silently — see
+   * `UnsupportedMangaIdMapError`.
+   */
+  mangaIdMapNamespaced?: boolean | undefined;
   /** Overrides the manifest's allowed_hosts (tests only; normally omitted). */
   allowedHosts?: readonly string[] | undefined;
   /** Tuning/injection for the guarded fetch. */
@@ -49,14 +55,53 @@ export interface CreatedExtensionContext {
  * built from a unique-per-(extension, mangaId) table, so in practice it does
  * not occur.
  */
-export function invertMangaIdMap(idMap: Record<string, string[]>): Map<string, string> {
+/** The lease's map: flat `{mdId: [externalIds]}`, or namespaced by catalogue. */
+export type LeaseMangaIdMap =
+  | Record<string, string[]>
+  | Record<string, Record<string, string[]>>;
+
+/**
+ * Thrown rather than tolerated: a namespaced map inverted by flat-only code
+ * produces an EMPTY lookup, and an empty lookup does not read as an error. The
+ * extension would conclude that none of its series is tracked and report its
+ * ENTIRE catalogue as untracked — which, with `auto_create_titles` on, is a
+ * request to create a duplicate MangaDex title for every series it publishes.
+ * A crashed job that retries is a far better outcome than that, so refuse.
+ */
+export class UnsupportedMangaIdMapError extends Error {
+  constructor() {
+    super(
+      "the control plane sent a namespaced manga id map, which this extension " +
+        "runtime cannot interpret. Upgrade the worker, or run this extension " +
+        "without namespaced tracked rows.",
+    );
+    this.name = "UnsupportedMangaIdMapError";
+  }
+}
+
+export function invertMangaIdMap(
+  idMap: LeaseMangaIdMap,
+  opts: { namespaced?: boolean } = {},
+): Map<string, string> {
+  // Trust the control plane's flag first: shape-sniffing is what makes this
+  // failure silent, and the flag exists precisely so it need not be guessed.
+  if (opts.namespaced) throw new UnsupportedMangaIdMapError();
+
   const inverted = new Map<string, string>();
   for (const [mdMangaId, externals] of Object.entries(idMap)) {
-    if (!Array.isArray(externals)) continue;
-    for (const external of externals) {
-      if (typeof external === "string" || typeof external === "number") {
-        inverted.set(String(external), mdMangaId);
+    if (Array.isArray(externals)) {
+      for (const external of externals) {
+        if (typeof external === "string" || typeof external === "number") {
+          inverted.set(String(external), mdMangaId);
+        }
       }
+      continue;
+    }
+    // A nested value without the flag set means the two disagree. Refuse for
+    // the same reason: inverting this to nothing is indistinguishable from
+    // "tracked nothing".
+    if (externals !== null && typeof externals === "object") {
+      throw new UnsupportedMangaIdMapError();
     }
   }
   return inverted;
@@ -115,7 +160,9 @@ export function createExtensionContext(opts: ExtensionContextOptions): CreatedEx
 
   const ctx: ExtensionContext = {
     manifest: Object.freeze({ ...manifest }),
-    mangaIdMap: invertMangaIdMap(opts.mangaIdMap ?? {}),
+    mangaIdMap: invertMangaIdMap(opts.mangaIdMap ?? {}, {
+      namespaced: opts.mangaIdMapNamespaced ?? false,
+    }),
     fetch: (input, init) => guardedFetch(input, init),
     async dataFile(name: string): Promise<string> {
       return readFile(resolveDataFilePath(opts.bundleDir, dataFiles, name), "utf8");

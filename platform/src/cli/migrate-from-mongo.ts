@@ -18,13 +18,33 @@
  *   to_unavailable    -> upload_tasks kind=UNAVAILABLE
  *   GridFS "images"   -> artifacts (referenced by chapter.imageArtifacts)
  *
+ * Per-extension configuration did NOT live in Mongo — the legacy stack read it
+ * from JSON files beside each extension — so `--extensions <dir>` imports that
+ * half of the cutover from the extension checkout:
+ *
+ * (one subdirectory per extension, keyed by its manifest.json name)
+ *
+ *   manga_id_map.json     -> tracked_manga (namespace-aware; see
+ *                            parseMangaIdMapFile for the three shapes)
+ *   override_options.json -> extension_chapter_aliases,
+ *                            extension_multi_chapters,
+ *                            extension_language_maps, and the extension-private
+ *                            remainder in extension_configs.override_options
+ *
+ * A deployment that did keep those documents in Mongo is also handled: an
+ * `extension_configs` collection, if present, is imported the same way.
+ *
  * Environment: MONGODB_URI, MONGODB_DB_NAME, DATABASE_URL.
  * Run exactly one instance at a time — concurrent passes could orphan
  * artifacts whose owning upload task loses the ON CONFLICT race.
  */
 import { randomUUID, createHash } from "node:crypto";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join, resolve as resolvePath } from "node:path";
 import { GridFSBucket, MongoClient, ObjectId, type Db, type Document } from "mongodb";
 import { Prisma, PrismaClient } from "@prisma/client";
+import { parseMangaIdMapFile } from "../core/store/bundles.js";
+import { ExtensionConfigStore } from "../core/store/extensionConfig.js";
 import {
   chapterFromJson,
   chapterToColumns,
@@ -39,7 +59,17 @@ const BATCH = 500;
 /** MangaDex page images are well under this; anything larger is corrupt or not an image. */
 const MAX_ARTIFACT_BYTES = 20 * 1024 * 1024;
 
-const args = new Set(process.argv.slice(2));
+const argv = process.argv.slice(2);
+const args = new Set(argv);
+
+/** `--extensions <dir>`: the legacy extension checkout to read config JSON from. */
+function flagValue(name: string): string | undefined {
+  const index = argv.indexOf(name);
+  if (index !== -1 && argv[index + 1] !== undefined) return argv[index + 1];
+  const inline = argv.find((arg) => arg.startsWith(`${name}=`));
+  return inline?.slice(name.length + 1);
+}
+const EXTENSIONS_DIR = flagValue("--extensions");
 /**
  * By default already-migrated rows are left untouched (pure ON CONFLICT skip).
  * `--refresh` additionally rewrites the JSONB payload of the history mirrors
@@ -538,6 +568,147 @@ async function migrateQueue(
   return counts;
 }
 
+// ------------------------------------------------- per-extension configuration
+
+interface ConfigCounts {
+  extensions: number;
+  tracked: number;
+  aliases: number;
+  multiChapters: number;
+  languages: number;
+  rejected: number;
+}
+
+function readJsonFile(path: string): unknown {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Seed one extension's tracked map and override options.
+ *
+ * Create-only in both halves, like a bundle publish: this script is re-runnable
+ * by design and the second pass must not undo curation done between passes.
+ * `ExtensionConfigStore.replace` is what splits the legacy document into the
+ * three relation tables, so the migration and the admin API agree on what a
+ * valid row is — including which MangaDex language codes are real.
+ */
+async function importExtensionConfig(
+  prisma: PrismaClient,
+  configStore: ExtensionConfigStore,
+  extension: string,
+  idMap: unknown,
+  overrides: unknown,
+  counts: ConfigCounts,
+): Promise<void> {
+  const rows = parseMangaIdMapFile(idMap);
+  if (rows.length > 0 && !DRY_RUN) {
+    const created = await prisma.trackedManga.createMany({
+      data: rows.map((row) => ({ extension, ...row, source: "mongo-import" })),
+      skipDuplicates: true,
+    });
+    counts.tracked += created.count;
+  } else {
+    counts.tracked += rows.length;
+  }
+
+  if (overrides !== undefined && !DRY_RUN) {
+    const [aliasCount, multiCount, languageCount, config] = await Promise.all([
+      prisma.extensionChapterAlias.count({ where: { extension } }),
+      prisma.extensionMultiChapter.count({ where: { extension } }),
+      prisma.extensionLanguageMap.count({ where: { extension } }),
+      prisma.extensionConfig.findUnique({ where: { extension } }),
+    ]);
+    if (aliasCount + multiCount + languageCount === 0 && config === null) {
+      const result = await configStore.replace(extension, overrides);
+      counts.aliases += result.aliases;
+      counts.multiChapters += result.multiChapters;
+      counts.languages += result.languages;
+      counts.rejected += result.rejected.length;
+      for (const row of result.rejected) {
+        console.warn(`  warn: ${extension} ${row.option}.${row.key} rejected: ${row.reason}`);
+      }
+    } else {
+      log(`${extension}: config already present, left as it is`);
+    }
+  }
+  counts.extensions += 1;
+}
+
+/**
+ * `--extensions <dir>`: walk the legacy extension checkout. Per-extension
+ * configuration was never in Mongo — the Python stack loaded manga_id_map.json
+ * and override_options.json from disk beside each extension — so this is the
+ * only place the cutover can get it from.
+ */
+async function migrateExtensionFiles(
+  prisma: PrismaClient,
+  configStore: ExtensionConfigStore,
+  dir: string,
+  counts: ConfigCounts,
+): Promise<void> {
+  const root = resolvePath(dir);
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch (err) {
+    console.error(`error: cannot read --extensions ${root}: ${(err as Error).message}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  for (const entry of entries.sort()) {
+    const extensionDir = join(root, entry);
+    if (!statSync(extensionDir).isDirectory()) continue;
+    // The directory name is not authoritative: manifest.name is what the
+    // platform keys every table on, and a checkout directory can be renamed.
+    const manifest = readJsonFile(join(extensionDir, "manifest.json"));
+    const name =
+      manifest !== null && typeof manifest === "object" && !Array.isArray(manifest)
+        ? (manifest as { name?: unknown }).name
+        : undefined;
+    if (typeof name !== "string" || name.length === 0) continue;
+
+    const idMap = readJsonFile(join(extensionDir, "manga_id_map.json"));
+    const overrides = readJsonFile(join(extensionDir, "override_options.json"));
+    if (idMap === undefined && overrides === undefined) continue;
+    await importExtensionConfig(prisma, configStore, name, idMap, overrides, counts);
+    log(`${name}: config imported from ${extensionDir}`);
+  }
+}
+
+/**
+ * An `extension_configs` collection, if this deployment kept its config in
+ * Mongo rather than on disk. Absent in the reference deployment; handled so a
+ * fork that did is not silently skipped.
+ */
+async function migrateMongoConfigs(
+  db: Db,
+  prisma: PrismaClient,
+  configStore: ExtensionConfigStore,
+  counts: ConfigCounts,
+): Promise<void> {
+  for await (const docs of batches(db, "extension_configs")) {
+    for (const doc of docs) {
+      const name = str(doc["extension"]) ?? str(doc["extension_name"]) ?? str(doc["name"]);
+      if (!name) continue;
+      const overrides = toJson(doc["override_options"] ?? doc["overrideOptions"]);
+      const idMap = toJson(doc["manga_id_map"] ?? doc["mangaIdMap"]);
+      await importExtensionConfig(
+        prisma,
+        configStore,
+        name,
+        idMap ?? undefined,
+        overrides ?? undefined,
+        counts,
+      );
+    }
+  }
+}
+
 // --------------------------------------------------------------------- entry
 
 async function main(): Promise<void> {
@@ -550,8 +721,17 @@ async function main(): Promise<void> {
 
   const mongo = new MongoClient(mongoUri);
   const prisma = new PrismaClient();
+  const configStore = new ExtensionConfigStore(prisma);
   const report: Record<string, Counts> = {};
   const imageStats: ImageStats = { fetched: 0, bytes: 0, missing: 0, oversize: 0 };
+  const configCounts: ConfigCounts = {
+    extensions: 0,
+    tracked: 0,
+    aliases: 0,
+    multiChapters: 0,
+    languages: 0,
+    rejected: 0,
+  };
 
   try {
     await mongo.connect();
@@ -572,6 +752,16 @@ async function main(): Promise<void> {
       ["to_unavailable", "UNAVAILABLE"],
     ] as const) {
       report[collection] = await migrateQueue(db, prisma, bucket, collection, kind, imageStats);
+    }
+
+    await migrateMongoConfigs(db, prisma, configStore, configCounts);
+    if (EXTENSIONS_DIR) {
+      await migrateExtensionFiles(prisma, configStore, EXTENSIONS_DIR, configCounts);
+    } else {
+      log(
+        "no --extensions <dir> given: tracked_manga and the override-option tables were not " +
+          "seeded (that config lived in JSON files, not Mongo)",
+      );
     }
 
     // ---- verification report ----
@@ -596,6 +786,14 @@ async function main(): Promise<void> {
       `images: ${imageStats.fetched} fetched (${(imageStats.bytes / 1024 / 1024).toFixed(1)} MiB), ` +
         `${imageStats.missing} missing, ${imageStats.oversize} over the ${MAX_ARTIFACT_BYTES}-byte cap`,
     );
+    if (configCounts.extensions > 0) {
+      console.log("");
+      console.log(
+        `config: ${configCounts.extensions} extensions, ${configCounts.tracked} tracked mappings, ` +
+          `${configCounts.aliases} chapter aliases, ${configCounts.multiChapters} multi-chapter numbers, ` +
+          `${configCounts.languages} language overrides, ${configCounts.rejected} rows rejected`,
+      );
+    }
     if (carriedKeys.size > 0) {
       console.log("");
       console.log("non-chapter fields carried through into the task payload:");

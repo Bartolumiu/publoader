@@ -67,6 +67,30 @@ export interface MdManga {
 }
 
 /**
+ * A single title read in full — what an operator is shown before correcting a
+ * MangaDex entry, and what an edit needs in order to be safe.
+ *
+ * `version` is the load-bearing field: MangaDex requires the version it
+ * currently holds on every PUT /manga/{id}, and rejects the write when someone
+ * else has edited the title since we read it. That optimistic check is the only
+ * thing standing between two concurrent operators and a lost correction, so the
+ * version always travels with the fields it describes rather than being fetched
+ * separately.
+ */
+export interface MdMangaDetail extends MdManga {
+  attributes: {
+    title: Record<string, string>;
+    altTitles: Record<string, string>[];
+    originalLanguage?: string | null;
+    status?: string | null;
+    contentRating?: string | null;
+    /** `raw` is the one this pipeline writes: the source URL of the series. */
+    links?: Record<string, string> | null;
+    version: number;
+  };
+}
+
+/**
  * MangaDex API surface used by the processor and upload workers. Implemented
  * by MdClient (real) and the e2e mock. Implementations must rate-limit and
  * retry internally; callers treat every method as at-least-once safe.
@@ -78,6 +102,12 @@ export interface MdApi {
   chaptersByIds(ids: string[]): Promise<MdChapter[]>;
   /** GET /manga?ids[]=… lookups. */
   mangaByIds(ids: string[]): Promise<MdManga[]>;
+  /**
+   * GET /manga/{id} — one title in full, or null when MangaDex 404s it. Used
+   * before editing a title, both to show an operator what the entry actually
+   * says and to read the `version` the edit has to carry.
+   */
+  mangaById(mangaId: string): Promise<MdMangaDetail | null>;
   /**
    * Search titles by name. Used before auto-creating a title, so an existing
    * MangaDex entry is mapped rather than duplicated.
@@ -118,4 +148,19 @@ export interface MdApi {
     links?: Record<string, string>;
   }): Promise<{ id: string; version: number }>;
   commitMangaDraft(mangaId: string, version: number): Promise<boolean>;
+  /**
+   * PUT /manga/{id} — correct a title this pipeline is responsible for.
+   *
+   * `version` is the version read from the title; MangaDex bumps it itself, and
+   * rejects the request outright if it is not the current one. `payload` carries
+   * ONLY the fields being changed (see `mangaEditPayload` in titleService.ts):
+   * an omitted field is left alone, but a field that IS sent replaces its whole
+   * value — so a `title` or `links` object must be the merged result, never just
+   * the one entry being corrected.
+   */
+  editManga(
+    mangaId: string,
+    payload: Record<string, unknown>,
+    version: number,
+  ): Promise<boolean>;
 }

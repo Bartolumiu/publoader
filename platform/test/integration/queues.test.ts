@@ -1,0 +1,1056 @@
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import type { FastifyInstance } from "fastify";
+import { loadConfig } from "../../src/config.js";
+import { createLogger } from "../../src/logging.js";
+import { buildContext, type AppContext } from "../../src/core/api/context.js";
+import { buildServer } from "../../src/core/api/server.js";
+import { registerQueueRoutes } from "../../src/core/api/routes/queues.js";
+import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
+
+/**
+ * Full operator control of the upload queues.
+ *
+ * The properties worth proving here are the ones that cost real damage when
+ * they regress, and none of them can be checked without a live postgres —
+ * SKIP LOCKED claims, a unique (kind, dedupe_key) constraint and guarded
+ * single-statement updates are the system under test:
+ *
+ *  - a LEASED row is refused by EVERY mutating path, and is left byte-identical;
+ *  - a purge dry-run writes nothing at all, audit rows included;
+ *  - a reorder changes what `claim` actually hands out next, not merely a column;
+ *  - hand-enqueueing a duplicate is refused by the constraint that makes double
+ *    uploads impossible;
+ *  - deleting a DONE row — half of that same guard — needs an explicit flag;
+ *  - and the sharpest verb, manual add, is out of a CONTRIBUTOR's reach.
+ */
+describe.skipIf(!dbReady())("queue management endpoints", () => {
+  const prisma = testPrisma();
+  const ADMIN_TOKEN = "test-admin-token-0123456789";
+  const config = loadConfig({
+    DATABASE_URL: process.env.TEST_DATABASE_URL!,
+    ADMIN_TOKEN,
+    LOG_LEVEL: "error",
+  });
+  const log = createLogger("test-queues", "error");
+  let app: FastifyInstance;
+  let ctx: AppContext;
+  const root = { authorization: `Bearer ${ADMIN_TOKEN}` };
+
+  /**
+   * server.ts is owned by another module's integrator, so these routes may or
+   * may not be wired into `buildServer` yet. Probe a throwaway instance and
+   * register them by hand only when they are absent — registering twice would
+   * throw on duplicate routes, and skipping when they are wired would test a
+   * different server than production runs. Routes inside `app.register(…)` do
+   * not exist until the plugin boots, hence the ready-then-check.
+   */
+  async function buildApp(): Promise<FastifyInstance> {
+    const probe = buildServer(ctx);
+    await probe.ready();
+    if (probe.hasRoute({ method: "GET", url: "/api/v1/admin/queues/tasks" })) return probe;
+    await probe.close();
+    const fresh = buildServer(ctx);
+    registerQueueRoutes(fresh, ctx);
+    await fresh.ready();
+    return fresh;
+  }
+
+  beforeEach(async () => {
+    await resetDb(prisma);
+    await prisma.apiToken.deleteMany({});
+    ctx = buildContext(prisma, config, log);
+    app = await buildApp();
+    expect(app.hasRoute({ method: "GET", url: "/api/v1/admin/queues/tasks" })).toBe(true);
+  });
+  afterAll(async () => {
+    await app?.close();
+    await closeDb();
+  });
+
+  /** A scoped `pa_…` credential carrying exactly `scopes`. */
+  async function mint(scopes: string[]): Promise<Record<string, string>> {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/tokens",
+      headers: root,
+      payload: { name: `queues-${scopes.join("-")}`, scopes },
+    });
+    expect(res.statusCode).toBe(201);
+    return { authorization: `Bearer ${res.json().token}` };
+  }
+
+  let seq = 0;
+  const task = (overrides: Record<string, unknown> = {}) =>
+    prisma.uploadTask.create({
+      data: {
+        kind: "UPLOAD",
+        dedupeKey: `ext-chapter-${(seq += 1)}|${seq}|en`,
+        chapter: { chapterNumber: String(seq), chapterLanguage: "en" },
+        ...overrides,
+      },
+    });
+
+  /** A LEASED row with a live lease — the thing nothing here may touch. */
+  const LEASE_ID = "11111111-1111-4111-8111-111111111111";
+  const leasedTask = (overrides: Record<string, unknown> = {}) =>
+    task({
+      state: "LEASED",
+      leaseId: LEASE_ID,
+      leaseExpiresAt: new Date(Date.now() + 60_000),
+      attempt: 1,
+      ...overrides,
+    });
+
+  /** A chapter payload complete enough for taskWorkers to execute an UPLOAD. */
+  const uploadChapter = (overrides: Record<string, unknown> = {}) => ({
+    chapterId: "src-4001",
+    chapterNumber: "12",
+    chapterLanguage: "en",
+    chapterTitle: "Hand-queued",
+    mdMangaId: "9a1b1c1d-0000-4000-8000-000000000000",
+    mdGroupId: "4f1de6a2-f0c5-4ac5-bce5-02c7dbb67deb",
+    mangaName: "Test Series",
+    extensionName: "queuetest",
+    ...overrides,
+  });
+
+  const csrf = { "x-requested-with": "publoader-dash" };
+
+  /** A logged-in session cookie for a fresh account with `role`. */
+  async function sessionAs(role: "OWNER" | "ADMIN" | "CONTRIBUTOR", email: string): Promise<Record<string, string>> {
+    await ctx.adminUsers.ensureOwner("owner@example.com");
+    const password = "correct-horse-battery-staple";
+    if (role === "OWNER") {
+      const login = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/session",
+        payload: { token: ADMIN_TOKEN, actor: "ardax" },
+      });
+      const value = login.cookies.find((c) => c.name === "publoader_session")!.value;
+      return { cookie: `publoader_session=${value}`, ...csrf };
+    }
+    const user = await ctx.adminUsers.invite(email, role);
+    await ctx.adminUsers.setPassword(user.id, password);
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/session",
+      payload: { email, password },
+    });
+    expect(login.statusCode).toBe(200);
+    const value = login.cookies.find((c) => c.name === "publoader_session")!.value;
+    return { cookie: `publoader_session=${value}`, ...csrf };
+  }
+
+  // ---- list ----
+
+  it("lists the queue in claim order with filters, a total, and a summary", async () => {
+    const later = await task({ notBefore: new Date(Date.now() + 60_000) });
+    const soon = await task({ notBefore: new Date(Date.now() - 60_000) });
+    const dead = await task({ kind: "EDIT", state: "DEAD_LETTER", attempt: 5, lastError: "md said no" });
+    await task({ kind: "DELETE", state: "DONE" });
+
+    const all = await app.inject({ method: "GET", url: "/api/v1/admin/queues/tasks", headers: root });
+    expect(all.statusCode).toBe(200);
+    expect(all.json().total).toBe(4);
+    expect(all.json().order).toBe("notBefore,createdAt,id");
+    // Claim order, not recency: `soon` is due before `later`, whatever their
+    // created_at. This is the ordering a reorder rewrites, which is why the list
+    // has to use it rather than `updated_at DESC`.
+    const ids = all.json().tasks.map((t: { id: string }) => t.id);
+    expect(ids.indexOf(soon.id)).toBeLessThan(ids.indexOf(later.id));
+    // The payload is large and worker-supplied; the list view omits it.
+    expect(all.json().tasks[0].chapter).toBeUndefined();
+    expect(all.json().summary).toEqual(
+      expect.arrayContaining([
+        { kind: "EDIT", state: "DEAD_LETTER", count: 1 },
+        { kind: "DELETE", state: "DONE", count: 1 },
+      ]),
+    );
+
+    const byState = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/queues/tasks?kind=EDIT&state=DEAD_LETTER",
+      headers: root,
+    });
+    expect(byState.json().total).toBe(1);
+    expect(byState.json().tasks[0].id).toBe(dead.id);
+    // The summary stays global so a narrow filter cannot hide a backing-up queue.
+    expect(byState.json().summary.length).toBeGreaterThan(1);
+
+    // Repeated params are a one-or-more set.
+    const twoKinds = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/queues/tasks?kind=EDIT&kind=DELETE",
+      headers: root,
+    });
+    expect(twoKinds.json().total).toBe(2);
+
+    const bySubstring = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/queues/tasks?dedupeKey=${encodeURIComponent(dead.dedupeKey.slice(4, 14))}`,
+      headers: root,
+    });
+    expect(bySubstring.json().total).toBe(1);
+
+    const byAttempt = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/queues/tasks?attemptMin=1",
+      headers: root,
+    });
+    expect(byAttempt.json().total).toBe(1);
+    expect(byAttempt.json().tasks[0].id).toBe(dead.id);
+
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/api/v1/admin/queues/tasks?state=NOPE",
+          headers: root,
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/api/v1/admin/queues/tasks?attemptMin=9&attemptMax=2",
+          headers: root,
+        })
+      ).statusCode,
+    ).toBe(400);
+  });
+
+  it("pages with a cursor, and refuses a cursor it did not issue", async () => {
+    for (let i = 0; i < 5; i++) await task({ notBefore: new Date(Date.now() - (10 - i) * 1000) });
+
+    const first = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/queues/tasks?limit=2",
+      headers: root,
+    });
+    expect(first.json().tasks).toHaveLength(2);
+    expect(first.json().total).toBe(5);
+    expect(first.json().nextCursor).toBeTruthy();
+
+    const second = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/queues/tasks?limit=2&cursor=${encodeURIComponent(first.json().nextCursor)}`,
+      headers: root,
+    });
+    expect(second.json().tasks).toHaveLength(2);
+    // Disjoint pages, still in claim order.
+    const firstIds = first.json().tasks.map((t: { id: string }) => t.id);
+    const secondIds = second.json().tasks.map((t: { id: string }) => t.id);
+    expect(firstIds.filter((id: string) => secondIds.includes(id))).toEqual([]);
+
+    const last = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/queues/tasks?limit=2&cursor=${encodeURIComponent(second.json().nextCursor)}`,
+      headers: root,
+    });
+    expect(last.json().tasks).toHaveLength(1);
+    expect(last.json().nextCursor).toBeNull();
+
+    const bad = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/queues/tasks?cursor=not-a-cursor",
+      headers: root,
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it("returns one task with its chapter payload for the edit view", async () => {
+    const row = await task({ chapter: uploadChapter() });
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/queues/tasks/${row.id}`,
+      headers: root,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().task.chapter).toMatchObject({ chapterNumber: "12", mdGroupId: expect.any(String) });
+
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/api/v1/admin/queues/tasks/00000000-0000-4000-8000-000000000000",
+          headers: root,
+        })
+      ).statusCode,
+    ).toBe(404);
+  });
+
+  // ---- retry ----
+
+  it("retries a failed task with a fresh budget, single and in bulk", async () => {
+    const failed = await task({ state: "FAILED", attempt: 4, lastError: "md 503" });
+    const dead = await task({ state: "DEAD_LETTER", attempt: 5 });
+    const done = await task({ state: "DONE" });
+
+    const single = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/queues/tasks/${failed.id}/retry`,
+      headers: root,
+    });
+    expect(single.statusCode).toBe(200);
+    expect(single.json()).toMatchObject({ ok: true, outcome: "retried" });
+    const after = await prisma.uploadTask.findUniqueOrThrow({ where: { id: failed.id } });
+    // The budget resets because the operator asserts the cause is fixed.
+    expect(after).toMatchObject({ state: "PENDING", attempt: 0, leaseId: null });
+    expect(after.notBefore.getTime()).toBeLessThanOrEqual(Date.now());
+    expect(await prisma.auditEvent.count({ where: { action: "queue.retry" } })).toBe(1);
+
+    // Already PENDING: a conflict, not a silent no-op.
+    const again = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/queues/tasks/${failed.id}/retry`,
+      headers: root,
+    });
+    expect(again.statusCode).toBe(409);
+    expect(again.json().outcome).toBe("wrong_state");
+    expect(again.json().error).toContain("PENDING");
+
+    // Bulk: one result per requested id, whatever happened to each.
+    const bulk = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/retry",
+      headers: root,
+      payload: { ids: [dead.id, done.id, "00000000-0000-4000-8000-000000000000"] },
+    });
+    expect(bulk.statusCode).toBe(200);
+    expect(bulk.json()).toMatchObject({ requested: 3, changed: 1, refused: 2 });
+    const byId = Object.fromEntries(
+      (bulk.json().results as { id: string; outcome: string }[]).map((r) => [r.id, r.outcome]),
+    );
+    expect(byId[dead.id]).toBe("retried");
+    expect(byId[done.id]).toBe("wrong_state");
+    expect(byId["00000000-0000-4000-8000-000000000000"]).toBe("not_found");
+    expect((await prisma.uploadTask.findUniqueOrThrow({ where: { id: done.id } })).state).toBe("DONE");
+  });
+
+  it("retries by filter, selecting only the rows a retry can move", async () => {
+    const failed = await task({ state: "FAILED", attempt: 3 });
+    const dead = await task({ state: "DEAD_LETTER", attempt: 5 });
+    const pending = await task({ state: "PENDING" });
+    const otherKind = await task({ kind: "DELETE", state: "FAILED", attempt: 2 });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/retry",
+      headers: root,
+      payload: { filter: { kind: "UPLOAD" } },
+    });
+    expect(res.statusCode).toBe(200);
+    // A filter names a set, so it is intersected with the retryable states
+    // rather than producing a pile of "this row is PENDING" refusals.
+    expect(res.json()).toMatchObject({ requested: 2, changed: 2, refused: 0 });
+    for (const id of [failed.id, dead.id]) {
+      expect((await prisma.uploadTask.findUniqueOrThrow({ where: { id } })).attempt).toBe(0);
+    }
+    expect((await prisma.uploadTask.findUniqueOrThrow({ where: { id: pending.id } })).state).toBe("PENDING");
+    expect((await prisma.uploadTask.findUniqueOrThrow({ where: { id: otherKind.id } })).state).toBe("FAILED");
+
+    const bothOrNeither = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/retry",
+      headers: root,
+      payload: { ids: [failed.id], filter: { kind: "UPLOAD" } },
+    });
+    expect(bothOrNeither.statusCode).toBe(400);
+    expect((await app.inject({ method: "POST", url: "/api/v1/admin/queues/retry", headers: root, payload: {} })).statusCode).toBe(400);
+  });
+
+  // ---- remove ----
+
+  it("removes rows only with confirm, and never a DONE row by accident", async () => {
+    const pending = await task({ state: "PENDING" });
+    const done = await task({ state: "DONE" });
+
+    const unconfirmed = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/admin/queues/tasks/${pending.id}`,
+      headers: root,
+    });
+    expect(unconfirmed.statusCode).toBe(400);
+    expect(unconfirmed.json().error).toContain("confirm");
+    expect(await prisma.uploadTask.count({ where: { id: pending.id } })).toBe(1);
+
+    // "false" as a query word must not read as true — this is the flag guarding
+    // a permanent delete.
+    const lying = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/admin/queues/tasks/${pending.id}?confirm=false`,
+      headers: root,
+    });
+    expect(lying.statusCode).toBe(400);
+    expect(await prisma.uploadTask.count({ where: { id: pending.id } })).toBe(1);
+
+    const removed = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/admin/queues/tasks/${pending.id}`,
+      headers: root,
+      payload: { confirm: true },
+    });
+    expect(removed.statusCode).toBe(200);
+    // The response names what went: these rows no longer exist to look up.
+    expect(removed.json().deleted).toMatchObject({ id: pending.id, kind: "UPLOAD", state: "PENDING" });
+    expect(await prisma.uploadTask.count({ where: { id: pending.id } })).toBe(0);
+    const event = await prisma.auditEvent.findFirstOrThrow({ where: { action: "queue.remove" } });
+    expect(event.subject).toBe(pending.id);
+
+    // A DONE row is half of the double-upload guard: refused, with the flag named.
+    const refused = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/admin/queues/tasks/${done.id}`,
+      headers: root,
+      payload: { confirm: true },
+    });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().hint).toContain("includeCompleted");
+    expect(refused.json().hint).toContain("double-upload");
+    expect(await prisma.uploadTask.count({ where: { id: done.id } })).toBe(1);
+
+    const forced = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/admin/queues/tasks/${done.id}`,
+      headers: root,
+      payload: { confirm: true, includeCompleted: true },
+    });
+    expect(forced.statusCode).toBe(200);
+    expect(forced.json().warning).toContain("re-enqueue");
+    expect(await prisma.uploadTask.count({ where: { id: done.id } })).toBe(0);
+  });
+
+  it("removes in bulk and reports each row's fate", async () => {
+    const a = await task({ state: "PENDING" });
+    const b = await task({ state: "DEAD_LETTER" });
+    const done = await task({ state: "DONE" });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/remove",
+      headers: root,
+      payload: { ids: [a.id, b.id, done.id], confirm: true },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().deleted).toHaveLength(2);
+    expect(res.json().refused).toBe(1);
+    expect(await prisma.uploadTask.count()).toBe(1);
+
+    const unconfirmed = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/remove",
+      headers: root,
+      payload: { ids: [done.id] },
+    });
+    expect(unconfirmed.statusCode).toBe(400);
+    expect(await prisma.uploadTask.count()).toBe(1);
+  });
+
+  // ---- purge ----
+
+  it("purges nothing until told twice, and never a LEASED row", async () => {
+    for (let i = 0; i < 3; i++) await task({ state: "DEAD_LETTER" });
+    await task({ state: "PENDING" });
+    const leased = await leasedTask();
+    const done = await task({ state: "DONE" });
+    const before = await prisma.uploadTask.count();
+
+    // A first call with no flags at all is a dry run: that default IS the safety
+    // property.
+    const dry = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/purge",
+      headers: root,
+      payload: { state: "DEAD_LETTER" },
+    });
+    expect(dry.statusCode).toBe(200);
+    expect(dry.json()).toMatchObject({ dryRun: true, matched: 3, wouldDelete: 3 });
+    expect(dry.json().sample).toHaveLength(3);
+    expect(dry.json().breakdown).toEqual([{ kind: "UPLOAD", state: "DEAD_LETTER", count: 3 }]);
+    // Nothing written — not one row, and not an audit event either. A dry run
+    // reports an intention, so even the log stays untouched.
+    expect(await prisma.uploadTask.count()).toBe(before);
+    expect(await prisma.auditEvent.count({ where: { action: { startsWith: "queue." } } })).toBe(0);
+
+    // dryRun: false alone is not enough.
+    const halfArmed = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/purge",
+      headers: root,
+      payload: { state: "DEAD_LETTER", dryRun: false },
+    });
+    expect(halfArmed.statusCode).toBe(400);
+    expect(halfArmed.json().error).toContain("confirm");
+    expect(await prisma.uploadTask.count()).toBe(before);
+
+    const live = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/purge",
+      headers: root,
+      payload: { state: "DEAD_LETTER", dryRun: false, confirm: true },
+    });
+    expect(live.statusCode).toBe(200);
+    expect(live.json()).toMatchObject({ dryRun: false, deleted: 3, remaining: 0 });
+    expect(await prisma.uploadTask.count()).toBe(before - 3);
+    const event = await prisma.auditEvent.findFirstOrThrow({ where: { action: "queue.purge" } });
+    // The ids are the only surviving record that those rows existed.
+    expect((event.detail as { rows: unknown[] }).rows).toHaveLength(3);
+
+    // An unfiltered purge takes the queue but leaves the leased row and the DONE
+    // row standing.
+    const everything = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/purge",
+      headers: root,
+      payload: { dryRun: false, confirm: true },
+    });
+    expect(everything.statusCode).toBe(200);
+    const survivors = await prisma.uploadTask.findMany({ select: { id: true, state: true } });
+    expect(survivors.map((row) => row.id).sort()).toEqual([leased.id, done.id].sort());
+    expect(await prisma.uploadTask.findUniqueOrThrow({ where: { id: leased.id } })).toMatchObject({
+      state: "LEASED",
+      leaseId: LEASE_ID,
+    });
+
+    // Asking for a protected state is a 400 that says why, not a cheerful zero.
+    const protectedOnly = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/purge",
+      headers: root,
+      payload: { state: "LEASED", dryRun: false, confirm: true },
+    });
+    expect(protectedOnly.statusCode).toBe(400);
+    expect(protectedOnly.json().error).toContain("LEASED");
+    const doneOnly = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/purge",
+      headers: root,
+      payload: { state: "DONE", dryRun: false, confirm: true },
+    });
+    expect(doneOnly.statusCode).toBe(400);
+    expect(doneOnly.json().error).toContain("includeCompleted");
+    expect(await prisma.uploadTask.count({ where: { id: done.id } })).toBe(1);
+  });
+
+  it("counts protected rows in a dry run instead of hiding them", async () => {
+    await task({ state: "PENDING" });
+    await leasedTask();
+
+    const dry = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/purge",
+      headers: root,
+      payload: { kind: "UPLOAD" },
+    });
+    // matched is what the operator's filter selects; wouldDelete is what may go.
+    expect(dry.json()).toMatchObject({ matched: 2, wouldDelete: 1, protectedRows: 1 });
+  });
+
+  // ---- reorder ----
+
+  it("moves a task to the front of the queue the uploader actually claims from", async () => {
+    const first = await task({ notBefore: new Date(Date.now() - 30_000) });
+    const second = await task({ notBefore: new Date(Date.now() - 20_000) });
+    const third = await task({ notBefore: new Date(Date.now() - 10_000) });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/reorder",
+      headers: root,
+      payload: { ids: [third.id], mode: "front" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ mode: "front", moved: 1, refused: 0 });
+
+    // The claim is the assertion: reordering that did not change what comes out
+    // of the queue would be a column update and nothing more.
+    const claimed = await ctx.uploadTasks.claim("UPLOAD", 60);
+    expect(claimed?.id).toBe(third.id);
+    expect(await prisma.auditEvent.count({ where: { action: "queue.reorder" } })).toBe(1);
+
+    // ...and the rest kept their relative order behind it.
+    const next = await ctx.uploadTasks.claim("UPLOAD", 60);
+    expect(next?.id).toBe(first.id);
+    const after = await ctx.uploadTasks.claim("UPLOAD", 60);
+    expect(after?.id).toBe(second.id);
+  });
+
+  it("reorders a group among itself, sends rows to the back, and defers them", async () => {
+    const a = await task({ notBefore: new Date(Date.now() - 30_000) });
+    const b = await task({ notBefore: new Date(Date.now() - 20_000) });
+    const c = await task({ notBefore: new Date(Date.now() - 10_000) });
+
+    // sequence: the group keeps its slot in the queue, its internal order flips.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/reorder",
+      headers: root,
+      payload: { ids: [c.id, b.id, a.id], mode: "sequence" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().ordered.map((row: { id: string }) => row.id)).toEqual([c.id, b.id, a.id]);
+    expect((await ctx.uploadTasks.claim("UPLOAD", 60))?.id).toBe(c.id);
+
+    // back: behind every other pending row.
+    const backwards = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/reorder",
+      headers: root,
+      payload: { ids: [b.id], mode: "back" },
+    });
+    expect(backwards.statusCode).toBe(200);
+    const [rowA, rowB] = await Promise.all([
+      prisma.uploadTask.findUniqueOrThrow({ where: { id: a.id } }),
+      prisma.uploadTask.findUniqueOrThrow({ where: { id: b.id } }),
+    ]);
+    expect(rowB.notBefore.getTime()).toBeGreaterThan(rowA.notBefore.getTime());
+
+    // defer: pushed into the future, so it is no longer claimable at all.
+    const deferred = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/reorder",
+      headers: root,
+      payload: { ids: [a.id], mode: "defer", deferSeconds: 3600 },
+    });
+    expect(deferred.statusCode).toBe(200);
+    expect(
+      (await prisma.uploadTask.findUniqueOrThrow({ where: { id: a.id } })).notBefore.getTime(),
+    ).toBeGreaterThan(Date.now() + 3_000_000);
+    // Only `b` is left due, and `a` is not handed out despite being oldest.
+    expect((await ctx.uploadTasks.claim("UPLOAD", 60))?.id).toBe(b.id);
+    expect(await ctx.uploadTasks.claim("UPLOAD", 60)).toBeNull();
+
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/admin/queues/reorder",
+          headers: root,
+          payload: { ids: [a.id], mode: "defer" },
+        })
+      ).statusCode,
+    ).toBe(400);
+  });
+
+  it("reorders only PENDING rows", async () => {
+    const dead = await task({ state: "DEAD_LETTER" });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/reorder",
+      headers: root,
+      payload: { ids: [dead.id], mode: "front" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ moved: 0, refused: 1 });
+    expect(res.json().results[0]).toMatchObject({ outcome: "wrong_state", state: "DEAD_LETTER" });
+  });
+
+  // ---- the LEASED invariant, on every mutating path ----
+
+  it("refuses to touch a LEASED task from any endpoint, and leaves it identical", async () => {
+    const leased = await leasedTask();
+    const snapshot = await prisma.uploadTask.findUniqueOrThrow({ where: { id: leased.id } });
+
+    const calls: { name: string; res: Awaited<ReturnType<typeof app.inject>> }[] = [
+      {
+        name: "retry",
+        res: await app.inject({
+          method: "POST",
+          url: `/api/v1/admin/queues/tasks/${leased.id}/retry`,
+          headers: root,
+        }),
+      },
+      {
+        name: "delete",
+        res: await app.inject({
+          method: "DELETE",
+          url: `/api/v1/admin/queues/tasks/${leased.id}`,
+          headers: root,
+          payload: { confirm: true, includeCompleted: true },
+        }),
+      },
+      {
+        name: "patch",
+        res: await app.inject({
+          method: "PATCH",
+          url: `/api/v1/admin/queues/tasks/${leased.id}`,
+          headers: root,
+          payload: { notBefore: new Date().toISOString() },
+        }),
+      },
+    ];
+    for (const { name, res } of calls) {
+      expect(res.statusCode, `${name} must refuse a LEASED row`).toBe(409);
+      // The refusal names the lease, so an operator can correlate with the
+      // uploader's logs instead of guessing who owns the row.
+      expect(res.json().error, `${name} must name the lease`).toContain(LEASE_ID);
+    }
+
+    for (const [path, payload] of [
+      ["/api/v1/admin/queues/retry", { ids: [leased.id] }],
+      ["/api/v1/admin/queues/remove", { ids: [leased.id], confirm: true, includeCompleted: true }],
+      ["/api/v1/admin/queues/reorder", { ids: [leased.id], mode: "front" }],
+    ] as const) {
+      const res = await app.inject({ method: "POST", url: path, headers: root, payload });
+      expect(res.statusCode, `${path} bulk`).toBe(200);
+      const result = res.json().results[0];
+      expect(result.outcome, `${path} bulk outcome`).toBe("leased");
+      expect(result.leaseId).toBe(LEASE_ID);
+      expect(result.reason).toContain("requeue-stale");
+    }
+
+    // Byte-identical: no half-applied change from any of the seven refusals.
+    expect(await prisma.uploadTask.findUniqueOrThrow({ where: { id: leased.id } })).toEqual(snapshot);
+  });
+
+  // ---- manual add ----
+
+  it("queues a task by hand, deriving the dedupe key the processor would", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/tasks",
+      headers: root,
+      payload: { kind: "UPLOAD", chapter: uploadChapter() },
+    });
+    expect(res.statusCode).toBe(201);
+    // Same rule as processor.ts: chapterId|chapterNumber|chapterLanguage.
+    expect(res.json().task).toMatchObject({
+      kind: "UPLOAD",
+      state: "PENDING",
+      dedupeKey: "src-4001|12|en",
+      attempt: 0,
+    });
+
+    const row = await prisma.uploadTask.findUniqueOrThrow({ where: { id: res.json().task.id } });
+    // Written through chapterToTaskPayload, so it is the shape the uploader reads:
+    // every canonical key present, imageArtifacts set.
+    expect(row.chapter).toMatchObject({ mdMangaId: expect.any(String), imageArtifacts: [] });
+    expect((row.chapter as Record<string, unknown>)["chapterVolume"]).toBeNull();
+
+    // The full payload is in the audit detail: this is a manual write to
+    // MangaDex and the log must reconstruct exactly what was asked for.
+    const event = await prisma.auditEvent.findFirstOrThrow({ where: { action: "queue.task_create" } });
+    expect((event.detail as { chapter: Record<string, unknown> }).chapter).toMatchObject({
+      chapterId: "src-4001",
+    });
+
+    // A duplicate is refused by the constraint that makes a double upload
+    // impossible, and the refusal names the row already holding the slot.
+    const dupe = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/tasks",
+      headers: root,
+      payload: { kind: "UPLOAD", chapter: uploadChapter() },
+    });
+    expect(dupe.statusCode).toBe(409);
+    expect(dupe.json().existing.id).toBe(res.json().task.id);
+    expect(dupe.json().dedupeKey).toBe("src-4001|12|en");
+    expect(await prisma.uploadTask.count()).toBe(1);
+
+    // Same chapter, different kind: a different slot, so this is allowed.
+    const asDelete = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/tasks",
+      headers: root,
+      payload: {
+        kind: "DELETE",
+        chapter: uploadChapter({ mdChapterId: "7c2b9e10-0000-4000-8000-000000000001" }),
+      },
+    });
+    expect(asDelete.statusCode).toBe(201);
+    expect(asDelete.json().task.dedupeKey).toBe("7c2b9e10-0000-4000-8000-000000000001");
+  });
+
+  it("rejects a hand-built task the uploader could not execute", async () => {
+    const post = (payload: Record<string, unknown>) =>
+      app.inject({ method: "POST", url: "/api/v1/admin/queues/tasks", headers: root, payload });
+
+    // Every one of these corresponds to a TaskError that would otherwise be
+    // discovered after the task was claimed — for UPLOAD, after a MangaDex
+    // upload session was already open.
+    const noManga = await post({ kind: "UPLOAD", chapter: uploadChapter({ mdMangaId: null }) });
+    expect(noManga.statusCode).toBe(422);
+    expect(noManga.json().problems.join()).toContain("mdMangaId");
+
+    const noGroup = await post({ kind: "UPLOAD", chapter: uploadChapter({ mdGroupId: null }) });
+    expect(noGroup.statusCode).toBe(422);
+    expect(noGroup.json().problems.join()).toContain("mdGroupId");
+
+    const noChapterId = await post({ kind: "DELETE", chapter: { mangaName: "x" } });
+    expect(noChapterId.statusCode).toBe(422);
+    expect(noChapterId.json().problems.join()).toContain("mdChapterId");
+
+    const editNoPayload = await post({
+      kind: "EDIT",
+      chapter: { mdChapterId: "7c2b9e10-0000-4000-8000-000000000002" },
+    });
+    expect(editNoPayload.statusCode).toBe(422);
+    expect(editNoPayload.json().problems.join()).toContain("payload");
+
+    const editOk = await post({
+      kind: "EDIT",
+      chapter: {
+        mdChapterId: "7c2b9e10-0000-4000-8000-000000000002",
+        payload: { title: "Fixed title" },
+      },
+    });
+    expect(editOk.statusCode).toBe(201);
+    // The EDIT sidecar survived: stripping it would make the task unexecutable.
+    const stored = await prisma.uploadTask.findUniqueOrThrow({ where: { id: editOk.json().task.id } });
+    expect((stored.chapter as Record<string, unknown>)["payload"]).toEqual({ title: "Fixed title" });
+
+    // A page artifact that does not exist fails the task mid-upload otherwise.
+    const ghostPages = await post({
+      kind: "UPLOAD",
+      chapter: uploadChapter({
+        chapterId: "src-4002",
+        imageArtifacts: ["3f3f3f3f-0000-4000-8000-000000000000"],
+      }),
+    });
+    expect(ghostPages.statusCode).toBe(422);
+    expect(ghostPages.json().problems.join()).toContain("artifact store");
+
+    expect(await prisma.uploadTask.count()).toBe(1);
+  });
+
+  it("keeps hand-enqueueing out of a contributor's reach", async () => {
+    const contributor = await sessionAs("CONTRIBUTOR", "curator@example.com");
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/tasks",
+      headers: contributor,
+      payload: { kind: "UPLOAD", chapter: uploadChapter() },
+    });
+    // Refused on the role, before the scope check — this endpoint can create a
+    // real chapter on MangaDex, so it sits at ADMIN-or-above.
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toContain("admin role or above");
+    expect(await prisma.uploadTask.count()).toBe(0);
+
+    // An ADMIN session is allowed through.
+    const admin = await sessionAs("ADMIN", "admin@example.com");
+    const allowed = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/tasks",
+      headers: admin,
+      payload: { kind: "UPLOAD", chapter: uploadChapter() },
+    });
+    expect(allowed.statusCode).toBe(201);
+  });
+
+  // ---- edit a queued task ----
+
+  it("corrects a pending task, recomputing the dedupe key when identity moves", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/tasks",
+      headers: root,
+      payload: { kind: "UPLOAD", chapter: uploadChapter() },
+    });
+    const id = created.json().task.id as string;
+
+    // A shallow merge: one field fixed without restating the payload.
+    const titled = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/queues/tasks/${id}`,
+      headers: root,
+      payload: { chapter: { chapterTitle: "Corrected" }, maxAttempts: 9 },
+    });
+    expect(titled.statusCode).toBe(200);
+    expect(titled.json()).toMatchObject({ ok: true, dedupeKeyChanged: false });
+    expect(titled.json().task).toMatchObject({ maxAttempts: 9, dedupeKey: "src-4001|12|en" });
+    expect((titled.json().task.chapter as Record<string, unknown>)["chapterTitle"]).toBe("Corrected");
+    // The untouched fields are still there.
+    expect((titled.json().task.chapter as Record<string, unknown>)["mdGroupId"]).toBeTruthy();
+
+    // Changing an identity field moves the row's dedupe slot with it.
+    const renumbered = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/queues/tasks/${id}`,
+      headers: root,
+      payload: { chapter: { chapterNumber: "13" } },
+    });
+    expect(renumbered.statusCode).toBe(200);
+    expect(renumbered.json()).toMatchObject({ dedupeKeyChanged: true });
+    expect(renumbered.json().task.dedupeKey).toBe("src-4001|13|en");
+    expect(await prisma.auditEvent.count({ where: { action: "queue.task_edit" } })).toBe(2);
+
+    // ...but not onto a slot another task holds.
+    const other = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/tasks",
+      headers: root,
+      payload: { kind: "UPLOAD", chapter: uploadChapter({ chapterNumber: "20" }) },
+    });
+    expect(other.statusCode).toBe(201);
+    const collide = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/queues/tasks/${id}`,
+      headers: root,
+      payload: { chapter: { chapterNumber: "20" } },
+    });
+    expect(collide.statusCode).toBe(409);
+    expect(collide.json().existing.id).toBe(other.json().task.id);
+    expect(
+      (await prisma.uploadTask.findUniqueOrThrow({ where: { id } })).dedupeKey,
+    ).toBe("src-4001|13|en");
+
+    // An edit that would make the task unexecutable is refused too.
+    const broken = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/queues/tasks/${id}`,
+      headers: root,
+      payload: { chapter: { mdGroupId: null } },
+    });
+    expect(broken.statusCode).toBe(422);
+    expect(broken.json().problems.join()).toContain("mdGroupId");
+
+    const nothing = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/queues/tasks/${id}`,
+      headers: root,
+      payload: {},
+    });
+    expect(nothing.statusCode).toBe(400);
+  });
+
+  it("edits only a PENDING task", async () => {
+    const done = await task({ state: "DONE" });
+    const dead = await task({ state: "DEAD_LETTER" });
+
+    const onDone = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/queues/tasks/${done.id}`,
+      headers: root,
+      payload: { maxAttempts: 3 },
+    });
+    expect(onDone.statusCode).toBe(409);
+    expect(onDone.json().error).toContain("DONE");
+
+    const onDead = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/queues/tasks/${dead.id}`,
+      headers: root,
+      payload: { maxAttempts: 3 },
+    });
+    expect(onDead.statusCode).toBe(409);
+    // The way forward is named rather than left to be guessed.
+    expect(onDead.json().error).toContain("retry it first");
+
+    expect(
+      (
+        await app.inject({
+          method: "PATCH",
+          url: "/api/v1/admin/queues/tasks/00000000-0000-4000-8000-000000000000",
+          headers: root,
+          payload: { maxAttempts: 3 },
+        })
+      ).statusCode,
+    ).toBe(404);
+  });
+
+  // ---- authorization ----
+
+  it("confines every endpoint to the scope it declares", async () => {
+    const stats = await mint(["stats:read"]);
+    const runsRead = await mint(["runs:read"]);
+    const runsWrite = await mint(["runs:write"]);
+    const pending = await task({ state: "PENDING" });
+
+    for (const url of ["/api/v1/admin/queues", "/api/v1/admin/queues/tasks"]) {
+      const res = await app.inject({ method: "GET", url, headers: stats });
+      expect(res.statusCode, `${url} for stats:read`).toBe(403);
+      expect(res.json().error).toMatch(/^missing scope: /);
+    }
+
+    // runs:read may look at every queue and change none of them.
+    expect((await app.inject({ method: "GET", url: "/api/v1/admin/queues", headers: runsRead })).statusCode).toBe(200);
+    expect(
+      (await app.inject({ method: "GET", url: "/api/v1/admin/queues/tasks", headers: runsRead })).statusCode,
+    ).toBe(200);
+    for (const [method, url, payload] of [
+      ["POST", `/api/v1/admin/queues/tasks/${pending.id}/retry`, {}],
+      ["POST", "/api/v1/admin/queues/purge", { dryRun: false, confirm: true }],
+      ["POST", "/api/v1/admin/queues/reorder", { ids: [pending.id], mode: "front" }],
+      ["DELETE", `/api/v1/admin/queues/tasks/${pending.id}`, { confirm: true }],
+      ["PATCH", `/api/v1/admin/queues/tasks/${pending.id}`, { maxAttempts: 2 }],
+      ["POST", "/api/v1/admin/queues/tasks", { kind: "UPLOAD", chapter: uploadChapter() }],
+    ] as const) {
+      const res = await app.inject({ method, url, headers: runsRead, payload });
+      expect(res.statusCode, `${method} ${url} for runs:read`).toBe(403);
+    }
+    // Nothing leaked through: the row is exactly as it was.
+    expect(await prisma.uploadTask.findUniqueOrThrow({ where: { id: pending.id } })).toMatchObject({
+      state: "PENDING",
+    });
+
+    // runs:write acts on the queue, and write implies read.
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/admin/queues/reorder",
+          headers: runsWrite,
+          payload: { ids: [pending.id], mode: "front" },
+        })
+      ).statusCode,
+    ).toBe(200);
+    // ...but a token is never ADMIN-by-role enough for the manual-add gate?
+    // It is: adminAuthHook assigns api tokens the ADMIN role, so the role gate
+    // passes and the scope gate is what confines them.
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/api/v1/admin/queues/tasks",
+          headers: runsWrite,
+          payload: { kind: "UPLOAD", chapter: uploadChapter() },
+        })
+      ).statusCode,
+    ).toBe(201);
+
+    // A worker credential is rejected by audience, before any scope check.
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/api/v1/admin/queues/tasks",
+          headers: { authorization: "Bearer pw_not-a-real-worker-token" },
+        })
+      ).statusCode,
+    ).toBe(401);
+  });
+
+  it("names the acting principal in the audit log and demands CSRF on cookie writes", async () => {
+    const dead = await task({ state: "DEAD_LETTER", attempt: 5 });
+    const headers = await mint(["runs:write"]);
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/queues/tasks/${dead.id}/retry`,
+      headers,
+    });
+    const event = await prisma.auditEvent.findFirstOrThrow({ where: { action: "queue.retry" } });
+    expect(event.actor).toBe("token:queues-runs:write");
+
+    const owner = await sessionAs("OWNER", "owner@example.com");
+    const pending = await task({ state: "PENDING" });
+    const bare = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/admin/queues/tasks/${pending.id}`,
+      headers: { cookie: owner.cookie! },
+      payload: { confirm: true },
+    });
+    expect(bare.statusCode).toBe(403);
+    expect(bare.json().error).toContain("x-requested-with");
+    expect(await prisma.uploadTask.count({ where: { id: pending.id } })).toBe(1);
+
+    const dashed = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/admin/queues/tasks/${pending.id}`,
+      headers: owner,
+      payload: { confirm: true },
+    });
+    expect(dashed.statusCode).toBe(200);
+  });
+});

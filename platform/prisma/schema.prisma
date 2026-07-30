@@ -417,6 +417,14 @@ model UntrackedManga {
   mdMangaId     String?        @map("md_manga_id")
   attempts      Int            @default(0)
   lastError     String?        @map("last_error")
+  /// When an operator's corrections to this row were last pushed to the
+  /// MangaDex entry, and who pushed them. NULL means never.
+  ///
+  /// Current state, not history: the audit log records the action, but reading
+  /// "has this been applied?" off an append-only log makes a routine question
+  /// depend on log retention. Both nullable, so nothing needs backfilling.
+  mdAppliedAt   DateTime?      @map("md_applied_at")
+  mdAppliedBy   String?        @map("md_applied_by")
   createdAt     DateTime       @default(now()) @map("created_at")
   updatedAt     DateTime       @updatedAt @map("updated_at")
 
@@ -425,28 +433,120 @@ model UntrackedManga {
   @@map("untracked_manga")
 }
 
+/// external manga id -> MangaDex title id, the database replacement for each
+/// bundle's manga_id_map.json.
+///
+/// Uniqueness is on the EXTERNAL side only — (extension, namespace, mangaId) —
+/// which is what makes the legacy `{mdMangaId: [externalIds]}` file shape
+/// expressible: many external ids may point at one MangaDex title (mangaplus
+/// routinely does, one id per language edition of the same series), while one
+/// external id can never point at two titles.
 model TrackedManga {
   id        String   @id @default(uuid())
   extension String
+  /// Sub-id-space within the extension, "" when the extension has just one.
+  ///
+  /// An extension is not guaranteed to have a single flat id space. viz serves
+  /// two catalogues from one extension — `shonenjump` and `vizmanga` — and the
+  /// same numeric id under each is a DIFFERENT series, so keying only on
+  /// (extension, mangaId) silently collapses them into one row. "" is the
+  /// default so the flat case (mangaplus, alpha_manga) is untouched, and it is
+  /// a real value rather than NULL because it participates in a unique key.
+  namespace String   @default("")
   mangaId   String   @map("manga_id")
   mdMangaId String   @map("md_manga_id")
   source    String   @default("auto")
   createdAt DateTime @default(now()) @map("created_at")
 
-  @@unique([extension, mangaId])
+  @@unique([extension, namespace, mangaId])
   @@index([extension])
+  @@index([extension, namespace])
   @@map("tracked_manga")
 }
 
-// Per-extension runtime configuration. The DATABASE is the source of truth
-// ("no JSON config files"): seeded once from the bundle's data files at first
-// publish for migration convenience, then owned and edited via the admin API.
+/// Per-extension runtime configuration the platform does NOT interpret.
+///
+/// The three relations that used to hide in this blob (`same`,
+/// `multi_chapters`, `custom_language`) are tables now — see the three models
+/// below. What is left is genuinely extension-private: mangaplus's `empty`,
+/// `noformat`, `custom` (title regexes), `num2words`,
+/// `override_chapter_numbers` and `no_chapters` are read by the extension in
+/// the worker and never by core, so columns would be modelling another
+/// program's config. The blob keeps them; the platform's own decision inputs do
+/// not live here any more.
 model ExtensionConfig {
   extension       String   @id
   overrideOptions Json     @default("{}") @map("override_options")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
   @@map("extension_configs")
+}
+
+/// `override_options.same`: alternate chapter ids that are the same chapter as
+/// a master id, so the alternate is never uploaded a second time.
+///
+/// Unique on (extension, aliasChapterId) — an alias has exactly ONE master.
+/// That is the constraint the JSON dict could not express: nothing stopped
+/// `{"a": ["x"], "b": ["x"]}`, and findKeyFromListValue would then resolve x to
+/// whichever master happened to be enumerated first, making "was this chapter
+/// already uploaded" depend on JSON key order.
+model ExtensionChapterAlias {
+  id              String   @id @default(uuid())
+  extension       String
+  masterChapterId String   @map("master_chapter_id")
+  aliasChapterId  String   @map("alias_chapter_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@unique([extension, aliasChapterId])
+  @@index([extension])
+  @@index([extension, masterChapterId])
+  @@map("extension_chapter_aliases")
+}
+
+/// `override_options.multi_chapters`: one source chapter that legitimately
+/// backs several MangaDex chapter numbers (a merged release), so the extra
+/// MangaDex chapters are not treated as duplicates to delete.
+///
+/// Unique on all three columns; the declared numbers are a SET, not a sequence
+/// — every consumer in core/processor/dedupe.ts tests membership only
+/// (`allowedNumbers.includes`, `declaredNumbers.includes`, and a `keep` list
+/// whose contents depend on membership rather than iteration order), so no
+/// ordering column is needed to reproduce the JSON array's behaviour.
+model ExtensionMultiChapter {
+  id            String   @id @default(uuid())
+  extension     String
+  chapterId     String   @map("chapter_id")
+  chapterNumber String   @map("chapter_number")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  // Named explicitly: the generated name would be 64 characters and Postgres
+  // silently truncates identifiers at 63, which leaves the schema and the
+  // database disagreeing about what the index is called.
+  @@unique([extension, chapterId, chapterNumber], map: "extension_multi_chapters_unique")
+  @@index([extension])
+  @@map("extension_multi_chapters")
+}
+
+/// `override_options.custom_language`: a MangaDex language code the extension
+/// may publish in beyond the ones its manifest declares.
+///
+/// `sourceLanguage` keeps the name the contract has always used, but the key is
+/// whatever the extension decided to key on and core does not interpret it —
+/// mangaplus keys it by MANGA id (`{"200159": "es-la"}`), overriding the
+/// language of one series. Only the VALUE is load-bearing for the platform: it
+/// widens the set of languages allowed to stay on a title, which is why it is
+/// validated against src/contracts/languages.ts on the way in. Unique on
+/// (extension, sourceLanguage): one override per key, whatever the key means.
+model ExtensionLanguageMap {
+  id               String   @id @default(uuid())
+  extension        String
+  sourceLanguage   String   @map("source_language")
+  mangadexLanguage String   @map("mangadex_language")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@unique([extension, sourceLanguage])
+  @@index([extension])
+  @@map("extension_language_maps")
 }
 
 model ScheduleOverride {

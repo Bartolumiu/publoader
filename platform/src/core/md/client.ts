@@ -2,7 +2,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { PrismaClient } from "@prisma/client";
 import type { Config } from "../../config.js";
 import type { Logger } from "../../logging.js";
-import type { MdApi, MdChapter, MdManga } from "./types.js";
+import type { MdApi, MdChapter, MdManga, MdMangaDetail } from "./types.js";
 
 /**
  * MangaDex API client — the TypeScript port of publoader/http/{model,client,
@@ -547,6 +547,34 @@ export class MdClient implements MdExtendedApi {
     };
   }
 
+  /** As `toManga`, plus the edit-relevant attributes and the version. */
+  private static toMangaDetail(entity: MdEntity): MdMangaDetail {
+    const base = MdClient.toManga(entity);
+    const attrs = entity.attributes ?? {};
+    const str = (key: string): string | null => {
+      const value = attrs[key];
+      return typeof value === "string" && value !== "" ? value : null;
+    };
+    const links = attrs.links;
+    const version = attrs.version;
+    return {
+      id: base.id,
+      attributes: {
+        ...base.attributes,
+        status: str("status"),
+        contentRating: str("contentRating"),
+        links:
+          links !== null && typeof links === "object" && !Array.isArray(links)
+            ? (links as Record<string, string>)
+            : null,
+        // A title with no readable version cannot be edited safely — 1 is the
+        // value MangaDex assigns a fresh entity, and a wrong guess is refused
+        // rather than silently overwriting someone else's edit.
+        version: typeof version === "number" ? version : 1,
+      },
+    };
+  }
+
   private static chunk<T>(items: T[], size: number): T[][] {
     const out: T[][] = [];
     for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
@@ -594,7 +622,7 @@ export class MdClient implements MdExtendedApi {
   async searchManga(title: string, limit = 5): Promise<MdManga[]> {
     const trimmed = title.trim();
     if (trimmed.length === 0) return [];
-    const response = await this.request("GET", "manga", {
+    const response = await this.request("GET", `${this.config.mdApiUrl}/manga`, {
       params: { title: trimmed, limit, "order[relevance]": "desc" },
       successfulCodes: [404],
     });
@@ -602,6 +630,42 @@ export class MdClient implements MdExtendedApi {
     const data = response.data["data"];
     if (!Array.isArray(data)) return [];
     return data.map((entity) => MdClient.toManga(entity as MdEntity));
+  }
+
+  async mangaById(mangaId: string): Promise<MdMangaDetail | null> {
+    const response = await this.request("GET", `${this.config.mdApiUrl}/manga/${mangaId}`, {
+      successfulCodes: [404],
+    });
+    if (response.status === 404) return null;
+    const entity = response.data?.data;
+    if (entity === null || typeof entity !== "object") return null;
+    const typed = entity as MdEntity;
+    if (typeof typed.id !== "string") return null;
+    return MdClient.toMangaDetail(typed);
+  }
+
+  /**
+   * Correct an existing title. Mirrors `editChapter` — a PUT carrying the
+   * version MangaDex currently holds, which it bumps itself.
+   *
+   * `tries: 1`, unlike every other write here: a rejection is either a version
+   * conflict (someone edited the title between our read and our write, and the
+   * same stale version can never succeed) or a validation error (which will not
+   * change on retry). Replaying either against a public catalogue buys nothing
+   * and risks applying an edit the operator was told had failed. A 4xx becomes
+   * an MdRequestError carrying the status, so the caller can tell "the title
+   * moved under you" apart from "MangaDex refused this".
+   */
+  async editManga(
+    mangaId: string,
+    payload: Record<string, unknown>,
+    version: number,
+  ): Promise<boolean> {
+    const response = await this.request("PUT", `${this.config.mdApiUrl}/manga/${mangaId}`, {
+      json: { ...payload, version },
+      tries: 1,
+    });
+    return response.status === 200;
   }
 
   /** Port of fetch_aggregate — returns the `volumes` object, or null on error. */

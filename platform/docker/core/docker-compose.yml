@@ -92,8 +92,8 @@ x-core-build: &core-build
   # bug that is very hard to see.
   image: ${PUBLOADER_CORE_IMAGE:-ardax/publoader-core:2.0.0}
   build:
-    context: ../..
-    dockerfile: docker/core/Dockerfile
+    context: ../../..
+    dockerfile: platform/docker/core/Dockerfile
 
 services:
   # --- postgres -------------------------------------------------------------
@@ -159,8 +159,8 @@ services:
     <<: [*app-security, *core-build]
     # `migrate` is a separate Dockerfile target that keeps the prisma CLI.
     build:
-      context: ../..
-      dockerfile: docker/core/Dockerfile
+      context: ../../..
+      dockerfile: platform/docker/core/Dockerfile
       target: migrate
     image: ${PUBLOADER_MIGRATE_IMAGE:-ardax/publoader-core-migrate:2.0.0}
     restart: "no"

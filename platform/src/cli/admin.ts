@@ -40,6 +40,11 @@ function fail(message: string): never {
   process.exit(1);
 }
 
+/** `namespace/externalId` when the extension has catalogues, else the bare id. */
+function qualify(namespace: string | undefined, mangaId: string): string {
+  return namespace ? `${namespace}/${mangaId}` : mangaId;
+}
+
 type RequestOptions = {
   method?: "GET" | "POST" | "PUT" | "DELETE";
   json?: unknown;
@@ -417,42 +422,109 @@ const tracked = program
   .command("tracked")
   .description("external manga id -> MangaDex id mapping");
 
+/**
+ * `--namespace` names one of an extension's catalogues (viz has `shonenjump`
+ * and `vizmanga`, where the same numeric id under each is a different series).
+ * Omitting it means the single flat id space, which is what every extension
+ * except viz has — so no existing invocation changes.
+ */
 tracked
   .command("list <extension>")
   .description("every tracked manga for an extension")
-  .action(async (extension: string) => {
-    const res = await api<{ tracked: Record<string, unknown>[] }>(
+  .option("--namespace <namespace>", "only this catalogue (default: all of them)")
+  .action(async (extension: string, opts: { namespace?: string }) => {
+    const res = await api<{ tracked: Record<string, unknown>[]; namespaces: string[] }>(
       `/api/v1/admin/extensions/${extension}/tracked`,
+      { query: { namespace: opts.namespace } },
     );
+    const namespaced = res.tracked.some((t) => t["namespace"]);
     table(res.tracked, [
+      // The column is omitted entirely for a flat extension rather than shown
+      // full of empty strings.
+      ...(namespaced ? [{ header: "NAMESPACE", get: (t: Record<string, unknown>) => t["namespace"] || "-" }] : []),
       { header: "MANGA ID", get: (t) => t["mangaId"] },
       { header: "MANGADEX ID", get: (t) => t["mdMangaId"] },
       { header: "SOURCE", get: (t) => t["source"] },
       { header: "ADDED", get: (t) => ago(t["createdAt"]) },
     ], `nothing tracked for ${extension}`);
     if (res.tracked.length > 0) console.log(`\n${res.tracked.length} tracked`);
+    const others = res.namespaces.filter((n) => n !== "");
+    if (others.length > 0) console.log(`namespaces: ${others.join(", ")}`);
   });
 
 tracked
   .command("set <extension> <mangaId> <mdMangaId>")
   .description("add or repoint a mapping")
-  .action(async (extension: string, mangaId: string, mdMangaId: string) => {
+  .option("--namespace <namespace>", "the extension catalogue this id belongs to")
+  .action(async (extension: string, mangaId: string, mdMangaId: string, opts: { namespace?: string }) => {
     await api(`/api/v1/admin/extensions/${extension}/tracked`, {
       method: "PUT",
-      json: { mangaId, mdMangaId },
+      json: { mangaId, mdMangaId, ...(opts.namespace ? { namespace: opts.namespace } : {}) },
     });
-    ok(`${extension}: ${mangaId} -> ${mdMangaId}`);
+    ok(`${extension}: ${qualify(opts.namespace, mangaId)} -> ${mdMangaId}`);
   });
 
 tracked
   .command("remove <extension> <mangaId>")
   .description("stop tracking a manga (does not touch MangaDex)")
-  .action(async (extension: string, mangaId: string) => {
+  .option("--namespace <namespace>", "the extension catalogue this id belongs to")
+  .action(async (extension: string, mangaId: string, opts: { namespace?: string }) => {
     const res = await api<{ removed: boolean }>(
       `/api/v1/admin/extensions/${extension}/tracked/${encodeURIComponent(mangaId)}`,
-      { method: "DELETE" },
+      { method: "DELETE", query: { namespace: opts.namespace } },
     );
-    ok(res.removed ? `removed ${extension}:${mangaId}` : `no mapping for ${extension}:${mangaId}`);
+    const subject = `${extension}:${qualify(opts.namespace, mangaId)}`;
+    ok(res.removed ? `removed ${subject}` : `no mapping for ${subject}`);
+  });
+
+tracked
+  .command("import <extension> [file]")
+  .description("bulk-add mappings from pasted `[namespace,]externalId,titleId` lines, or stdin")
+  .option("--namespace <namespace>", "default catalogue for lines that do not name one")
+  .option("--remove", "treat each line's external id as a removal instead")
+  .option("--dry-run", "report what would happen and write nothing")
+  .action(async (
+    extension: string,
+    file: string | undefined,
+    opts: { namespace?: string; remove?: boolean; dryRun?: boolean },
+  ) => {
+    const text = file && file !== "-" ? readFileSync(resolve(file), "utf8") : readFileSync(0, "utf8");
+    const body = opts.remove
+      ? {
+          remove: text
+            .split(/\r?\n/)
+            .map((line) => line.split("#")[0]!.trim())
+            .filter(Boolean)
+            .map((mangaId) => ({ mangaId, ...(opts.namespace ? { namespace: opts.namespace } : {}) })),
+        }
+      : { text };
+    const res = await api<{
+      added: number;
+      updated: number;
+      unchanged: number;
+      removed: number;
+      failed: number;
+      parseErrors: { line: number; reason: string }[];
+      results: { mangaId: string; namespace?: string; outcome: string; detail?: string }[];
+    }>(`/api/v1/admin/extensions/${extension}/tracked/batch`, {
+      method: "POST",
+      json: {
+        ...body,
+        ...(opts.namespace ? { namespace: opts.namespace } : {}),
+        dryRun: opts.dryRun === true,
+      },
+    });
+    for (const err of res.parseErrors) console.error(`  line ${err.line}: ${err.reason}`);
+    // Only the rows that did not simply work: a 2000-line paste's useful output
+    // is the handful that needs a decision.
+    for (const row of res.results) {
+      if (row.outcome === "added" || row.outcome === "unchanged" || row.outcome === "removed") continue;
+      console.error(`  ${qualify(row.namespace, row.mangaId)}: ${row.outcome}${row.detail ? ` (${row.detail})` : ""}`);
+    }
+    ok(
+      `${opts.dryRun ? "would apply" : "applied"}: ${res.added} added, ${res.updated} updated, ` +
+        `${res.unchanged} unchanged, ${res.removed} removed, ${res.failed} failed`,
+    );
   });
 
 // ---- extension config (the database replacement for override_options.json) ----
@@ -463,11 +535,34 @@ const extConfig = program
 extConfig
   .command("get <extension>")
   .description("print the current override options as JSON")
-  .action(async (extension: string) => {
-    const res = await api<{ overrideOptions: unknown }>(
-      `/api/v1/admin/extensions/${extension}/config`,
+  .option("--split", "show which keys are modelled tables and which are passed through")
+  .action(async (extension: string, opts: { split?: boolean }) => {
+    const res = await api<{
+      overrideOptions: unknown;
+      passthrough: Record<string, unknown>;
+      same: Record<string, string[]>;
+      multi_chapters: Record<string, string[]>;
+      custom_language: Record<string, string>;
+    }>(`/api/v1/admin/extensions/${extension}/config`);
+    if (!opts.split) {
+      // The reassembled legacy document, so `get > f && set f` round-trips.
+      console.log(JSON.stringify(res.overrideOptions, null, 2));
+      return;
+    }
+    console.log(
+      JSON.stringify(
+        {
+          tables: {
+            same: res.same,
+            multi_chapters: res.multi_chapters,
+            custom_language: res.custom_language,
+          },
+          passthrough: res.passthrough,
+        },
+        null,
+        2,
+      ),
     );
-    console.log(JSON.stringify(res.overrideOptions, null, 2));
   });
 
 extConfig
@@ -489,11 +584,30 @@ extConfig
     if (typeof overrideOptions !== "object" || overrideOptions === null || Array.isArray(overrideOptions)) {
       fail("override options must be a JSON object");
     }
-    await api(`/api/v1/admin/extensions/${extension}/config`, {
+    const res = await api<{
+      aliases: number;
+      multiChapters: number;
+      languages: number;
+      passthroughKeys: string[];
+      rejected: { option: string; key: string; value?: string; reason: string }[];
+    }>(`/api/v1/admin/extensions/${extension}/config`, {
       method: "PUT",
       json: { overrideOptions },
     });
-    ok(`override options replaced for ${extension}`);
+    // A rejected row is not a failed command — the rest of the document landed —
+    // but it must be visible, because a dropped `custom_language` row silently
+    // stops protecting a language from the chapter-removal pass.
+    for (const row of res.rejected) {
+      console.error(
+        `  rejected ${row.option}.${row.key}${row.value ? ` = ${row.value}` : ""}: ${row.reason}`,
+      );
+    }
+    ok(
+      `override options replaced for ${extension}: ${res.aliases} chapter aliases, ` +
+        `${res.multiChapters} multi-chapter numbers, ${res.languages} language overrides, ` +
+        `${res.passthroughKeys.length} extension-private keys (${res.passthroughKeys.join(", ") || "none"})` +
+        (res.rejected.length > 0 ? `, ${res.rejected.length} rejected` : ""),
+    );
   });
 
 // ---- untracked series pipeline ----
@@ -664,19 +778,24 @@ bundle
     const headers: Record<string, string> = {};
     if (opts.sourceCommit) headers["x-source-commit"] = opts.sourceCommit;
     if (opts.allowLegacyRuntime) headers["x-allow-legacy-runtime"] = "true";
-    const res = await api<{ extension: string; version: string; sha256: string; created: boolean }>(
-      "/api/v1/admin/bundles",
-      {
-        method: "POST",
-        raw: { body: zipData, contentType: "application/zip", headers },
-      },
-    );
+    const res = await api<{
+      extension: string;
+      version: string;
+      sha256: string;
+      created: boolean;
+      warnings?: string[];
+    }>("/api/v1/admin/bundles", {
+      method: "POST",
+      raw: { body: zipData, contentType: "application/zip", headers },
+    });
     kv({
       extension: res.extension,
       version: res.version,
       sha256: res.sha256,
       status: res.created ? "published" : "already published (identical content)",
     });
+    // Not grounds for refusing the bundle, but the operator is here now.
+    for (const warning of res.warnings ?? []) console.error(`  warning: ${warning}`);
   });
 
 // ---- client tokens ----

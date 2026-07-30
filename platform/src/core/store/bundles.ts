@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 import AdmZip from "adm-zip";
 import type { PrismaClient, Bundle } from "@prisma/client";
 import { Manifest, manifestRuntime } from "../../contracts/manifest.js";
+import { normaliseMangadexLanguage } from "../../contracts/languages.js";
+import { ExtensionConfigStore } from "./extensionConfig.js";
+import { DEFAULT_NAMESPACE, normaliseNamespace } from "./trackedManga.js";
 
 /** A bundle that cannot be accepted as published. Surfaces as a 422. */
 export class BundleRejectedError extends Error {
@@ -30,7 +33,7 @@ export class BundleStore {
      * to a known-good legacy bundle is possible without a code change.
      */
     allowLegacy?: boolean;
-  }): Promise<{ bundle: Bundle; created: boolean }> {
+  }): Promise<{ bundle: Bundle; created: boolean; warnings: string[] }> {
     const manifest = Manifest.parse(opts.manifest);
     const runtime = manifestRuntime(manifest);
 
@@ -45,10 +48,22 @@ export class BundleStore {
       assertNodeEntrypoint(manifest, opts.zipData);
     }
 
+    // A language MangaDex does not have is a WARNING, not a rejection. It is
+    // worth surfacing while an operator is watching (it is almost always a typo
+    // like `pt_br`, and a chapter in an undeclared language is dropped at
+    // ingest), but MangaDex adds codes and this list would then block a
+    // perfectly good bundle with no way to override it. `custom_language` is
+    // enforced rather than warned, because there the failure is silent: an
+    // unrecognised code there widens the keep-set by nothing and quietly stops
+    // protecting chapters from the removal pass.
+    const warnings = manifest.languages
+      .filter((language) => normaliseMangadexLanguage(language) === null)
+      .map((language) => `manifest language ${JSON.stringify(language)} is not a MangaDex language code`);
+
     const sha256 = createHash("sha256").update(opts.zipData).digest("hex");
 
     const existing = await this.prisma.bundle.findUnique({ where: { sha256 } });
-    if (existing) return { bundle: existing, created: false };
+    if (existing) return { bundle: existing, created: false, warnings };
 
     const bundle = await this.prisma.bundle.upsert({
       where: { extension_version: { extension: manifest.name, version: manifest.version } },
@@ -73,7 +88,7 @@ export class BundleStore {
       },
     });
     await this.seedConfigFromBundle(manifest, opts.zipData);
-    return { bundle, created: true };
+    return { bundle, created: true, warnings };
   }
 
   /**
@@ -100,28 +115,19 @@ export class BundleStore {
       }
     };
 
-    // manga_id_map.json: { md_manga_id: [external ids] } -> TrackedManga rows.
-    // Falls back to the conventional filename when data_files doesn't map it.
+    // manga_id_map.json -> TrackedManga rows. Falls back to the conventional
+    // filename when data_files doesn't map it.
     const idMap = readJson(manifest.data_files["manga_id_map"] ?? "manga_id_map.json");
-    if (idMap && typeof idMap === "object" && !Array.isArray(idMap)) {
-      const rows: { extension: string; mangaId: string; mdMangaId: string }[] = [];
-      for (const [mdMangaId, externals] of Object.entries(idMap as Record<string, unknown>)) {
-        if (!Array.isArray(externals)) continue;
-        for (const external of externals) {
-          rows.push({ extension: manifest.name, mangaId: String(external), mdMangaId });
-        }
-      }
-      await this.reconcileTrackedManga(manifest.name, rows);
+    const parsed = parseMangaIdMapFile(idMap);
+    if (parsed.length > 0) {
+      await this.reconcileTrackedManga(manifest.name, parsed);
     }
 
-    // override_options.json -> ExtensionConfig (create-only; DB wins afterwards).
+    // override_options.json -> the three config tables plus the free-form
+    // remainder (create-only; DB wins afterwards).
     const overrides = readJson(manifest.data_files["override_options"] ?? "override_options.json");
     if (overrides && typeof overrides === "object") {
-      await this.prisma.extensionConfig.upsert({
-        where: { extension: manifest.name },
-        create: { extension: manifest.name, overrideOptions: overrides as object },
-        update: {},
-      });
+      await new ExtensionConfigStore(this.prisma).seedIfAbsent(manifest.name, overrides);
     }
   }
 
@@ -148,28 +154,33 @@ export class BundleStore {
    */
   private async reconcileTrackedManga(
     extension: string,
-    rows: { extension: string; mangaId: string; mdMangaId: string }[],
+    rows: ParsedIdMapRow[],
   ): Promise<{ added: number; updated: number; preserved: number }> {
     if (rows.length === 0) return { added: 0, updated: 0, preserved: 0 };
 
     const existing = await this.prisma.trackedManga.findMany({
       where: { extension },
-      select: { mangaId: true, mdMangaId: true, source: true },
+      select: { namespace: true, mangaId: true, mdMangaId: true, source: true },
     });
-    const byMangaId = new Map(existing.map((row) => [row.mangaId, row]));
+    // Keyed on the row identity — (namespace, mangaId) — not on mangaId alone.
+    // Keying on the external id by itself is what let viz's two catalogues,
+    // which reuse numeric ids, overwrite each other.
+    const byPair = new Map(
+      existing.map((row) => [JSON.stringify([row.namespace, row.mangaId]), row]),
+    );
 
-    const toInsert: typeof rows = [];
-    const toUpdate: { mangaId: string; mdMangaId: string }[] = [];
+    const toInsert: ParsedIdMapRow[] = [];
+    const toUpdate: ParsedIdMapRow[] = [];
     let preserved = 0;
 
     for (const row of rows) {
-      const current = byMangaId.get(row.mangaId);
+      const current = byPair.get(JSON.stringify([row.namespace, row.mangaId]));
       if (!current) {
         toInsert.push(row);
       } else if (current.mdMangaId === row.mdMangaId) {
         // Already correct; nothing to do.
       } else if (current.source === "bundle-import") {
-        toUpdate.push({ mangaId: row.mangaId, mdMangaId: row.mdMangaId });
+        toUpdate.push(row);
       } else {
         preserved += 1;
       }
@@ -177,13 +188,18 @@ export class BundleStore {
 
     if (toInsert.length > 0) {
       await this.prisma.trackedManga.createMany({
-        data: toInsert.map((row) => ({ ...row, source: "bundle-import" })),
+        data: toInsert.map((row) => ({ extension, ...row, source: "bundle-import" })),
         skipDuplicates: true,
       });
     }
     for (const row of toUpdate) {
       await this.prisma.trackedManga.updateMany({
-        where: { extension, mangaId: row.mangaId, source: "bundle-import" },
+        where: {
+          extension,
+          namespace: row.namespace,
+          mangaId: row.mangaId,
+          source: "bundle-import",
+        },
         data: { mdMangaId: row.mdMangaId },
       });
     }
@@ -225,6 +241,79 @@ export class BundleStore {
     });
     return res.count === 1;
   }
+}
+
+export interface ParsedIdMapRow {
+  namespace: string;
+  mangaId: string;
+  mdMangaId: string;
+}
+
+const MD_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Read a bundle's `manga_id_map.json` in every shape the real files use.
+ *
+ * There are three in the wild and the parser must not guess wrong, because a
+ * misread map means either "nothing is tracked" (every series is reported
+ * untracked) or, worse, series pointed at the wrong MangaDex title:
+ *
+ *   {mdMangaId: [externalId, …]}          mangaplus — many external ids per
+ *                                         title, one per language edition
+ *   {externalId: mdMangaId}               alpha_manga — the forward direction
+ *   {namespace: {externalId: mdMangaId}}  viz — TWO catalogues (`shonenjump`,
+ *                                         `vizmanga`) in one extension, where
+ *                                         the same numeric id under each is a
+ *                                         different series
+ *
+ * They are told apart by the type of each top-level VALUE (array, string,
+ * object), per entry rather than for the file as a whole, so a hand-edited file
+ * that mixes them still imports. A namespace's contents may themselves be in
+ * either flat shape. The MangaDex side is always the uuid; a row where neither
+ * side is one is skipped rather than inserted backwards.
+ *
+ * NOTE: alpha_manga's shape was previously dropped on the floor — the old
+ * parser required array values, so `{externalId: mdMangaId}` seeded nothing at
+ * all and viz's nested map likewise seeded nothing.
+ */
+export function parseMangaIdMapFile(document: unknown): ParsedIdMapRow[] {
+  if (!isPlainObject(document)) return [];
+  const rows: ParsedIdMapRow[] = [];
+
+  const addFlat = (namespace: string, entries: Record<string, unknown>): void => {
+    for (const [key, value] of Object.entries(entries)) {
+      if (Array.isArray(value)) {
+        // {mdMangaId: [externalId, …]}
+        if (!MD_UUID_RE.test(key)) continue;
+        for (const external of value) {
+          if (typeof external !== "string" && typeof external !== "number") continue;
+          const mangaId = String(external);
+          if (mangaId.length === 0) continue;
+          rows.push({ namespace, mangaId, mdMangaId: key.toLowerCase() });
+        }
+      } else if (typeof value === "string" || typeof value === "number") {
+        // {externalId: mdMangaId}
+        const mdMangaId = String(value);
+        if (!MD_UUID_RE.test(mdMangaId) || key.length === 0) continue;
+        rows.push({ namespace, mangaId: key, mdMangaId: mdMangaId.toLowerCase() });
+      }
+    }
+  };
+
+  for (const [key, value] of Object.entries(document)) {
+    if (isPlainObject(value)) {
+      // A namespace. Nesting stops here: two levels is what the files have, and
+      // accepting more would make an accidentally double-wrapped file look valid.
+      addFlat(normaliseNamespace(key), value);
+    } else {
+      addFlat(DEFAULT_NAMESPACE, { [key]: value });
+    }
+  }
+  return rows;
 }
 
 /**

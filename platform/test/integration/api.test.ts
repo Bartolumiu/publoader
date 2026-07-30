@@ -173,8 +173,10 @@ describe.skipIf(!dbReady())("control-plane API", () => {
     const leased = lease.json();
     expect(leased.job.bundleSha256).toBe(sha);
     expect(leased.job.manifest.name).toBe("mangaplus");
-    // DB-seeded manga id map is delivered with the lease.
+    // DB-seeded manga id map is delivered with the lease, in the flat legacy
+    // shape while every tracked row is in the extension's default id space.
     expect(leased.job.mangaIdMap["b3c7e5d1-0000-4000-8000-000000000001"]).toEqual(["100001"]);
+    expect(leased.job.mangaIdMapNamespaced).toBe(false);
 
     const envelope = {
       envelopeVersion: 1,
@@ -227,6 +229,58 @@ describe.skipIf(!dbReady())("control-plane API", () => {
 
     const job = await prisma.job.findUniqueOrThrow({ where: { id: leased.job.jobId } });
     expect(job.state).toBe("SUCCEEDED");
+  });
+
+  /**
+   * viz reuses numeric ids across its `shonenjump` and `vizmanga` catalogues, so
+   * the lease has to say which catalogue an id belongs to. The flat shape cannot,
+   * hence the second wire form — and `mangaIdMapNamespaced` so a runner that does
+   * not implement it can refuse loudly rather than invert an object-valued map
+   * into an empty lookup and report every series as untracked.
+   */
+  it("delivers a namespaced manga id map once an extension has more than one catalogue", async () => {
+    const sha = await publishBundle();
+    await prisma.trackedManga.createMany({
+      data: [
+        {
+          extension: "mangaplus",
+          namespace: "vizmanga",
+          mangaId: "709",
+          mdMangaId: "b3c7e5d1-0000-4000-8000-000000000002",
+        },
+        {
+          extension: "mangaplus",
+          namespace: "shonenjump",
+          mangaId: "709",
+          mdMangaId: "b3c7e5d1-0000-4000-8000-000000000003",
+        },
+      ],
+    });
+
+    const { token } = await enrollWorker();
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/runs",
+      headers: admin,
+      payload: { extension: "mangaplus", kind: "FORCE" },
+    });
+    const lease = await app.inject({
+      method: "POST",
+      url: "/api/v1/worker/lease",
+      headers: { authorization: `Bearer ${token}` },
+      payload: {},
+    });
+    expect(lease.statusCode).toBe(200);
+    const leased = lease.json();
+    expect(leased.job.bundleSha256).toBe(sha);
+    expect(leased.job.mangaIdMapNamespaced).toBe(true);
+    expect(leased.job.mangaIdMap).toEqual({
+      // The publish-seeded row is in the default id space and keeps its own key
+      // rather than being dropped or renamed.
+      "": { "b3c7e5d1-0000-4000-8000-000000000001": ["100001"] },
+      vizmanga: { "b3c7e5d1-0000-4000-8000-000000000002": ["709"] },
+      shonenjump: { "b3c7e5d1-0000-4000-8000-000000000003": ["709"] },
+    });
   });
 
   it("quarantines policy-violating envelopes (disallowed host) without touching state", async () => {

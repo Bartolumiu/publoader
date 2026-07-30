@@ -5,6 +5,9 @@ import { loadConfig } from "../../src/config.js";
 import { createLogger } from "../../src/logging.js";
 import { buildContext, type AppContext } from "../../src/core/api/context.js";
 import { buildServer } from "../../src/core/api/server.js";
+import { MdRequestError } from "../../src/core/md/client.js";
+import { TitleService } from "../../src/core/md/titleService.js";
+import type { MdApi, MdMangaDetail } from "../../src/core/md/types.js";
 import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
 
 /**
@@ -28,12 +31,166 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
   const log = createLogger("test-ops", "error");
   let app: FastifyInstance;
   let ctx: AppContext;
+  let md: MdStub;
   const root = { authorization: `Bearer ${ADMIN_TOKEN}` };
+
+  /**
+   * A MangaDex stand-in for the untracked-series routes. Not the dev mock over
+   * HTTP: these tests are about what the API does with what MangaDex says —
+   * including saying nothing, or refusing an edit as stale — and driving those
+   * answers is exactly what a stub is for. The mock at docker/dev/mock-md covers
+   * the wire format for the e2e stack.
+   */
+  interface MdStub extends Partial<MdApi> {
+    titles: Map<string, MdMangaDetail>;
+    edits: { mangaId: string; payload: Record<string, unknown>; version: number }[];
+    drafts: Record<string, unknown>[];
+    /** Thrown by the next editManga call, then cleared. */
+    failEditWith?: Error;
+    /** Thrown by every mangaById call, standing in for a MangaDex outage. */
+    failReadWith?: Error;
+  }
+
+  function mdStub(): MdStub {
+    const stub: MdStub = { titles: new Map(), edits: [], drafts: [] };
+    stub.mangaById = async (mangaId: string) => {
+      if (stub.failReadWith) throw stub.failReadWith;
+      return stub.titles.get(mangaId) ?? null;
+    };
+    stub.editManga = async (mangaId, payload, version) => {
+      if (stub.failEditWith) {
+        const err = stub.failEditWith;
+        stub.failEditWith = undefined;
+        throw err;
+      }
+      stub.edits.push({ mangaId, payload, version });
+      const existing = stub.titles.get(mangaId);
+      if (existing) {
+        stub.titles.set(mangaId, {
+          id: mangaId,
+          attributes: {
+            ...existing.attributes,
+            ...(payload.title ? { title: payload.title as Record<string, string> } : {}),
+            ...(payload.links ? { links: payload.links as Record<string, string> } : {}),
+            version: existing.attributes.version + 1,
+          },
+        });
+      }
+      return true;
+    };
+    stub.searchManga = async () => [];
+    stub.createMangaDraft = async (payload) => {
+      stub.drafts.push(payload);
+      const id = `9c9c9c9c-0000-4000-8000-${String(stub.drafts.length).padStart(12, "0")}`;
+      stub.titles.set(id, {
+        id,
+        attributes: {
+          title: payload.title,
+          altTitles: [],
+          originalLanguage: payload.originalLanguage,
+          status: payload.status,
+          contentRating: payload.contentRating,
+          links: payload.links ?? {},
+          version: 1,
+        },
+      });
+      return { id, version: 1 };
+    };
+    stub.commitMangaDraft = async () => true;
+    return stub;
+  }
+
+  /** A MangaDex title the stub will serve, with one name and one raw link. */
+  const seedTitle = (id: string, titles: Record<string, string>, raw?: string): MdMangaDetail => {
+    const detail: MdMangaDetail = {
+      id,
+      attributes: {
+        title: titles,
+        altTitles: [],
+        originalLanguage: "ja",
+        status: "ongoing",
+        contentRating: "safe",
+        links: raw ? { raw } : {},
+        version: 3,
+      },
+    };
+    md.titles.set(id, detail);
+    return detail;
+  };
+
+  /** A published bundle, so the routes can read the extension's manifest. */
+  const bundle = async (overrides: Record<string, unknown> = {}) =>
+    prisma.bundle.create({
+      data: {
+        extension: "opstest",
+        version: "1.0.0",
+        sha256: `${Math.random().toString(36).slice(2).padEnd(64, "0")}`,
+        archive: Buffer.from("not-a-real-zip"),
+        manifest: {
+          name: "opstest",
+          version: "1.0.0",
+          publoader_api: "^2.0.0",
+          runtime: "node",
+          entrypoint: "index.mjs",
+          class_name: "Extension",
+          mangadex_group_id: "4f1de6a2-f0c5-4ac5-bce5-02c7dbb67deb",
+          languages: ["en"],
+          allowed_hosts: ["example.com"],
+          auto_create_titles: false,
+          title_defaults: { originalLanguage: "ja", contentRating: "safe", status: "ongoing" },
+        },
+        ...overrides,
+      },
+    });
+
+  const untracked = (overrides: Record<string, unknown> = {}) =>
+    prisma.untrackedManga.create({
+      data: {
+        extension: "opstest",
+        mangaId: `ext-${Math.random().toString(36).slice(2)}`,
+        mangaName: "Mangled Nmae",
+        mangaLanguage: "en",
+        mangaUrl: "https://example.com/series/1",
+        state: "NEW",
+        ...overrides,
+      },
+    });
+
+  /** A logged-in dashboard session for `role`, plus the CSRF header writes need. */
+  async function session(role: "OWNER" | "ADMIN" | "CONTRIBUTOR"): Promise<Record<string, string>> {
+    const email = `${role.toLowerCase()}@example.com`;
+    let cookie: string;
+    if (role === "OWNER") {
+      await ctx.adminUsers.ensureOwner(email);
+      const login = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/session",
+        payload: { token: ADMIN_TOKEN, actor: "owner" },
+      });
+      cookie = login.cookies.find((c) => c.name === "publoader_session")!.value;
+    } else {
+      const user = await ctx.adminUsers.invite(email, role);
+      await ctx.adminUsers.setPassword(user.id, "correct-horse-battery-staple");
+      const login = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/session",
+        payload: { email, password: "correct-horse-battery-staple" },
+      });
+      expect(login.statusCode, `${role} login`).toBe(200);
+      cookie = login.cookies.find((c) => c.name === "publoader_session")!.value;
+    }
+    return { cookie: `publoader_session=${cookie}`, "x-requested-with": "publoader-dash" };
+  }
 
   beforeEach(async () => {
     await resetDb(prisma);
     await prisma.apiToken.deleteMany({});
     ctx = buildContext(prisma, config, log);
+    // The API only holds a title service where it holds MangaDex credentials
+    // (see services/api.ts); the untracked-correction routes are 503 without it,
+    // so the tests that exercise them install one.
+    md = mdStub();
+    ctx.titleService = new TitleService(prisma, md as MdApi, { send: async () => undefined }, log);
     app = buildServer(ctx);
     await app.ready();
     // buildServer already calls registerOpsRoutes; asserting that here means a
@@ -780,5 +937,380 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
       headers: { cookie, "x-requested-with": "publoader-dash" },
     });
     expect(dashed.statusCode).toBe(200);
+  });
+
+  // ---- correcting an untracked series ----
+
+  /**
+   * The property under test throughout: a correction is two separate acts. The
+   * local row is a contributor's to fix; the MangaDex entry it created is a
+   * public catalogue record that only an admin may change, and only explicitly.
+   */
+  const MD_ID = "6a1b2c3d-0000-4000-8000-000000000001";
+
+  it("returns the row, the live MangaDex title, and what an apply would send", async () => {
+    await bundle();
+    const row = await untracked({ state: "TRACKED", mdMangaId: MD_ID });
+    seedTitle(MD_ID, { en: "Mangled Nmae" }, "https://example.com/moved");
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/untracked/${row.id}`,
+      headers: root,
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+
+    expect(body.untracked).toMatchObject({ id: row.id, mangaName: "Mangled Nmae", mangaLanguage: "en" });
+    // The MangaDex half is read live, so the operator edits against the entry as
+    // it is now rather than against what the extension scraped.
+    expect(body.mangadex).toMatchObject({
+      id: MD_ID,
+      titleUrl: `https://mangadex.org/title/${MD_ID}`,
+      titles: { en: "Mangled Nmae" },
+      originalLanguage: "ja",
+      status: "ongoing",
+      contentRating: "safe",
+      links: { raw: "https://example.com/moved" },
+      version: 3,
+    });
+    expect(body.mangadexError).toBeNull();
+    // The row's URL and the entry's raw link disagree, and the diff says so
+    // before anything is sent.
+    expect(body.pendingChanges.map((c: { field: string }) => c.field)).toEqual(["links"]);
+    expect(body.extension).toMatchObject({ allowedHosts: ["example.com"], languages: ["en"] });
+    expect(body).toMatchObject({
+      editable: true,
+      canApplyToMangaDex: true,
+      applyBlockedReason: null,
+      appliedToMangaDex: null,
+      languageValidation: "allowlist",
+    });
+
+    const unknown = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/untracked/00000000-0000-4000-8000-000000000000",
+      headers: root,
+    });
+    expect(unknown.statusCode).toBe(404);
+  });
+
+  it("still answers when the MangaDex read fails", async () => {
+    const row = await untracked({ state: "TRACKED", mdMangaId: MD_ID });
+    md.failReadWith = new MdRequestError("GET /manga failed — 503: upstream down", 503);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/untracked/${row.id}`,
+      headers: root,
+    });
+    // Correcting the local row does not need MangaDex, so a MangaDex outage must
+    // not make the row unreadable.
+    expect(res.statusCode).toBe(200);
+    expect(res.json().untracked.id).toBe(row.id);
+    expect(res.json().mangadex).toBeNull();
+    expect(res.json().mangadexError).toContain("503");
+    expect(res.json().pendingChanges).toEqual([]);
+  });
+
+  it("corrects the row, and refuses every value that would escape unchecked", async () => {
+    await bundle();
+    const row = await untracked();
+    const patch = (payload: Record<string, unknown>) =>
+      app.inject({ method: "PATCH", url: `/api/v1/admin/untracked/${row.id}`, headers: root, payload });
+
+    const badLanguage = await patch({ mangaLanguage: "klingon" });
+    expect(badLanguage.statusCode).toBe(400);
+    expect(badLanguage.json().error).toContain("not a language MangaDex accepts");
+
+    // This URL becomes links.raw on a public MangaDex entry and a clickable link
+    // in Discord, so it is held to the extension's own allowlist.
+    const badHost = await patch({ mangaUrl: "https://evil.test/series/1" });
+    expect(badHost.statusCode).toBe(400);
+    expect(badHost.json().error).toContain("allowed_hosts");
+    expect(badHost.json().allowedHosts).toEqual(["example.com"]);
+
+    const badScheme = await patch({ mangaUrl: "javascript:alert(1)" });
+    expect(badScheme.statusCode).toBe(400);
+
+    const blankName = await patch({ mangaName: "   " });
+    expect(blankName.statusCode).toBe(400);
+
+    // A misspelled field must not read as a successful edit that changed nothing.
+    expect((await patch({ mangaNmae: "Correct Name" })).statusCode).toBe(400);
+    expect((await patch({})).statusCode).toBe(400);
+
+    // Nothing above touched the row.
+    expect(await prisma.untrackedManga.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      mangaName: "Mangled Nmae",
+      mangaLanguage: "en",
+      mangaUrl: "https://example.com/series/1",
+    });
+
+    const good = await patch({
+      mangaName: "  Correct Name  ",
+      mangaLanguage: "JA",
+      mangaUrl: "https://example.com/series/2",
+    });
+    expect(good.statusCode).toBe(200);
+    expect(good.json().changed.sort()).toEqual(["mangaLanguage", "mangaName", "mangaUrl"]);
+    // A language the extension does not declare is legitimate (a series' name in
+    // its original language) but unusual, so it is reported and not refused.
+    expect(good.json().warnings.join(" ")).toContain("not in opstest's manifest languages");
+    // No title exists yet, so there is nothing to reconcile on MangaDex.
+    expect(good.json().mangadexNeedsApply).toBe(false);
+
+    const after = await prisma.untrackedManga.findUniqueOrThrow({ where: { id: row.id } });
+    expect(after).toMatchObject({
+      mangaName: "Correct Name",
+      mangaLanguage: "ja",
+      mangaUrl: "https://example.com/series/2",
+    });
+
+    const event = await prisma.auditEvent.findFirstOrThrow({ where: { action: "untracked.edit" } });
+    expect(event.subject).toBe(row.id);
+    expect(event.detail).toMatchObject({
+      before: { mangaName: "Mangled Nmae", mangaLanguage: "en" },
+      after: { mangaName: "Correct Name", mangaLanguage: "ja" },
+    });
+  });
+
+  it("refuses to edit a row while a title creation is in flight", async () => {
+    await bundle();
+    const row = await untracked({ state: "CREATING" });
+
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/untracked/${row.id}`,
+      headers: root,
+      payload: { mangaName: "Correct Name" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toContain("CREATING");
+    expect((await prisma.untrackedManga.findUniqueOrThrow({ where: { id: row.id } })).mangaName).toBe(
+      "Mangled Nmae",
+    );
+
+    // The dashboard learns the same thing without having to try.
+    const view = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/untracked/${row.id}`,
+      headers: root,
+    });
+    expect(view.json().editable).toBe(false);
+  });
+
+  it("refuses an apply on a row that has no MangaDex title", async () => {
+    const row = await untracked();
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/untracked/${row.id}/apply-to-mangadex`,
+      headers: root,
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().reason).toBe("no-md-title");
+    expect(res.json().error).toContain("approve");
+    expect(md.edits).toEqual([]);
+  });
+
+  it("lets a contributor correct the row but not the MangaDex title", async () => {
+    await bundle();
+    const row = await untracked({ state: "TRACKED", mdMangaId: MD_ID });
+    seedTitle(MD_ID, { en: "Mangled Nmae" }, "https://example.com/series/1");
+    const contributor = await session("CONTRIBUTOR");
+
+    // Fixing the local row is exactly the job the CONTRIBUTOR role exists for.
+    const patch = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/untracked/${row.id}`,
+      headers: contributor,
+      payload: { mangaName: "Correct Name" },
+    });
+    expect(patch.statusCode).toBe(200);
+    expect(patch.json().mangadexNeedsApply).toBe(true);
+
+    // Changing the public catalogue entry is not, even though the same scope
+    // allowed the edit above.
+    const apply = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/untracked/${row.id}/apply-to-mangadex`,
+      headers: contributor,
+    });
+    expect(apply.statusCode).toBe(403);
+    expect(apply.json().error).toContain("ADMIN role");
+    expect(apply.json().requiredRole).toBe("ADMIN");
+    expect(md.edits).toEqual([]);
+
+    // ...and the reason is on the row, so the UI disables the control with an
+    // explanation instead of letting them find out from the 403.
+    const view = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/untracked/${row.id}`,
+      headers: contributor,
+    });
+    expect(view.json().canApplyToMangaDex).toBe(false);
+    expect(view.json().applyBlockedReason).toContain("ADMIN role");
+    expect(view.json().pendingChanges.map((c: { field: string }) => c.field)).toEqual(["title"]);
+
+    const admin = await session("ADMIN");
+    const allowed = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/untracked/${row.id}/apply-to-mangadex`,
+      headers: admin,
+    });
+    expect(allowed.statusCode).toBe(200);
+    expect(allowed.json()).toMatchObject({ applied: true, mdMangaId: MD_ID });
+    expect(md.edits).toHaveLength(1);
+  });
+
+  it("applies the correction to MangaDex and records both steps in the audit trail", async () => {
+    await bundle();
+    const row = await untracked({ state: "TRACKED", mdMangaId: MD_ID });
+    seedTitle(MD_ID, { en: "Mangled Nmae" }, "https://example.com/series/1");
+
+    const patch = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/untracked/${row.id}`,
+      headers: root,
+      payload: { mangaName: "Correct Name" },
+    });
+    expect(patch.statusCode).toBe(200);
+    // The row and the entry now disagree, and only an explicit apply reconciles
+    // them: correcting a row never writes to MangaDex on its own.
+    expect(patch.json().mangadexNeedsApply).toBe(true);
+    expect(md.edits).toEqual([]);
+
+    const apply = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/untracked/${row.id}/apply-to-mangadex`,
+      headers: root,
+    });
+    expect(apply.statusCode).toBe(200);
+    expect(apply.json()).toMatchObject({
+      ok: true,
+      applied: true,
+      mdMangaId: MD_ID,
+      titleUrl: `https://mangadex.org/title/${MD_ID}`,
+    });
+
+    expect(md.edits).toHaveLength(1);
+    // The version read in the same request is what the write carries, and only
+    // the changed field is sent — the entry's links, status and content rating
+    // are not this platform's to restate.
+    expect(md.edits[0]).toMatchObject({ mangaId: MD_ID, version: 3, payload: { title: { en: "Correct Name" } } });
+    expect(md.edits[0]!.payload).not.toHaveProperty("links");
+
+    const actions = await prisma.auditEvent.findMany({ where: { subject: row.id } });
+    expect(new Set(actions.map((a) => a.action))).toEqual(
+      new Set(["untracked.edit", "untracked.mangadex_apply"]),
+    );
+    const applied = actions.find((a) => a.action === "untracked.mangadex_apply")!;
+    expect(applied.actor).toBe("admin:root");
+    expect(applied.detail).toMatchObject({ mdMangaId: MD_ID, version: 3 });
+
+    // Applying again sends nothing: the entry already says what the row says.
+    const again = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/untracked/${row.id}/apply-to-mangadex`,
+      headers: root,
+    });
+    expect(again.statusCode).toBe(200);
+    expect(again.json().applied).toBe(false);
+    expect(md.edits).toHaveLength(1);
+
+    const view = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/untracked/${row.id}`,
+      headers: root,
+    });
+    expect(view.json().appliedToMangaDex).toMatchObject({ actor: "admin:root" });
+    expect(view.json().pendingChanges).toEqual([]);
+  });
+
+  it("reports a version conflict rather than overwriting the other edit", async () => {
+    const row = await untracked({ state: "TRACKED", mdMangaId: MD_ID, mangaName: "Correct Name" });
+    seedTitle(MD_ID, { en: "Mangled Nmae" }, "https://example.com/series/1");
+    md.failEditWith = new MdRequestError("PUT /manga failed — 409: version 3 is stale", 409);
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/untracked/${row.id}/apply-to-mangadex`,
+      headers: root,
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().reason).toBe("version-conflict");
+    expect(res.json().error).toContain("changed since it was read");
+
+    // Nothing is claimed to have happened, and the failure is on the row where
+    // the queue view shows it.
+    expect(await prisma.auditEvent.count({ where: { action: "untracked.mangadex_apply" } })).toBe(0);
+    expect(
+      (await prisma.untrackedManga.findUniqueOrThrow({ where: { id: row.id } })).lastError,
+    ).toContain("409");
+  });
+
+  it("creates the MangaDex title from the corrected values, not the scraped ones", async () => {
+    await bundle();
+    const row = await untracked();
+
+    const patch = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/untracked/${row.id}`,
+      headers: root,
+      payload: {
+        mangaName: "Correct Name",
+        mangaLanguage: "ja",
+        mangaUrl: "https://example.com/series/9",
+      },
+    });
+    expect(patch.statusCode).toBe(200);
+
+    const approve = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/untracked/${row.id}/approve`,
+      headers: root,
+    });
+    expect(approve.statusCode).toBe(200);
+
+    // The whole point of correcting before approving: the title MangaDex is
+    // asked to create is the corrected one.
+    expect(md.drafts).toHaveLength(1);
+    expect(md.drafts[0]).toMatchObject({
+      title: { ja: "Correct Name" },
+      links: { raw: "https://example.com/series/9" },
+    });
+    const after = await prisma.untrackedManga.findUniqueOrThrow({ where: { id: row.id } });
+    expect(after.state).toBe("TRACKED");
+    expect(after.mdMangaId).toBe(approve.json().mdMangaId);
+  });
+
+  it("confines the correction routes to the untracked scopes", async () => {
+    await bundle();
+    const row = await untracked({ state: "TRACKED", mdMangaId: MD_ID });
+    seedTitle(MD_ID, { en: "Mangled Nmae" });
+    const stats = await mint(["stats:read"]);
+    const reader = await mint(["untracked:read"]);
+
+    const url = `/api/v1/admin/untracked/${row.id}`;
+    expect((await app.inject({ method: "GET", url, headers: stats })).statusCode).toBe(403);
+    expect((await app.inject({ method: "GET", url, headers: reader })).statusCode).toBe(200);
+
+    const patch = await app.inject({
+      method: "PATCH",
+      url,
+      headers: reader,
+      payload: { mangaName: "Correct Name" },
+    });
+    expect(patch.statusCode).toBe(403);
+    expect(patch.json().error).toBe("missing scope: untracked:write");
+
+    const apply = await app.inject({ method: "POST", url: `${url}/apply-to-mangadex`, headers: reader });
+    expect(apply.statusCode).toBe(403);
+    expect(md.edits).toEqual([]);
+
+    // A read credential is told why the button it cannot use is disabled, too.
+    const view = await app.inject({ method: "GET", url, headers: reader });
+    expect(view.json().applyBlockedReason).toBe("missing scope: untracked:write");
   });
 });

@@ -38,8 +38,8 @@ x-app-security: &app-security
 x-core-build: &core-build
   image: publoader/core:dev
   build:
-    context: ../..
-    dockerfile: docker/core/Dockerfile
+    context: ../../..
+    dockerfile: platform/docker/core/Dockerfile
 
 # Everything points at the mock instead of MangaDex. The credentials are
 # nonsense because the mock accepts anything — and because a dev stack that
@@ -103,8 +103,8 @@ services:
   migrate:
     <<: *core-build
     build:
-      context: ../..
-      dockerfile: docker/core/Dockerfile
+      context: ../../..
+      dockerfile: platform/docker/core/Dockerfile
       target: migrate
     image: publoader/core-migrate:dev
     restart: "no"

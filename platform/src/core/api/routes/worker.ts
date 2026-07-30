@@ -5,6 +5,7 @@ import type { AppContext } from "../context.js";
 import { workerAuthHook } from "../auth.js";
 import { MAX_ENVELOPE_BYTES } from "../../../contracts/envelope.js";
 import { MAX_ARTIFACT_BYTES } from "../../store/artifacts.js";
+import { buildMangaIdMap } from "../../store/trackedManga.js";
 import { hashToken } from "../../store/workers.js";
 import { metrics } from "../../../metrics.js";
 
@@ -119,21 +120,19 @@ export function registerWorkerRoutes(app: FastifyInstance, ctx: AppContext): voi
           // Runtime config comes from the DATABASE, not bundle JSON files:
           // the tracked-manga map (including titles auto-created since the
           // bundle was published) and operator-editable override options.
-          const [trackedRows, extConfig] = await Promise.all([
+          const [trackedRows, overrideOptions] = await Promise.all([
             ctx.prisma.trackedManga.findMany({
               where: { extension: claimed.job.extension },
-              select: { mangaId: true, mdMangaId: true },
+              select: { namespace: true, mangaId: true, mdMangaId: true },
             }),
-            ctx.prisma.extensionConfig.findUnique({
-              where: { extension: claimed.job.extension },
-            }),
+            ctx.extensionConfig.loadForLease(claimed.job.extension),
           ]);
-          // Delivered in the legacy manga_id_map shape {mdMangaId: [externalIds]}
-          // so the runner's open_manga_id_map compat needs no translation.
-          const mangaIdMap: Record<string, string[]> = {};
-          for (const row of trackedRows) {
-            (mangaIdMap[row.mdMangaId] ??= []).push(row.mangaId);
-          }
+          // Delivered in the legacy manga_id_map shape — flat
+          // {mdMangaId: [externalIds]} while the extension has one id space, and
+          // {namespace: {mdMangaId: [externalIds]}} once it has more, which is
+          // the shape viz's own file already has. See MangaIdMapPayload for why
+          // `namespaced` travels alongside it.
+          const { mangaIdMap, namespaced } = buildMangaIdMap(trackedRows);
           const postedChapterIds =
             claimed.job.kind === "CLEAN"
               ? []
@@ -165,7 +164,8 @@ export function registerWorkerRoutes(app: FastifyInstance, ctx: AppContext): voi
               manifest: bundle?.manifest ?? null,
               postedChapterIds,
               mangaIdMap,
-              overrideOptions: extConfig?.overrideOptions ?? {},
+              mangaIdMapNamespaced: namespaced,
+              overrideOptions,
             },
             leaseId: claimed.leaseId,
             leaseExpiresAt: claimed.leaseExpiresAt.toISOString(),

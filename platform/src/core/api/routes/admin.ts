@@ -1,9 +1,17 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook, requireScope } from "../auth.js";
 import { hasScope } from "../scopes.js";
-import { MAX_BATCH_ROWS, parsePairs } from "../../store/trackedManga.js";
+import {
+  DEFAULT_NAMESPACE,
+  MAX_BATCH_ROWS,
+  MAX_NAMESPACE_LENGTH,
+  NAMESPACE_RE,
+  normaliseNamespace,
+  parsePairs,
+} from "../../store/trackedManga.js";
 import { sessionAuthenticator } from "../session.js";
 import { Manifest, EXTENSION_NAME_RE } from "../../../contracts/manifest.js";
 import { VALID_REMOVAL_MODES } from "../../store/settings.js";
@@ -11,6 +19,18 @@ import { BundleRejectedError } from "../../store/bundles.js";
 import AdmZip from "adm-zip";
 
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * The audit subject for one tracked mapping. The default id space keeps the
+ * `extension:mangaId` form every existing audit row uses; a namespaced row adds
+ * the catalogue, because `709` alone does not identify a series once viz has
+ * two of them.
+ */
+function trackedSubject(extension: string, namespace: string, mangaId: string): string {
+  return namespace === DEFAULT_NAMESPACE
+    ? `${extension}:${mangaId}`
+    : `${extension}:${namespace}/${mangaId}`;
+}
 
 /**
  * Admin-audience routes. Consumed by the operator CLI, the Discord bot, and
@@ -354,7 +374,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           });
         }
         try {
-          const { bundle, created } = await ctx.bundles.publish({
+          const { bundle, created, warnings } = await ctx.bundles.publish({
             zipData: req.body,
             manifest: manifestRaw,
             sourceCommit,
@@ -365,12 +385,16 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
             sourceCommit,
             created,
             ...(allowLegacy ? { allowLegacy: true } : {}),
+            ...(warnings.length > 0 ? { warnings } : {}),
           });
           return reply.code(created ? 201 : 200).send({
             extension: bundle.extension,
             version: bundle.version,
             sha256: bundle.sha256,
             created,
+            // Things worth an operator's attention that are not grounds for
+            // refusing the bundle. Empty on a clean publish.
+            warnings,
           });
         } catch (err) {
           // A rejected bundle already carries an operator-readable reason;
@@ -387,23 +411,41 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     scope.get("/api/v1/admin/extensions/:name/tracked", { preHandler: requireScope("tracked:read") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
+      // `namespace` filters to one catalogue; omitting it returns them all,
+      // which is what an operator inspecting an extension wants to see.
+      const query = z.object({ namespace: z.string().max(MAX_NAMESPACE_LENGTH).optional() }).parse(req.query ?? {});
       const rows = await ctx.prisma.trackedManga.findMany({
-        where: { extension: name },
+        where: {
+          extension: name,
+          ...(query.namespace === undefined
+            ? {}
+            : { namespace: normaliseNamespace(query.namespace) }),
+        },
         orderBy: { createdAt: "asc" },
       });
-      return { tracked: rows };
+      return { tracked: rows, namespaces: await ctx.trackedManga.namespaces(name) };
     });
 
     scope.put("/api/v1/admin/extensions/:name/tracked", { preHandler: requireScope("tracked:append") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
       const body = z
-        .object({ mangaId: z.string().min(1).max(512), mdMangaId: z.string().uuid() })
+        .object({
+          mangaId: z.string().min(1).max(512),
+          mdMangaId: z.string().uuid(),
+          /** The extension's catalogue; omit for the single flat id space. */
+          namespace: z.string().max(MAX_NAMESPACE_LENGTH).optional(),
+        })
         .parse(req.body);
+      const namespace = normaliseNamespace(body.namespace);
+      if (namespace !== DEFAULT_NAMESPACE && !NAMESPACE_RE.test(namespace)) {
+        return reply.code(400).send({ error: `namespace must match ${String(NAMESPACE_RE)}` });
+      }
+      const identity = { extension: name, namespace, mangaId: body.mangaId };
       // Reachable with tracked:append, which must not be able to repoint an
       // existing series at a different title — that is an edit, and a silent one.
       const existing = await ctx.prisma.trackedManga.findUnique({
-        where: { extension_mangaId: { extension: name, mangaId: body.mangaId } },
+        where: { extension_namespace_mangaId: identity },
       });
       if (
         existing &&
@@ -415,29 +457,40 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         });
       }
       await ctx.prisma.trackedManga.upsert({
-        where: { extension_mangaId: { extension: name, mangaId: body.mangaId } },
-        create: { extension: name, ...body, source: actor(req) },
+        where: { extension_namespace_mangaId: identity },
+        create: { ...identity, mdMangaId: body.mdMangaId, source: actor(req) },
         update: { mdMangaId: body.mdMangaId, source: actor(req) },
       });
-      await ctx.audit.record(actor(req), "tracked_manga.set", `${name}:${body.mangaId}`, body);
+      await ctx.audit.record(actor(req), "tracked_manga.set", trackedSubject(name, namespace, body.mangaId), {
+        ...body,
+        namespace,
+      });
       return { ok: true };
     });
 
     scope.delete("/api/v1/admin/extensions/:name/tracked/:mangaId", { preHandler: requireScope("tracked:write") }, async (req) => {
       const { name, mangaId } = req.params as { name: string; mangaId: string };
+      const query = z.object({ namespace: z.string().max(MAX_NAMESPACE_LENGTH).optional() }).parse(req.query ?? {});
+      // A namespace is a query parameter rather than a second path segment so
+      // the flat-space URL every existing client uses keeps working unchanged.
+      const namespace = normaliseNamespace(query.namespace);
       const res = await ctx.prisma.trackedManga.deleteMany({
-        where: { extension: name, mangaId },
+        where: { extension: name, namespace, mangaId },
       });
-      await ctx.audit.record(actor(req), "tracked_manga.remove", `${name}:${mangaId}`);
+      await ctx.audit.record(actor(req), "tracked_manga.remove", trackedSubject(name, namespace, mangaId));
       return { ok: true, removed: res.count > 0 };
     });
 
     /**
      * Bulk curation. `set` adds (or, with tracked:write, repoints) mappings and
      * `remove` deletes them; `text` accepts the pasted `externalId,titleId`
-     * format so nobody has to build JSON by hand. Rows are judged individually
-     * and reported individually — a contributor pasting 200 lines needs to know
-     * which three were wrong.
+     * format (or `namespace,externalId,titleId`) so nobody has to build JSON by
+     * hand. Rows are judged individually and reported individually — a
+     * contributor pasting 200 lines needs to know which three were wrong.
+     *
+     * `namespace` at the top level is the default for rows that do not name one,
+     * so pasting one catalogue's worth of two-column lines needs no per-line
+     * prefix.
      */
     scope.post(
       "/api/v1/admin/extensions/:name/tracked/batch",
@@ -448,18 +501,43 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         const body = z
           .object({
             set: z
-              .array(z.object({ mangaId: z.string().min(1).max(512), mdMangaId: z.string() }))
+              .array(
+                z.object({
+                  mangaId: z.string().min(1).max(512),
+                  mdMangaId: z.string(),
+                  namespace: z.string().max(MAX_NAMESPACE_LENGTH).optional(),
+                }),
+              )
               .max(MAX_BATCH_ROWS)
               .optional(),
-            remove: z.array(z.string().min(1).max(512)).max(MAX_BATCH_ROWS).optional(),
-            /** Pasted lines: `externalId,mdMangaId` (order-insensitive). */
+            remove: z
+              .array(
+                z.union([
+                  z.string().min(1).max(512),
+                  z.object({
+                    mangaId: z.string().min(1).max(512),
+                    namespace: z.string().max(MAX_NAMESPACE_LENGTH).optional(),
+                  }),
+                ]),
+              )
+              .max(MAX_BATCH_ROWS)
+              .optional(),
+            /** Pasted lines: `[namespace,]externalId,mdMangaId` (order-insensitive). */
             text: z.string().max(512 * 1024).optional(),
+            /** Default catalogue for `set`/`text` rows that do not name one. */
+            namespace: z.string().max(MAX_NAMESPACE_LENGTH).optional(),
             /** Report what would happen without writing anything. */
             dryRun: z.boolean().default(false),
           })
           .parse(req.body ?? {});
 
-        const parsed = body.text ? parsePairs(body.text) : { rows: [], errors: [] };
+        const defaultNamespace = normaliseNamespace(body.namespace);
+        if (defaultNamespace !== DEFAULT_NAMESPACE && !NAMESPACE_RE.test(defaultNamespace)) {
+          return reply.code(400).send({ error: `namespace must match ${String(NAMESPACE_RE)}` });
+        }
+        const parsed = body.text
+          ? parsePairs(body.text, { defaultNamespace })
+          : { rows: [], errors: [] };
         const set = [...(body.set ?? []), ...parsed.rows];
         if (set.length + (body.remove?.length ?? 0) === 0 && parsed.errors.length === 0) {
           return reply.code(400).send({ error: "nothing to do: provide set, remove, or text" });
@@ -503,24 +581,34 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       },
     );
 
+    /**
+     * The whole override-options document, reassembled from the three relation
+     * tables and the free-form remainder, so `GET | PUT` still round-trips. The
+     * split is also reported: `same`, `multi_chapters` and `custom_language` are
+     * the modelled ones, `passthrough` is what core does not interpret.
+     */
     scope.get("/api/v1/admin/extensions/:name/config", { preHandler: requireScope("extensions:read") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
-      const config = await ctx.prisma.extensionConfig.findUnique({ where: { extension: name } });
-      return { extension: name, overrideOptions: config?.overrideOptions ?? {} };
+      return ctx.extensionConfig.describe(name);
     });
 
     scope.put("/api/v1/admin/extensions/:name/config", { preHandler: requireScope("extensions:write") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
       const body = z.object({ overrideOptions: z.record(z.unknown()) }).parse(req.body);
-      await ctx.prisma.extensionConfig.upsert({
-        where: { extension: name },
-        create: { extension: name, overrideOptions: body.overrideOptions as object },
-        update: { overrideOptions: body.overrideOptions as object },
+      // Rows the constraints refuse come back as `rejected` rather than as a
+      // 4xx: one unrecognised language code should not discard an otherwise
+      // good document, and the operator needs to be told which row it was.
+      const result = await ctx.extensionConfig.replace(name, body.overrideOptions);
+      await ctx.audit.record(actor(req), "extension_config.set", name, {
+        aliases: result.aliases,
+        multiChapters: result.multiChapters,
+        languages: result.languages,
+        passthroughKeys: result.passthroughKeys,
+        rejected: result.rejected.length,
       });
-      await ctx.audit.record(actor(req), "extension_config.set", name);
-      return { ok: true };
+      return { ok: true, ...result };
     });
 
     // ---- untracked series pipeline ----
@@ -634,11 +722,103 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       };
     });
 
-    scope.get("/api/v1/admin/audit", { preHandler: requireScope("audit:read") }, async (req) => {
+    /**
+     * The audit trail, filterable.
+     *
+     * `limit` alone made an event id unfindable. The dashboard copies a
+     * permalink for a row, and resolving one meant fetching the most recent page
+     * and scanning it in the browser: any event that had since been pushed off
+     * that page could never be reached, and `id` was not a filter at all. So
+     * `?id=` is the important one here — it is what makes a permalink resolve to
+     * its event however old it is — and the rest are the filters an operator
+     * reaches for next ("everything this actor did last Tuesday").
+     *
+     * Every filter is served by an index that already exists: `id` is the
+     * primary key, `createdAt` and `action` each carry one. The `actor`,
+     * `action` and `subject` substring matches could not use an index whatever
+     * we added, which is why they are bounded by `limit` and the time window
+     * rather than by an index.
+     *
+     * Paging is offered both ways on purpose. `offset` is what a page with a
+     * "page 4 of 40" control needs; `cursor` is the id of the last row of the
+     * previous page and is stable while events are still being written, which
+     * offset is not. Sorting on (createdAt, id) rather than createdAt alone is
+     * what makes the cursor total: two events recorded in the same millisecond
+     * would otherwise be able to swap places between pages.
+     */
+    scope.get("/api/v1/admin/audit", { preHandler: requireScope("audit:read") }, async (req, reply) => {
       const query = z
-        .object({ limit: z.coerce.number().int().min(1).max(500).default(100) })
+        .object({
+          id: z.string().max(64).optional(),
+          actor: z.string().max(128).optional(),
+          action: z.string().max(128).optional(),
+          subject: z.string().max(256).optional(),
+          /** ISO instants; omitted means unbounded on that side. */
+          since: z.coerce.date().optional(),
+          until: z.coerce.date().optional(),
+          /** The id of the last row of the previous page. */
+          cursor: z.string().max(64).optional(),
+          offset: z.coerce.number().int().min(0).max(100_000).default(0),
+          limit: z.coerce.number().int().min(1).max(500).default(100),
+        })
         .parse(req.query ?? {});
-      return { events: await ctx.audit.recent(query.limit) };
+
+      const insensitive = { mode: "insensitive" } as const;
+      const where: Prisma.AuditEventWhereInput = {
+        ...(query.id ? { id: query.id } : {}),
+        ...(query.actor ? { actor: { contains: query.actor, ...insensitive } } : {}),
+        ...(query.action ? { action: { contains: query.action, ...insensitive } } : {}),
+        ...(query.subject ? { subject: { contains: query.subject, ...insensitive } } : {}),
+        ...(query.since || query.until
+          ? {
+              createdAt: {
+                ...(query.since ? { gte: query.since } : {}),
+                ...(query.until ? { lte: query.until } : {}),
+              },
+            }
+          : {}),
+      };
+
+      // Keyset paging needs the cursor row's own sort key, so it is read first.
+      // An unknown cursor is a client error rather than an empty page: silently
+      // returning nothing would read as "there is nothing older", which is a
+      // different and wrong answer.
+      let keyset: Prisma.AuditEventWhereInput | null = null;
+      if (query.cursor) {
+        const at = await ctx.prisma.auditEvent.findUnique({
+          where: { id: query.cursor },
+          select: { id: true, createdAt: true },
+        });
+        if (!at) return reply.code(400).send({ error: `unknown cursor: ${query.cursor}` });
+        keyset = {
+          OR: [{ createdAt: { lt: at.createdAt } }, { createdAt: at.createdAt, id: { lt: at.id } }],
+        };
+      }
+      const filter = keyset ? { AND: [where, keyset] } : where;
+
+      const [events, total] = await Promise.all([
+        ctx.prisma.auditEvent.findMany({
+          where: filter,
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          take: query.limit,
+          // A cursor already encodes the position, so honouring offset as well
+          // would skip rows twice.
+          skip: keyset ? 0 : query.offset,
+        }),
+        // The total is what makes paging honest: without it a caller cannot tell
+        // "that is all of them" from "here is the first page of four thousand".
+        ctx.prisma.auditEvent.count({ where }),
+      ]);
+
+      return {
+        events,
+        total,
+        limit: query.limit,
+        offset: keyset ? null : query.offset,
+        // Null when this is the last page, so a caller can stop without a
+        // second request that comes back empty.
+        nextCursor: events.length === query.limit ? (events[events.length - 1]?.id ?? null) : null,
+      };
     });
   });
 }
