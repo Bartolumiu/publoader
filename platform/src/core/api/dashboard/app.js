@@ -3187,6 +3187,60 @@ function schedulePanel(name) {
   );
 }
 
+/**
+ * Report what a config save actually stored.
+ *
+ * `PUT /extensions/:name/config` answers 200 with per-relation counts and a
+ * `rejected[]` of rows its constraints refused — a language code outside the
+ * MangaDex allowlist, an alias pointing at itself. A 200 therefore means "stored
+ * what was valid", not "stored everything", and treating the two alike is how an
+ * operator ends up believing an alias is live when the server dropped it.
+ *
+ * Deliberately not a toast: a rejection list has to stay on screen long enough to
+ * fix the document it came from.
+ */
+function renderConfigOutcome(host, result) {
+  const rejected = Array.isArray(result.rejected) ? result.rejected : [];
+  const counts =
+    `Stored ${result.aliases ?? 0} alias(es), ${result.multiChapters ?? 0} multi-chapter ` +
+    `number(s), ${result.languages ?? 0} language override(s).`;
+
+  setChildren(
+    host,
+    el("p", { class: rejected.length ? "error" : "dim small", text: counts }),
+    rejected.length
+      ? el(
+          "div",
+          {},
+          el("p", {
+            class: "error",
+            text: `${rejected.length} row(s) were REFUSED and are not saved:`,
+          }),
+          el(
+            "ul",
+            { class: "errors" },
+            rejected.map((row) =>
+              el("li", {
+                text:
+                  `${row.option}: ${row.key}` +
+                  (row.value === undefined ? "" : ` → ${row.value}`) +
+                  ` — ${row.reason}`,
+              }),
+            ),
+          ),
+        )
+      : null,
+    // Names what stayed in the free-form blob, so a typo'd key does not read as
+    // an accepted setting.
+    Array.isArray(result.passthroughKeys) && result.passthroughKeys.length
+      ? el("p", {
+          class: "dim small",
+          text: `Kept as free-form extension settings: ${result.passthroughKeys.join(", ")}.`,
+        })
+      : null,
+  );
+}
+
 function configPanel(name) {
   const config = new Resource(`config:${name}`, () => api(`/extensions/${encodeURIComponent(name)}/config`));
   const writable = can("extensions:write");
@@ -3250,10 +3304,10 @@ function configPanel(name) {
               gatedButton("extensions:write", {
                 class: "primary",
                 text: "Save",
-                onclick: (event) => {
+                onclick: async (event) => {
                   const parsed = parse();
                   if (!parsed) return undefined;
-                  return act(
+                  const result = await act(
                     "extension_config.set",
                     () =>
                       api(`/extensions/${encodeURIComponent(name)}/config`, {
@@ -3262,6 +3316,13 @@ function configPanel(name) {
                       }),
                     { button: event.currentTarget, refresh: [config] },
                   );
+                  // The PUT answers 200 with a per-row verdict, and discarding it
+                  // made a save that DROPPED rows the server refused read as
+                  // unqualified success — the operator's next belief being "my
+                  // aliases are saved". A 200 here means "stored what was valid",
+                  // not "stored everything".
+                  if (result) renderConfigOutcome(status, result);
+                  return result;
                 },
               }),
             ),
@@ -4328,12 +4389,29 @@ function untrackedEditCard(item, detail, data) {
     );
   };
 
-  const applyReason = !item.mdMangaId
-    ? "There is no MangaDex title yet — approve the series first."
-    : !canApply
-      ? "Pushing a change to the public MangaDex entry is limited to owners and admins. A contributor can " +
-        "correct the local row and ask an operator to apply it."
-      : null;
+  // The SERVER's reason wins. It is computed by the same code that guards the
+  // POST, so it already accounts for cases this file cannot see — a create in
+  // flight, an instance holding no MangaDex credentials, an api-token principal —
+  // and a locally-derived reason that disagreed would either offer a button that
+  // 403s or hide one that would have worked. The local derivation stays only as a
+  // fallback for a build whose GET predates the field.
+  const applyReason =
+    data.applyBlockedReason ??
+    (!item.mdMangaId
+      ? "There is no MangaDex title yet — approve the series first."
+      : !canApply
+        ? "Pushing a change to the public MangaDex entry is limited to owners and admins. A contributor can " +
+          "correct the local row and ask an operator to apply it."
+        : null);
+
+  // Whether this row has already been pushed, and whether anything differs now.
+  // Without these the button reads identically on a row applied an hour ago with
+  // nothing outstanding and on one that has never been applied — so the safe move
+  // looks like pressing it, and the cost of guessing wrong is a redundant public
+  // edit to someone else's catalogue under our shared account.
+  const applied = data.appliedToMangaDex ?? null;
+  const pending = Array.isArray(data.pendingChanges) ? data.pendingChanges : [];
+  const nothingToApply = applied !== null && pending.length === 0;
 
   return card(
     "Details",
@@ -4372,13 +4450,28 @@ function untrackedEditCard(item, detail, data) {
         type: "button",
         id: "apply-to-mangadex",
         class: "danger",
-        text: "Apply to MangaDex",
+        // Says which act it is. "Apply" on an already-applied row with nothing
+        // outstanding invites a public no-op edit.
+        text: nothingToApply ? "Re-apply to MangaDex" : "Apply to MangaDex",
         disabled: Boolean(applyReason),
-        title: applyReason,
+        title: applyReason ?? (nothingToApply ? "Nothing differs from the live entry." : undefined),
         onclick: applyReason ? undefined : (event) => void applyToMangadex(event.currentTarget),
       }),
     ),
     applyReason ? el("p", { class: "dim small", text: applyReason }) : null,
+    // When it was last pushed, and by whom. Read off the row, so it survives
+    // audit-log pruning.
+    applied
+      ? el("p", {
+          class: "dim small",
+          text:
+            `Applied to MangaDex ${fmtTime(applied.at)} (${ago(applied.at)})` +
+            (applied.actor ? ` by ${applied.actor}` : "") +
+            (pending.length === 0
+              ? " — nothing differs from the live entry."
+              : ` — ${pending.length} field(s) differ now.`),
+        })
+      : null,
     data.mangadex
       ? el(
           "div",
