@@ -388,17 +388,41 @@ The authority for publisher-id → MangaDex-title-id.
 
 | Column | Meaning |
 | --- | --- |
-| `extension` + `manga_id` **unique together** | One MangaDex title per publisher series per extension. |
+| `extension` + `namespace` + `manga_id` **unique together** | One MangaDex title per publisher series per catalogue. |
+| `namespace` | Which of the extension's catalogues `manga_id` belongs to; `""` for the common single-catalogue case. |
 | `md_manga_id` | The MangaDex title. |
 | `source` | Provenance: `"auto"`, `"bundle-import"` (seeded from a bundle's `manga_id_map.json` at first publish), or `operator:<actor>`. |
 
 Index: `(extension)` serves the lease-time map build.
+
+`namespace` exists because some publishers expose more than one catalogue behind
+one API, and the catalogues number their series independently — viz keys its map
+by path, so `709` means one series under one path and a different series under
+another. Without the namespace those two rows collide on
+`(extension, manga_id)`, and whichever was written second wins: chapters get
+attached to the wrong MangaDex title. Note the direction that is *not* a problem
+and needs no namespace — many publisher ids mapping to one `md_manga_id`, which
+is how per-language editions of one series are tracked, and which the unique
+constraint already permits.
 
 This table — not any file in the bundle — is what the worker receives as
 `mangaIdMap`, which is why a title auto-created after a bundle was published
 reaches the extension without republishing it (`routes/worker.ts:119-137`). Bundle
 data files only *seed* missing rows and never overwrite existing ones
 (`store/bundles.ts:79-84`, `120`).
+
+**Known limitation: a namespaced extension runs unpartitioned.** `jobs.segment_manga_ids`
+is a flat list of ids on the wire, so it cannot say which catalogue an id came
+from. For an extension with two, `709` is ambiguous — partitioning on it would
+either treat two distinct series as one or hand the same id to two workers. The
+scheduler therefore detects a non-empty namespace and creates a single
+unpartitioned job, logging a warning (`scheduler/service.ts:137-143`). That is
+slower for a large namespaced catalogue and it is correct; guessing is neither.
+Lifting it means teaching the wire format, the worker and `invertMangaIdMap` to
+carry a namespace — `invertMangaIdMap` currently *refuses* a namespaced map
+rather than silently inverting it to an empty one, so this is a deliberate
+staged gap and not a latent bug (see `extsdk/context.ts` and
+`test/unit/mangaIdMap.test.ts`).
 
 ### `untracked_manga` (derived)
 

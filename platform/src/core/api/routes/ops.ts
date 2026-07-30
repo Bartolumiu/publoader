@@ -15,6 +15,7 @@ import { hasScope } from "../scopes.js";
 import { sessionAuthenticator } from "../session.js";
 import { EXTENSION_NAME_RE, Manifest, hostAllowed } from "../../../contracts/manifest.js";
 import { normaliseMangadexLanguage } from "../../../contracts/languages.js";
+import { UPLOAD_TASK_KINDS, UPLOAD_TASK_STATES } from "../../store/uploadTasks.js";
 import { mangaEditPayload } from "../../md/titleService.js";
 
 /**
@@ -29,9 +30,6 @@ import { mangaEditPayload } from "../../md/titleService.js";
  * stdout stays where it is (`docker logs`) because it describes processes; every
  * application-level event is a row, and rows are what this module serves.
  */
-
-const UPLOAD_TASK_KINDS = ["UPLOAD", "EDIT", "DELETE", "UNAVAILABLE"] as const;
-const UPLOAD_TASK_STATES = ["PENDING", "LEASED", "DONE", "FAILED", "DEAD_LETTER"] as const;
 
 /** Bundle preflight bodies are the same zip the publish route takes. */
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
