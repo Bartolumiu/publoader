@@ -1327,11 +1327,21 @@ function renderSummary() {
       : "—";
 
   // A quarantine count is the one number in the header that is a problem rather
-  // than a fact, so it also lands on the Errors destination as a badge.
-  renderNav();
+  // than a fact, so it also lands on the Errors destination as a badge. Only
+  // when it has actually changed: this runs on every poll, and rebuilding the
+  // sidebar takes the keyboard focus with it — a ten-second timer that steals
+  // focus mid-Tab makes the whole menu unusable without a mouse.
+  const quarantined = stats?.quarantined ?? 0;
+  if (quarantined !== lastNavBadge) {
+    lastNavBadge = quarantined;
+    renderNav();
+  }
 }
 
 // ----------------------------------------------------------------- the sidebar
+
+/** Last quarantine count drawn on the nav, so a poll can skip a rebuild. */
+let lastNavBadge = 0;
 
 function renderNav() {
   const nav = $("nav");

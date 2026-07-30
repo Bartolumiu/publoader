@@ -331,6 +331,31 @@ containers keep running until you `up` successfully — the stack fails closed.
 Read `docker compose logs migrate`, fix the migration, retry. Do not run
 `prisma migrate reset` against production; it drops the database.
 
+**Never deploy a single service with `--no-deps`.** All four core services
+declare `depends_on: migrate: service_completed_successfully`, which is what
+makes step 3 safe — and `--no-deps` exists precisely to skip that. Deploying just
+the API that way starts new code against the old schema, and the failure is not a
+crash on boot: the service comes up healthy and reports healthy, because
+`/healthz` does not consult the schema. Only the endpoints that touch a
+changed table fail, one at a time, with a 500 and a Prisma `P2022` (*column does
+not exist*) in the log. If you need to replace one container, either use plain
+`up -d <service>` (dependencies included, migrate reruns idempotently) or run
+`docker compose run --rm migrate` yourself first.
+
+Either way, confirm the schema afterwards from the dashboard — **System →
+Schema**, or:
+
+```bash
+curl -fsS -H "authorization: Bearer $ADMIN_TOKEN" \
+  https://publoader.ardax.dev/api/v1/admin/schema
+```
+
+`current: true` with an empty `pending` is the answer you want. `pending`
+non-empty means running code is ahead of the database. `historyAvailable: false`
+means the database was built by `prisma db push` or restored from a dump rather
+than migrated, so pending migrations cannot be computed — expect that on a dev
+stack, never on production.
+
 **Rolling back a core upgrade** is only safe if the migration was additive. If
 it was not, restore from backup (below) — which is why you take one before a
 schema-changing upgrade.

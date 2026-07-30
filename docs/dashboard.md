@@ -21,7 +21,7 @@ Three methods, in the order you should prefer them:
 
 | Method | For | Notes |
 |---|---|---|
-| Email + password | Day-to-day | Minimum 12 characters. An OWNER sets it from the Users view; there is no self-service reset. |
+| Email + password | Day-to-day | Minimum 12 characters. An OWNER sets it from **Users → Accounts**, and anyone signed in can change their own from **the profile menu → Your account**. There is no self-service reset for a password you cannot sign in with. |
 | Discord | Teams already on Discord | Only shown when `DISCORD_CLIENT_ID` is configured. New accounts land unapproved and an OWNER must approve them — and only if self-signup is enabled. |
 | Admin token | Break-glass | The `ADMIN_TOKEN`, exchanged for a session cookie. Use it when the accounts table is the problem. It is never stored in the browser. |
 
@@ -70,22 +70,88 @@ convenience so nobody clicks into a wall of 403s — never the control itself.
 
 ---
 
-## The sections
+## Navigation
 
-| Section | Needs | Answers |
+Three levels, and each one is in the URL.
+
+**A persistent left sidebar** is the main menu. Destinations are grouped by what
+you are doing rather than by which endpoint serves them:
+
+| Group | Destinations |
+|---|---|
+| — | Overview |
+| **Work** | Runs, Queues, Activity, Errors |
+| **Catalogue** | Extensions, Tracked, Untracked |
+| **Fleet** | Workers |
+| **Admin** | Users, Tokens, Audit, System, Maintenance, Docs |
+
+Each entry declares the scope its view needs and is simply absent without it —
+a contributor's sidebar is Overview, Extensions, Tracked, Untracked and Docs. The
+current entry carries `aria-current="page"` and is marked three ways (fill,
+brighter text, a left rule), because "which page am I on" should not require
+reading. The sidebar collapses to icons with the button at its foot, and
+remembers that in `localStorage`. Below 860px it becomes a drawer: a hamburger in
+the header opens it, a tap outside or Escape closes it, and while closed it is
+`inert` so Tab cannot walk into it.
+
+**Tabs inside a page** are that page's own sections — Overview's Platform and
+MangaDex, System's Schema / MangaDex / Backup, one extension's Overview / Series
+map / Schedule / Config / Versions. They are a tablist: arrow keys, Home and End
+move between them.
+
+**A header** carries the platform's live state on the left — paused or running,
+active/total workers, jobs in flight, uploads queued, and the last run with how
+long ago it was — polled from `GET /admin/stats` every ten seconds and **only
+while the browser tab is visible**, so a dashboard left open overnight is not the
+busiest client the API has. On the right is the signed-in actor with a role
+badge; its menu holds "Your account" (which credential this is, what it may do,
+and setting your own password) and Sign out.
+
+### The URL is the view
+
+Routing is hash-based, `#/<destination>[/<thing>][/<tab>]`:
+
+```
+#/overview/platform                      the default landing view
+#/runs/dead-letter                       a tab within a destination
+#/runs/<runId>                           one run and all its segments
+#/extensions/mangaplus/series-map        one extension, one of its tabs
+#/untracked/<id>                         one untracked series, editable
+#/audit/<id>                             one audit event
+#/system/backup
+```
+
+Every link is a real `<a href>`, so middle-click, "copy link address" and the
+back button all behave. A pasted link restores the sidebar selection **and** the
+active tab. Links minted by older versions (`#run/<id>`, `#audit/<id>`,
+`#tab/queues`) are translated rather than broken. A link into a destination the
+signed-in account cannot open says so in a toast and lands on the first one it
+can, instead of rendering a view that 403s.
+
+A fragment is never sent to the server, so pasting a permalink into chat cannot
+leak an id into an access log.
+
+---
+
+## The views
+
+| View | Needs | Answers |
 |---|---|---|
-| **Overview** | `stats:read` | Queue depths, worker counts, pause state, and the MangaDex session's expiry. The first screen in an incident. |
-| **Activity** | `runs:read` | One time-ordered feed of everything that happened, merged across runs, jobs, upload tasks, quarantine and the audit log, filterable by severity, time window, extension and free text. Every row has a permalink. |
-| **Workers** | `workers:read` | The fleet: status, trust tier, heartbeat, agent version, which extensions each worker takes. Drain, activate, revoke, and mint an enrolment token. |
-| **Extensions** | `extensions:read` | Published bundles, per-extension schedule and config, the series map, and the publish drop zone. Trigger `UPDATE` / `FORCE` / `CLEAN` runs. |
-| **Runs** | `runs:read` | Recent runs, their jobs, per-job attempts and lease holders, plus the dead-letter queue with replay. |
-| **Queues** | `runs:read` | The MangaDex upload queues by kind and state, with retry, cancel, and "requeue stale leases". |
-| **Untracked** | `untracked:read` | Series an extension reported that have no mapping yet. Approve creates the MangaDex title; skip never does. |
-| **Quarantine** | `runs:read` | Result envelopes the core refused to believe. The security-relevant queue, not just an error queue. |
-| **Audit** | `audit:read` | Who did what, searchable by actor, action, subject, free text and time window. |
-| **System** | `settings:read` | Migration state (is this database the schema this build expects?), the MangaDex session, and the database backup. |
-| **Users** | OWNER | Accounts, roles, approvals, passwords, and live sessions. |
-| **Tokens** | OWNER | Scoped `pa_…` client credentials: mint, list, revoke. |
+| **Overview** | `stats:read` | *Platform*: paused or running, with pause-for-N-minutes / pause indefinitely / resume; jobs by state, workers by status, upload tasks, and the quarantine count. *MangaDex*: the upload side's saved session and its expiry, with "clear saved session". The first screen in an incident. |
+| **Runs** | `runs:read` | *Recent*: the last 50 runs, each linking to its own page — every segment with attempts, lease holder, lease expiry and last error, plus per-job cancel and retry. *Dead letter*: jobs that exhausted their attempt budget, with replay. |
+| **Queues** | `runs:read` | *Tasks*: the MangaDex upload queues filtered by kind and state, with retry, cancel, and "requeue stale leases" (which only touches leases that have already expired). *Depth*: the same queues counted by kind and state. |
+| **Activity** | `runs:read` | One time-ordered feed merged across runs, jobs, upload tasks, quarantine and the audit log, filtered by severity, time window, extension and free text. Every row links to the thing it is about and offers a permalink. |
+| **Errors** | `runs:read` | *Failures*: everything that failed, newest first, across all three sources. *Quarantine*: result envelopes the core refused to believe — the security-relevant queue, not just an error queue. A non-zero quarantine count also shows as a red badge on Errors in the sidebar. |
+| **Extensions** | `extensions:read` | The published-bundle list, the chapter removal mode, and the publish drop zone. Opening one gives *Overview* (its bundle, its curation counts, and its runs, jobs, upload tasks and quarantine on one screen — the join is the point: green runs beside red upload tasks is the diagnosis), *Series map*, *Schedule*, *Config*, and *Versions* (every version ever published, with yank). |
+| **Tracked** | `tracked:read` | The series map across every extension: how many mappings each has and the most recent one, linking into the map that can be edited. There is no cross-extension endpoint, so this is an index rather than a merged table. |
+| **Untracked** | `untracked:read` | Series an extension reported that have no mapping yet, filtered by state. Opening one gives its details **editable** — see below. Approve creates the MangaDex title; skip never does. |
+| **Workers** | `workers:read` | *Fleet*: status, trust tier, heartbeat, agent version, which extensions each worker takes, with drain / activate / revoke. *Enrolment*: mint a one-time token and copy the compose snippet that uses it. |
+| **Users** | OWNER | *Accounts*: invite, approve, change role, set a password, delete. *Sessions*: who is signed in, with revoke. *Signups*: the self-signup gate. |
+| **Tokens** | OWNER | *Issued*: every `pa_…` client credential with its scopes, creator, last use and expiry, with revoke. *Mint*: scopes grouped by area, with the shipped presets. |
+| **Audit** | `audit:read` | Who did what, searchable by actor, action, subject, free text and date range — and one event at a time by id. |
+| **System** | `settings:read` | *Schema*: is this database the schema this build expects. *MangaDex*: the saved session. *Backup*: a `pg_dump` download (OWNER only). |
+| **Maintenance** | `bundles:read` | Compare each live bundle against its GitHub branch, install a bundle, restart a service. Lives in `dashboard/sysops.js`. |
+| **Docs** | `stats:read` | The operator handbook that ships with this build, rendered in the page. Lives in `dashboard/docs.js`. |
 
 Runbooks for the triage-shaped ones — stuck upload tasks, a bad MangaDex
 session, issuing and rotating client tokens — are in
@@ -213,15 +279,90 @@ Most of the time it does — the point of the feed is that `lastError` and
 `rejectReason` are already in front of you.
 
 Each row carries a **permalink** (`Copy link`) of the form
-`https://…/dash#run/<id>`. It is a URL fragment, so it is never sent to the
-server and pasting one into chat cannot leak an id into an access log. Opening
-one selects the right section and the right row; a link into a section the
-recipient's role cannot open says so instead of failing with a 403.
+`https://…/dash#/runs/<id>`. Opening one selects the right destination and the
+right row; a link into a destination the recipient's role cannot open says so
+instead of failing with a 403.
 
 Audit events are included only for a principal holding `audit:read`. When they
 are withheld the feed says so in a banner rather than quietly returning a
 shorter list, because "the platform has been quiet" and "you cannot see half of
 this" must not look alike.
+
+---
+
+## Opening one audit event
+
+Copy the link on an audit row and it opens `#/audit/<id>`: a detail view with the
+actor, the action, the subject, the timestamp (absolute and relative), and the
+event's `detail` JSON pretty-printed, plus one-click "everything by this actor"
+and "everything with this action", and a download of the event as JSON.
+
+That detail matters because the `detail` column is the only place the *arguments*
+of an audited action are recorded. "Who changed the removal mode, and to what"
+is answerable nowhere else.
+
+This used to be broken, and the shape of the bug is worth keeping written down.
+The permalink set a client-side filter and searched the most recent page in the
+browser, and `GET /admin/audit` accepted only `limit` — so an event that had
+since been pushed off that page could never be found, and the id was not a
+searchable field at all. A copied link reliably answered "no matching events" as
+the log grew. `GET /admin/audit` now takes filters:
+
+| Parameter | Meaning |
+|---|---|
+| `id` | Exactly one event, by primary key. This is what a permalink uses. |
+| `actor`, `action`, `subject` | Case-insensitive substring, so partial names work. |
+| `since`, `until` | ISO instants, inclusive on both ends. |
+| `limit` | Capped at 500, default 100. |
+| `offset` | For a "page 4 of 40" control. |
+| `cursor` | The id of the last row of the previous page. Stable while events are still being written, which offset is not; an unknown cursor is a 400, because an empty page would read as "there is nothing older". |
+
+The response adds `total` (so paging can be honest about how much there is) and
+`nextCursor` (null on the last page, so a caller stops without an extra empty
+request). Ordering is on `(createdAt, id)` rather than `createdAt` alone, so two
+events recorded in the same millisecond cannot swap places between pages. Every
+filter is served by an index that already exists — `id` is the primary key,
+`createdAt` and `action` each carry one — and the substring filters could not use
+an index whatever we added, which is why they stay bounded by `limit` and the
+time window.
+
+The free-text search on the Audit list still goes to `GET /admin/audit/search`,
+because that one reaches into the serialised `detail`, which the filters above
+deliberately do not.
+
+---
+
+## Correcting an untracked series
+
+The scrapers guess a title from a source page, and they guess wrong often enough
+that approving without a chance to correct it is how a bad title ends up public
+on MangaDex. So `#/untracked/<id>` shows the row with **Title**, **Original
+language** and **Source URL** editable:
+
+- **Save local row** (`untracked:write`) corrects the local row only, and says
+  so. Validation happens in the browser first — a title is required, the language
+  must look like `en`, `pt-br` or `zh-hk`, the URL must be complete and http(s) —
+  so a typo never becomes a request, and each field says what is wrong. The
+  server validates again, including that the URL's host is in the extension's
+  `allowed_hosts`; a refusal is shown with the server's own reason and the
+  optimistic edit is rolled back.
+- **Apply to MangaDex** pushes the title and links to an already-created title.
+  It is owner/admin-level, and it is behind a confirmation that says out loud
+  that this edits the live entry *for everyone*, lists exactly what will change,
+  and notes that MangaDex keeps its own edit history and this cannot be undone
+  from here.
+- A **CONTRIBUTOR** can do the first and not the second. The button is disabled
+  rather than hidden, and the reason is written both in its tooltip and in the
+  page: pushing to the public entry is limited to owners and admins, and a
+  contributor should correct the local row and ask an operator to apply it. A
+  disabled control that explains itself tells them the operation exists and who
+  to ask; an absent one reads as a missing feature.
+- The button is also disabled, with a different reason, when there is no MangaDex
+  title yet — approve the series first.
+
+The order this is designed around is: **fix the details, then approve.** A row
+whose title already exists shows a banner saying local edits do not reach
+MangaDex until they are applied.
 
 ---
 
@@ -240,6 +381,47 @@ Two consequences worth knowing:
 - `whoami` discloses nothing secret: no token, no session id, no password
   state. It answers "what may this credential do", which the caller already
   knows implicitly.
+
+### Reactivity
+
+There is one client-side store with subscribe/notify, and every fetched thing is
+a resource with four states the page can actually show: loading, ready, empty,
+failed. Consequences you will notice:
+
+- **A mutation updates every affected view.** Pausing the platform from Overview
+  moves the header pill and the Overview banner together, with no reload.
+- **A poll over data already on screen dims it rather than replacing it with a
+  skeleton**, so nothing flashes every ten seconds.
+- **Small edits are optimistic and roll back.** Approving an account, draining a
+  worker or removing a mapping moves immediately and comes back if the server
+  refuses — which it does, for instance, when a contributor tries to remove a
+  mapping that needs `tracked:write`.
+- **Space is reserved before data arrives**, so the page does not jump under
+  your pointer.
+- **A failed load names the reason and offers "Try again"** in place of that one
+  panel; it never empties the page.
+- **Every list has an empty state that says what would put something in it**,
+  rather than showing a blank table.
+
+### Responsiveness
+
+Usable down to a phone. The sidebar becomes a drawer; below 620px tables restack
+as cards, with each cell labelled from its column header. A wide table always
+scrolls inside its own container — the page body never scrolls sideways at any
+width. Touch targets are at least 40px once there is no pointer to be precise
+with.
+
+### Files
+
+`dashboard/app.js` is one classic script with no build step: the shell, the
+store, the router and most views. It is deliberately not a module, because jsdom
+cannot execute module scripts and being able to drive this page headlessly is
+worth more than the file count. `dashboard/sysops.js`, `dashboard/docs.js` and
+`dashboard/markdown.js` **are** ES modules, loaded on demand with `import()` when
+their destination is first opened; the shell hands them its own `el`, `api`,
+`card`, `row`, `table`, `toast` and `can` so they look like the rest of the page.
+Anything with a supported extension in `src/core/api/dashboard/` is served, so a
+new module needs no server change.
 
 ---
 
@@ -304,7 +486,7 @@ This document is one of the set below. Start at
 | [security-trust-model.md](security-trust-model.md) | Threat model, control matrix, secrets inventory, and what a worker can and cannot do |
 | [deployment.md](deployment.md) | Standing up the core and worker hosts, the tunnel and WAF, upgrades, backups |
 | [operations.md](operations.md) | Day-2 runbooks: triage, worker lifecycle, secret rotation, dead letters, incidents |
-| [dashboard.md](dashboard.md) | The operator dashboard: signing in, the roles, every section, and what still needs host access |
+| [dashboard.md](dashboard.md) | The operator dashboard: signing in, the roles, the navigation model, every view, and what still needs host access |
 | [migration-guide.md](migration-guide.md) | Staged Mongo/SQLite to Postgres cutover, with a rollback at every stage |
 | [ipc-to-api-mapping.md](ipc-to-api-mapping.md) | Which endpoint replaced each legacy IPC command |
 | [bot.md](bot.md) | Discord bot setup, the admin-gating model, and the command reference |
