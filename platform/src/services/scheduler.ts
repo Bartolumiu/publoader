@@ -4,12 +4,15 @@ import { createLogger } from "../logging.js";
 import { getPrisma } from "../db.js";
 import { markSchedulerTick } from "../metrics.js";
 import { SchedulerService } from "../core/scheduler/service.js";
+import { SettingsStore } from "../core/store/settings.js";
+import { shouldRestart } from "../core/sysops/restartSignal.js";
 import { startMetricsServer } from "../core/observability/metricsServer.js";
 import { collectInventoryMetrics } from "../core/observability/inventory.js";
 
 const config = loadConfig();
 const log = createLogger("core-scheduler", config.logLevel);
 const prisma = getPrisma(config.databaseUrl);
+const settings = new SettingsStore(prisma);
 const scheduler = new SchedulerService(prisma, log, {
   baseSeconds: config.retryBaseSeconds,
   maxSeconds: config.retryMaxSeconds,
@@ -30,6 +33,10 @@ const metricsServer = await startMetricsServer({
 
 log.info("core-scheduler started");
 while (running) {
+  // Checked at the top of the iteration so the exit goes through the teardown
+  // below rather than interrupting a tick that is mid-transaction.
+  if (await shouldRestart(settings, "scheduler", log)) break;
+
   try {
     await scheduler.tick();
     // Only after a tick returns: a loop that throws every time is not a

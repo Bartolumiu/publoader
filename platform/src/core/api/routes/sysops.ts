@@ -4,20 +4,21 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook, requireOwner, requireScope } from "../auth.js";
+import { RateLimiter } from "../ratelimit.js";
 import { sessionAuthenticator } from "../session.js";
 import { EXTENSION_NAME_RE } from "../../../contracts/manifest.js";
+import { fetchRepoArchive, RepoArchiveError, type RepoArchiveFetcher } from "../../webhooks/repoArchive.js";
 import {
-  fetchRepoArchive,
-  findExtensionDirs,
-  findManifestRoot,
-  extractUploadedTree,
-  RepoArchiveError,
-  type RepoArchiveFetcher,
-} from "../../webhooks/repoArchive.js";
+  archiveStats,
+  BundleIntakeError,
+  extractBundleTree,
+  findExtensionRoots,
+  type ArchiveStats,
+} from "../../sysops/bundleIntake.js";
 import {
   publishExtensionDirectory,
   publishExtensionFromArchive,
@@ -62,8 +63,18 @@ import {
  *  - docs are served from the image, read-only, from an allowlist.
  */
 
-/** Uploaded bundles use the same ceiling as POST /api/v1/admin/bundles. */
-const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
+/**
+ * Body limit for an uploaded bundle: deliberately far below the 50 MB total
+ * uncompressed cap the intake enforces, and two orders of magnitude below the
+ * 64 MiB the generic publish route allows.
+ *
+ * The reasoning is that this endpoint takes a zip from a browser and the largest
+ * real extension is tens of kilobytes, so 8 MiB is already absurd generosity —
+ * and the smaller the body, the less work a hostile archive can ask for before
+ * the intake's own counters get involved. The two limits are complementary: this
+ * one bounds the bytes we accept, the intake bounds the bytes they can become.
+ */
+export const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 
 /**
  * Ceiling on GitHub API calls for one status/sync request. Each extension may
@@ -86,6 +97,19 @@ const SYNC_BUDGET_MS = 120_000;
  * happened.
  */
 const RESTART_DELAY_MS = 500;
+
+/**
+ * Publishing budget per PRINCIPAL, not per IP.
+ *
+ * The IP limiter on the whole admin scope is about hammering; this is about the
+ * cost of one credential's requests. Each accepted install downloads or unpacks
+ * an archive, runs a build subprocess and writes a row, and each REFUSED one
+ * still costs the intake's work — so a leaked `bundles:write` token gets six
+ * bursts and one more every two minutes, which is far more than an operator
+ * publishing by hand ever needs.
+ */
+const INSTALL_BURST = 6;
+const INSTALL_REFILL_PER_SECOND = 1 / 120;
 
 export interface SysopsRouteOptions {
   /** Test seam: GitHub metadata reads (default branch HEAD, commit compare). */
@@ -127,8 +151,8 @@ const RepoRef = z
 
 /**
  * A repo-relative directory. No leading slash, no `..`, no backslashes: this
- * string selects a subtree of a downloaded archive, and extractSubtree's own
- * zip-slip check is the backstop rather than the only defence.
+ * string selects a subtree of a downloaded archive, and the intake's own
+ * normalisation is the backstop rather than the only defence.
  */
 const RepoPath = z
   .string()
@@ -240,6 +264,21 @@ export function registerSysopsRoutes(
       }
     });
 
+    /**
+     * Per-principal budget for the three endpoints that publish. Keyed on the
+     * principal name so a token and a session are metered separately, and one
+     * operator's mistake does not lock the other out.
+     */
+    const installLimiter = new RateLimiter(INSTALL_BURST, INSTALL_REFILL_PER_SECOND);
+    const installAllowed = async (req: FastifyRequest, reply: FastifyReply): Promise<boolean> => {
+      const key = req.principal?.name ?? req.ip;
+      if (installLimiter.allow(key)) return true;
+      await reply.code(429).send({
+        error: "too many publish attempts for this credential; wait a couple of minutes",
+      });
+      return false;
+    };
+
     /** Same attribution rules as routes/admin.ts and routes/ops.ts. */
     const actor = (req: FastifyRequest) => {
       const claimed = (req.headers["x-actor"] as string | undefined)?.slice(0, 64);
@@ -282,6 +321,10 @@ export function registerSysopsRoutes(
       { preHandler: requireScope("bundles:write") },
       async (req, reply) => {
         const body = parseOrThrow(SyncBody, req.body ?? {});
+        // A dry run does not download, build or publish, so it does not spend the
+        // publish budget — an operator checking twice before committing to it is
+        // the behaviour we want to encourage.
+        if (!body.dryRun && !(await installAllowed(req, reply))) return reply;
         const status = await collectGithubStatus();
         if (!status.available) {
           return reply.code(503).send({ error: status.reason ?? "GitHub is not available" });
@@ -496,6 +539,7 @@ export function registerSysopsRoutes(
       "/api/v1/admin/sysops/extensions/install-github",
       { preHandler: requireScope("bundles:write") },
       async (req, reply) => {
+        if (!(await installAllowed(req, reply))) return reply;
         const body = parseOrThrow(InstallGithubBody, req.body ?? {});
         const slash = body.repo.indexOf("/");
         const owner = slash < 0 ? ctx.config.githubRepoOwner : body.repo.slice(0, slash);
@@ -543,24 +587,31 @@ export function registerSysopsRoutes(
         // Where the extension lives is a question about the tree, not about the
         // operator. Ambiguity is reported so they can answer it with `path`
         // rather than having one guessed for them.
+        const stats = archiveStats(archive);
         let subPath = body.path;
         if (subPath === undefined) {
           let found: string[];
           try {
-            found = findExtensionDirs(archive);
+            found = findExtensionRoots(archive, { stripArchiveRoot: true });
           } catch (err) {
-            return reply
-              .code(422)
-              .send({ error: err instanceof RepoArchiveError ? err.message : "unreadable archive" });
+            return refuse(req, reply, stats, err, `${owner}/${repo}@${commit.slice(0, 7)}`);
           }
           if (found.length === 0) {
-            return reply.code(422).send({
-              error: `no manifest.json found in ${owner}/${repo} at ${commit.slice(0, 7)}; pass \`path\` if the extension lives somewhere unusual`,
-            });
+            return refuse(
+              req,
+              reply,
+              stats,
+              new BundleIntakeError(
+                "no_manifest",
+                `no manifest.json found in ${owner}/${repo} at ${commit.slice(0, 7)}; pass \`path\` if the extension lives somewhere unusual`,
+              ),
+              `${owner}/${repo}@${commit.slice(0, 7)}`,
+            );
           }
           if (found.length > 1) {
             return reply.code(422).send({
               error: `${owner}/${repo} contains ${found.length} extensions; pass \`path\` to choose one`,
+              code: "ambiguous_manifest",
               candidates: found.slice(0, 50),
             });
           }
@@ -579,6 +630,12 @@ export function registerSysopsRoutes(
           attribution(actor(req), "sysops-install-github", ref),
           { subPath, requireName: conventional !== null },
         );
+        await ctx.audit.record(actor(req), "bundle.intake", `${owner}/${repo}:${subPath}`, {
+          ...stats,
+          via: "sysops-install-github",
+          commit,
+          outcome: outcome.status,
+        });
         return reply.code(statusFor(outcome)).send({
           ...outcome,
           repo: `${owner}/${repo}`,
@@ -601,36 +658,38 @@ export function registerSysopsRoutes(
      */
     scope.post(
       "/api/v1/admin/sysops/extensions/install-upload",
-      { bodyLimit: MAX_BUNDLE_BYTES, preHandler: requireScope("bundles:write") },
+      { bodyLimit: MAX_UPLOAD_BYTES, preHandler: requireScope("bundles:write") },
       async (req, reply) => {
+        if (!(await installAllowed(req, reply))) return reply;
         if (!Buffer.isBuffer(req.body)) {
           return reply
             .code(400)
             .send({ error: "zip body required (content-type application/zip)" });
         }
+        const stats = archiveStats(req.body);
+        // 0700 by mkdtemp, and the intake writes every file 0600 inside it.
         const workDir = mkdtempSync(join(tmpdir(), "publoader-upload-"));
         try {
           try {
-            extractUploadedTree(req.body, workDir);
+            // The extension's own directory becomes workDir itself, whatever it
+            // was called inside the zip — `root` is only which directory was
+            // taken, for the log.
+            const intake = extractBundleTree(req.body, workDir);
+            ctx.log.info({ ...stats, ...intake }, "accepted an uploaded bundle archive");
           } catch (err) {
-            return reply
-              .code(422)
-              .send({ error: err instanceof RepoArchiveError ? err.message : "unreadable zip" });
-          }
-          const root = findManifestRoot(workDir);
-          if (root === null) {
-            return reply.code(422).send({
-              error:
-                "no manifest.json in the uploaded zip. Zip the extension directory (or its " +
-                "contents): manifest.json plus either a built index.mjs or the TypeScript source.",
-            });
+            return refuse(req, reply, stats, err, "upload");
           }
           const outcome = await publishExtensionDirectory(
-            root,
+            workDir,
             ctx,
             attribution(actor(req), "sysops-install-upload"),
             { expectedName: null, origin: "the uploaded zip" },
           );
+          await ctx.audit.record(actor(req), "bundle.intake", outcome.extension, {
+            ...stats,
+            via: "sysops-install-upload",
+            outcome: outcome.status,
+          });
           return reply.code(statusFor(outcome)).send({
             ...outcome,
             source: "upload",
@@ -694,6 +753,34 @@ export function registerSysopsRoutes(
     );
 
     // ---- helpers that need ctx ----
+
+    /**
+     * Refuse an archive: 422 with the reason and the code, and an audit row.
+     *
+     * A refused upload is exactly the event an operator wants to find later —
+     * "someone tried to publish something the intake rejected" is worth as much
+     * as a successful publish, and more if it happens repeatedly. The sha256 is
+     * of the archive as received, so two attempts with the same bytes are
+     * recognisable as one.
+     */
+    async function refuse(
+      req: FastifyRequest,
+      reply: FastifyReply,
+      stats: ArchiveStats,
+      err: unknown,
+      subject: string,
+    ): Promise<FastifyReply> {
+      const intake = err instanceof BundleIntakeError ? err : null;
+      const code = intake?.code ?? "unreadable_zip";
+      const message = intake?.message ?? "the archive could not be read";
+      await ctx.audit.record(actor(req), "bundle.intake.refused", subject, {
+        ...stats,
+        code,
+        reason: message,
+      });
+      ctx.log.warn({ ...stats, code, subject, actor: actor(req) }, "refused a bundle archive");
+      return reply.code(422).send({ error: message, code, ...stats });
+    }
 
     /**
      * Did this bundle become the one the scheduler will pin?

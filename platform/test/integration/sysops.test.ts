@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { loadConfig } from "../../src/config.js";
 import { createLogger } from "../../src/logging.js";
 import { buildContext, type AppContext } from "../../src/core/api/context.js";
-import { registerSysopsRoutes } from "../../src/core/api/routes/sysops.js";
+import { MAX_UPLOAD_BYTES, registerSysopsRoutes } from "../../src/core/api/routes/sysops.js";
 import type { RepoArchiveFetcher } from "../../src/core/webhooks/repoArchive.js";
 import {
   GithubApiError,
@@ -865,8 +865,8 @@ describe.skipIf(!dbReady())("operator self-service endpoints", () => {
           "wrapped-extension/",
         ),
       );
+      expect(res.json()).toMatchObject({ extension: "wrapped", status: "published" });
       expect(res.statusCode).toBe(201);
-      expect(res.json().extension).toBe("wrapped");
     });
 
     it("builds TypeScript source with the same esbuild step the webhook uses", async () => {
@@ -901,14 +901,20 @@ describe.skipIf(!dbReady())("operator self-service endpoints", () => {
         }),
       );
       expect(res.statusCode).toBe(422);
-      expect(res.json().detail).toMatch(/extension API v2/);
+      // Refused at intake now (a .py file is not an allowed type at all), so the
+      // porting message has to be carried by the refusal rather than by
+      // BundleStore — an operator with a v1 extension must be told to port it,
+      // not told that .py is not in an allowlist.
+      expect(res.json().code).toBe("python_bundle");
+      expect(res.json().error).toMatch(/extension API v2/);
       expect(await prisma.bundle.count()).toBe(0);
     });
 
     it("rejects a zip with no manifest, saying what to zip", async () => {
       const res = await upload(uploadZip({ "index.mjs": FACTORY }));
       expect(res.statusCode).toBe(422);
-      expect(res.json().error).toMatch(/no manifest\.json in the uploaded zip/);
+      expect(res.json().code).toBe("no_manifest");
+      expect(res.json().error).toMatch(/no manifest\.json in the archive/);
     });
 
     it("refuses an entry that would escape the extraction directory", async () => {
@@ -950,6 +956,150 @@ describe.skipIf(!dbReady())("operator self-service endpoints", () => {
         headers,
       );
       expect(res.statusCode).toBe(403);
+    });
+  });
+
+  // ------------------------------------------------------- intake at the edge
+
+  /**
+   * The route's half of the hardening: what an operator sees when an archive is
+   * refused, what lands in the audit log, and the two limits that live on the
+   * endpoint rather than in the intake (body size and per-credential rate).
+   *
+   * The refusal classes themselves are covered exhaustively in
+   * test/unit/bundleIntake.test.ts; these are the cases that only exist over
+   * HTTP.
+   */
+  describe("hostile uploads at the edge", () => {
+    const upload = (body: Buffer, headers: Record<string, string> = root) =>
+      app.inject({
+        method: "POST",
+        url: "/api/v1/admin/sysops/extensions/install-upload",
+        headers: { ...headers, "content-type": "application/zip" },
+        payload: body,
+      });
+
+    it("refuses an executable disguised as a data file, and audits the refusal", async () => {
+      const zip = new AdmZip();
+      zip.addFile("manifest.json", Buffer.from(JSON.stringify(manifest("hostile"))));
+      zip.addFile("index.mjs", Buffer.from(FACTORY));
+      zip.addFile(
+        "manga_id_map.json",
+        Buffer.concat([Buffer.from("7f454c46", "hex"), Buffer.alloc(64)]),
+      );
+      const body = zip.toBuffer();
+
+      const res = await upload(body);
+      expect(res.statusCode).toBe(422);
+      expect(res.json().code).toBe("binary_content");
+      expect(res.json().error).toMatch(/ELF/);
+      // The stats travel with the refusal so an operator can match it to a file.
+      expect(res.json().bytes).toBe(body.length);
+      expect(res.json().entries).toBe(3);
+      expect(res.json().sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(await prisma.bundle.count()).toBe(0);
+
+      // A refused upload is exactly the event worth finding later.
+      const audit = await auditFor("bundle.intake.refused");
+      expect(audit).toHaveLength(1);
+      expect(audit[0]).toMatchObject({ actor: "admin:root", subject: "upload" });
+      expect(audit[0]?.detail).toMatchObject({
+        code: "binary_content",
+        bytes: body.length,
+        entries: 3,
+      });
+    });
+
+    it("audits an accepted upload with the same fingerprint", async () => {
+      const body = uploadZip({
+        "manifest.json": JSON.stringify(manifest("accepted")),
+        "index.mjs": FACTORY,
+      });
+      expect((await upload(body)).statusCode).toBe(201);
+      const audit = await auditFor("bundle.intake");
+      expect(audit).toHaveLength(1);
+      expect(audit[0]?.detail).toMatchObject({
+        bytes: body.length,
+        entries: 2,
+        via: "sysops-install-upload",
+        outcome: "published",
+      });
+    });
+
+    it("refuses a body larger than the upload limit before reading it", async () => {
+      const res = await upload(Buffer.alloc(MAX_UPLOAD_BYTES + 1024, 0x50));
+      // Fastify answers 413 from the body limit; the intake is never reached.
+      expect(res.statusCode).toBe(413);
+      expect(await prisma.bundle.count()).toBe(0);
+    });
+
+    it("rate-limits publishing per credential, not per address", async () => {
+      const zip = uploadZip({
+        "manifest.json": JSON.stringify(manifest("ratelimited")),
+        "index.mjs": FACTORY,
+      });
+      const scoped = await mint(["bundles:write"]);
+      const codes: number[] = [];
+      for (let attempt = 0; attempt < 8; attempt++) {
+        codes.push((await upload(zip, scoped)).statusCode);
+      }
+      // Six bursts, then refused.
+      expect(codes.filter((code) => code === 429).length).toBeGreaterThan(0);
+      expect(codes.slice(0, 6).every((code) => code !== 429)).toBe(true);
+      // A different principal has its own bucket and is unaffected.
+      expect((await upload(zip, root)).statusCode).not.toBe(429);
+    });
+
+    it("does not spend the publish budget on a dry-run sync", async () => {
+      const scoped = await mint(["bundles:write"]);
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const res = await app.inject({
+          method: "POST",
+          url: "/api/v1/admin/sysops/github/sync",
+          headers: scoped,
+          payload: { dryRun: true },
+        });
+        expect(res.statusCode).not.toBe(429);
+      }
+    });
+
+    it("applies the same intake to a repository archive, per extension", async () => {
+      // A repo is no more trustworthy than an upload: the archive is fetched over
+      // the network and written by anyone who can push.
+      await seedBundle("mangaplus", { commit: OLD });
+      github = githubStub({
+        heads: { "publoader-extensions": HEAD },
+        comparisons: {
+          [`publoader-extensions:${OLD}`]: {
+            aheadBy: 1,
+            paths: ["src/mangaplus/index.mjs"],
+            pathsTruncated: false,
+          },
+        },
+      });
+      await boot({ GITHUB_EXTENSIONS_REPOS: "publoader-extensions" });
+      await seedBundle("mangaplus", { commit: OLD });
+
+      const zip = new AdmZip();
+      zip.addFile(
+        `${ARCHIVE_ROOT}/src/mangaplus/manifest.json`,
+        Buffer.from(JSON.stringify(manifest("mangaplus", "2.0.0"))),
+      );
+      zip.addFile(`${ARCHIVE_ROOT}/src/mangaplus/index.mjs`, Buffer.from(FACTORY));
+      zip.addFile(`${ARCHIVE_ROOT}/src/mangaplus/vendor.so`, Buffer.from("not really a binary"));
+      archive = zip.toBuffer();
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/sysops/github/sync",
+        headers: root,
+        payload: {},
+      });
+      expect(res.statusCode).toBe(207);
+      expect(res.json().outcomes[0]).toMatchObject({ extension: "mangaplus", status: "failed" });
+      expect(res.json().outcomes[0].detail).toMatch(/may contain only/);
+      // Nothing was published from the refused archive.
+      expect(await prisma.bundle.count({ where: { version: "2.0.0" } })).toBe(0);
     });
   });
 

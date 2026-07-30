@@ -7,6 +7,7 @@ import { MdClient } from "../core/md/client.js";
 import { RunProcessor } from "../core/processor/processor.js";
 import { SettingsStore } from "../core/store/settings.js";
 import { UploadTaskStore } from "../core/store/uploadTasks.js";
+import { shouldRestart } from "../core/sysops/restartSignal.js";
 import { startMetricsServer } from "../core/observability/metricsServer.js";
 
 /**
@@ -46,6 +47,9 @@ const metricsServer = await startMetricsServer({
 
 log.info("core-processor started");
 while (running) {
+  // Ahead of the pause gate below: a paused processor must still be restartable.
+  if (await shouldRestart(settings, "processor", log)) break;
+
   try {
     // The pause gate stops new MangaDex-facing work without stopping the
     // scheduler: runs simply queue up in INGESTING until it is lifted.

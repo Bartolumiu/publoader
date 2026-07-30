@@ -138,3 +138,46 @@ export async function honourRestartRequest(
   await settings.setSetting(restartAckKey(service), request.requestedAt);
   return request;
 }
+
+/** The subset of the logger this module uses, so services pass their own. */
+export interface RestartLogger {
+  info(obj: object, msg: string): void;
+  warn(obj: object, msg: string): void;
+}
+
+/**
+ * The call a service loop makes each iteration: true means "stop looping".
+ *
+ * Wrapped rather than left to each caller for two reasons. Errors are swallowed
+ * with a warning, because a database hiccup while reading a *setting* must not
+ * take down a service whose actual work is unaffected — the request survives in
+ * the row and the next iteration sees it. And the exit is a return value rather
+ * than a `process.exit()` here, so each loop leaves through the shutdown path it
+ * already has (close the metrics server, disconnect Prisma, log) instead of
+ * dropping a Prisma connection and a half-written lease on the floor.
+ *
+ * Where to call it: BEFORE any `continue` in the loop body, in particular the
+ * pause gate. A paused service is exactly the one an operator is most likely to
+ * be restarting, and a poll placed after the pause check would skip it for as
+ * long as the pause lasted — the button would appear to do nothing.
+ */
+export async function shouldRestart(
+  settings: RestartSettingsStore,
+  service: RestartService,
+  log: RestartLogger,
+): Promise<boolean> {
+  try {
+    const request = await honourRestartRequest(settings, service);
+    if (!request) return false;
+    // No `service` field: every logger here is already bound to one, and adding
+    // it emits a duplicate JSON key whose winner depends on the parser.
+    log.info(
+      { target: request.target, requestedBy: request.requestedBy },
+      "restart requested from the dashboard, exiting for the restart policy",
+    );
+    return true;
+  } catch (err) {
+    log.warn({ err, restartTarget: service }, "could not read the restart request");
+    return false;
+  }
+}

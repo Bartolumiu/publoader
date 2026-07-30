@@ -7,8 +7,8 @@
  * in the system. Both endpoints serve the same tree for the same sha, so this
  * is purely a "use the parser we already trust" choice.
  */
-import { mkdirSync, readdirSync, writeFileSync, type Dirent } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve, sep } from "node:path";
 import AdmZip from "adm-zip";
 
 /**
@@ -104,6 +104,13 @@ async function readCapped(res: Response, limit: number): Promise<Buffer> {
 /**
  * Write the files under `subPath` out of a GitHub archive into `destDir`.
  *
+ * SUPERSEDED for publishing: every archive that becomes a bundle now goes
+ * through core/sysops/bundleIntake.ts, which adds the bomb, link, file-type and
+ * permission checks this function never had and counts bytes as it
+ * decompresses. This remains as the plain extraction primitive (and its
+ * zip-slip guard) that test/unit/webhookArchive.test.ts covers; do not reach for
+ * it in a new publish path.
+ *
  * GitHub wraps the tree in a single top-level directory named after the repo
  * and sha (`owner-repo-1a2b3c4/`), which is stripped: callers want repo-relative
  * paths. Returns the number of files written; zero means the path was not in
@@ -148,143 +155,11 @@ function safeTarget(destRoot: string, relative: string, entryName: string): stri
   return target;
 }
 
-/**
- * Total uncompressed size accepted from an OPERATOR-SUPPLIED zip.
- *
- * The request body is already capped, but compression ratios are not: a 200 KB
- * zip can expand to gigabytes. The core container runs with a 256 MiB tmpfs, so
- * an unbounded expansion is a denial of service against the whole control plane
- * rather than a failed upload.
- */
-export const MAX_UNPACKED_BYTES = 96 * 1024 * 1024;
-
-/** Entry-count cap for the same reason: many tiny files also fill a filesystem. */
-export const MAX_UNPACKED_ENTRIES = 5_000;
-
-/**
- * Extract every file of an uploaded zip into `destDir`, preserving its layout.
- *
- * Unlike extractSubtree this keeps whatever structure the operator zipped —
- * `manifest.json` at the root, a wrapping directory from a file manager, or a
- * whole `src/<name>/` tree — because which of those it is only becomes knowable
- * afterwards (see findManifestRoot). Returns how many files were written.
- */
-export function extractUploadedTree(zipData: Buffer, destDir: string): number {
-  let zip: AdmZip;
-  try {
-    zip = new AdmZip(zipData);
-  } catch {
-    throw new RepoArchiveError("upload is not a readable zip");
-  }
-  const destRoot = resolve(destDir);
-  let written = 0;
-  let bytes = 0;
-
-  for (const entry of zip.getEntries()) {
-    if (entry.isDirectory) continue;
-    if (written >= MAX_UNPACKED_ENTRIES) {
-      throw new RepoArchiveError(`zip has more than ${MAX_UNPACKED_ENTRIES} files`);
-    }
-    // The header's declared size is checked before the data is materialised, so
-    // a bomb is refused rather than decompressed and then measured.
-    bytes += entry.header.size;
-    if (bytes > MAX_UNPACKED_BYTES) {
-      throw new RepoArchiveError(
-        `zip expands to more than ${MAX_UNPACKED_BYTES} bytes; publish a built bundle instead`,
-      );
-    }
-    const target = safeTarget(destRoot, entry.entryName, entry.entryName);
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, entry.getData());
-    written += 1;
-  }
-  return written;
-}
-
-/**
- * The shallowest directory under `root` holding a manifest.json, or null.
- *
- * "Zip the contents of the directory, not the directory itself" is a real
- * instruction the publish API gives, and it is also the mistake every operator
- * makes once. Finding the manifest instead of demanding it at the root turns
- * that mistake into a non-event. Shallowest wins so a repo-shaped zip resolves
- * to the extension rather than to a fixture inside its tests.
- */
-export function findManifestRoot(root: string, maxDepth = 4): string | null {
-  let frontier = [root];
-  for (let depth = 0; depth <= maxDepth && frontier.length > 0; depth++) {
-    const next: string[] = [];
-    for (const dir of frontier) {
-      const entries = readdirSafe(dir);
-      if (entries.some((entry) => entry.isFile() && entry.name === "manifest.json")) return dir;
-      for (const entry of entries) {
-        if (entry.isDirectory() && !ZIP_IGNORED_DIRS.has(entry.name)) next.push(join(dir, entry.name));
-      }
-    }
-    frontier = next;
-  }
-  return null;
-}
-
-/** Never searched for a manifest: build inputs and caches, not the program. */
-const ZIP_IGNORED_DIRS = new Set(["__MACOSX", "__pycache__", ".git", "node_modules", "dist"]);
-
-/** An unreadable directory is not there as far as the search is concerned. */
-function readdirSafe(dir: string): Dirent[] {
-  try {
-    return readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-}
-
 /** Drop the `owner-repo-sha/` wrapper, or null for an entry that has none. */
 function stripArchiveRoot(entryName: string): string | null {
   const slash = entryName.indexOf("/");
   if (slash < 0) return null;
   return entryName.slice(slash + 1);
-}
-
-/**
- * Repo-relative directories in the archive that hold a manifest.json.
- *
- * The push webhook never needs this: a push payload names the directories that
- * changed. Installing an arbitrary repo does — the operator gives a repo and a
- * ref, and where the extension lives inside it is a question about the tree, not
- * about them. `src/<name>/` is listed first because that is the convention in
- * both extensions repos; a repo that IS a single extension (manifest.json at the
- * root) comes back as "".
- *
- * Ambiguity is returned, not resolved: a caller that finds several must ask
- * which one rather than picking.
- */
-export function findExtensionDirs(zipData: Buffer): string[] {
-  let zip: AdmZip;
-  try {
-    zip = new AdmZip(zipData);
-  } catch {
-    throw new RepoArchiveError("repository archive is not a readable zip");
-  }
-  const dirs = new Set<string>();
-  for (const entry of zip.getEntries()) {
-    if (entry.isDirectory) continue;
-    const repoPath = stripArchiveRoot(entry.entryName);
-    if (repoPath === null) continue;
-    const slash = repoPath.lastIndexOf("/");
-    const file = slash < 0 ? repoPath : repoPath.slice(slash + 1);
-    if (file !== "manifest.json") continue;
-    dirs.add(slash < 0 ? "" : repoPath.slice(0, slash));
-  }
-  // Conventional locations first, then shallowest, then alphabetical: the order
-  // a human would read them in, and the order a caller should offer them.
-  return [...dirs].sort((a, b) => {
-    const conventional = (p: string) => (/^src\/[a-z0-9_]+$/.test(p) ? 0 : 1);
-    return (
-      conventional(a) - conventional(b) ||
-      a.split("/").length - b.split("/").length ||
-      a.localeCompare(b)
-    );
-  });
 }
 
 /** Where an extension lives inside either extensions repo. Always zip-style. */

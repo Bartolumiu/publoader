@@ -10,6 +10,7 @@ import { MdClient } from "../core/md/client.js";
 import { DiscordNotifier } from "../core/md/webhook.js";
 import { UploadTaskWorkers } from "../core/md/taskWorkers.js";
 import { TitleService } from "../core/md/titleService.js";
+import { shouldRestart } from "../core/sysops/restartSignal.js";
 import { startMetricsServer } from "../core/observability/metricsServer.js";
 
 /**
@@ -95,6 +96,10 @@ const metricsServer = await startMetricsServer({
 log.info({ kinds: KIND_ORDER, discord: notifier.enabled }, "core-uploader started");
 
 while (running) {
+  // Between iterations, so we are never holding a task lease, and ahead of the
+  // pause gate's `continue` — a paused uploader must still be restartable.
+  if (await shouldRestart(settings, "uploader", log)) break;
+
   try {
     await tasks.sweepExpired();
 

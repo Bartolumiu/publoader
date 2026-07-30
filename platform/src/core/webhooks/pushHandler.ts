@@ -23,11 +23,11 @@ import type { Logger } from "../../logging.js";
 import { BundleBuildError, buildExtensionBundle } from "./bundleBuilder.js";
 import {
   extensionRepoPath,
-  extractSubtree,
   fetchRepoArchive,
   RepoArchiveError,
   type RepoArchiveFetcher,
 } from "./repoArchive.js";
+import { BundleIntakeError, extractBundleTree } from "../sysops/bundleIntake.js";
 import type { PushPayload } from "./github.js";
 
 /**
@@ -201,23 +201,33 @@ export async function publishExtensionFromArchive(
   const from = options.subPath ?? extensionRepoPath(extension);
   const workDir = mkdtempSync(join(tmpdir(), `publoader-push-${extension}-`));
   try {
-    let files: number;
     try {
-      files = extractSubtree(archive, from, workDir);
+      // A repository archive gets the same intake as an operator's upload: it is
+      // whatever anyone who can push to that repo wrote, fetched over the
+      // network. See core/sysops/bundleIntake.ts.
+      extractBundleTree(archive, workDir, { stripArchiveRoot: true, subPath: from });
     } catch (err) {
-      const detail = err instanceof RepoArchiveError ? err.message : "archive could not be read";
-      deps.log.error({ err, extension, commit }, "could not extract extension from archive");
+      if (err instanceof BundleIntakeError && err.code === "subtree_missing") {
+        // Every path of the extension was removed by this push. Nothing is taken
+        // out of rotation here — retiring a live extension on the strength of a
+        // push payload is not a decision to automate.
+        return {
+          extension,
+          status: "skipped",
+          detail: `${from} is not present at ${commit}; if it was deleted, take it out of rotation with \`publoader-admin extensions disable ${extension}\``,
+        };
+      }
+      const detail =
+        err instanceof BundleIntakeError
+          ? err.message
+          : err instanceof RepoArchiveError
+            ? err.message
+            : "archive could not be read";
+      deps.log.error(
+        { err, extension, commit, code: err instanceof BundleIntakeError ? err.code : undefined },
+        "refused an extension archive",
+      );
       return { extension, status: "failed", detail };
-    }
-    if (files === 0) {
-      // Every path of the extension was removed by this push. Nothing is taken
-      // out of rotation here — retiring a live extension on the strength of a
-      // push payload is not a decision to automate.
-      return {
-        extension,
-        status: "skipped",
-        detail: `${from} is not present at ${commit}; if it was deleted, take it out of rotation with \`publoader-admin extensions disable ${extension}\``,
-      };
     }
     return await publishExtensionDirectory(workDir, deps, attribution, {
       expectedName: options.requireName === false ? null : extension,

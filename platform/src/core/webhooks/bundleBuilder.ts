@@ -27,6 +27,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import AdmZip from "adm-zip";
+import { buildInSandbox, SandboxBuildError } from "../sysops/buildSandbox.js";
 
 /** A directory that cannot be built into a bundle, with the reason why. */
 export class BundleBuildError extends Error {
@@ -75,11 +76,6 @@ export function zipDirectory(dir: string): Buffer {
  */
 const ZIP_EPOCH = new Date("2020-01-01T00:00:00Z");
 
-/** What esbuild's `build` looks like to us. See buildEntrypoint for why it is typed here. */
-interface EsbuildModule {
-  build(options: Record<string, unknown>): Promise<{ errors: { text: string }[] }>;
-}
-
 /**
  * A bundle ships ONE self-contained ESM file. When the extension directory has
  * TypeScript sources (or a package.json build script implying a toolchain),
@@ -94,42 +90,29 @@ interface EsbuildModule {
  * that imports a third-party package cannot be built from a bare repo
  * checkout, which is why the webhook path is limited to dependency-free
  * extensions (see docs/webhooks.md).
+ *
+ * The build runs in a SUBPROCESS with a timeout, a heap ceiling and no inherited
+ * environment (core/sysops/buildSandbox.ts). `root` holds source that arrived
+ * from a repository or an upload, and it used to be handed to esbuild in this
+ * process, holding every credential the service has — including in the one case
+ * where esbuild will read a file the sources point it at (`tsconfig.json` with
+ * absolute `compilerOptions.paths`). See that module for the details.
+ *
+ * absWorkingDir + a relative entry point keeps the output free of absolute
+ * paths: esbuild derives both its file comments and its generated symbol names
+ * from the path it was given, so building the same commit out of a different
+ * temp directory would otherwise produce different bytes — a new sha256 for
+ * identical code on every webhook redelivery — and would bake the server's
+ * filesystem layout into a published bundle.
  */
 export async function buildEntrypoint(root: string, source: string, outFile: string): Promise<void> {
-  let esbuild: EsbuildModule;
   try {
-    // Resolved at run time so this still works for plain-.mjs extensions on an
-    // install where esbuild is absent.
-    const specifier = "esbuild";
-    esbuild = (await import(specifier)) as EsbuildModule;
-  } catch {
-    throw new BundleBuildError(
-      `${source} needs a build step but esbuild is not installed. ` +
-        "Run `pnpm install` in platform/, or ship a prebuilt index.mjs instead.",
-    );
-  }
-  const result = await esbuild.build({
-    // absWorkingDir + a relative entry point keeps the output free of absolute
-    // paths. esbuild derives both its file comments and its generated symbol
-    // names from the path it was given, so building the same commit out of a
-    // different temp directory would otherwise produce different bytes — a new
-    // sha256 for identical code on every webhook redelivery — and would bake
-    // the server's filesystem layout into a published bundle.
-    absWorkingDir: root,
-    entryPoints: [source],
-    outfile: outFile,
-    bundle: true,
-    format: "esm",
-    platform: "node",
-    target: "node24",
-    external: [],
-    sourcemap: false,
-    logLevel: "silent",
-  });
-  if (result.errors.length > 0) {
-    throw new BundleBuildError(
-      `esbuild failed:\n${result.errors.map((e) => `  ${e.text}`).join("\n")}`,
-    );
+    await buildInSandbox({ root, entry: source, outFile });
+  } catch (err) {
+    if (err instanceof SandboxBuildError) {
+      throw new BundleBuildError(`${source}: ${err.message}`);
+    }
+    throw err;
   }
 }
 
