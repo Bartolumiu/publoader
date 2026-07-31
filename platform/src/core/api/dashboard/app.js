@@ -462,6 +462,12 @@ function defs(pairs) {
 }
 
 const STATE_TONE = {
+  // Enrolment tokens: PENDING is the one that matters — an unused token is a
+  // live credential, so it is warned rather than greyed out.
+  PENDING: "warn",
+  USED: "ok",
+  EXPIRED: "",
+  REVOKED: "bad",
   PROCESSED: "ok",
   SUCCEEDED: "ok",
   COMMITTED: "ok",
@@ -5220,22 +5226,100 @@ function enrolmentPanel() {
                   ttlHours: Number(ttl.value) || 24,
                 },
               }),
-            { button: event.currentTarget },
+            { button: event.currentTarget, refresh: [enrollTokens] },
           );
           if (minted) showEnrollToken(minted, name.value.trim() || "publoader-worker-1");
         },
       }),
     ),
+    enrollTokenList(),
+  );
+}
+
+/** Shared so minting can refresh the list it just added a row to. */
+const enrollTokens = new Resource("enroll-tokens", () => api("/enroll-tokens"));
+
+/**
+ * Every token minted, and what became of it.
+ *
+ * The plaintext is deliberately absent — only a hash is stored and it was shown
+ * once. The useful fact here is the status: a PENDING token is a credential
+ * somebody can still enrol a worker with, which is the one an operator may want
+ * to withdraw.
+ */
+function enrollTokenList() {
+  return card(
+    "Enrolment tokens",
+    el("p", {
+      class: "dim small",
+      text:
+        "The token itself is never shown again — only its fate. A token stays usable until it is used, " +
+        "revoked, or expires.",
+    }),
+    live(
+      [enrollTokens],
+      (data) =>
+        table(
+          ["Status", "Trust", "Note", "Used by", "Created", "Expires", ""],
+          (data.tokens ?? []).map((t) => [
+            chip(t.status),
+            t.trust,
+            t.note || el("span", { class: "dim", text: "—" }),
+            t.usedByWorkerName
+              ? el("span", {}, t.usedByWorkerName)
+              : el("span", { class: "dim", text: "—" }),
+            `${fmtTime(t.createdAt)} (${ago(t.createdAt)})`,
+            t.status === "PENDING"
+              ? `${fmtTime(t.expiresAt)} (${ago(t.expiresAt)})`
+              : el("span", { class: "dim", text: fmtTime(t.expiresAt) }),
+            t.status === "PENDING"
+              ? gatedButton("enroll:write", {
+                  class: "danger",
+                  text: "Revoke",
+                  title: "Stop this token being usable, without waiting for it to expire",
+                  onclick: async (event) => {
+                    const button = event.currentTarget;
+                    if (
+                      !(await confirmDialog({
+                        title: "Revoke this enrolment token",
+                        lead: "Anyone holding it will no longer be able to enrol a worker with it.",
+                        points: ["A host that has already enrolled is unaffected — it holds a permanent token."],
+                        confirmLabel: "Revoke it",
+                      }))
+                    ) {
+                      return;
+                    }
+                    await act("enroll_token.revoke", () => api(`/enroll-tokens/${t.id}/revoke`, { method: "POST", body: {} }), {
+                      button,
+                      refresh: [enrollTokens],
+                    });
+                  },
+                })
+              : "",
+          ]),
+          { empty: "No enrolment token has been minted yet." },
+        ),
+      { reserve: 200, skeleton: () => skeletonTable(4, 7) },
+    ),
   );
 }
 
 function showEnrollToken(minted, workerName) {
+  // The image must be one that actually exists: this snippet is pasted straight
+  // onto a host, and a name nobody published turns "enrol a worker" into a pull
+  // failure with no clue that the dashboard invented the tag. WORKER_IMAGE comes
+  // from the server so the snippet tracks the deployed release rather than a
+  // constant that goes stale here.
+  const image = minted.workerImage || "ardax/publoader-worker:2.1.1";
   const snippet = [
     "# publoader worker — one-time enrolment token",
     `# expires ${fmtTime(minted.expiresAt)}; it enrols exactly one worker.`,
+    "#",
+    "# The token is traded once for a permanent one kept in the named volume.",
+    "# Losing that volume means asking the operator for a new enrolment token.",
     "services:",
     "  publoader-worker:",
-    "    image: ghcr.io/publoader/worker:latest",
+    `    image: ${image}`,
     "    restart: unless-stopped",
     "    environment:",
     `      CORE_URL: ${window.location.origin}`,

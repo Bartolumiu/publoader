@@ -38,6 +38,9 @@ export interface DiscordEmbedInput {
   colour?: string | number | null;
   footer?: string | null;
   fields?: DiscordField[];
+  /** ISO-8601. Discord renders it in the reader's own timezone, which is why
+   *  the Python embeds carried one rather than writing a time into the text. */
+  timestamp?: string | null;
 }
 
 interface DiscordEmbedPayload {
@@ -46,6 +49,7 @@ interface DiscordEmbedPayload {
   color: number;
   footer?: { text: string };
   fields?: DiscordField[];
+  timestamp?: string;
 }
 
 /** Accept one URL, or a comma/newline-separated list (_parse_webhook_urls). */
@@ -100,6 +104,7 @@ export class DiscordNotifier {
     if (input.title) embed.title = clip(input.title, EMBED_TITLE_LIMIT);
     if (input.description) embed.description = clip(input.description, EMBED_DESCRIPTION_LIMIT);
     if (input.footer) embed.footer = { text: clip(input.footer, EMBED_FOOTER_TEXT_LIMIT) };
+    if (input.timestamp) embed.timestamp = input.timestamp;
     if (input.fields && input.fields.length > 0) {
       embed.fields = input.fields.slice(0, EMBED_MAX_FIELDS).map((field) => ({
         name: clip(field.name, EMBED_FIELD_NAME_LIMIT),

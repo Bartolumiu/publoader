@@ -15,6 +15,9 @@ import {
 import { sessionAuthenticator } from "../session.js";
 import { Manifest, EXTENSION_NAME_RE } from "../../../contracts/manifest.js";
 import { MANGADEX_LANGUAGES } from "../../../contracts/languages.js";
+
+/** The worker image the enrolment snippet tells a new host to run. */
+const WORKER_IMAGE = process.env["PUBLOADER_WORKER_IMAGE"] ?? "ardax/publoader-worker:2.1.1";
 import { VALID_REMOVAL_MODES } from "../../store/settings.js";
 import { BundleRejectedError } from "../../store/bundles.js";
 import AdmZip from "adm-zip";
@@ -104,8 +107,77 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         trust: body.trust,
         note: body.note,
       });
-      return token;
+      // The image goes out with the token so the dashboard's compose snippet
+      // names a tag that exists. It used to hard-code one that was never
+      // published, which turned "enrol a worker" into a pull failure.
+      return { ...token, workerImage: WORKER_IMAGE };
     });
+
+    /**
+     * Every enrolment token and what became of it.
+     *
+     * The token itself is never returned — only its hash is stored, and the
+     * plaintext was shown once at mint time. What an operator needs here is the
+     * fate of each one: an unused, unexpired token is a credential somebody can
+     * still enrol with, and that is the thing worth being able to see.
+     *
+     * Status is derived rather than stored, so it cannot drift from the row.
+     */
+    scope.get("/api/v1/admin/enroll-tokens", { preHandler: requireScope("workers:read") }, async () => {
+      const rows = await ctx.prisma.enrollToken.findMany({ orderBy: { createdAt: "desc" }, take: 200 });
+      const usedIds = rows.map((r) => r.usedByWorkerId).filter((v): v is string => v !== null);
+      const workers = usedIds.length
+        ? await ctx.prisma.worker.findMany({ where: { id: { in: usedIds } }, select: { id: true, name: true } })
+        : [];
+      const nameOf = new Map(workers.map((w) => [w.id, w.name]));
+      const now = Date.now();
+
+      return {
+        tokens: rows.map((row) => ({
+          id: row.id,
+          trust: row.trust,
+          note: row.note,
+          createdAt: row.createdAt,
+          expiresAt: row.expiresAt,
+          singleUse: row.singleUse,
+          usedByWorkerId: row.usedByWorkerId,
+          usedByWorkerName: row.usedByWorkerId ? (nameOf.get(row.usedByWorkerId) ?? null) : null,
+          status: row.revoked
+            ? "REVOKED"
+            : row.usedByWorkerId
+              ? "USED"
+              : row.expiresAt.getTime() <= now
+                ? "EXPIRED"
+                : "PENDING",
+        })),
+      };
+    });
+
+    /**
+     * Withdraw a token that has not been used yet.
+     *
+     * An unused token stays a live credential until it expires, so this is how
+     * an operator takes back one sent to the wrong person without waiting out
+     * its TTL.
+     */
+    scope.post(
+      "/api/v1/admin/enroll-tokens/:id/revoke",
+      { preHandler: requireScope("enroll:write") },
+      async (req, reply) => {
+        const { id } = req.params as { id: string };
+        const updated = await ctx.prisma.enrollToken.updateMany({
+          where: { id, revoked: false },
+          data: { revoked: true },
+        });
+        // Already revoked, or no such token: either way there was nothing to
+        // withdraw, and answering ok would imply there had been.
+        if (updated.count !== 1) {
+          return reply.code(404).send({ error: "no unrevoked enrolment token with that id" });
+        }
+        await ctx.audit.record(actor(req), "enroll_token.revoke", id);
+        return { ok: true, revoked: true };
+      },
+    );
 
     scope.get("/api/v1/admin/workers", { preHandler: requireScope("workers:read") }, async () => {
       const workers = await ctx.workers.list();

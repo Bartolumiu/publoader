@@ -6,7 +6,7 @@ execution platform**.
 A central core (this codebase) owns the database, the schedule, result
 validation, and every MangaDex upload. Worker hosts — including machines the
 operator does not control — enroll over an authenticated HTTPS control plane,
-lease scrape jobs, run the (Python) extension in an isolated runner, and submit
+lease scrape jobs, run the extension in an isolated runner, and submit
 schema-validated result envelopes. Workers hold no credentials and never write
 to the database.
 
@@ -29,7 +29,7 @@ Full design: [`../docs/target-architecture.md`](../docs/target-architecture.md).
 CORE (operator's host)                    WORKER HOST(S)
 ├── core-api        control + data plane  └── worker-agent
 ├── core-scheduler  runs, jobs, sweeper       ├── bundle fetch (sha256-verified)
-├── core-processor  results → upload tasks    ├── python runner shim
+├── core-processor  results → upload tasks    ├── node runner (ESM)   
 ├── core-uploader   the ONLY MD writer        └── envelope → artifacts → submit
 ├── postgres        single source of truth
 └── cloudflared     the one public entrance      outbound HTTPS only, no inbound
@@ -52,9 +52,11 @@ CORE (operator's host)                    WORKER HOST(S)
 | `src/worker/` | The worker agent: lease loop, bundle cache, credential persistence, runner execution. |
 | `src/services/` | Process entrypoints, one per container. |
 | `src/cli/` | `admin.ts` (operator CLI), `migrate-from-mongo.ts`, `import-sqlite.ts`. |
-| `runner/` | The Python 3.11 shim — the only Python left. Executes the extension, enforces the manifest's egress allowlist, prints an envelope. |
+| `runner-node/` | `runner.mjs`, the extension API v2 runner. Executes the extension under Node's permission model, enforces the manifest's egress allowlist, prints an envelope. |
+| `runner/` | The Python 3.11 shim. **Deprecated** — python bundles are refused at publish, so this only serves jobs still pinned to a bundle published before the v2 cutover. |
 | `docker/core/`, `docker/worker/`, `docker/dev/` | Compose stacks and multi-stage Dockerfiles. |
 | `test/unit/`, `test/integration/` | vitest. Integration runs against a real PostgreSQL — lease semantics cannot be proven against mocks. |
+| `test/browser/` | Real-Chrome assertions for the dashboard. jsdom cannot see cascade-origin bugs; these caught five the other suites passed. |
 
 ## Dev quickstart
 

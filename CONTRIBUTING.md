@@ -335,6 +335,7 @@ pnpm exec prisma generate       # if the schema changed
 pnpm run typecheck              # zero errors
 pnpm run lint                   # zero warnings
 pnpm test                       # unit
+./test/browser/run.sh           # dashboard, in real Chrome (needs Chrome + a Postgres)
 pnpm run test:integration       # needs a real Postgres — check for skips
 ```
 

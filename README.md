@@ -128,9 +128,9 @@ Published images:
 
 | Image | Runs |
 | --- | --- |
-| `ardax/publoader-core:2.0.0` | `core-api`, `core-scheduler`, `core-processor`, `core-uploader`, and the Discord bot — one image, several entry points |
-| `ardax/publoader-core-migrate:2.0.0` | The one-shot migration container, the only thing able to alter the schema |
-| `ardax/publoader-worker:2.0.0` | The worker agent and the extension runtime |
+| `ardax/publoader-core:2.1.1` | `core-api`, `core-scheduler`, `core-processor`, `core-uploader`, and the Discord bot — one image, several entry points |
+| `ardax/publoader-core-migrate:2.1.1` | The one-shot migration container, the only thing able to alter the schema |
+| `ardax/publoader-worker:2.1.1` | The worker agent and the extension runtime |
 
 Base images are pinned by digest; the tag in an env file is what a deploy runs.
 Full procedure in [docs/deployment.md](docs/deployment.md).
@@ -184,7 +184,7 @@ platform/                     everything current
 │   ├── cli/                  publoader-admin, and the legacy importers
 │   └── services/             the six process entry points
 ├── runner-node/runner.mjs    the sandbox. Self-contained; no platform imports
-├── test/                     unit / integration (real Postgres) / e2e (Docker)
+├── test/                     unit / integration (real Postgres) / browser (Chrome) / e2e (Docker)
 ├── docker/                   core, worker, and dev compose stacks + Dockerfiles
 └── scripts/publoader         the dev/staging/prod entry point
 docs/                         the documentation set above
