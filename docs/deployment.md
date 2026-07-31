@@ -549,7 +549,7 @@ Code-only rollback (no new migration in the bad release) is just the previous
 tag:
 
 ```bash
-PUBLOADER_CORE_IMAGE=ghcr.io/publoader/core:1.0.0 \
+PUBLOADER_CORE_IMAGE=ardax/publoader-core:2.1.1 \
   docker compose -f platform/docker/core/docker-compose.yml up -d
 ```
 
