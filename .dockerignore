@@ -1,0 +1,20 @@
+# Build context is the repo root (the core image ships docs/ from here), so the
+# excludes that used to live in platform/.dockerignore have to apply from here.
+.git
+.github
+**/node_modules
+**/dist
+**/.claude
+**/*.tsbuildinfo
+**/.env
+**/.env.*
+!**/.env.example
+logs
+resources
+.remember
+.serena
+__pycache__
+**/*.pyc
+publoader
+tests
+scripts

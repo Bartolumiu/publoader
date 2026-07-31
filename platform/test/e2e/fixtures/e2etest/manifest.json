@@ -1,0 +1,22 @@
+{
+  "name": "e2etest",
+  "version": "2.0.0",
+  "publoader_api": "^2.0.0",
+  "runtime": "node",
+  "entrypoint": "index.mjs",
+  "mangadex_group_id": "22222222-2222-4222-8222-222222222222",
+  "languages": ["en"],
+  "allowed_hosts": ["e2e.example.com"],
+  "permissions": {
+    "network": false,
+    "filesystem_read": ["manga_id_map.json"],
+    "filesystem_write": [],
+    "subprocess": false
+  },
+  "data_files": {
+    "manga_id_map": "manga_id_map.json"
+  },
+  "maintainers": ["publoader"],
+  "timeout_seconds": 120,
+  "max_attempts": 3
+}

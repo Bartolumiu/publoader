@@ -1,0 +1,62 @@
+{
+  "name": "publoader-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Publoader distributed extension execution platform (core + worker agent)",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/client",
+      "@prisma/engines",
+      "esbuild",
+      "prisma",
+      "sharp"
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && pnpm run copy:dashboard",
+    "copy:dashboard": "mkdir -p dist/src/core/api/dashboard && cp -r src/core/api/dashboard/. dist/src/core/api/dashboard/",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src test",
+    "test": "vitest run test/unit",
+    "test:integration": "vitest run test/integration --no-file-parallelism",
+    "test:all": "vitest run --no-file-parallelism",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate deploy",
+    "start:api": "node dist/src/services/api.js",
+    "start:scheduler": "node dist/src/services/scheduler.js",
+    "start:processor": "node dist/src/services/processor.js",
+    "start:uploader": "node dist/src/services/uploader.js",
+    "start:worker": "node dist/src/services/worker.js",
+    "admin": "node dist/src/cli/admin.js"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.10.0",
+    "adm-zip": "^0.5.14",
+    "commander": "^13.1.0",
+    "discord.js": "^14.18.0",
+    "esbuild": "^0.25.0",
+    "fastify": "^5.3.0",
+    "mongodb": "^6.16.0",
+    "pino": "^9.6.0",
+    "prom-client": "^15.1.3",
+    "sharp": "^0.34.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/adm-zip": "^0.5.5",
+    "@types/node": "^22.15.0",
+    "@types/pg": "^8.20.0",
+    "eslint": "^9.24.0",
+    "jsdom": "^30.0.0",
+    "pg": "^8.22.0",
+    "prisma": "^6.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0",
+    "typescript-eslint": "^8.30.0",
+    "vitest": "^3.1.0"
+  }
+}

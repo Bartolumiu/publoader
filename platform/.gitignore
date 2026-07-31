@@ -1,0 +1,21 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.local
+coverage/
+
+# The repo-root .gitignore has a bare `extensions` rule for the legacy shared
+# volume, which also matches this directory. It must exist in a fresh checkout
+# or the worker image build fails on `COPY ${EXTENSIONS_DIR}/`.
+!docker/worker/extensions/
+
+# Real environment files. `.env` alone did NOT cover `.env.production` /
+# `.env.staging`, and both were committed to this public repository with a live
+# ADMIN_TOKEN, SESSION_SECRET, POSTGRES_PASSWORD and Cloudflare TUNNEL_TOKEN in
+# them. Ignore every .env* and re-allow only the committed templates, so the
+# default for a new env file is "not committed".
+.env*
+!.env.example
+!.env.production.example
+!.env.staging.example

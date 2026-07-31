@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="dark" />
+    <title>publoader · control plane</title>
+    <link rel="stylesheet" href="/dash/style.css" />
+    <script src="/dash/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#view">Skip to content</a>
+
+    <!-- Every view is built client-side, so with scripting off the page would
+         otherwise be blank. Naming the destinations here tells an operator what
+         they are missing rather than leaving them to guess. -->
+    <noscript>
+      <div class="noscript card">
+        <h2>JavaScript required</h2>
+        <p>
+          The control plane renders its views in the browser. The navigation offers Overview;
+          Runs, Queues, Activity and Errors under Work; Extensions, Tracked and Untracked under
+          Catalogue; Workers under Fleet; and Users, Tokens, Audit, System, Maintenance and Docs
+          under Admin.
+          Enable scripting for this origin, or use the <code>publoader-admin</code> CLI instead.
+        </p>
+      </div>
+    </noscript>
+
+    <!-- ---------------------------------------------------------- sign-in --
+         Its own full-page layer rather than a section inside the app shell:
+         nothing behind it should be built, or fetched, before there is a
+         session. -->
+    <main id="login" class="login-layer" hidden>
+      <div class="login card">
+        <h1 class="login-brand">publoader<span class="dim"> control plane</span></h1>
+
+        <form id="login-form" autocomplete="on">
+          <label for="login-email">Email</label>
+          <input id="login-email" name="email" type="email" required maxlength="320"
+                 autocomplete="username" placeholder="you@example.com" />
+          <label for="login-password">Password</label>
+          <input id="login-password" name="password" type="password" required maxlength="1024"
+                 autocomplete="current-password" />
+          <button id="login-submit" type="submit" class="primary">Sign in</button>
+        </form>
+
+        <p id="login-discord-wrap" hidden>
+          <a id="login-discord" class="button-link" href="/api/v1/admin/oauth/discord/start">
+            Sign in with Discord
+          </a>
+        </p>
+        <p id="login-signups" class="dim small" hidden>
+          New Discord accounts are accepted, but an owner must approve them before first use.
+        </p>
+
+        <p>
+          <button id="login-token-toggle" type="button" class="linkish" aria-expanded="false"
+                  aria-controls="login-token-form">
+            Use the admin token instead
+          </button>
+        </p>
+
+        <form id="login-token-form" autocomplete="off" hidden>
+          <p class="dim small">
+            Break-glass access. The token is exchanged for a session cookie and is not stored in
+            the browser.
+          </p>
+          <label for="login-actor">Display name</label>
+          <input id="login-actor" name="actor" type="text" maxlength="64" placeholder="ardax" />
+          <label for="login-token">Admin token</label>
+          <input id="login-token" name="token" type="password" required maxlength="512" />
+          <button id="login-token-submit" type="submit">Sign in with token</button>
+        </form>
+
+        <p id="login-error" class="error" role="alert"></p>
+      </div>
+    </main>
+
+    <!-- ------------------------------------------------------------ shell -->
+    <div id="app" class="shell" hidden>
+      <!-- The sidebar is the main menu. Its contents are built from the nav
+           registry in app.js so a destination the principal cannot open is
+           never drawn. -->
+      <aside id="sidebar" class="sidebar" aria-label="Main">
+        <div class="sidebar-head">
+          <span class="brand" aria-hidden="true">pl</span>
+          <span class="brand-name">publoader</span>
+        </div>
+        <nav id="nav" class="nav"></nav>
+        <div class="sidebar-foot">
+          <button id="nav-collapse" type="button" class="icon-button" aria-expanded="true"
+                  aria-controls="nav">
+            <span class="nav-collapse-label">Collapse</span>
+          </button>
+        </div>
+      </aside>
+      <!-- Closes the mobile drawer on a tap outside it. Not focusable: Escape
+           and the toggle are the keyboard routes. -->
+      <div id="nav-scrim" class="nav-scrim" hidden></div>
+
+      <header class="topbar">
+        <button id="nav-toggle" type="button" class="icon-button drawer-only"
+                aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar"></button>
+
+        <!-- Live platform state, polled while the tab is visible. The nodes are
+             created here rather than in JS so the row reserves its height
+             before the first response lands. -->
+        <div id="summary" class="summary" aria-live="polite" aria-atomic="false">
+          <span id="pause-pill" class="pill">&nbsp;</span>
+          <span class="summary-item"><span id="sum-workers" class="summary-n">—</span><span class="summary-k">workers</span></span>
+          <span class="summary-item"><span id="sum-jobs" class="summary-n">—</span><span class="summary-k">jobs in flight</span></span>
+          <span class="summary-item"><span id="sum-queue" class="summary-n">—</span><span class="summary-k">uploads queued</span></span>
+          <span class="summary-item wide"><span id="sum-run" class="summary-n">—</span><span class="summary-k">last run</span></span>
+        </div>
+
+        <div class="topbar-end">
+          <button id="profile-toggle" type="button" class="profile" aria-expanded="false"
+                  aria-controls="profile-menu" aria-haspopup="true">
+            <span id="whoami" class="profile-name"></span>
+            <span id="role-badge" class="badge"></span>
+          </button>
+          <div id="profile-menu" class="menu" role="menu" aria-labelledby="profile-toggle" hidden>
+            <p id="profile-detail" class="menu-detail"></p>
+            <button id="profile-account" type="button" class="menu-item" role="menuitem">Your account</button>
+            <button id="logout" type="button" class="menu-item danger" role="menuitem">Sign out</button>
+          </div>
+        </div>
+      </header>
+
+      <main class="content">
+        <div id="page-head" class="page-head"></div>
+        <div id="tabs" class="tabs" role="tablist" aria-label="Sections of this view"></div>
+        <div id="view" role="tabpanel" tabindex="-1"></div>
+      </main>
+    </div>
+
+    <dialog id="modal" aria-labelledby="modal-title">
+      <div class="modal-head">
+        <h2 id="modal-title"></h2>
+        <button id="modal-close" type="button" class="icon-button" aria-label="Close dialog"></button>
+      </div>
+      <div id="modal-body"></div>
+    </dialog>
+
+    <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+  </body>
+</html>

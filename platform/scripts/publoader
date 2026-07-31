@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# ============================================================================
+# publoader — one entry point for every environment.
+#
+#   ./scripts/publoader <env> <command> [args...]
+#
+#   env:      staging | prod | dev
+#   command:  any docker compose command (up, down, logs, ps, pull, …)
+#             plus the shorthands below.
+#
+# Examples
+#   ./scripts/publoader prod up -d              # start production
+#   ./scripts/publoader staging up -d            # start staging beside it
+#   ./scripts/publoader prod logs -f core-api    # follow one service
+#   ./scripts/publoader prod migrate             # apply DB migrations
+#   ./scripts/publoader prod upgrade 2.1.0       # pull + migrate + restart
+#   ./scripts/publoader prod rollback 2.0.0      # back to a known-good tag
+#   ./scripts/publoader staging down -v          # destroy staging entirely
+#   ./scripts/publoader prod admin stats         # run the operator CLI
+#   ./scripts/publoader prod psql                # a shell on the database
+#
+# WHY A SCRIPT AND NOT RAW `docker compose`: three things have to agree for two
+# environments to coexist safely — the env file, the compose project name (which
+# namespaces containers, networks AND the database volume), and, for staging,
+# the mock-MangaDex override. Getting one of the three wrong is how a staging
+# deploy ends up writing to the production database, so they are set together
+# here rather than remembered per command.
+# ============================================================================
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$HERE"
+
+die() { printf 'publoader: %s\n' "$*" >&2; exit 1; }
+
+PROFILE_ARGS=()
+ENVIRONMENT="${1:-}"; shift || true
+COMMAND="${1:-}"; shift || true
+
+[ -n "$ENVIRONMENT" ] || die "usage: ./scripts/publoader <staging|prod|dev> <command> [args...]"
+[ -n "$COMMAND" ] || die "no command given (try: up -d, ps, logs -f, migrate, upgrade <tag>)"
+
+case "$ENVIRONMENT" in
+  prod|production)
+    ENVIRONMENT=prod
+    ENV_FILE="docker/core/.env.production"
+    COMPOSE_FILES=(-f docker/core/docker-compose.yml)
+    ;;
+  staging|stage)
+    ENVIRONMENT=staging
+    ENV_FILE="docker/core/.env.staging"
+    # Staging additionally runs the MangaDex mock, so a staging mistake cannot
+    # reach the real catalogue.
+    COMPOSE_FILES=(-f docker/core/docker-compose.yml -f docker/core/compose.staging.yml)
+    ;;
+  dev|local)
+    # The dev stack is self-contained (its own compose file, throwaway tmpfs
+    # database, two workers, mock MangaDex) and needs no env file.
+    exec docker compose -f docker/dev/docker-compose.yml -p publoader-dev "$COMMAND" "$@"
+    ;;
+  *) die "unknown environment '$ENVIRONMENT' (expected staging, prod, or dev)" ;;
+esac
+
+[ -f "$ENV_FILE" ] || die "$ENV_FILE not found — copy ${ENV_FILE}.example (see docs/deployment.md) and fill it in"
+
+envval() { grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '[:space:]'; }
+
+# Ingress choice lives in the env file, not in whatever flags someone remembers
+# to type: `tunnel` (cloudflared, no open ports), `direct` (Caddy with
+# Let's Encrypt on 80/443), or `none` (internal only — the default).
+case "$(envval PUBLOADER_INGRESS)" in
+  direct) COMPOSE_FILES+=(-f docker/core/compose.ingress-direct.yml) ;;
+  tunnel) PROFILE_ARGS+=(--profile tunnel) ;;
+  ""|none) ;;
+  *) die "PUBLOADER_INGRESS must be one of: direct, tunnel, none" ;;
+esac
+
+# Optional services, likewise declared in config.
+[ "$(envval PUBLOADER_ENABLE_BOT)" = "true" ] && PROFILE_ARGS+=(--profile bot)
+
+# The project name is what keeps the two environments' volumes apart. It comes
+# from the env file so the file and the namespace can never disagree.
+PROJECT="publoader-$(grep -E '^PUBLOADER_ENV=' "$ENV_FILE" | cut -d= -f2- | tr -d '[:space:]')"
+[ "$PROJECT" != "publoader-" ] || die "PUBLOADER_ENV is not set in $ENV_FILE"
+
+compose() { docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" "${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"}" -p "$PROJECT" "$@"; }
+
+# Refuse the classic footgun: a staging env file that points at the real API.
+if [ "$ENVIRONMENT" = staging ] && grep -qE '^MANGADEX_API_URL=https://api\.mangadex\.org' "$ENV_FILE"; then
+  printf 'publoader: WARNING — staging is configured against the REAL MangaDex API.\n' >&2
+  printf '           Uploads from staging will be public. Ctrl-C within 5s to stop.\n' >&2
+  sleep 5
+fi
+
+case "$COMMAND" in
+  migrate)
+    # One-shot; exits 0 when the schema is current.
+    compose up migrate
+    ;;
+  upgrade)
+    TAG="${1:-}"; [ -n "$TAG" ] || die "upgrade needs a tag: ./scripts/publoader $ENVIRONMENT upgrade 2.1.0"
+    printf 'publoader: upgrading %s to %s\n' "$PROJECT" "$TAG"
+    PUBLOADER_CORE_IMAGE="ardax/publoader-core:$TAG" \
+    PUBLOADER_MIGRATE_IMAGE="ardax/publoader-core-migrate:$TAG" \
+      compose pull core-api migrate
+    # Migrations first: the new code may require the new schema, and every
+    # migration in this repo is written to be safe against a populated database.
+    PUBLOADER_CORE_IMAGE="ardax/publoader-core:$TAG" \
+    PUBLOADER_MIGRATE_IMAGE="ardax/publoader-core-migrate:$TAG" \
+      compose up migrate
+    PUBLOADER_CORE_IMAGE="ardax/publoader-core:$TAG" \
+    PUBLOADER_MIGRATE_IMAGE="ardax/publoader-core-migrate:$TAG" \
+      compose up -d
+    printf 'publoader: now running %s. Pin it in %s so a restart keeps it.\n' "$TAG" "$ENV_FILE"
+    ;;
+  rollback)
+    TAG="${1:-}"; [ -n "$TAG" ] || die "rollback needs a tag: ./scripts/publoader $ENVIRONMENT rollback 2.0.0"
+    printf 'publoader: rolling %s back to %s (schema is NOT reverted — see docs/operations.md)\n' "$PROJECT" "$TAG"
+    PUBLOADER_CORE_IMAGE="ardax/publoader-core:$TAG" compose pull core-api
+    PUBLOADER_CORE_IMAGE="ardax/publoader-core:$TAG" compose up -d --no-deps \
+      core-api core-scheduler core-processor core-uploader
+    ;;
+  admin)
+    # The operator CLI, inside the network, already holding DATABASE_URL and
+    # ADMIN_TOKEN — so no credential has to be typed on a shell line.
+    compose run --rm --no-deps -e PUBLOADER_API_URL=http://core-api:8100 \
+      core-api node dist/src/cli/admin.js "$@"
+    ;;
+  psql)
+    compose exec postgres psql -U "$(grep -E '^POSTGRES_USER=' "$ENV_FILE" | cut -d= -f2-)" \
+      -d "$(grep -E '^POSTGRES_DB=' "$ENV_FILE" | cut -d= -f2-)" "$@"
+    ;;
+  backup)
+    OUT="${1:-backup-$PROJECT-$(date +%Y%m%d-%H%M%S).sql.gz}"
+    compose exec -T postgres pg_dump -U "$(grep -E '^POSTGRES_USER=' "$ENV_FILE" | cut -d= -f2-)" \
+      -d "$(grep -E '^POSTGRES_DB=' "$ENV_FILE" | cut -d= -f2-)" | gzip > "$OUT"
+    printf 'publoader: wrote %s\n' "$OUT"
+    ;;
+  *)
+    compose "$COMMAND" "$@"
+    ;;
+esac

@@ -1,0 +1,1063 @@
+#!/usr/bin/env node
+/**
+ * `publoader-admin` — operator CLI for the platform control plane.
+ *
+ * Every subcommand is a thin wrapper over an admin API endpoint (see
+ * docs/ipc-to-api-mapping.md for the legacy IPC equivalences). The CLI holds no
+ * database credentials and never talks to Postgres directly: the core API is
+ * the only writer, so the CLI is safe to run from a laptop.
+ *
+ * Configuration (env):
+ *   PUBLOADER_API_URL     default https://publoader.ardax.dev
+ *   PUBLOADER_ADMIN_TOKEN required for every command
+ *   USER                  sent as X-Actor so the audit trail names a human
+ */
+import { Command } from "commander";
+import { readFileSync, statSync } from "node:fs";
+import { resolve } from "node:path";
+import { BundleBuildError, buildExtensionBundle } from "../core/webhooks/bundleBuilder.js";
+
+const DEFAULT_API_URL = "https://publoader.ardax.dev";
+
+function apiBase(): string {
+  return (process.env["PUBLOADER_API_URL"] ?? DEFAULT_API_URL).replace(/\/+$/, "");
+}
+
+function adminToken(): string {
+  const token = process.env["PUBLOADER_ADMIN_TOKEN"];
+  if (!token) {
+    fail("PUBLOADER_ADMIN_TOKEN is not set");
+  }
+  return token;
+}
+
+function actor(): string {
+  return process.env["USER"] ?? process.env["USERNAME"] ?? "unknown";
+}
+
+function fail(message: string): never {
+  console.error(`error: ${message}`);
+  process.exit(1);
+}
+
+/** `namespace/externalId` when the extension has catalogues, else the bare id. */
+function qualify(namespace: string | undefined, mangaId: string): string {
+  return namespace ? `${namespace}/${mangaId}` : mangaId;
+}
+
+type RequestOptions = {
+  method?: "GET" | "POST" | "PUT" | "DELETE";
+  json?: unknown;
+  raw?: { body: Buffer; contentType: string; headers?: Record<string, string> };
+  query?: Record<string, string | number | undefined>;
+};
+
+/**
+ * One request against the admin API. Non-2xx responses abort the process with
+ * the server's error message — an operator running a script wants a non-zero
+ * exit, not a partially-applied change reported as success.
+ */
+async function api<T = unknown>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const url = new URL(apiBase() + path);
+  for (const [key, value] of Object.entries(opts.query ?? {})) {
+    if (value !== undefined) url.searchParams.set(key, String(value));
+  }
+
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${adminToken()}`,
+    "x-actor": actor(),
+    accept: "application/json",
+  };
+  let body: string | Uint8Array | undefined;
+  if (opts.raw) {
+    headers["content-type"] = opts.raw.contentType;
+    Object.assign(headers, opts.raw.headers ?? {});
+    body = new Uint8Array(opts.raw.body);
+  } else if (opts.json !== undefined) {
+    headers["content-type"] = "application/json";
+    body = JSON.stringify(opts.json);
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(url, { method: opts.method ?? "GET", headers, body });
+  } catch (err) {
+    return fail(`cannot reach ${url.origin}: ${(err as Error).message}`);
+  }
+
+  const text = await res.text();
+  let parsed: unknown;
+  try {
+    parsed = text ? JSON.parse(text) : {};
+  } catch {
+    parsed = { raw: text };
+  }
+
+  if (!res.ok) {
+    const detail =
+      (parsed as { error?: string; message?: string }).error ??
+      (parsed as { message?: string }).message ??
+      text.slice(0, 500);
+    return fail(`${res.status} ${res.statusText} from ${url.pathname}: ${detail}`);
+  }
+  return parsed as T;
+}
+
+// ---------------------------------------------------------------- formatting
+
+type Column<T> = { header: string; get: (row: T) => unknown };
+
+function cell(value: unknown): string {
+  if (value === null || value === undefined) return "-";
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+/** Left-aligned fixed-width table. CLI output is the one place console.log is correct. */
+function table<T>(rows: T[], columns: Column<T>[], emptyNote = "(none)"): void {
+  if (rows.length === 0) {
+    console.log(emptyNote);
+    return;
+  }
+  const cells = rows.map((row) => columns.map((col) => cell(col.get(row))));
+  const widths = columns.map((col, i) =>
+    Math.max(col.header.length, ...cells.map((r) => (r[i] ?? "").length)),
+  );
+  const line = (values: string[]) =>
+    values.map((v, i) => v.padEnd(widths[i] ?? 0)).join("  ").trimEnd();
+
+  console.log(line(columns.map((c) => c.header)));
+  console.log(line(widths.map((w) => "-".repeat(w))));
+  for (const row of cells) console.log(line(row));
+}
+
+function kv(obj: Record<string, unknown>): void {
+  const width = Math.max(0, ...Object.keys(obj).map((k) => k.length));
+  for (const [key, value] of Object.entries(obj)) {
+    console.log(`${key.padEnd(width)}  ${cell(value)}`);
+  }
+}
+
+function ok(message: string): void {
+  console.log(message);
+}
+
+function ago(iso: unknown): string {
+  if (typeof iso !== "string") return "-";
+  const seconds = Math.round((Date.now() - Date.parse(iso)) / 1000);
+  if (!Number.isFinite(seconds)) return "-";
+  if (seconds < 90) return `${seconds}s ago`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m ago`;
+  if (seconds < 172800) return `${Math.round(seconds / 3600)}h ago`;
+  return `${Math.round(seconds / 86400)}d ago`;
+}
+
+// ------------------------------------------------------------------ commands
+
+const program = new Command();
+program
+  .name("publoader-admin")
+  .description("Operator CLI for the Publoader distributed platform")
+  .version("1.0.0")
+  .showHelpAfterError();
+
+// ---- enroll tokens ----
+const enroll = program.command("enroll-token").description("worker enrollment tokens");
+
+enroll
+  .command("create")
+  .description("mint a single-use enrollment token for a new worker host")
+  .option("--trust", "issue a TRUSTED-tier token (default COMMUNITY)", false)
+  .option("--note <text>", "free-text note recorded with the token")
+  .option("--ttl-hours <n>", "validity window in hours", "24")
+  .action(async (opts: { trust: boolean; note?: string; ttlHours: string }) => {
+    const ttlHours = Number(opts.ttlHours);
+    if (!Number.isInteger(ttlHours) || ttlHours < 1 || ttlHours > 720) {
+      fail("--ttl-hours must be an integer between 1 and 720");
+    }
+    const res = await api<{ token: string; expiresAt: string }>(
+      "/api/v1/admin/enroll-tokens",
+      {
+        method: "POST",
+        json: {
+          trust: opts.trust ? "TRUSTED" : "COMMUNITY",
+          ...(opts.note ? { note: opts.note } : {}),
+          ttlHours,
+        },
+      },
+    );
+    kv({
+      token: res.token,
+      trust: opts.trust ? "TRUSTED" : "COMMUNITY",
+      expiresAt: res.expiresAt,
+    });
+    console.log("");
+    console.log("This token is shown once. Hand it to the worker host as ENROLL_TOKEN.");
+  });
+
+// ---- workers ----
+const workers = program.command("workers").description("worker fleet");
+
+workers
+  .command("list")
+  .description("list enrolled workers")
+  .action(async () => {
+    const res = await api<{ workers: Record<string, unknown>[] }>("/api/v1/admin/workers");
+    table(res.workers, [
+      { header: "ID", get: (w) => w["id"] },
+      { header: "NAME", get: (w) => w["name"] },
+      { header: "STATUS", get: (w) => w["status"] },
+      { header: "TRUST", get: (w) => w["trust"] },
+      { header: "AGENT", get: (w) => w["agentVersion"] },
+      { header: "HEARTBEAT", get: (w) => ago(w["lastHeartbeatAt"]) },
+    ], "no workers enrolled");
+  });
+
+for (const action of ["drain", "activate", "revoke"] as const) {
+  const help = {
+    drain: "stop leasing new jobs to a worker (in-flight job finishes)",
+    activate: "return a drained worker to service",
+    revoke: "permanently invalidate a worker's credential",
+  }[action];
+  workers
+    .command(`${action} <id>`)
+    .description(help)
+    .action(async (id: string) => {
+      const res = await api<{ status: string }>(`/api/v1/admin/workers/${id}/${action}`, {
+        method: "POST",
+      });
+      ok(`worker ${id} -> ${res.status}`);
+    });
+}
+
+// ---- runs ----
+const runs = program.command("runs").description("scrape runs");
+
+runs
+  .command("list")
+  .description("recent runs, newest first")
+  .option("--limit <n>", "how many runs", "25")
+  .option("--extension <name>", "filter to one extension")
+  .action(async (opts: { limit: string; extension?: string }) => {
+    const res = await api<{ runs: Record<string, unknown>[] }>("/api/v1/admin/runs", {
+      query: { limit: opts.limit, extension: opts.extension },
+    });
+    table(res.runs, [
+      { header: "ID", get: (r) => r["id"] },
+      { header: "EXTENSION", get: (r) => r["extension"] },
+      { header: "KIND", get: (r) => r["kind"] },
+      { header: "STATE", get: (r) => r["state"] },
+      { header: "SEGMENTS", get: (r) => r["segmentsTotal"] },
+      { header: "TRIGGERED BY", get: (r) => r["triggeredBy"] },
+      { header: "CREATED", get: (r) => ago(r["createdAt"]) },
+    ], "no runs");
+  });
+
+runs
+  .command("show <id>")
+  .description("one run and all of its jobs")
+  .action(async (id: string) => {
+    const res = await api<{ run: Record<string, unknown> & { jobs: Record<string, unknown>[] } }>(
+      `/api/v1/admin/runs/${id}`,
+    );
+    const { jobs, ...run } = res.run;
+    kv(run);
+    console.log("");
+    console.log(`jobs (${jobs.length}):`);
+    table(jobs, [
+      { header: "ID", get: (j) => j["id"] },
+      { header: "SEG", get: (j) => `${Number(j["segmentIndex"]) + 1}/${j["segmentTotal"]}` },
+      { header: "STATE", get: (j) => j["state"] },
+      { header: "ATTEMPT", get: (j) => `${j["attempt"]}/${j["maxAttempts"]}` },
+      { header: "WORKER", get: (j) => j["leaseWorkerId"] },
+      { header: "LEASE EXPIRES", get: (j) => j["leaseExpiresAt"] },
+      { header: "ERROR", get: (j) => String(j["lastError"] ?? "").slice(0, 60) || "-" },
+    ]);
+  });
+
+runs
+  .command("trigger <extension>")
+  .description("create a run now (bypasses the schedule)")
+  .option("--kind <kind>", "UPDATE | CLEAN | FORCE", "FORCE")
+  .option("--idempotency-key <key>", "reuse a key to make the trigger retry-safe")
+  .action(async (extension: string, opts: { kind: string; idempotencyKey?: string }) => {
+    const kind = opts.kind.toUpperCase();
+    if (!["UPDATE", "CLEAN", "FORCE"].includes(kind)) {
+      fail("--kind must be one of UPDATE, CLEAN, FORCE");
+    }
+    const res = await api<{ runId: string; created: boolean; jobs?: number }>(
+      "/api/v1/admin/runs",
+      {
+        method: "POST",
+        json: {
+          extension,
+          kind,
+          ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
+        },
+      },
+    );
+    kv({
+      runId: res.runId,
+      created: res.created,
+      jobs: res.jobs ?? "-",
+      note: res.created ? "queued" : "idempotency key already existed; no new run",
+    });
+  });
+
+// ---- jobs ----
+const jobs = program.command("jobs").description("individual scrape jobs");
+
+jobs
+  .command("cancel <id>")
+  .description("request cancellation of a pending or running job")
+  .action(async (id: string) => {
+    const res = await api<{ result: string }>(`/api/v1/admin/jobs/${id}/cancel`, {
+      method: "POST",
+    });
+    ok(`job ${id} cancel: ${res.result}`);
+  });
+
+jobs
+  .command("retry <id>")
+  .description("replay a dead-lettered job")
+  .action(async (id: string) => {
+    await api(`/api/v1/admin/jobs/${id}/retry`, { method: "POST" });
+    ok(`job ${id} requeued`);
+  });
+
+// ---- dead letter / quarantine ----
+program
+  .command("dead-letter")
+  .description("jobs that exhausted retries or hit a permanent error")
+  .action(async () => {
+    const res = await api<{ jobs: Record<string, unknown>[] }>("/api/v1/admin/dead-letter");
+    table(res.jobs, [
+      { header: "ID", get: (j) => j["id"] },
+      { header: "EXTENSION", get: (j) => j["extension"] },
+      { header: "KIND", get: (j) => j["kind"] },
+      { header: "ATTEMPTS", get: (j) => `${j["attempt"]}/${j["maxAttempts"]}` },
+      { header: "CLASS", get: (j) => j["errorClass"] },
+      { header: "WHEN", get: (j) => ago(j["updatedAt"]) },
+      { header: "ERROR", get: (j) => String(j["lastError"] ?? "").slice(0, 80) || "-" },
+    ], "dead-letter queue is empty");
+  });
+
+program
+  .command("quarantine")
+  .description("result envelopes rejected by schema or policy validation")
+  .action(async () => {
+    const res = await api<{ quarantined: Record<string, unknown>[] }>(
+      "/api/v1/admin/quarantine",
+    );
+    table(res.quarantined, [
+      { header: "ID", get: (q) => q["id"] },
+      { header: "JOB", get: (q) => q["jobId"] },
+      { header: "WORKER", get: (q) => q["workerId"] },
+      { header: "WHEN", get: (q) => ago(q["createdAt"]) },
+      { header: "REASON", get: (q) => String(q["rejectReason"] ?? "").slice(0, 90) || "-" },
+    ], "nothing quarantined");
+  });
+
+// ---- pause / resume ----
+program
+  .command("pause")
+  .description("suspend scheduling and upload task processing")
+  .option("--minutes <n>", "auto-resume after N minutes (omit for indefinite)")
+  .action(async (opts: { minutes?: string }) => {
+    const json: Record<string, unknown> = {};
+    if (opts.minutes !== undefined) {
+      const minutes = Number(opts.minutes);
+      if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+        fail("--minutes must be an integer between 1 and 1440");
+      }
+      json["minutes"] = minutes;
+    }
+    const res = await api<{ indefinite: boolean }>("/api/v1/admin/pause", {
+      method: "POST",
+      json,
+    });
+    ok(res.indefinite ? "paused indefinitely" : `paused for ${opts.minutes} minutes`);
+  });
+
+program
+  .command("resume")
+  .description("lift a pause")
+  .action(async () => {
+    await api("/api/v1/admin/resume", { method: "POST" });
+    ok("resumed");
+  });
+
+// ---- extensions ----
+const extensions = program.command("extensions").description("published extensions");
+
+extensions
+  .command("list")
+  .description("latest published bundle per extension")
+  .action(async () => {
+    const res = await api<{ extensions: Record<string, unknown>[] }>(
+      "/api/v1/admin/extensions",
+    );
+    table(res.extensions, [
+      { header: "NAME", get: (e) => e["name"] },
+      { header: "VERSION", get: (e) => e["version"] },
+      { header: "SHA256", get: (e) => String(e["sha256"] ?? "").slice(0, 12) },
+      { header: "DISABLED", get: (e) => (e["disabled"] ? "yes" : "no") },
+      { header: "PUBLISHED", get: (e) => ago(e["publishedAt"]) },
+    ], "no bundles published");
+  });
+
+for (const action of ["enable", "disable"] as const) {
+  extensions
+    .command(`${action} <name>`)
+    .description(`${action} scheduling for an extension`)
+    .action(async (name: string) => {
+      await api(`/api/v1/admin/extensions/${name}/${action}`, { method: "POST" });
+      ok(`extension ${name} ${action}d`);
+    });
+}
+
+// ---- tracked manga (the database replacement for manga_id_map.json) ----
+const tracked = program
+  .command("tracked")
+  .description("external manga id -> MangaDex id mapping");
+
+/**
+ * `--namespace` names one of an extension's catalogues (viz has `shonenjump`
+ * and `vizmanga`, where the same numeric id under each is a different series).
+ * Omitting it means the single flat id space, which is what every extension
+ * except viz has — so no existing invocation changes.
+ */
+tracked
+  .command("list <extension>")
+  .description("every tracked manga for an extension")
+  .option("--namespace <namespace>", "only this catalogue (default: all of them)")
+  .action(async (extension: string, opts: { namespace?: string }) => {
+    const res = await api<{ tracked: Record<string, unknown>[]; namespaces: string[] }>(
+      `/api/v1/admin/extensions/${extension}/tracked`,
+      { query: { namespace: opts.namespace } },
+    );
+    const namespaced = res.tracked.some((t) => t["namespace"]);
+    table(res.tracked, [
+      // The column is omitted entirely for a flat extension rather than shown
+      // full of empty strings.
+      ...(namespaced ? [{ header: "NAMESPACE", get: (t: Record<string, unknown>) => t["namespace"] || "-" }] : []),
+      { header: "MANGA ID", get: (t) => t["mangaId"] },
+      { header: "MANGADEX ID", get: (t) => t["mdMangaId"] },
+      { header: "SOURCE", get: (t) => t["source"] },
+      { header: "ADDED", get: (t) => ago(t["createdAt"]) },
+    ], `nothing tracked for ${extension}`);
+    if (res.tracked.length > 0) console.log(`\n${res.tracked.length} tracked`);
+    const others = res.namespaces.filter((n) => n !== "");
+    if (others.length > 0) console.log(`namespaces: ${others.join(", ")}`);
+  });
+
+tracked
+  .command("set <extension> <mangaId> <mdMangaId>")
+  .description("add or repoint a mapping")
+  .option("--namespace <namespace>", "the extension catalogue this id belongs to")
+  .action(async (extension: string, mangaId: string, mdMangaId: string, opts: { namespace?: string }) => {
+    await api(`/api/v1/admin/extensions/${extension}/tracked`, {
+      method: "PUT",
+      json: { mangaId, mdMangaId, ...(opts.namespace ? { namespace: opts.namespace } : {}) },
+    });
+    ok(`${extension}: ${qualify(opts.namespace, mangaId)} -> ${mdMangaId}`);
+  });
+
+tracked
+  .command("remove <extension> <mangaId>")
+  .description("stop tracking a manga (does not touch MangaDex)")
+  .option("--namespace <namespace>", "the extension catalogue this id belongs to")
+  .action(async (extension: string, mangaId: string, opts: { namespace?: string }) => {
+    const res = await api<{ removed: boolean }>(
+      `/api/v1/admin/extensions/${extension}/tracked/${encodeURIComponent(mangaId)}`,
+      { method: "DELETE", query: { namespace: opts.namespace } },
+    );
+    const subject = `${extension}:${qualify(opts.namespace, mangaId)}`;
+    ok(res.removed ? `removed ${subject}` : `no mapping for ${subject}`);
+  });
+
+tracked
+  .command("import <extension> [file]")
+  .description("bulk-add mappings from pasted `[namespace,]externalId,titleId` lines, or stdin")
+  .option("--namespace <namespace>", "default catalogue for lines that do not name one")
+  .option("--remove", "treat each line's external id as a removal instead")
+  .option("--dry-run", "report what would happen and write nothing")
+  .action(async (
+    extension: string,
+    file: string | undefined,
+    opts: { namespace?: string; remove?: boolean; dryRun?: boolean },
+  ) => {
+    const text = file && file !== "-" ? readFileSync(resolve(file), "utf8") : readFileSync(0, "utf8");
+    const body = opts.remove
+      ? {
+          remove: text
+            .split(/\r?\n/)
+            .map((line) => line.split("#")[0]!.trim())
+            .filter(Boolean)
+            .map((mangaId) => ({ mangaId, ...(opts.namespace ? { namespace: opts.namespace } : {}) })),
+        }
+      : { text };
+    const res = await api<{
+      added: number;
+      updated: number;
+      unchanged: number;
+      removed: number;
+      failed: number;
+      parseErrors: { line: number; reason: string }[];
+      results: { mangaId: string; namespace?: string; outcome: string; detail?: string }[];
+    }>(`/api/v1/admin/extensions/${extension}/tracked/batch`, {
+      method: "POST",
+      json: {
+        ...body,
+        ...(opts.namespace ? { namespace: opts.namespace } : {}),
+        dryRun: opts.dryRun === true,
+      },
+    });
+    for (const err of res.parseErrors) console.error(`  line ${err.line}: ${err.reason}`);
+    // Only the rows that did not simply work: a 2000-line paste's useful output
+    // is the handful that needs a decision.
+    for (const row of res.results) {
+      if (row.outcome === "added" || row.outcome === "unchanged" || row.outcome === "removed") continue;
+      console.error(`  ${qualify(row.namespace, row.mangaId)}: ${row.outcome}${row.detail ? ` (${row.detail})` : ""}`);
+    }
+    ok(
+      `${opts.dryRun ? "would apply" : "applied"}: ${res.added} added, ${res.updated} updated, ` +
+        `${res.unchanged} unchanged, ${res.removed} removed, ${res.failed} failed`,
+    );
+  });
+
+// ---- extension config (the database replacement for override_options.json) ----
+const extConfig = program
+  .command("ext-config")
+  .description("per-extension override options");
+
+extConfig
+  .command("get <extension>")
+  .description("print the current override options as JSON")
+  .option("--split", "show which keys are modelled tables and which are passed through")
+  .action(async (extension: string, opts: { split?: boolean }) => {
+    const res = await api<{
+      overrideOptions: unknown;
+      passthrough: Record<string, unknown>;
+      same: Record<string, string[]>;
+      multi_chapters: Record<string, string[]>;
+      custom_language: Record<string, string>;
+    }>(`/api/v1/admin/extensions/${extension}/config`);
+    if (!opts.split) {
+      // The reassembled legacy document, so `get > f && set f` round-trips.
+      console.log(JSON.stringify(res.overrideOptions, null, 2));
+      return;
+    }
+    console.log(
+      JSON.stringify(
+        {
+          tables: {
+            same: res.same,
+            multi_chapters: res.multi_chapters,
+            custom_language: res.custom_language,
+          },
+          passthrough: res.passthrough,
+        },
+        null,
+        2,
+      ),
+    );
+  });
+
+extConfig
+  .command("set <extension> [file]")
+  .description("replace the override options from a JSON file, or from stdin when omitted")
+  .action(async (extension: string, file?: string) => {
+    // Reading a whole document from argv would be unusable; a file or a pipe is
+    // how an operator actually has this content to hand.
+    const raw =
+      file && file !== "-"
+        ? readFileSync(resolve(file), "utf8")
+        : readFileSync(0, "utf8");
+    let overrideOptions: unknown;
+    try {
+      overrideOptions = JSON.parse(raw);
+    } catch (err) {
+      return fail(`input is not valid JSON: ${(err as Error).message}`);
+    }
+    if (typeof overrideOptions !== "object" || overrideOptions === null || Array.isArray(overrideOptions)) {
+      fail("override options must be a JSON object");
+    }
+    const res = await api<{
+      aliases: number;
+      multiChapters: number;
+      languages: number;
+      passthroughKeys: string[];
+      rejected: { option: string; key: string; value?: string; reason: string }[];
+    }>(`/api/v1/admin/extensions/${extension}/config`, {
+      method: "PUT",
+      json: { overrideOptions },
+    });
+    // A rejected row is not a failed command — the rest of the document landed —
+    // but it must be visible, because a dropped `custom_language` row silently
+    // stops protecting a language from the chapter-removal pass.
+    for (const row of res.rejected) {
+      console.error(
+        `  rejected ${row.option}.${row.key}${row.value ? ` = ${row.value}` : ""}: ${row.reason}`,
+      );
+    }
+    ok(
+      `override options replaced for ${extension}: ${res.aliases} chapter aliases, ` +
+        `${res.multiChapters} multi-chapter numbers, ${res.languages} language overrides, ` +
+        `${res.passthroughKeys.length} extension-private keys (${res.passthroughKeys.join(", ") || "none"})` +
+        (res.rejected.length > 0 ? `, ${res.rejected.length} rejected` : ""),
+    );
+  });
+
+// ---- untracked series pipeline ----
+const untracked = program
+  .command("untracked")
+  .description("series an extension reported that have no MangaDex title yet");
+
+untracked
+  .command("list")
+  .description("untracked candidates, newest first")
+  .option("--state <state>", "NEW | CREATING | CREATED | TRACKED | FAILED | SKIPPED")
+  .option("--limit <n>", "how many rows", "100")
+  .action(async (opts: { state?: string; limit: string }) => {
+    const state = opts.state?.toUpperCase();
+    const valid = ["NEW", "CREATING", "CREATED", "TRACKED", "FAILED", "SKIPPED"];
+    if (state && !valid.includes(state)) fail(`--state must be one of ${valid.join(", ")}`);
+    const res = await api<{ untracked: Record<string, unknown>[] }>("/api/v1/admin/untracked", {
+      query: { state, limit: opts.limit },
+    });
+    table(res.untracked, [
+      { header: "ID", get: (u) => u["id"] },
+      { header: "EXTENSION", get: (u) => u["extension"] },
+      { header: "MANGA", get: (u) => String(u["mangaName"] ?? "").slice(0, 40) },
+      { header: "LANG", get: (u) => u["mangaLanguage"] },
+      { header: "STATE", get: (u) => u["state"] },
+      { header: "MANGADEX ID", get: (u) => u["mdMangaId"] },
+      { header: "TRIES", get: (u) => u["attempts"] },
+      { header: "ERROR", get: (u) => String(u["lastError"] ?? "").slice(0, 50) || "-" },
+    ], "no untracked series");
+  });
+
+untracked
+  .command("approve <id>")
+  .description("create the MangaDex title now and start tracking it")
+  .action(async (id: string) => {
+    const res = await api<{ mdMangaId: string }>(`/api/v1/admin/untracked/${id}/approve`, {
+      method: "POST",
+    });
+    kv({ mdMangaId: res.mdMangaId, url: `https://mangadex.org/title/${res.mdMangaId}` });
+  });
+
+untracked
+  .command("skip <id>")
+  .description("never create a title for this series")
+  .action(async (id: string) => {
+    await api(`/api/v1/admin/untracked/${id}/skip`, { method: "POST" });
+    ok(`untracked ${id} skipped`);
+  });
+
+// ---- schedules ----
+const schedules = program.command("schedules").description("run schedules");
+
+schedules
+  .command("list")
+  .description("manifest defaults and database overrides")
+  .action(async () => {
+    const res = await api<{
+      defaults: Record<string, unknown>;
+      overrides: Record<string, unknown>;
+    }>("/api/v1/admin/schedules");
+    const names = [...new Set([...Object.keys(res.defaults), ...Object.keys(res.overrides)])].sort();
+    table(
+      names,
+      [
+        { header: "EXTENSION", get: (n) => n },
+        { header: "MANIFEST DEFAULT", get: (n) => res.defaults[n] ?? "-" },
+        { header: "OVERRIDE", get: (n) => res.overrides[n] ?? "-" },
+        {
+          header: "EFFECTIVE",
+          get: (n) => res.overrides[n] ?? res.defaults[n] ?? "-",
+        },
+      ],
+      "no schedules configured",
+    );
+  });
+
+schedules
+  .command("set <extension> <hour> <minute>")
+  .description("override an extension's schedule (UTC)")
+  .option("--day <n>", "restrict to a weekday, 0=Monday .. 6=Sunday")
+  .action(async (extension: string, hourRaw: string, minuteRaw: string, opts: { day?: string }) => {
+    const hour = Number(hourRaw);
+    const minute = Number(minuteRaw);
+    if (!Number.isInteger(hour) || hour < 0 || hour > 23) fail("hour must be 0-23");
+    if (!Number.isInteger(minute) || minute < 0 || minute > 59) fail("minute must be 0-59");
+    const json: Record<string, unknown> = { hour, minute };
+    if (opts.day !== undefined) {
+      const day = Number(opts.day);
+      if (!Number.isInteger(day) || day < 0 || day > 6) fail("--day must be 0-6");
+      json["day"] = day;
+    }
+    await api(`/api/v1/admin/schedules/${extension}`, { method: "PUT", json });
+    ok(`schedule set for ${extension}: ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")} UTC${opts.day !== undefined ? ` on day ${opts.day}` : ""}`);
+  });
+
+schedules
+  .command("remove <extension>")
+  .description("drop the override and fall back to the manifest default")
+  .action(async (extension: string) => {
+    const res = await api<{ removed: boolean }>(`/api/v1/admin/schedules/${extension}`, {
+      method: "DELETE",
+    });
+    ok(res.removed ? `override removed for ${extension}` : `no override existed for ${extension}`);
+  });
+
+// ---- removal mode ----
+const removalMode = program
+  .command("removal-mode")
+  .description("what happens when a publisher drops a chapter");
+
+removalMode
+  .command("get")
+  .description("show the current mode")
+  .action(async () => {
+    const res = await api<{ mode: string; validModes: string[] }>(
+      "/api/v1/admin/removal-mode",
+    );
+    kv({ mode: res.mode, validModes: res.validModes.join(", ") });
+  });
+
+removalMode
+  .command("set <mode>")
+  .description("set the mode (unavailable | delete)")
+  .action(async (mode: string) => {
+    const res = await api<{ mode: string }>("/api/v1/admin/removal-mode", {
+      method: "POST",
+      json: { mode: mode.toLowerCase() },
+    });
+    ok(`removal mode is now ${res.mode}`);
+  });
+
+// ---- bundles ----
+const bundle = program.command("bundle").description("extension bundle publishing");
+
+bundle
+  .command("publish <dir>")
+  .description("build (if needed), zip, and publish an extension as a content-addressed bundle")
+  .option("--source-commit <sha>", "record the source repo commit this was built from")
+  .option(
+    "--allow-legacy-runtime",
+    "republish a pre-v2 python bundle (audit-logged; new extensions must use API v2)",
+    false,
+  )
+  .action(async (dir: string, opts: { sourceCommit?: string; allowLegacyRuntime: boolean }) => {
+    const root = resolve(dir);
+    try {
+      if (!statSync(root).isDirectory()) fail(`${root} is not a directory`);
+    } catch {
+      fail(`${root} does not exist`);
+    }
+    // The same build+zip the GitHub push webhook runs (core/webhooks/
+    // bundleBuilder.ts), so both publish paths produce identical bytes — and so
+    // an operator gets an immediate, obvious error rather than a 422 after
+    // uploading tens of megabytes.
+    let built;
+    try {
+      built = await buildExtensionBundle(root);
+    } catch (err) {
+      if (err instanceof BundleBuildError) return fail(err.message);
+      throw err;
+    }
+    const { zipData, manifest } = built;
+    if (built.builtFrom) console.log(`built ${built.builtFrom} -> index.mjs (esbuild)`);
+
+    console.log(
+      `publishing ${manifest.name}@${manifest.version} (${(zipData.length / 1024).toFixed(1)} KiB)`,
+    );
+    const headers: Record<string, string> = {};
+    if (opts.sourceCommit) headers["x-source-commit"] = opts.sourceCommit;
+    if (opts.allowLegacyRuntime) headers["x-allow-legacy-runtime"] = "true";
+    const res = await api<{
+      extension: string;
+      version: string;
+      sha256: string;
+      created: boolean;
+      warnings?: string[];
+    }>("/api/v1/admin/bundles", {
+      method: "POST",
+      raw: { body: zipData, contentType: "application/zip", headers },
+    });
+    kv({
+      extension: res.extension,
+      version: res.version,
+      sha256: res.sha256,
+      status: res.created ? "published" : "already published (identical content)",
+    });
+    // Not grounds for refusing the bundle, but the operator is here now.
+    for (const warning of res.warnings ?? []) console.error(`  warning: ${warning}`);
+  });
+
+// ---- client tokens ----
+const tokens = program
+  .command("tokens")
+  .description("scoped per-client API credentials (pa_…)");
+
+tokens
+  .command("scopes")
+  .description("the scope taxonomy and the recommended set per client")
+  .action(async () => {
+    const res = await api<{ scopes: string[]; presets: Record<string, string[]> }>(
+      "/api/v1/admin/tokens/scopes",
+    );
+    console.log("scopes:");
+    for (const scope of res.scopes) console.log(`  ${scope}`);
+    console.log("");
+    console.log("presets:");
+    kv(Object.fromEntries(Object.entries(res.presets).map(([k, v]) => [k, v.join(",")])));
+  });
+
+tokens
+  .command("list")
+  .description("issued tokens (metadata only — secrets are unrecoverable)")
+  .action(async () => {
+    const res = await api<{ tokens: Record<string, unknown>[] }>("/api/v1/admin/tokens");
+    table(res.tokens, [
+      { header: "ID", get: (t) => t["id"] },
+      { header: "NAME", get: (t) => t["name"] },
+      { header: "SCOPES", get: (t) => (t["scopes"] as string[]).join(",") },
+      { header: "CREATED BY", get: (t) => t["createdBy"] },
+      { header: "LAST USED", get: (t) => (t["lastUsedAt"] ? ago(t["lastUsedAt"]) : "never") },
+      { header: "EXPIRES", get: (t) => t["expiresAt"] ?? "never" },
+      { header: "REVOKED", get: (t) => (t["revoked"] ? "yes" : "no") },
+    ], "no client tokens issued");
+  });
+
+tokens
+  .command("create")
+  .description("mint a client token with exactly the scopes it needs")
+  .requiredOption("--name <name>", "which client this is for, e.g. discord-bot")
+  .requiredOption("--scopes <list>", "comma-separated scopes, or a preset name from `tokens scopes`")
+  .option("--ttl-days <n>", "expire after N days (omit for no expiry)")
+  .action(async (opts: { name: string; scopes: string; ttlDays?: string }) => {
+    // A preset NAME is accepted as well as a scope list, because that is what
+    // the help promises and because the presets are the least-privilege path we
+    // want people on. Resolve it here rather than posting the name, which the
+    // server would reject as an unknown scope.
+    const requested = opts.scopes
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (requested.length === 0) fail("--scopes must list at least one scope");
+
+    const { presets } = (await api("/api/v1/admin/tokens/scopes")) as {
+      presets: Record<string, string[]>;
+    };
+    const scopes = [
+      ...new Set(requested.flatMap((entry) => presets[entry] ?? [entry])),
+    ];
+    const expanded = requested.filter((entry) => presets[entry]);
+    if (expanded.length > 0) {
+      console.log(`expanded preset(s) ${expanded.join(", ")} -> ${scopes.join(", ")}`);
+    }
+    const json: Record<string, unknown> = { name: opts.name, scopes };
+    if (opts.ttlDays !== undefined) {
+      const days = Number(opts.ttlDays);
+      if (!Number.isInteger(days) || days < 1 || days > 3650) {
+        fail("--ttl-days must be an integer between 1 and 3650");
+      }
+      json["ttlDays"] = days;
+    }
+    const res = await api<{ id: string; name: string; scopes: string[]; expiresAt: string | null; token: string }>(
+      "/api/v1/admin/tokens",
+      { method: "POST", json },
+    );
+    kv({
+      id: res.id,
+      name: res.name,
+      scopes: res.scopes.join(","),
+      expiresAt: res.expiresAt ?? "never",
+      token: res.token,
+    });
+    console.log("");
+    console.log("This token is shown once and cannot be recovered. To rotate: create the");
+    console.log("replacement, update the client, then `tokens revoke` the old id.");
+  });
+
+tokens
+  .command("revoke <id>")
+  .description("invalidate a client token immediately")
+  .action(async (id: string) => {
+    await api(`/api/v1/admin/tokens/${id}/revoke`, { method: "POST" });
+    ok(`token ${id} revoked`);
+  });
+
+// ---- upload-task queues ----
+const queues = program
+  .command("queues")
+  .description("MangaDex upload task queues");
+
+queues
+  .command("list")
+  .description("queued upload tasks and the depth summary")
+  .option("--kind <kind>", "UPLOAD | EDIT | DELETE | UNAVAILABLE")
+  .option("--state <state>", "PENDING | LEASED | DONE | FAILED | DEAD_LETTER")
+  .option("--limit <n>", "how many rows", "100")
+  .action(async (opts: { kind?: string; state?: string; limit: string }) => {
+    const kind = opts.kind?.toUpperCase();
+    const taskState = opts.state?.toUpperCase();
+    const kinds = ["UPLOAD", "EDIT", "DELETE", "UNAVAILABLE"];
+    const states = ["PENDING", "LEASED", "DONE", "FAILED", "DEAD_LETTER"];
+    if (kind && !kinds.includes(kind)) fail(`--kind must be one of ${kinds.join(", ")}`);
+    if (taskState && !states.includes(taskState)) fail(`--state must be one of ${states.join(", ")}`);
+    const res = await api<{
+      tasks: Record<string, unknown>[];
+      counts: { kind: string; state: string; count: number }[];
+    }>("/api/v1/admin/upload-tasks", { query: { kind, state: taskState, limit: opts.limit } });
+
+    console.log("depth by kind and state:");
+    table(res.counts, [
+      { header: "KIND", get: (c) => c.kind },
+      { header: "STATE", get: (c) => c.state },
+      { header: "COUNT", get: (c) => c.count },
+    ], "no upload tasks have ever been queued");
+    console.log("");
+    table(res.tasks, [
+      { header: "ID", get: (t) => t["id"] },
+      { header: "KIND", get: (t) => t["kind"] },
+      { header: "STATE", get: (t) => t["state"] },
+      { header: "DEDUPE KEY", get: (t) => t["dedupeKey"] },
+      { header: "ATTEMPTS", get: (t) => `${t["attempt"]}/${t["maxAttempts"]}` },
+      { header: "NOT BEFORE", get: (t) => t["notBefore"] },
+      { header: "ERROR", get: (t) => String(t["lastError"] ?? "").slice(0, 60) || "-" },
+    ], "no upload tasks match that filter");
+  });
+
+queues
+  .command("retry <id>")
+  .description("requeue a failed or dead-lettered upload task with a fresh attempt budget")
+  .action(async (id: string) => {
+    await api(`/api/v1/admin/upload-tasks/${id}/retry`, { method: "POST" });
+    ok(`upload task ${id} requeued`);
+  });
+
+queues
+  .command("cancel <id>")
+  .description("drop an upload task without sending it to MangaDex")
+  .action(async (id: string) => {
+    await api(`/api/v1/admin/upload-tasks/${id}/cancel`, { method: "POST" });
+    ok(`upload task ${id} cancelled`);
+  });
+
+queues
+  .command("requeue-stale")
+  .description("reclaim upload tasks whose lease expired (crashed uploader)")
+  .action(async () => {
+    const res = await api<{ requeued: number }>("/api/v1/admin/upload-tasks/requeue-stale", {
+      method: "POST",
+    });
+    ok(`${res.requeued} stale lease(s) requeued`);
+  });
+
+// ---- merged error feed ----
+program
+  .command("errors")
+  .description("dead-lettered jobs, failed upload tasks, and quarantined submissions, newest first")
+  .option("--limit <n>", "how many rows", "50")
+  .action(async (opts: { limit: string }) => {
+    const res = await api<{
+      errors: { at: string; kind: string; subject: string; message: string; id: string }[];
+    }>("/api/v1/admin/errors", { query: { limit: opts.limit } });
+    table(res.errors, [
+      { header: "WHEN", get: (e) => e.at },
+      { header: "KIND", get: (e) => e.kind },
+      { header: "ID", get: (e) => e.id },
+      { header: "SUBJECT", get: (e) => e.subject.slice(0, 50) },
+      { header: "MESSAGE", get: (e) => e.message.slice(0, 80) || "-" },
+    ], "nothing has failed");
+    console.log("");
+    console.log("Container logs are not aggregated here — use `docker compose logs` on the host.");
+  });
+
+// ---- MangaDex session ----
+const mangadex = program
+  .command("mangadex")
+  .description("the platform's saved MangaDex session");
+
+mangadex
+  .command("auth")
+  .description("whether the saved session is still usable (never prints tokens)")
+  .action(async () => {
+    const res = await api<{
+      hasAccess: boolean;
+      hasRefresh: boolean;
+      expiresAt: string | null;
+      expired: boolean;
+      expiresInSeconds: number | null;
+    }>("/api/v1/admin/mangadex/auth");
+    kv({
+      accessToken: res.hasAccess ? "saved" : "absent",
+      refreshToken: res.hasRefresh ? "saved" : "absent",
+      expiresAt: res.expiresAt ?? "unknown",
+      expired: res.expired,
+      expiresIn:
+        res.expiresInSeconds === null ? "unknown" : `${Math.round(res.expiresInSeconds / 60)}m`,
+    });
+  });
+
+mangadex
+  .command("clear-auth")
+  .description("forget the saved session so the next upload re-authenticates")
+  .action(async () => {
+    await api("/api/v1/admin/mangadex/auth/clear", { method: "POST" });
+    ok("saved MangaDex session cleared; the next upload authenticates from configured credentials");
+  });
+
+// ---- observability ----
+program
+  .command("stats")
+  .description("queue depths, worker counts, pause state")
+  .action(async () => {
+    const res = await api<{
+      jobs: Record<string, number>;
+      uploadTasks: { kind: string; state: string; count: number }[];
+      workers: Record<string, number>;
+      quarantined: number;
+      paused: boolean;
+    }>("/api/v1/admin/stats");
+    console.log("jobs by state:");
+    kv(res.jobs);
+    console.log("");
+    console.log("upload tasks:");
+    table(res.uploadTasks, [
+      { header: "KIND", get: (t) => t.kind },
+      { header: "STATE", get: (t) => t.state },
+      { header: "COUNT", get: (t) => t.count },
+    ], "no upload tasks queued");
+    console.log("");
+    console.log("workers by status:");
+    kv(res.workers);
+    console.log("");
+    kv({ quarantined: res.quarantined, paused: res.paused });
+  });
+
+program
+  .command("audit")
+  .description("recent audit trail entries")
+  .option("--limit <n>", "how many events", "50")
+  .action(async (opts: { limit: string }) => {
+    const res = await api<{ events: Record<string, unknown>[] }>("/api/v1/admin/audit", {
+      query: { limit: opts.limit },
+    });
+    table(res.events, [
+      { header: "WHEN", get: (e) => e["createdAt"] },
+      { header: "ACTOR", get: (e) => e["actor"] },
+      { header: "ACTION", get: (e) => e["action"] },
+      { header: "SUBJECT", get: (e) => e["subject"] },
+      { header: "DETAIL", get: (e) => String(cell(e["detail"])).slice(0, 70) },
+    ], "no audit events");
+  });
+
+program.parseAsync(process.argv).catch((err: unknown) => {
+  fail((err as Error).message ?? String(err));
+});

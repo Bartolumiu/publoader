@@ -1,0 +1,230 @@
+name: Platform CI
+
+# The TypeScript platform lives under platform/ alongside the legacy Python
+# stack. Path filters keep this workflow off Python-only changes and vice
+# versa. `pull_request` and `push` both run so a merge to master is verified
+# even if the branch was stale.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "platform/**"
+      - ".github/workflows/platform-ci.yml"
+  pull_request:
+    paths:
+      - "platform/**"
+      - ".github/workflows/platform-ci.yml"
+
+# A new push supersedes an in-flight run of the same ref; master is never
+# cancelled so the branch protection status is always from the real tip.
+concurrency:
+  group: platform-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "24"
+  # Matches the version baked into both Dockerfiles, so a lockfile that
+  # resolves in CI also resolves in the image build.
+  PNPM_VERSION: "10.12.1"
+
+defaults:
+  run:
+    working-directory: platform
+
+jobs:
+  lint-typecheck:
+    name: Lint and typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # corepack ships with the Node images; pinning the pnpm version here
+      # rather than relying on a `packageManager` field keeps CI and the
+      # Dockerfiles reading from one place (the env block above).
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+        working-directory: .
+
+      - name: Resolve pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('platform/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+
+      # --frozen-lockfile fails rather than silently updating the lockfile, so
+      # a dependency cannot change without the change being in the diff.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # The Prisma client is generated code; nothing typechecks without it.
+      - name: Generate Prisma client
+        run: pnpm exec prisma generate
+
+      - name: Typecheck
+        run: pnpm exec tsc -p tsconfig.json --noEmit
+
+      - name: Lint
+        run: pnpm exec eslint src test
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+        working-directory: .
+
+      - name: Resolve pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('platform/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm exec prisma generate
+
+      # Unit tests never touch the database. test/globalSetup.ts notices there
+      # is no server and lets integration files skip themselves, so this job
+      # needs no service container.
+      - name: Unit tests
+        run: pnpm exec vitest run test/unit
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: devpass
+          POSTGRES_DB: publoader_test
+        ports:
+          - 5432:5432
+        # Without this the job races initdb and the first connection fails.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Lease claims, SKIP LOCKED, and the partial unique commit-marker index
+      # are the system under test — these must run against a real PostgreSQL.
+      DATABASE_URL: postgresql://postgres:devpass@localhost:5432/publoader_test
+      TEST_DATABASE_URL: postgresql://postgres:devpass@localhost:5432/publoader_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+        working-directory: .
+
+      - name: Resolve pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('platform/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm exec prisma generate
+
+      # Applies the committed migrations, exactly as production does. Running
+      # this as its own step means a broken migration fails here with a clear
+      # message instead of inside a test.
+      - name: Apply migrations
+        run: pnpm exec prisma migrate deploy
+
+      - name: Integration tests
+        run: pnpm exec vitest run test/integration --no-file-parallelism
+
+  docker:
+    name: Docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Build only — publishing is a separate, credentialed workflow. This job
+      # exists to catch a Dockerfile that no longer builds, which is otherwise
+      # only discovered at deploy time.
+      - name: Build core image
+        uses: docker/build-push-action@v6
+        with:
+          # Repo root, not `platform`: the core image copies `docs/` into the
+          # runtime so the dashboard can serve the operator handbook, and that
+          # is a sibling of `platform/`. A context of `platform` cannot see it,
+          # and the failure is a confusing "/platform/package.json: not found"
+          # rather than anything naming docs. Matches docker/core/docker-compose.yml.
+          context: .
+          file: platform/docker/core/Dockerfile
+          push: false
+          load: false
+          tags: publoader/core:ci
+          cache-from: type=gha,scope=core
+          cache-to: type=gha,mode=max,scope=core
+
+      # The migrate target keeps the Prisma CLI; the runtime targets do not.
+      # It is a separate stage, so build it separately or a break goes unseen.
+      - name: Build core migrate image
+        uses: docker/build-push-action@v6
+        with:
+          # Repo root, not `platform`: the core image copies `docs/` into the
+          # runtime so the dashboard can serve the operator handbook, and that
+          # is a sibling of `platform/`. A context of `platform` cannot see it,
+          # and the failure is a confusing "/platform/package.json: not found"
+          # rather than anything naming docs. Matches docker/core/docker-compose.yml.
+          context: .
+          file: platform/docker/core/Dockerfile
+          target: migrate
+          push: false
+          load: false
+          tags: publoader/core-migrate:ci
+          cache-from: type=gha,scope=core
+          cache-to: type=gha,mode=max,scope=core-migrate
+
+      - name: Build worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: platform
+          file: platform/docker/worker/Dockerfile
+          push: false
+          load: false
+          tags: publoader/worker:ci
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker

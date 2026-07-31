@@ -1,0 +1,66 @@
+# Direct ingress for publoader, used instead of a Cloudflare tunnel.
+#
+# Caddy terminates TLS with a certificate it obtains and renews itself from
+# Let's Encrypt (HTTP-01), so the only prerequisites are:
+#   1. a DNS A record (and AAAA if the host has IPv6) for PUBLOADER_HOSTNAME
+#      pointing at this host's PUBLIC address, and
+#   2. inbound tcp/80 and tcp/443 reachable from the internet — 80 is not
+#      optional, it is how the certificate challenge is answered.
+#
+# Why a proxy at all rather than publishing core-api directly: Discord OAuth
+# refuses a plaintext redirect URI, dashboard session cookies must be Secure,
+# and the operator endpoints below must not be world-readable. All three are
+# ingress concerns, so they live here.
+
+{
+	# Where expiry warnings go. Caddy also needs this to register the ACME account.
+	email {$ACME_EMAIL}
+
+	# Keep the admin API off the network entirely; nothing here needs it.
+	admin off
+}
+
+{$PUBLOADER_HOSTNAME} {
+	encode zstd gzip
+
+	# Operational endpoints are for the internal network and a Prometheus
+	# scraper, not the public internet: /metrics names every extension, queue
+	# depth and worker, and the health probes are a free liveness oracle.
+	# Prometheus should scrape core-api:8104 (METRICS_PORT) over the compose network instead.
+	@internal_only path /metrics /metrics/* /healthz /readyz
+	respond @internal_only 404
+
+	reverse_proxy core-api:8100 {
+		# core-api trusts exactly one proxy hop (trustProxy: 1) and derives the
+		# client address from the RIGHTMOST X-Forwarded-For entry, so these must
+		# be set by us and only us. Caddy replaces any client-supplied value.
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+
+		# A worker's lease call long-polls for up to 25s; don't cut it short.
+		transport http {
+			read_timeout 120s
+			write_timeout 120s
+		}
+	}
+
+	# Uploads: extension bundles are capped at 64 MiB by the API, artifacts at
+	# 20 MiB. Give the proxy headroom over the larger of the two so the API's own
+	# limit is the one that produces the error message.
+	request_body {
+		max_size 80MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

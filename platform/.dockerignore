@@ -1,0 +1,58 @@
+# Build context = platform/. Keep it to exactly what the image needs: source,
+# manifests, prisma schema and runner-node/. Everything else either bloats the
+# context, invalidates layer caches on every edit, or would ship host-local
+# state (and secrets) into the image.
+
+# Installed on the build host, never copied in — the image installs its own
+# with the lockfile so the tree matches the target platform (sharp and the
+# prisma engines ship native binaries).
+node_modules
+**/node_modules
+
+# Build output is produced inside the image; a stale host dist/ must never
+# shadow it.
+dist
+**/dist
+*.tsbuildinfo
+
+# Tests are not part of any runtime image. Dropping them also means
+# `tsc -p tsconfig.json` compiles only src/**, so dist/ stays clean.
+test
+
+# The docker assets themselves — the Dockerfiles are passed to the builder
+# directly, and copying compose files/.env into the image would bake operator
+# secrets into a layer.
+docker
+.dockerignore
+
+# The legacy Python runner. No image copies it any more — the worker runs
+# runner-node/runner.mjs — and it is kept in the repo only until the last
+# pre-v2 bundle is retired.
+runner
+
+# VCS / editor / CI noise.
+.git
+.gitignore
+.github
+.vscode
+.idea
+**/.DS_Store
+
+# Local env files. These hold real credentials; they are supplied at run time
+# via env_file / secrets, never at build time.
+.env
+.env.*
+!.env.example
+
+# Python build artefacts left over from the pre-v2 runner shim.
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.venv
+venv
+
+# Local scratch.
+*.log
+coverage
+.nyc_output
