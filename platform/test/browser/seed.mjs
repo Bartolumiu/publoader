@@ -124,6 +124,39 @@ if (existing < 60) {
   }
 }
 
+
+// A PENDING upload task, so the queue view has a row to select, edit and defer.
+// PENDING specifically: it is the only state the edit endpoint accepts, and the
+// point of the queue view is reviewing work before it reaches MangaDex.
+if ((await prisma.uploadTask.count()) === 0) {
+  for (let i = 0; i < 3; i++) {
+    await prisma.uploadTask.create({
+      data: {
+        kind: "UPLOAD",
+        dedupeKey: `mangaplus:seeded-chapter-${i}`,
+        state: "PENDING",
+        attempt: 0,
+        maxAttempts: 3,
+        notBefore: new Date(Date.now() - 60_000),
+        chapter: {
+          chapterId: `seeded-${i}`,
+          chapterNumber: String(i + 1),
+          chapterVolume: null,
+          chapterTitle: `Seeded chapter ${i + 1}`,
+          chapterLanguage: "en",
+          chapterUrl: `https://example.com/chapter/${i}`,
+          mangaId: "100001",
+          mdMangaId: "333f4d22-7753-4e3b-b0da-0a69b2cdce4f",
+          mdGroupId: "00000000-0000-4000-8000-000000000001",
+          mangaName: "Seeded Series",
+          extensionName: "mangaplus",
+          imageArtifacts: [],
+        },
+      },
+    });
+  }
+}
+
 console.log(
   "seeded:",
   JSON.stringify({
@@ -132,6 +165,7 @@ console.log(
     untracked: await prisma.untrackedManga.count(),
     workers: await prisma.worker.count(),
     audit: await prisma.auditEvent.count(),
+    uploadTasks: await prisma.uploadTask.count(),
   }),
 );
 await prisma.$disconnect();

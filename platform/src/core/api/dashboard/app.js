@@ -2686,6 +2686,33 @@ function queueDeferDialog(ids, tasks, done) {
   );
 }
 
+/**
+ * The chapter fields worth a labelled input.
+ *
+ * These are the ones a bad regex or a mis-split chapter actually lands in — the
+ * number, the volume, the title, the language. Everything else on the payload
+ * (ids, urls, timestamps, the artifact list) is machine-set and is edited in the
+ * raw JSON below, where getting it wrong is at least obviously deliberate.
+ */
+const CHAPTER_FORM_FIELDS = [
+  ["chapterNumber", "Chapter number", "e.g. 12, 12.5, or blank for a oneshot"],
+  ["chapterVolume", "Volume", "blank if the source gives none"],
+  ["chapterTitle", "Title", ""],
+  ["chapterLanguage", "Language", "source language code"],
+];
+
+/**
+ * Edit a queued task before it is uploaded.
+ *
+ * This is the point where a chapter can still be corrected: the row is PENDING,
+ * no MangaDex upload session has been opened, and `PATCH /queues/tasks/:id`
+ * takes the whole chapter payload. Pause the platform and the queue holds, so a
+ * run can be reviewed in full before any of it is sent.
+ *
+ * Only a PENDING row is editable, and that is enforced server-side — if an
+ * uploader claims this task while the dialog is open the save comes back 409
+ * rather than racing it.
+ */
 function queueEditDialog(task, tasks, reload) {
   const notBefore = el("input", {
     id: "edit-not-before",
@@ -2700,11 +2727,61 @@ function queueEditDialog(task, tasks, reload) {
     value: String(task.maxAttempts ?? 3),
   });
 
-  openModal(
-    `Edit ${task.kind} task`,
-    el(
-      "div",
-      {},
+  const body = el("div", {});
+  const status = el("p", { class: "field-error" });
+  // The list endpoint omits `chapter` (it is large and worker-supplied), so the
+  // payload is fetched per row rather than assumed to be on the table data.
+  const detail = new Resource(`queue-task:${task.id}`, () => api(`/queues/tasks/${task.id}`));
+
+  const draw = (chapter) => {
+    const fields = new Map();
+    for (const [key, label, hint] of CHAPTER_FORM_FIELDS) {
+      fields.set(
+        key,
+        el("input", {
+          id: `edit-${key}`,
+          type: "text",
+          value: chapter[key] ?? "",
+          placeholder: hint,
+          "aria-label": label,
+        }),
+      );
+    }
+
+    const raw = el("textarea", {
+      id: "edit-chapter-json",
+      rows: "12",
+      spellcheck: "false",
+      "aria-label": "Full chapter payload, JSON",
+    });
+    raw.value = JSON.stringify(chapter, null, 2);
+
+    // The form fields are a view onto the JSON, not a second source of truth:
+    // typing in one updates the other, so a save can never depend on which of
+    // the two the operator happened to use last.
+    const syncToRaw = () => {
+      let parsed;
+      try {
+        parsed = JSON.parse(raw.value || "{}");
+      } catch {
+        return;
+      }
+      for (const [key, input] of fields) parsed[key] = input.value === "" ? null : input.value;
+      raw.value = JSON.stringify(parsed, null, 2);
+    };
+    for (const input of fields.values()) input.addEventListener("change", syncToRaw);
+    raw.addEventListener("change", () => {
+      try {
+        const parsed = JSON.parse(raw.value || "{}");
+        for (const [key, input] of fields) input.value = parsed[key] ?? "";
+        status.textContent = "";
+      } catch (err) {
+        status.textContent = `Invalid JSON: ${err.message}`;
+      }
+    });
+
+    setChildren(
+      body,
       el("p", { class: "dim small", text: task.dedupeKey }),
       el("p", {
         class: "dim small",
@@ -2712,6 +2789,19 @@ function queueEditDialog(task, tasks, reload) {
           "Only a PENDING row can be edited. If an uploader claims it while this dialog is open the save is " +
           "refused rather than racing it.",
       }),
+      el("h3", { text: "Chapter" }),
+      ...CHAPTER_FORM_FIELDS.flatMap(([key, label]) => [
+        el("label", { for: `edit-${key}`, text: label }),
+        fields.get(key),
+      ]),
+      el("h3", { text: "Full payload" }),
+      el("p", {
+        class: "dim small",
+        text: "Everything the uploader will send. The fields above are a view onto this.",
+      }),
+      raw,
+      status,
+      el("h3", { text: "Scheduling" }),
       el("label", { for: "edit-not-before", text: "Not before" }),
       notBefore,
       el("label", { for: "edit-max-attempts", text: "Attempt budget" }),
@@ -2724,17 +2814,26 @@ function queueEditDialog(task, tasks, reload) {
           class: "primary",
           text: "Save",
           onclick: async (event) => {
-            const body = {};
-            if (notBefore.value) body.notBefore = new Date(notBefore.value).toISOString();
+            syncToRaw();
+            const patch = {};
+            let parsed;
+            try {
+              parsed = JSON.parse(raw.value || "{}");
+            } catch (err) {
+              status.textContent = `Invalid JSON: ${err.message}`;
+              return;
+            }
+            if (JSON.stringify(parsed) !== JSON.stringify(chapter)) patch.chapter = parsed;
+            if (notBefore.value) patch.notBefore = new Date(notBefore.value).toISOString();
             const budget = Number(maxAttempts.value);
-            if (Number.isFinite(budget) && budget !== task.maxAttempts) body.maxAttempts = budget;
-            if (Object.keys(body).length === 0) {
+            if (Number.isFinite(budget) && budget !== task.maxAttempts) patch.maxAttempts = budget;
+            if (Object.keys(patch).length === 0) {
               toast("nothing changed", false);
               return;
             }
             const result = await act(
               "queue.edit",
-              () => api(`/queues/tasks/${task.id}`, { method: "PATCH", body }),
+              () => api(`/queues/tasks/${task.id}`, { method: "PATCH", body: patch }),
               { button: event.currentTarget, refresh: [tasks] },
             );
             if (result) {
@@ -2744,8 +2843,25 @@ function queueEditDialog(task, tasks, reload) {
           },
         }),
       ),
-    ),
+    );
+  };
+
+  onTeardown(
+    detail.subscribe(() => {
+      if (detail.status === "error") {
+        setChildren(
+          body,
+          el("p", { class: "error", text: `Could not read this task: ${detail.error?.message ?? "unknown error"}` }),
+        );
+      } else if (detail.data) {
+        draw(detail.data.task?.chapter ?? {});
+      }
+    }),
   );
+  setChildren(body, el("div", { class: "skeleton skeleton-line", style: { height: "180px" } }));
+  void detail.load();
+
+  openModal(`Edit ${task.kind} task`, body);
 }
 
 /**
