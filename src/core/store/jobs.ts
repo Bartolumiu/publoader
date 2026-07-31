@@ -58,6 +58,21 @@ export function backoffSeconds(attempt: number, policy: RetryPolicy): number {
   return Math.floor(capped / 2 + Math.random() * (capped / 2));
 }
 
+/**
+ * How recently a worker must have heartbeated to count as competition for the
+ * fairness rule. Generous relative to the heartbeat interval: treating a live
+ * worker as dead costs fairness, treating a dead one as live costs throughput,
+ * and the second is the worse trade.
+ */
+const FAIRNESS_ALIVE_SECONDS = 120;
+
+/**
+ * How long after claiming a worker is asked to stand aside. Short on purpose —
+ * it bounds what a heartbeating-but-wedged peer can cost the queue, since after
+ * this the previous claimer is eligible again regardless.
+ */
+const FAIRNESS_COOLDOWN_SECONDS = 30;
+
 export class JobStore {
   constructor(
     private readonly prisma: PrismaClient,
@@ -156,6 +171,34 @@ export class JobStore {
         WHERE state = 'PENDING'
           AND not_before <= now()
           AND cancel_requested = false
+          -- Fairness: do not hand consecutive jobs to the same worker.
+          --
+          -- Workers pull, so without this whichever host polls first takes
+          -- everything — systematically the fastest or least loaded one. That
+          -- defeats the reason to run several: publishers rate-limit per source
+          -- IP, and one worker doing all the scraping is one IP doing it.
+          --
+          -- Three guards stop it becoming a stall. It applies only when another
+          -- worker is actually ALIVE, so a single-worker fleet is unaffected and
+          -- takes jobs back to back. It applies only for a short window after the
+          -- previous claim, so a peer that is heartbeating but wedged costs one
+          -- cooldown per job instead of blocking until its heartbeat goes stale.
+          -- And it is a predicate inside this SELECT rather than a separate
+          -- statement, because two workers running check-then-claim independently
+          -- can both pass the check.
+          AND (
+            (
+              SELECT count(*) FROM workers
+              WHERE status = 'ACTIVE'
+                AND last_heartbeat_at > now() - make_interval(secs => ${FAIRNESS_ALIVE_SECONDS})
+            ) <= 1
+            OR NOT EXISTS (
+              SELECT 1 FROM jobs prev
+              WHERE prev.leased_at = (SELECT max(leased_at) FROM jobs WHERE leased_at IS NOT NULL)
+                AND prev.lease_worker_id = ${workerId}
+                AND prev.leased_at > now() - make_interval(secs => ${FAIRNESS_COOLDOWN_SECONDS})
+            )
+          )
           -- A disabled extension is unloaded, not merely unscheduled: whatever
           -- was already queued for it must stop being handed out too. Enforcing
           -- it in the claim (rather than only when creating runs) means the
@@ -173,6 +216,10 @@ export class JobStore {
           lease_id = ${leaseId},
           lease_worker_id = ${workerId},
           lease_expires_at = now() + make_interval(secs => ${opts.leaseTtlSeconds}),
+          -- Read by the fairness predicate above. Separate from lease_expires_at
+          -- because that is claim-time plus the TTL, so it only orders claims
+          -- correctly while the TTL never changes.
+          leased_at = now(),
           attempt = j.attempt + 1,
           updated_at = now()
       FROM candidate
