@@ -186,7 +186,12 @@ jobs:
       - name: Build core image
         uses: docker/build-push-action@v6
         with:
-          context: platform
+          # Repo root, not `platform`: the core image copies `docs/` into the
+          # runtime so the dashboard can serve the operator handbook, and that
+          # is a sibling of `platform/`. A context of `platform` cannot see it,
+          # and the failure is a confusing "/platform/package.json: not found"
+          # rather than anything naming docs. Matches docker/core/docker-compose.yml.
+          context: .
           file: platform/docker/core/Dockerfile
           push: false
           load: false
@@ -199,7 +204,12 @@ jobs:
       - name: Build core migrate image
         uses: docker/build-push-action@v6
         with:
-          context: platform
+          # Repo root, not `platform`: the core image copies `docs/` into the
+          # runtime so the dashboard can serve the operator handbook, and that
+          # is a sibling of `platform/`. A context of `platform` cannot see it,
+          # and the failure is a confusing "/platform/package.json: not found"
+          # rather than anything naming docs. Matches docker/core/docker-compose.yml.
+          context: .
           file: platform/docker/core/Dockerfile
           target: migrate
           push: false
