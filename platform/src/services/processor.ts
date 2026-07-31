@@ -5,6 +5,7 @@ import { getPrisma } from "../db.js";
 import { metrics } from "../metrics.js";
 import { MdClient } from "../core/md/client.js";
 import { RunProcessor } from "../core/processor/processor.js";
+import { DiscordNotifier } from "../core/md/webhook.js";
 import { SettingsStore } from "../core/store/settings.js";
 import { UploadTaskStore } from "../core/store/uploadTasks.js";
 import { shouldRestart } from "../core/sysops/restartSignal.js";
@@ -24,7 +25,10 @@ const config = loadConfig();
 const log = createLogger("core-processor", config.logLevel);
 const prisma = getPrisma(config.databaseUrl);
 const md = new MdClient(config, prisma, log);
-const processor = new RunProcessor(prisma, md, log);
+// The processor is where the update plan is decided, so it is where the
+// per-manga report is sent from — the same point the Python version used.
+const notifier = DiscordNotifier.fromConfig(config, log);
+const processor = new RunProcessor(prisma, md, log, { notifier });
 const settings = new SettingsStore(prisma);
 const tasks = new UploadTaskStore(prisma);
 

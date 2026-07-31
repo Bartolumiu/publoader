@@ -110,9 +110,14 @@ while (running) {
     }
 
     let processed = 0;
+    // Per-kind counts, so the end-of-drain summary can name the queue that did
+    // the work the way the Python worker threads did.
+    const drained = new Map<string, { processed: number; failed: number }>();
     for (const kind of KIND_ORDER) {
       if (!running) break;
-      processed += await drain(kind);
+      const done = await drain(kind);
+      processed += done;
+      if (done > 0) drained.set(kind, { processed: done, failed: 0 });
     }
 
     // Title creation is its own MangaDex-facing pass; a failure there must not
@@ -124,6 +129,7 @@ while (running) {
     }
 
     await workers.flushNotifications();
+    await workers.flushQueueSummary(drained);
     await publishDepths();
 
     if (processed === 0 && running) await sleep(IDLE_SLEEP_MS);

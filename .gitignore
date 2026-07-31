@@ -16,3 +16,11 @@ temp
 .env
 .DS_Store
 publoader/extensions/.*
+
+# Dependency and build output, at any depth. `platform/.gitignore` covered
+# `platform/node_modules/` only, so a vitest cache file written to the REPO
+# ROOT's node_modules was tracked — 365 bytes of machine-specific state that
+# changes on every run and belongs to nobody.
+node_modules/
+dist/
+.vite/

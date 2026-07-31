@@ -6,6 +6,7 @@ import { generateChapterCard } from "./card.js";
 import { chapterFromJson, chapterToColumns, uploadedChapterColumns } from "./chapterRows.js";
 import type { MdChapterDetail, MdExtendedApi } from "./client.js";
 import type { DiscordEmbedInput, DiscordNotifier } from "./webhook.js";
+import { queueEmbed, queueFinishedEmbed, queueSummaryEmbed } from "./webhookEmbeds.js";
 import type { Chapter } from "./types.js";
 
 /**
@@ -26,8 +27,6 @@ import type { Chapter } from "./types.js";
  */
 
 const IMAGE_BATCH_SIZE = 10;
-const COLOUR_OK = "B86F8C";
-const COLOUR_FAIL = "E74C3C";
 const MD_CHAPTER_URL = "https://mangadex.org/chapter/";
 const MD_MANGA_URL = "https://mangadex.org/manga/";
 
@@ -82,6 +81,31 @@ export class UploadTaskWorkers {
     const embeds = this.pending;
     this.pending = [];
     await this.deps.notifier.send(embeds);
+  }
+
+  /**
+   * The end-of-drain messages the Python queue workers sent.
+   *
+   * `processed` counts per kind rather than per worker thread, which is the
+   * closest this architecture has: Python named the embed after the thread, and
+   * here one uploader drains typed queues, so the kind IS the queue.
+   *
+   * Nothing is sent when nothing was processed — Python only spoke when it had
+   * done something, and a per-tick "finished 0 items" would be constant noise.
+   */
+  async flushQueueSummary(counts: Map<string, { processed: number; failed: number }>): Promise<void> {
+    if (!this.deps.notifier.enabled) return;
+    const embeds: DiscordEmbedInput[] = [];
+    for (const [kind, count] of counts) {
+      if (count.processed === 0 && count.failed === 0) continue;
+      // UNAVAILABLE was summary-only in Python: a per-chapter embed for a bulk
+      // "mark these unavailable" pass is hundreds of messages nobody reads.
+      if (kind === "UNAVAILABLE") {
+        embeds.push(queueSummaryEmbed(kind, count.processed, count.failed));
+      }
+      embeds.push(queueFinishedEmbed(kind));
+    }
+    if (embeds.length > 0) await this.deps.notifier.send(embeds);
   }
 
   // -------------------------------------------------------------- UPLOAD
@@ -558,12 +582,11 @@ export class UploadTaskWorkers {
     if (chapter.chapterUrl) lines.push(`Source: ${chapter.chapterUrl}`);
     if (detail) lines.push("", detail);
 
-    this.pending.push({
-      title: `${action} ${success ? "succeeded" : "failed"}`,
-      description: lines.join("\n"),
-      colour: success ? COLOUR_OK : COLOUR_FAIL,
-      footer: chapter.extensionName,
-    });
+    // The Python shape, not a per-action status line: one field carrying
+    // Success/Manga/Chapter/Extension plus the language, title, expiry and the
+    // four links, titled after the queue that did the work. A channel that has
+    // been reading these for years should not have to relearn them.
+    this.pending.push(queueEmbed(action, chapter, success));
   }
 }
 

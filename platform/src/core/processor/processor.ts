@@ -4,6 +4,8 @@ import { ResultEnvelope } from "../../contracts/envelope.js";
 import { type MangaRecord } from "../../contracts/records.js";
 import { Manifest } from "../../contracts/manifest.js";
 import { uploadedChapterColumns } from "../md/chapterRows.js";
+import type { DiscordEmbedInput } from "../md/webhook.js";
+import { updatesEmbeds } from "../md/webhookEmbeds.js";
 import { chapterFromRecord, type Chapter, type MdApi, type MdChapter } from "../md/types.js";
 import { ExtensionConfigStore } from "../store/extensionConfig.js";
 import { ResultStore } from "../store/results.js";
@@ -62,6 +64,12 @@ export interface MergedResults {
 export interface RunProcessorOptions {
   /** Safety valve so one tick cannot monopolise the process. */
   maxRunsPerTick?: number;
+  /**
+   * Where the per-manga update report goes. Optional: the processor's job is
+   * to decide what to upload, and it must keep doing that when Discord is not
+   * configured or is failing.
+   */
+  notifier?: { enabled: boolean; send(embeds: DiscordEmbedInput[]): Promise<void> };
 }
 
 export class RunProcessor {
@@ -74,6 +82,7 @@ export class RunProcessor {
   /** Per-run aggregate cache: volume backfill and the dupe sweep share it. */
   private aggregates = new Map<string, unknown>();
   private readonly maxRunsPerTick: number;
+  private readonly notifier: { enabled: boolean; send(embeds: DiscordEmbedInput[]): Promise<void> } | null;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -86,6 +95,44 @@ export class RunProcessor {
     this.settings = new SettingsStore(prisma);
     this.config = new ExtensionConfigStore(prisma);
     this.maxRunsPerTick = options.maxRunsPerTick ?? 10;
+    this.notifier = options.notifier ?? null;
+  }
+
+  /**
+   * The per-manga update report the Python version sent.
+   *
+   * Fired here, where the plan is decided, rather than after a successful
+   * upload — "To Upload" is an intention, and a channel that only hears about
+   * completed uploads cannot tell the difference between "nothing new" and
+   * "the uploader is stuck".
+   *
+   * Failures are swallowed with a warning on purpose: a Discord outage must not
+   * fail a run whose real work (queueing the uploads) already succeeded.
+   */
+  private async reportUpdates(
+    extension: string,
+    mangaId: string,
+    decision: { toUpload: Chapter[]; toEdit: { chapter: Chapter }[]; skipped: Chapter[] },
+  ): Promise<void> {
+    if (!this.notifier?.enabled) return;
+    // Nothing decided means nothing to say; Python sent no embed for a manga it
+    // had no news about, and a per-run heartbeat would drown the channel.
+    if (decision.toUpload.length === 0 && decision.toEdit.length === 0) return;
+
+    try {
+      await this.notifier.send(
+        updatesEmbeds({
+          extensionName: extension,
+          mangaTitle: this.mangaNames.get(mangaId) ?? mangaId,
+          mdMangaId: mangaId,
+          chapters: decision.toUpload,
+          skipped: decision.skipped.length,
+          edited: decision.toEdit.length,
+        }),
+      );
+    } catch (err) {
+      this.log.warn({ err, extension, mangaId }, "could not send the update webhook");
+    }
   }
 
   /** Process every run currently waiting in INGESTING. Returns the count. */
