@@ -421,6 +421,31 @@ becomes incompatible, `workers revoke` is the enforcement mechanism.
 
 ## Rotate secrets
 
+> **Unresolved incident — these four secrets are public.**
+>
+> `platform/docker/core/.env.production` and `.env.staging` were tracked and
+> pushed to this repository, which is public. `platform/.gitignore` matched
+> `.env` but not `.env.production`, so neither file was ever ignored. Commit
+> `d472f8d` untracks them and ignores `.env*`, which stops it recurring — it does
+> **not** unpublish anything. The values remain readable in the history of every
+> pushed commit that touched those files, and must be treated as compromised:
+>
+> | Secret | What it grants until rotated |
+> | --- | --- |
+> | `ADMIN_TOKEN` | Full admin API access. It is the break-glass credential and outranks every account. |
+> | `SESSION_SECRET` | Forged dashboard sessions as any operator, without a password. |
+> | `POSTGRES_PASSWORD` | The database, if the port is ever reachable. |
+> | `TUNNEL_TOKEN` | Running a Cloudflare tunnel for the hostname — an attacker can serve traffic as publoader.ardax.dev. |
+>
+> Rotate all four using the procedures below, `TUNNEL_TOKEN` first: it is the one
+> that lets someone else answer on your domain. MangaDex credentials were
+> placeholders at the time and were never exposed.
+>
+> Purging them from history (`git filter-repo`, or deleting the branch) is worth
+> doing afterwards, but rotation is what actually ends the exposure — assume the
+> published values were scraped the moment they were pushed.
+
+
 ### Dashboard credentials
 
 An operator password: **Users → Set password** (owner), or the operator does it
