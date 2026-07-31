@@ -248,7 +248,7 @@ wrong reaches MangaDex, the worker that proposed it is identifiable, and
   with `COMMUNITY` workers are accepting an unrecoverable-loss risk.** Set
   `min_trust: TRUSTED` on extensions where you run delete mode.
 
-**Documented for v2** (target-architecture §12): probabilistic verification
+**Documented for v2**: probabilistic verification
 re-runs of the same job on a second worker with result comparison; reputation
 scoring per worker; canary manga with known-correct expected output.
 
@@ -487,8 +487,6 @@ This document is one of the set below. Start at
 | [data-model.md](data-model.md) | Every table, column, index, and invariant |
 | [extension-guide.md](extension-guide.md) | Writing an extension: the v2 contract, the manifest, the sandbox, publishing |
 | [glossary.md](glossary.md) | Every load-bearing term, with the file that defines it |
-| [target-architecture.md](target-architecture.md) | The binding design reference and the rationale for each choice |
-| [architecture-assessment.md](architecture-assessment.md) | The legacy Python system and the failure modes that motivated the rewrite |
 | [security-trust-model.md](security-trust-model.md) | Threat model, control matrix, secrets inventory, and what a worker can and cannot do |
 | [deployment.md](deployment.md) | Standing up the core and worker hosts, the tunnel and WAF, upgrades, backups |
 | [operations.md](operations.md) | Day-2 runbooks: triage, worker lifecycle, secret rotation, dead letters, incidents |
@@ -496,6 +494,5 @@ This document is one of the set below. Start at
 | [ipc-to-api-mapping.md](ipc-to-api-mapping.md) | Which endpoint replaced each legacy IPC command |
 | [bot.md](bot.md) | Discord bot setup, the admin-gating model, and the command reference |
 | [webhooks.md](webhooks.md) | Publishing extension bundles from a GitHub push: setup, the signature check, and why CI-side publishing is preferred |
-| [implementation-plan.md](implementation-plan.md) | Historical: the original milestone plan |
 | [../README.md](../README.md) | What publoader is, and the five-minute quickstart |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | Branch workflow, definition of done, and the review checklist |

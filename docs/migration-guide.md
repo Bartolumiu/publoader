@@ -162,7 +162,7 @@ timestamps there; the transient `upload_tasks.chapter` payload keeps them as
 ISO-8601 strings inside JSONB. Any key a legacy document carries that has no
 column (`_id`, the GridFS `images` list, `archivedAt`) is parked in that table's
 nullable `extra` JSONB rather than dropped, so a migrated row stays traceable
-back to Mongo — see §3.1 of `target-architecture.md`. Queue documents keep their
+back to Mongo. Queue documents keep their
 non-chapter sidecars (`payload`, `oldInfo`, `unavailableAt`) in the JSONB
 payload, since the upload workers read them alongside the chapter.
 Images larger than 20 MiB are skipped with a warning (they are not real pages).
@@ -653,8 +653,6 @@ This document is one of the set below. Start at
 | [data-model.md](data-model.md) | Every table, column, index, and invariant |
 | [extension-guide.md](extension-guide.md) | Writing an extension: the v2 contract, the manifest, the sandbox, publishing |
 | [glossary.md](glossary.md) | Every load-bearing term, with the file that defines it |
-| [target-architecture.md](target-architecture.md) | The binding design reference and the rationale for each choice |
-| [architecture-assessment.md](architecture-assessment.md) | The legacy Python system and the failure modes that motivated the rewrite |
 | [security-trust-model.md](security-trust-model.md) | Threat model, control matrix, secrets inventory, and what a worker can and cannot do |
 | [deployment.md](deployment.md) | Standing up the core and worker hosts, the tunnel and WAF, upgrades, backups |
 | [operations.md](operations.md) | Day-2 runbooks: triage, worker lifecycle, secret rotation, dead letters, incidents |
@@ -662,6 +660,5 @@ This document is one of the set below. Start at
 | [ipc-to-api-mapping.md](ipc-to-api-mapping.md) | Which endpoint replaced each legacy IPC command |
 | [bot.md](bot.md) | Discord bot setup, the admin-gating model, and the command reference |
 | [webhooks.md](webhooks.md) | Publishing extension bundles from a GitHub push: setup, the signature check, and why CI-side publishing is preferred |
-| [implementation-plan.md](implementation-plan.md) | Historical: the original milestone plan |
 | [../README.md](../README.md) | What publoader is, and the five-minute quickstart |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | Branch workflow, definition of done, and the review checklist |

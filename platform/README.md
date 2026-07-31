@@ -53,7 +53,6 @@ CORE (operator's host)                    WORKER HOST(S)
 | `src/services/` | Process entrypoints, one per container. |
 | `src/cli/` | `admin.ts` (operator CLI), `migrate-from-mongo.ts`, `import-sqlite.ts`. |
 | `runner-node/` | `runner.mjs`, the extension API v2 runner. Executes the extension under Node's permission model, enforces the manifest's egress allowlist, prints an envelope. |
-| `runner/` | The Python 3.11 shim. **Deprecated** — python bundles are refused at publish, so this only serves jobs still pinned to a bundle published before the v2 cutover. |
 | `docker/core/`, `docker/worker/`, `docker/dev/` | Compose stacks and multi-stage Dockerfiles. |
 | `test/unit/`, `test/integration/` | vitest. Integration runs against a real PostgreSQL — lease semantics cannot be proven against mocks. |
 | `test/browser/` | Real-Chrome assertions for the dashboard. jsdom cannot see cascade-origin bugs; these caught five the other suites passed. |

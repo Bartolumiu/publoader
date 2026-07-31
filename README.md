@@ -147,8 +147,6 @@ Full procedure in [docs/deployment.md](docs/deployment.md).
 | [data-model.md](docs/data-model.md) | Every table, column, index, and invariant, plus why five columns are still JSONB |
 | [extension-guide.md](docs/extension-guide.md) | Writing an extension: the v2 contract, the manifest, the sandbox, publishing |
 | [glossary.md](docs/glossary.md) | Every load-bearing term, with the file that defines it |
-| [target-architecture.md](docs/target-architecture.md) | The binding design reference and the rationale for each choice |
-| [architecture-assessment.md](docs/architecture-assessment.md) | The legacy Python system and the failure modes that motivated the rewrite |
 | [security-trust-model.md](docs/security-trust-model.md) | Threat model, control matrix, secrets inventory, and what a worker can and cannot do |
 | [deployment.md](docs/deployment.md) | Standing up the core and worker hosts, the Cloudflare tunnel and WAF, upgrades, backups |
 | [operations.md](docs/operations.md) | Day-2 runbooks: triage, worker lifecycle, secret rotation, dead letters, incidents |
@@ -156,7 +154,6 @@ Full procedure in [docs/deployment.md](docs/deployment.md).
 | [ipc-to-api-mapping.md](docs/ipc-to-api-mapping.md) | Which endpoint replaced each legacy IPC command |
 | [bot.md](docs/bot.md) | Discord bot setup, the admin-gating model, and the command reference |
 | [webhooks.md](docs/webhooks.md) | Publishing extension bundles from a GitHub push: setup, the signature check, and why CI-side publishing is preferred |
-| [implementation-plan.md](docs/implementation-plan.md) | Historical: the original milestone plan |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Branch workflow, definition of done, and the review checklist |
 
 ---
@@ -188,7 +185,6 @@ platform/                     everything current
 ├── docker/                   core, worker, and dev compose stacks + Dockerfiles
 └── scripts/publoader         the dev/staging/prod entry point
 docs/                         the documentation set above
-run.py, publoader/, tests/    the LEGACY Python monolith — reference only
 ```
 
 Extensions live in their own repositories:

@@ -21,8 +21,9 @@ The extension repositories depend on this one only through the
 format. They are not submodules and are not built by this repo's CI; bundles are
 published into a running platform with `publoader-admin bundle publish`.
 
-Inside this repo, everything of substance is under `platform/`. The Python tree at
-the root (`run.py`, `publoader/`, `tests/`) is the **legacy monolith**, kept for
+Inside this repo, everything of substance is under `platform/`. The legacy Python
+monolith that used to sit at the root has been removed; it survives in git history
+and is described in the migration guide, kept for
 reference during the migration. Do not add to it.
 
 ---
@@ -360,10 +361,8 @@ lease expiry and reassignment work end to end, and it takes about two minutes.
   then the code. The comments in `platform/src/core/store/jobs.ts`,
   `core/api/scopes.ts`, and `core/ingest/ingest.ts` carry the reasoning behind the
   parts that look surprising.
-- **Why is X like this?** [docs/target-architecture.md](docs/target-architecture.md)
+- **Why is X like this?** [docs/architecture-guide.md](docs/architecture-guide.md)
   for the design decisions,
-  [docs/architecture-assessment.md](docs/architecture-assessment.md) for the legacy
-  failure modes that motivated them, and `git log` for everything since.
 - **Is this a security-relevant change?**
   [docs/security-trust-model.md](docs/security-trust-model.md) has the control
   matrix and the worker-fabrication analysis. If your change touches the worker
@@ -386,8 +385,6 @@ lease expiry and reassignment work end to end, and it takes about two minutes.
 | [docs/data-model.md](docs/data-model.md) | You are touching the schema or a query |
 | [docs/extension-guide.md](docs/extension-guide.md) | You are writing or porting an extension |
 | [docs/glossary.md](docs/glossary.md) | A term is unfamiliar |
-| [docs/target-architecture.md](docs/target-architecture.md) | You want the binding design reference and its rationale |
-| [docs/architecture-assessment.md](docs/architecture-assessment.md) | You want to know what the legacy system got wrong |
 | [docs/security-trust-model.md](docs/security-trust-model.md) | Your change touches trust, credentials, or the worker boundary |
 | [docs/deployment.md](docs/deployment.md) | You are standing up staging or production |
 | [docs/operations.md](docs/operations.md) | Something is wrong in a running deployment |
@@ -395,4 +392,3 @@ lease expiry and reassignment work end to end, and it takes about two minutes.
 | [docs/ipc-to-api-mapping.md](docs/ipc-to-api-mapping.md) | You are looking for the endpoint that replaced a legacy IPC command |
 | [docs/bot.md](docs/bot.md) | You are setting up or extending the Discord bot |
 | [docs/webhooks.md](docs/webhooks.md) | Publishing extension bundles from a GitHub push |
-| [docs/implementation-plan.md](docs/implementation-plan.md) | Historical: the original milestone plan |

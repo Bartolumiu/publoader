@@ -4,7 +4,7 @@ How publoader actually works, traced through the code. If you read one document
 before touching this repo, read this one.
 
 This is the *explanatory* companion to
-[target-architecture.md](target-architecture.md), which is the binding design
+this document, which is the binding design
 reference and records why each choice was made. Where the two disagree, the code
 wins and this document is the one that cites it.
 
@@ -1015,8 +1015,6 @@ acted (`root`, `token:<name>`, `token:<name> for discord:<user>`, `user:<actor>`
 
 | Document | For |
 | --- | --- |
-| [target-architecture.md](target-architecture.md) | the binding design reference and the rationale behind each choice |
-| [architecture-assessment.md](architecture-assessment.md) | the legacy system and the failure modes that motivated this one |
 | [data-model.md](data-model.md) | every table, column, index, and invariant |
 | [api-reference.md](api-reference.md) | every endpoint and its required scope |
 | [extension-guide.md](extension-guide.md) | writing an extension against the v2 contract |
