@@ -4,7 +4,7 @@ How publoader actually works, traced through the code. If you read one document
 before touching this repo, read this one.
 
 This is the *explanatory* companion to
-[target-architecture.md](target-architecture.md), which is the binding design
+this document, which is the binding design
 reference and records why each choice was made. Where the two disagree, the code
 wins and this document is the one that cites it.
 
@@ -100,7 +100,7 @@ thing that decides anything.
 **Data plane** — worker agents. Lease a job, fetch and verify the pinned bundle,
 run the extension, submit an envelope. A worker's entire blast radius is its own
 token and whatever bundle it was handed
-(`platform/docker/worker/Dockerfile:3-13`).
+(`docker/worker/Dockerfile:3-13`).
 
 **Extension runtime** — the sandbox inside a worker: a separate Node process
 launched with the permission model on, executing `runner-node/runner.mjs`, which
@@ -304,7 +304,7 @@ nothing else — so the extension cannot read the worker token or the core URL
 the whole process group and not just the direct child (`executor.ts:399`,
 `428-445`).
 
-Inside the sandbox, `runner.mjs` (`platform/runner-node/runner.mjs`):
+Inside the sandbox, `runner.mjs` (`runner-node/runner.mjs`):
 
 - **captures stdout before any bundle code runs** and redirects it to stderr,
   including the `console` methods, because stdout is the envelope channel
@@ -469,7 +469,7 @@ processing is idempotent (`core/processor/processor.ts:116-132`).
 5. For each MangaDex series, reads the **live** MangaDex chapter list and
    aggregate, backfills missing volumes from the aggregate, and calls
    `decideForManga` (`processor/dedupe.ts:477-525`) — pure, I/O-free, and
-   therefore exhaustively unit-testable (`platform/test/unit/dedupe.test.ts`).
+   therefore exhaustively unit-testable (`test/unit/dedupe.test.ts`).
 
    `decideForManga` sorts every reported chapter into four buckets:
 
@@ -632,7 +632,7 @@ races between two processors reading the same MangaDex state.
 and 4 still stop the second from committing, so correctness survives — but you
 have doubled the load on the publisher's site, which is the resource the whole
 partitioning design exists to conserve. Tested at
-`platform/test/integration/lease.test.ts:41`.
+`test/integration/lease.test.ts:41`.
 
 ### 3. Lease-id-gated transitions
 
@@ -741,7 +741,7 @@ Consequences that matter:
 - **Segments cannot overlap.** They are contiguous slices of a sorted,
   de-duplicated list, so each id belongs to exactly one segment by construction —
   not by a check that could be wrong. Tested at
-  `platform/test/unit/slots.test.ts:66` ("segments are non-overlapping and cover
+  `test/unit/slots.test.ts:66` ("segments are non-overlapping and cover
   every id exactly once").
 - **Keys are deterministic**, so a retry or a replay addresses the same segments
   and the same ids (`slots.test.ts:60`). The key includes the run key, so two
@@ -845,7 +845,7 @@ There is exactly one, and it is credential minting. Token management requires bo
 tokens are assigned role `ADMIN` regardless of their scopes
 (`auth.ts:128-131`), **no token can mint or widen another token, however broadly
 it is scoped** — including one holding `*`. Tested at
-`platform/test/integration/tokens.test.ts:129`.
+`test/integration/tokens.test.ts:129`.
 
 Above that sits the break-glass `ADMIN_TOKEN`, which resolves to `["*"]` and
 `OWNER`. It outranks every account by construction because it is the way back in
@@ -956,7 +956,7 @@ redeploying anything, so there is no window where the config a worker holds
 disagrees with the config the core enforces. And the e2e suite exercises exactly
 this: it puts the fixture extension into slow mode by adding a `tracked_manga`
 row through the API, which needs no republish and thereby proves the overlay works
-(`platform/test/e2e/run-e2e.sh:95-99`).
+(`test/e2e/run-e2e.sh:95-99`).
 
 ---
 
@@ -1015,8 +1015,6 @@ acted (`root`, `token:<name>`, `token:<name> for discord:<user>`, `user:<actor>`
 
 | Document | For |
 | --- | --- |
-| [target-architecture.md](target-architecture.md) | the binding design reference and the rationale behind each choice |
-| [architecture-assessment.md](architecture-assessment.md) | the legacy system and the failure modes that motivated this one |
 | [data-model.md](data-model.md) | every table, column, index, and invariant |
 | [api-reference.md](api-reference.md) | every endpoint and its required scope |
 | [extension-guide.md](extension-guide.md) | writing an extension against the v2 contract |

@@ -2,7 +2,6 @@
 
 Getting the platform running locally, changing it, and proving the change works.
 
-Everything in this document runs from `platform/` unless stated otherwise.
 
 **Contents**
 
@@ -196,7 +195,7 @@ pnpm exec prisma generate
 ```
 
 Verifying step 5 properly means: seed rows before the migration, apply it, and
-assert the rows are still there and still correct. `platform/test/unit/chapterRows.test.ts`
+assert the rows are still there and still correct. `test/unit/chapterRows.test.ts`
 covers the round-trip through the mapping module; the migration SQL itself is
 verified by applying it to a populated database.
 

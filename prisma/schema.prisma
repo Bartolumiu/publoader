@@ -1,0 +1,665 @@
+// Publoader platform durable state. PostgreSQL is the single source of truth
+// for scheduling, leases, results, canonical chapter history, and audit.
+// Hot-path claim statements use $queryRaw with FOR UPDATE SKIP LOCKED — table
+// and column names are snake_case-mapped so raw SQL stays unquoted.
+
+generator client {
+  provider      = "prisma-client-js"
+  // Pinned explicitly rather than left to build-host detection. The runtime
+  // images are Debian with OpenSSL 3, but `prisma generate` guesses from the
+  // BUILD stage — and when that stage had no openssl it guessed 1.1.x, so the
+  // engine silently failed to load at runtime. Listing both architectures also
+  // means one image build works on arm64 and amd64 hosts.
+  binaryTargets = ["native", "linux-arm64-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum WorkerStatus {
+  ACTIVE
+  DRAINED
+  REVOKED
+}
+
+enum TrustTier {
+  TRUSTED
+  COMMUNITY
+}
+
+enum RunKind {
+  UPDATE
+  CLEAN
+  FORCE
+}
+
+enum RunState {
+  PENDING
+  EXECUTING
+  INGESTING
+  PROCESSED
+  FAILED
+  DEAD_LETTER
+  CANCELLED
+}
+
+enum JobState {
+  PENDING
+  LEASED
+  RUNNING
+  SUCCEEDED
+  DEAD_LETTER
+  CANCELLED
+}
+
+enum ErrorClass {
+  TRANSIENT
+  PERMANENT
+  POLICY
+}
+
+enum ResultState {
+  RECEIVED
+  QUARANTINED
+  COMMITTED
+  SUPERSEDED
+}
+
+enum UploadTaskKind {
+  UPLOAD
+  EDIT
+  DELETE
+  UNAVAILABLE
+}
+
+enum UploadOutcome {
+  COMMITTING
+  COMMITTED
+  FAILED
+}
+
+enum UploadTaskState {
+  PENDING
+  LEASED
+  DONE
+  FAILED
+  DEAD_LETTER
+}
+
+model Worker {
+  id              String       @id @default(uuid())
+  name            String
+  tokenHash       String       @unique @map("token_hash")
+  status          WorkerStatus @default(ACTIVE)
+  trust           TrustTier    @default(COMMUNITY)
+  extensions      String[]     @default([])
+  lastHeartbeatAt DateTime?    @map("last_heartbeat_at")
+  agentVersion    String?      @map("agent_version")
+  createdAt       DateTime     @default(now()) @map("created_at")
+  updatedAt       DateTime     @updatedAt @map("updated_at")
+
+  @@map("workers")
+}
+
+model EnrollToken {
+  id             String    @id @default(uuid())
+  tokenHash      String    @unique @map("token_hash")
+  trust          TrustTier @default(COMMUNITY)
+  note           String?
+  expiresAt      DateTime  @map("expires_at")
+  singleUse      Boolean   @default(true) @map("single_use")
+  usedByWorkerId String?   @map("used_by_worker_id")
+  revoked        Boolean   @default(false)
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@map("enroll_tokens")
+}
+
+model Run {
+  id                 String    @id @default(uuid())
+  idempotencyKey     String    @unique @map("idempotency_key")
+  extension          String
+  extensionVersion   String    @map("extension_version")
+  bundleSha256       String    @map("bundle_sha256")
+  kind               RunKind
+  state              RunState  @default(PENDING)
+  segmentsTotal      Int       @default(1) @map("segments_total")
+  requireAllSegments Boolean   @default(true) @map("require_all_segments")
+  triggeredBy        String?   @map("triggered_by")
+  scheduledFor       DateTime? @map("scheduled_for")
+  startedAt          DateTime? @map("started_at")
+  completedAt        DateTime? @map("completed_at")
+  error              String?
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+  jobs               Job[]
+
+  @@index([state])
+  @@index([extension, createdAt])
+  @@map("runs")
+}
+
+model Job {
+  id               String      @id @default(uuid())
+  idempotencyKey   String      @unique @map("idempotency_key")
+  runId            String      @map("run_id")
+  run              Run         @relation(fields: [runId], references: [id])
+  extension        String
+  extensionVersion String      @map("extension_version")
+  bundleSha256     String      @map("bundle_sha256")
+  kind             RunKind
+  segmentIndex     Int         @default(0) @map("segment_index")
+  segmentTotal     Int         @default(1) @map("segment_total")
+  segmentKey       String?     @map("segment_key")
+  segmentMangaIds  String[]    @default([]) @map("segment_manga_ids")
+  minTrust         TrustTier   @default(COMMUNITY) @map("min_trust")
+  state            JobState    @default(PENDING)
+  attempt          Int         @default(0)
+  maxAttempts      Int         @default(3) @map("max_attempts")
+  notBefore        DateTime    @default(now()) @map("not_before")
+  timeoutSeconds   Int         @default(3600) @map("timeout_seconds")
+  leaseId          String?     @map("lease_id")
+  leaseWorkerId    String?     @map("lease_worker_id")
+  leaseExpiresAt   DateTime?   @map("lease_expires_at")
+  /// When this job was most recently claimed. Drives the claim fairness rule;
+  /// NULL means never claimed.
+  leasedAt         DateTime?   @map("leased_at")
+  cancelRequested  Boolean     @default(false) @map("cancel_requested")
+  errorClass       ErrorClass? @map("error_class")
+  lastError        String?     @map("last_error")
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+
+  @@index([state, notBefore])
+  @@index([runId])
+  @@index([leaseExpiresAt])
+  @@map("jobs")
+  @@index([leasedAt(sort: Desc)])
+}
+
+model ResultSubmission {
+  id             String      @id @default(uuid())
+  idempotencyKey String      @unique @map("idempotency_key")
+  jobId          String      @map("job_id")
+  attempt        Int
+  leaseId        String      @map("lease_id")
+  workerId       String      @map("worker_id")
+  envelope       Json
+  state          ResultState @default(RECEIVED)
+  rejectReason   String?     @map("reject_reason")
+  createdAt      DateTime    @default(now()) @map("created_at")
+
+  // A partial unique index (one COMMITTED row per job) is added in the
+  // migration SQL — Prisma cannot express partial indexes declaratively:
+  //   CREATE UNIQUE INDEX result_committed_one_per_job
+  //     ON result_submissions (job_id) WHERE state = 'COMMITTED';
+  @@index([jobId])
+  @@map("result_submissions")
+}
+
+model Artifact {
+  id          String    @id @default(uuid())
+  sha256      String
+  size        Int
+  contentType String    @map("content_type")
+  content     Bytes
+  jobId       String?   @map("job_id")
+  workerId    String?   @map("worker_id")
+  expiresAt   DateTime? @map("expires_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([jobId])
+  @@index([expiresAt])
+  @@map("artifacts")
+}
+
+model Bundle {
+  id           String   @id @default(uuid())
+  extension    String
+  version      String
+  sha256       String   @unique
+  manifest     Json
+  sourceCommit String?  @map("source_commit")
+  archive      Bytes
+  yanked       Boolean  @default(false)
+  publishedAt  DateTime @default(now()) @map("published_at")
+
+  @@unique([extension, version])
+  @@index([extension, publishedAt])
+  @@map("bundles")
+}
+
+model UploadTask {
+  id             String          @id @default(uuid())
+  kind           UploadTaskKind
+  dedupeKey      String          @map("dedupe_key")
+  /**
+   * Stays JSONB while the four chapter tables use typed columns, and the
+   * asymmetry is deliberate: this is a transient queue payload consumed once by
+   * one worker, never queried by field. It is also NOT the canonical chapter
+   * shape — EDIT rows carry `payload`/`oldInfo` and UNAVAILABLE rows carry
+   * `unavailableAt` alongside the chapter, which columns would have to model as
+   * a union. The row is deleted-by-state as soon as it is done.
+   */
+  chapter        Json
+  state          UploadTaskState @default(PENDING)
+  attempt        Int             @default(0)
+  maxAttempts    Int             @default(5) @map("max_attempts")
+  notBefore      DateTime        @default(now()) @map("not_before")
+  leaseId        String?         @map("lease_id")
+  leaseExpiresAt DateTime?       @map("lease_expires_at")
+  lastError      String?         @map("last_error")
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+
+  @@unique([kind, dedupeKey])
+  @@index([state, notBefore])
+  @@map("upload_tasks")
+}
+
+/// The canonical record of what each extension has on MangaDex — the mirror of
+/// Mongo `uploaded`. The chapter shape is fixed and known, so it lives in typed
+/// columns rather than a JSONB document; see src/core/md/chapterRows.ts for the
+/// single Chapter <-> columns mapping all four chapter tables share.
+model UploadedChapter {
+  id               String    @id @default(uuid())
+  mdChapterId      String    @unique @map("md_chapter_id")
+  /// Mirrors Chapter.extensionName. NOT NULL here because every lookup of this
+  /// table filters on it; "" stands in for an unattributed chapter.
+  extension        String
+  chapterId        String?   @map("chapter_id")
+  chapterUrl       String?   @map("chapter_url")
+  chapterNumber    String?   @map("chapter_number")
+  chapterTitle     String?   @map("chapter_title")
+  chapterVolume    String?   @map("chapter_volume")
+  chapterLanguage  String?   @map("chapter_language")
+  chapterTimestamp DateTime? @map("chapter_timestamp")
+  chapterExpire    DateTime? @map("chapter_expire")
+  chapterLookup    DateTime? @map("chapter_lookup")
+  mangaId          String?   @map("manga_id")
+  mangaName        String?   @map("manga_name")
+  mangaUrl         String?   @map("manga_url")
+  mdMangaId        String?   @map("md_manga_id")
+  mdGroupId        String?   @map("md_group_id")
+  /// Open-ended leftovers only: page-artifact ids, and any key a legacy Mongo
+  /// document carried that has no column (`_id`, `images`, …). NULL when empty.
+  extra            Json?
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@index([extension])
+  @@index([extension, chapterId])
+  @@map("uploaded_chapters")
+}
+
+model UploadedId {
+  id          String   @id @default(uuid())
+  extension   String
+  chapterId   String   @map("chapter_id")
+  mdChapterId String?  @map("md_chapter_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@unique([extension, chapterId])
+  @@map("uploaded_ids")
+}
+
+model EditedChapter {
+  id               String    @id @default(uuid())
+  mdChapterId      String    @unique @map("md_chapter_id")
+  extension        String?
+  chapterId        String?   @map("chapter_id")
+  chapterUrl       String?   @map("chapter_url")
+  chapterNumber    String?   @map("chapter_number")
+  chapterTitle     String?   @map("chapter_title")
+  chapterVolume    String?   @map("chapter_volume")
+  chapterLanguage  String?   @map("chapter_language")
+  chapterTimestamp DateTime? @map("chapter_timestamp")
+  chapterExpire    DateTime? @map("chapter_expire")
+  chapterLookup    DateTime? @map("chapter_lookup")
+  mangaId          String?   @map("manga_id")
+  mangaName        String?   @map("manga_name")
+  mangaUrl         String?   @map("manga_url")
+  mdMangaId        String?   @map("md_manga_id")
+  mdGroupId        String?   @map("md_group_id")
+  extra            Json?
+  /// Stays JSONB: an append-only {editedAt, old, new} history of genuinely
+  /// variable length and shape. Columns cannot model it and nothing queries
+  /// into it.
+  edits            Json      @default("[]")
+  lastEditedAt     DateTime  @default(now()) @map("last_edited_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@map("edited_chapters")
+}
+
+model UnavailableChapter {
+  id               String    @id @default(uuid())
+  mdChapterId      String    @unique @map("md_chapter_id")
+  extension        String?
+  chapterId        String?   @map("chapter_id")
+  chapterUrl       String?   @map("chapter_url")
+  chapterNumber    String?   @map("chapter_number")
+  chapterTitle     String?   @map("chapter_title")
+  chapterVolume    String?   @map("chapter_volume")
+  chapterLanguage  String?   @map("chapter_language")
+  chapterTimestamp DateTime? @map("chapter_timestamp")
+  chapterExpire    DateTime? @map("chapter_expire")
+  chapterLookup    DateTime? @map("chapter_lookup")
+  mangaId          String?   @map("manga_id")
+  mangaName        String?   @map("manga_name")
+  mangaUrl         String?   @map("manga_url")
+  mdMangaId        String?   @map("md_manga_id")
+  mdGroupId        String?   @map("md_group_id")
+  /// Also holds the `mdAttributes` snapshot of the chapter as MangaDex had it
+  /// at takedown time — an external API resource, not our shape.
+  extra            Json?
+  unavailableAt    DateTime  @default(now()) @map("unavailable_at")
+
+  @@map("unavailable_chapters")
+}
+
+// Archive of chapters hard-deleted from MangaDex, mirroring the legacy
+// `deleted` collection that workers/deleter.py appended to. Deletion is the
+// one irreversible action the platform takes, so the record of what was
+// removed (and when) is kept rather than dropped.
+model DeletedChapter {
+  id               String    @id @default(uuid())
+  mdChapterId      String    @unique @map("md_chapter_id")
+  extension        String?
+  chapterId        String?   @map("chapter_id")
+  chapterUrl       String?   @map("chapter_url")
+  chapterNumber    String?   @map("chapter_number")
+  chapterTitle     String?   @map("chapter_title")
+  chapterVolume    String?   @map("chapter_volume")
+  chapterLanguage  String?   @map("chapter_language")
+  chapterTimestamp DateTime? @map("chapter_timestamp")
+  chapterExpire    DateTime? @map("chapter_expire")
+  chapterLookup    DateTime? @map("chapter_lookup")
+  mangaId          String?   @map("manga_id")
+  mangaName        String?   @map("manga_name")
+  mangaUrl         String?   @map("manga_url")
+  mdMangaId        String?   @map("md_manga_id")
+  mdGroupId        String?   @map("md_group_id")
+  extra            Json?
+  deletedAt        DateTime  @default(now()) @map("deleted_at")
+
+  @@index([extension])
+  @@map("deleted_chapters")
+}
+
+model UploadLog {
+  id          String        @id @default(uuid())
+  dedupeKey   String        @map("dedupe_key")
+  mdChapterId String?       @map("md_chapter_id")
+  outcome     UploadOutcome
+  detail      String?
+  createdAt   DateTime      @default(now()) @map("created_at")
+
+  @@index([dedupeKey])
+  @@map("upload_logs")
+}
+
+enum UntrackedState {
+  NEW
+  CREATING
+  CREATED
+  TRACKED
+  FAILED
+  SKIPPED
+}
+
+model UntrackedManga {
+  id            String         @id @default(uuid())
+  extension     String
+  mangaId       String         @map("manga_id")
+  mangaName     String         @map("manga_name")
+  mangaLanguage String         @map("manga_language")
+  mangaUrl      String         @map("manga_url")
+  state         UntrackedState @default(NEW)
+  mdMangaId     String?        @map("md_manga_id")
+  attempts      Int            @default(0)
+  lastError     String?        @map("last_error")
+  /// When an operator's corrections to this row were last pushed to the
+  /// MangaDex entry, and who pushed them. NULL means never.
+  ///
+  /// Current state, not history: the audit log records the action, but reading
+  /// "has this been applied?" off an append-only log makes a routine question
+  /// depend on log retention. Both nullable, so nothing needs backfilling.
+  mdAppliedAt   DateTime?      @map("md_applied_at")
+  mdAppliedBy   String?        @map("md_applied_by")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  @@unique([extension, mangaId, mangaLanguage])
+  @@index([state])
+  @@map("untracked_manga")
+}
+
+/// external manga id -> MangaDex title id, the database replacement for each
+/// bundle's manga_id_map.json.
+///
+/// Uniqueness is on the EXTERNAL side only — (extension, namespace, mangaId) —
+/// which is what makes the legacy `{mdMangaId: [externalIds]}` file shape
+/// expressible: many external ids may point at one MangaDex title (mangaplus
+/// routinely does, one id per language edition of the same series), while one
+/// external id can never point at two titles.
+model TrackedManga {
+  id        String   @id @default(uuid())
+  extension String
+  /// Sub-id-space within the extension, "" when the extension has just one.
+  ///
+  /// An extension is not guaranteed to have a single flat id space. viz serves
+  /// two catalogues from one extension — `shonenjump` and `vizmanga` — and the
+  /// same numeric id under each is a DIFFERENT series, so keying only on
+  /// (extension, mangaId) silently collapses them into one row. "" is the
+  /// default so the flat case (mangaplus, alpha_manga) is untouched, and it is
+  /// a real value rather than NULL because it participates in a unique key.
+  namespace String   @default("")
+  mangaId   String   @map("manga_id")
+  mdMangaId String   @map("md_manga_id")
+  source    String   @default("auto")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([extension, namespace, mangaId])
+  @@index([extension])
+  @@index([extension, namespace])
+  @@map("tracked_manga")
+}
+
+/// Per-extension runtime configuration the platform does NOT interpret.
+///
+/// The three relations that used to hide in this blob (`same`,
+/// `multi_chapters`, `custom_language`) are tables now — see the three models
+/// below. What is left is genuinely extension-private: mangaplus's `empty`,
+/// `noformat`, `custom` (title regexes), `num2words`,
+/// `override_chapter_numbers` and `no_chapters` are read by the extension in
+/// the worker and never by core, so columns would be modelling another
+/// program's config. The blob keeps them; the platform's own decision inputs do
+/// not live here any more.
+model ExtensionConfig {
+  extension       String   @id
+  overrideOptions Json     @default("{}") @map("override_options")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("extension_configs")
+}
+
+/// `override_options.same`: alternate chapter ids that are the same chapter as
+/// a master id, so the alternate is never uploaded a second time.
+///
+/// Unique on (extension, aliasChapterId) — an alias has exactly ONE master.
+/// That is the constraint the JSON dict could not express: nothing stopped
+/// `{"a": ["x"], "b": ["x"]}`, and findKeyFromListValue would then resolve x to
+/// whichever master happened to be enumerated first, making "was this chapter
+/// already uploaded" depend on JSON key order.
+model ExtensionChapterAlias {
+  id              String   @id @default(uuid())
+  extension       String
+  masterChapterId String   @map("master_chapter_id")
+  aliasChapterId  String   @map("alias_chapter_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@unique([extension, aliasChapterId])
+  @@index([extension])
+  @@index([extension, masterChapterId])
+  @@map("extension_chapter_aliases")
+}
+
+/// `override_options.multi_chapters`: one source chapter that legitimately
+/// backs several MangaDex chapter numbers (a merged release), so the extra
+/// MangaDex chapters are not treated as duplicates to delete.
+///
+/// Unique on all three columns; the declared numbers are a SET, not a sequence
+/// — every consumer in core/processor/dedupe.ts tests membership only
+/// (`allowedNumbers.includes`, `declaredNumbers.includes`, and a `keep` list
+/// whose contents depend on membership rather than iteration order), so no
+/// ordering column is needed to reproduce the JSON array's behaviour.
+model ExtensionMultiChapter {
+  id            String   @id @default(uuid())
+  extension     String
+  chapterId     String   @map("chapter_id")
+  chapterNumber String   @map("chapter_number")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  // Named explicitly: the generated name would be 64 characters and Postgres
+  // silently truncates identifiers at 63, which leaves the schema and the
+  // database disagreeing about what the index is called.
+  @@unique([extension, chapterId, chapterNumber], map: "extension_multi_chapters_unique")
+  @@index([extension])
+  @@map("extension_multi_chapters")
+}
+
+/// `override_options.custom_language`: a MangaDex language code the extension
+/// may publish in beyond the ones its manifest declares.
+///
+/// `sourceLanguage` keeps the name the contract has always used, but the key is
+/// whatever the extension decided to key on and core does not interpret it —
+/// mangaplus keys it by MANGA id (`{"200159": "es-la"}`), overriding the
+/// language of one series. Only the VALUE is load-bearing for the platform: it
+/// widens the set of languages allowed to stay on a title, which is why it is
+/// validated against src/contracts/languages.ts on the way in. Unique on
+/// (extension, sourceLanguage): one override per key, whatever the key means.
+model ExtensionLanguageMap {
+  id               String   @id @default(uuid())
+  extension        String
+  sourceLanguage   String   @map("source_language")
+  mangadexLanguage String   @map("mangadex_language")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@unique([extension, sourceLanguage])
+  @@index([extension])
+  @@map("extension_language_maps")
+}
+
+model ScheduleOverride {
+  extension String   @id
+  hour      Int
+  minute    Int
+  day       Int?
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("schedule_overrides")
+}
+
+model DisabledExtension {
+  extension String   @id
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("disabled_extensions")
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("settings")
+}
+
+enum AdminRole {
+  OWNER
+  ADMIN
+  /// Curates the series map and triages untracked series. Can ADD mappings but
+  /// not change or remove existing ones, and cannot reach runs, workers,
+  /// credentials or settings. This is the role to hand a community contributor.
+  CONTRIBUTOR
+}
+
+// Dashboard operator accounts. ALL auth state lives in Postgres: accounts,
+// Discord linkage, and revocable sessions. The bearer ADMIN_TOKEN remains the
+// break-glass path and the bot/CLI credential.
+model AdminUser {
+  id              String         @id @default(uuid())
+  email           String         @unique
+  displayName     String?        @map("display_name")
+  role            AdminRole      @default(ADMIN)
+  /**
+   * Signups (when enabled) create unapproved accounts; an OWNER approves.
+   */
+  approved        Boolean        @default(true)
+  /**
+   * scrypt "salt:hash" — null when the account is Discord-only.
+   */
+  passwordHash    String?        @map("password_hash")
+  discordId       String?        @unique @map("discord_id")
+  discordUsername String?        @map("discord_username")
+  lastLoginAt     DateTime?      @map("last_login_at")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  sessions        AdminSession[]
+
+  @@map("admin_users")
+}
+
+model AdminSession {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  user      AdminUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique @map("token_hash")
+  actor     String
+  expiresAt DateTime  @map("expires_at")
+  revoked   Boolean   @default(false)
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("admin_sessions")
+}
+
+// Scoped per-client API tokens (`pa_…`, hashed at rest). Blast-radius
+// containment: each machine client (Discord bot, CI publisher, scripts) gets
+// its own token carrying only the scopes it needs, so one exposed credential
+// affects one area — never the whole system. The env ADMIN_TOKEN remains the
+// break-glass root ("*") and should live in a vault, not in clients.
+model ApiToken {
+  id         String    @id @default(uuid())
+  name       String
+  tokenHash  String    @unique @map("token_hash")
+  /**
+   * Scopes, e.g. ["runs:write","workers:read"].
+   */
+  scopes     String[]
+  createdBy  String    @map("created_by")
+  expiresAt  DateTime? @map("expires_at")
+  revoked    Boolean   @default(false)
+  lastUsedAt DateTime? @map("last_used_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  @@map("api_tokens")
+}
+
+model AuditEvent {
+  id        String   @id @default(uuid())
+  actor     String
+  action    String
+  subject   String?
+  detail    Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([action])
+  @@map("audit_events")
+}

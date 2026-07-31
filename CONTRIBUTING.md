@@ -21,8 +21,8 @@ The extension repositories depend on this one only through the
 format. They are not submodules and are not built by this repo's CI; bundles are
 published into a running platform with `publoader-admin bundle publish`.
 
-Inside this repo, everything of substance is under `platform/`. The Python tree at
-the root (`run.py`, `publoader/`, `tests/`) is the **legacy monolith**, kept for
+The legacy Python monolith that used to sit alongside this code has been
+removed; it survives in git history and is described in the migration guide, kept for
 reference during the migration. Do not add to it.
 
 ---
@@ -104,7 +104,7 @@ A change is not done until all of these are true.
 **1. `tsc` is clean.**
 
 ```bash
-cd platform && pnpm run typecheck
+pnpm run typecheck
 ```
 
 Zero errors. Note that `prisma generate` must have run — `src/` imports the
@@ -173,13 +173,12 @@ an existing column.** It generates drop-and-add. In this repo it has twice
 generated SQL that would have discarded every chapter snapshot the platform holds
 — 8.5k uploaded, 25k deleted, 429 unavailable rows at the time. Both were caught
 in review, and both are now hand-written
-(`platform/prisma/migrations/20260729214943_optimise_names/`,
+(`prisma/migrations/20260729214943_optimise_names/`,
 `20260729225058_normalise_chapter_storage/`).
 
 The required workflow:
 
 ```bash
-cd platform
 pnpm exec prisma migrate dev --create-only --name describe_the_change
 ```
 
@@ -295,7 +294,7 @@ of which are database constraints. So:
 - Does any log line, error message, or audit `detail` include a credential? Note
   the specific hazards already handled: a Discord token-exchange failure body can
   echo the authorization code, so it is never logged verbatim
-  (`platform/src/core/api/oauth.ts:187-190`); the MangaDex auth endpoint reports
+  (`src/core/api/oauth.ts:187-190`); the MangaDex auth endpoint reports
   only *whether* tokens exist and when they expire, never their values
   (`routes/ops.ts:219-247`).
 - Does an error response leak internals? The handler collapses every 5xx to
@@ -315,12 +314,12 @@ of which are database constraints. So:
 - **Fail closed.** A new gate with nothing configured should deny, not allow. The
   bot's authz is the reference: an unconfigured admin allowlist denies every
   mutating command and names the variable to set.
-- **The guarded fetch exists twice.** `platform/src/extsdk/guardedFetch.ts` and an
-  inline copy in `platform/runner-node/runner.mjs`, because the runner executes
+- **The guarded fetch exists twice.** `src/extsdk/guardedFetch.ts` and an
+  inline copy in `runner-node/runner.mjs`, because the runner executes
   under a read allowlist that cannot see `dist/`. Change one, change the other.
 - **Comments explain why.** A comment restating the next line will be asked about.
 - **Metrics that measure liveness** must not be written by the process being
-  measured — see the note at `platform/src/metrics.ts:19-33`.
+  measured — see the note at `src/metrics.ts:19-33`.
 
 ---
 
@@ -329,12 +328,12 @@ of which are database constraints. So:
 Before marking a PR ready:
 
 ```bash
-cd platform
 
 pnpm exec prisma generate       # if the schema changed
 pnpm run typecheck              # zero errors
 pnpm run lint                   # zero warnings
 pnpm test                       # unit
+./test/browser/run.sh           # dashboard, in real Chrome (needs Chrome + a Postgres)
 pnpm run test:integration       # needs a real Postgres — check for skips
 ```
 
@@ -356,13 +355,11 @@ lease expiry and reassignment work end to end, and it takes about two minutes.
 ## Where to ask
 
 - **How does X work?** [docs/architecture-guide.md](docs/architecture-guide.md),
-  then the code. The comments in `platform/src/core/store/jobs.ts`,
+  then the code. The comments in `src/core/store/jobs.ts`,
   `core/api/scopes.ts`, and `core/ingest/ingest.ts` carry the reasoning behind the
   parts that look surprising.
-- **Why is X like this?** [docs/target-architecture.md](docs/target-architecture.md)
+- **Why is X like this?** [docs/architecture-guide.md](docs/architecture-guide.md)
   for the design decisions,
-  [docs/architecture-assessment.md](docs/architecture-assessment.md) for the legacy
-  failure modes that motivated them, and `git log` for everything since.
 - **Is this a security-relevant change?**
   [docs/security-trust-model.md](docs/security-trust-model.md) has the control
   matrix and the worker-fabrication analysis. If your change touches the worker
@@ -385,8 +382,6 @@ lease expiry and reassignment work end to end, and it takes about two minutes.
 | [docs/data-model.md](docs/data-model.md) | You are touching the schema or a query |
 | [docs/extension-guide.md](docs/extension-guide.md) | You are writing or porting an extension |
 | [docs/glossary.md](docs/glossary.md) | A term is unfamiliar |
-| [docs/target-architecture.md](docs/target-architecture.md) | You want the binding design reference and its rationale |
-| [docs/architecture-assessment.md](docs/architecture-assessment.md) | You want to know what the legacy system got wrong |
 | [docs/security-trust-model.md](docs/security-trust-model.md) | Your change touches trust, credentials, or the worker boundary |
 | [docs/deployment.md](docs/deployment.md) | You are standing up staging or production |
 | [docs/operations.md](docs/operations.md) | Something is wrong in a running deployment |
@@ -394,4 +389,3 @@ lease expiry and reassignment work end to end, and it takes about two minutes.
 | [docs/ipc-to-api-mapping.md](docs/ipc-to-api-mapping.md) | You are looking for the endpoint that replaced a legacy IPC command |
 | [docs/bot.md](docs/bot.md) | You are setting up or extending the Discord bot |
 | [docs/webhooks.md](docs/webhooks.md) | Publishing extension bundles from a GitHub push |
-| [docs/implementation-plan.md](docs/implementation-plan.md) | Historical: the original milestone plan |

@@ -9,7 +9,7 @@ Both must move to HTTPS against the core admin API.
 
 **The dashboard half is already done.** It is no longer a separate app holding
 its own copy of the credential: core-api serves it as static assets at the
-domain root (`platform/src/core/api/dashboard/`) and it calls the same
+domain root (`src/core/api/dashboard/`) and it calls the same
 `/api/v1/admin/*` endpoints as everything else. Operators sign in with their
 own accounts — email + password or Discord — and get a revocable session
 cookie; the admin token is the break-glass path only. The "Dashboard" column
@@ -39,7 +39,7 @@ publoader-dash` (CSRF). Bearer clients are unaffected and should not send it.
 ## Command mapping
 
 Base path for every endpoint below is `/api/v1/admin`. "CLI" is the
-`publoader-admin` equivalent (`platform/src/cli/admin.ts`).
+`publoader-admin` equivalent (`src/cli/admin.ts`).
 
 ### Direct equivalents
 
@@ -97,7 +97,7 @@ surface them because they are where operational problems now appear.
 | `restart_workers` | Killed and respawned four `multiprocessing.Process` children inside one container. The upload workers are now separate container replicas and the scrape workers are remote hosts. | Upload-task workers: `docker compose restart core-uploader`. Scrape workers: `workers drain <id>` then restart the remote agent, then `workers activate <id>`. In-flight work is leased and requeues automatically either way. |
 | `kill_tasks` | Drained an in-memory `queue.Queue` and restarted local children. There is no in-memory queue — every unit of work is a durable row. | `jobs cancel <id>` per job. **Bulk cancel is a gap** (see below). |
 | `logs` | Tailed `*.log` files from the scheduler's own filesystem. Work now executes on machines the core cannot read. | Container logs via the host log driver (`docker compose logs -f core-api`). For a failure, the diagnostic path is `runs show <id>` → per-job `lastError` → `dead-letter` → `quarantine` → `audit`. **Centralised log aggregation is a gap** (see below). |
-| `config_show` | Read a local `config.ini` through `configparser`. | Configuration is environment/Docker-secret driven (`platform/src/config.ts`). Inspect with `docker compose config` on the core host; secrets are deliberately not exposed over the API. |
+| `config_show` | Read a local `config.ini` through `configparser`. | Configuration is environment/Docker-secret driven (`src/config.ts`). Inspect with `docker compose config` on the core host; secrets are deliberately not exposed over the API. |
 | `config_set` | Rewrote `config.ini` in place and only affected that one process. | Edit the compose env / secret file and redeploy. Nothing that changes MangaDex credentials or database URLs should be settable from a Discord message. |
 | `mdauth_status` | Read the local `mdauth.json`. | **Gap** — see below. Only `core-uploader` holds MD credentials now. |
 | `force_login` | Forced a MangaDex password-grant login and rewrote `mdauth.json`; other processes kept stale copies. | **Gap** — see below. |
@@ -106,7 +106,7 @@ surface them because they are where operational problems now appear.
 ## Gaps to close before the bot and dashboard can fully cut over
 
 These are the commands with no v1 equivalent. Each is a small, well-scoped
-addition to `platform/src/core/api/routes/admin.ts`; none blocks the data
+addition to `src/core/api/routes/admin.ts`; none blocks the data
 migration, but the bot loses a feature until they land.
 
 1. **MangaDex auth visibility** (`mdauth_status`, `force_login`, `logout`).
@@ -172,13 +172,13 @@ migration, but the bot loses a feature until they land.
 ## Discord bot: the port, as built
 
 Date: 2026-07-29. The bot half of this document is now done. It lives at
-`platform/src/bot/` with its entrypoint at `platform/src/services/bot.ts`;
+`src/bot/` with its entrypoint at `src/services/bot.ts`;
 setup and the command reference are in `docs/bot.md`.
 
 Two things above are now out of date and worth stating plainly:
 
 1. **"Token scope … per-client tokens with scopes are a follow-up"** — they have
-   landed. The bot holds a scoped `pa_…` token (`platform/src/core/api/scopes.ts`,
+   landed. The bot holds a scoped `pa_…` token (`src/core/api/scopes.ts`,
    `routes/tokens.ts`), *not* `ADMIN_TOKEN`, and every admin route enforces a
    scope. The bot's token is no longer equivalent to shell access to the control
    plane; it is equivalent to its scope list.
@@ -310,8 +310,6 @@ This document is one of the set below. Start at
 | [data-model.md](data-model.md) | Every table, column, index, and invariant |
 | [extension-guide.md](extension-guide.md) | Writing an extension: the v2 contract, the manifest, the sandbox, publishing |
 | [glossary.md](glossary.md) | Every load-bearing term, with the file that defines it |
-| [target-architecture.md](target-architecture.md) | The binding design reference and the rationale for each choice |
-| [architecture-assessment.md](architecture-assessment.md) | The legacy Python system and the failure modes that motivated the rewrite |
 | [security-trust-model.md](security-trust-model.md) | Threat model, control matrix, secrets inventory, and what a worker can and cannot do |
 | [deployment.md](deployment.md) | Standing up the core and worker hosts, the tunnel and WAF, upgrades, backups |
 | [operations.md](operations.md) | Day-2 runbooks: triage, worker lifecycle, secret rotation, dead letters, incidents |
@@ -319,6 +317,5 @@ This document is one of the set below. Start at
 | [ipc-to-api-mapping.md](ipc-to-api-mapping.md) | Which endpoint replaced each legacy IPC command |
 | [bot.md](bot.md) | Discord bot setup, the admin-gating model, and the command reference |
 | [webhooks.md](webhooks.md) | Publishing extension bundles from a GitHub push: setup, the signature check, and why CI-side publishing is preferred |
-| [implementation-plan.md](implementation-plan.md) | Historical: the original milestone plan |
 | [../README.md](../README.md) | What publoader is, and the five-minute quickstart |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | Branch workflow, definition of done, and the review checklist |

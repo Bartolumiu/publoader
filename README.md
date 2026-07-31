@@ -51,10 +51,9 @@ all the way through.
 
 ## Get running in five minutes
 
-Requires Node 24, pnpm, and Docker. Everything runs from `platform/`.
+Requires Node 24, pnpm, and Docker.
 
 ```bash
-cd platform
 pnpm install
 pnpm exec prisma generate
 
@@ -98,7 +97,7 @@ Tear it down with `./scripts/publoader dev down -v`.
 
 ## Environments
 
-`platform/scripts/publoader` is the single entry point for all three
+`scripts/publoader` is the single entry point for all three
 environments. It exists because three things have to agree for two environments to
 coexist safely — the env file, the compose project name (which namespaces
 containers, networks, **and the database volume**), and the ingress overlay — and
@@ -128,9 +127,9 @@ Published images:
 
 | Image | Runs |
 | --- | --- |
-| `ardax/publoader-core:2.0.0` | `core-api`, `core-scheduler`, `core-processor`, `core-uploader`, and the Discord bot — one image, several entry points |
-| `ardax/publoader-core-migrate:2.0.0` | The one-shot migration container, the only thing able to alter the schema |
-| `ardax/publoader-worker:2.0.0` | The worker agent and the extension runtime |
+| `ardax/publoader-core:2.1.1` | `core-api`, `core-scheduler`, `core-processor`, `core-uploader`, and the Discord bot — one image, several entry points |
+| `ardax/publoader-core-migrate:2.1.1` | The one-shot migration container, the only thing able to alter the schema |
+| `ardax/publoader-worker:2.1.1` | The worker agent and the extension runtime |
 
 Base images are pinned by digest; the tag in an env file is what a deploy runs.
 Full procedure in [docs/deployment.md](docs/deployment.md).
@@ -147,8 +146,6 @@ Full procedure in [docs/deployment.md](docs/deployment.md).
 | [data-model.md](docs/data-model.md) | Every table, column, index, and invariant, plus why five columns are still JSONB |
 | [extension-guide.md](docs/extension-guide.md) | Writing an extension: the v2 contract, the manifest, the sandbox, publishing |
 | [glossary.md](docs/glossary.md) | Every load-bearing term, with the file that defines it |
-| [target-architecture.md](docs/target-architecture.md) | The binding design reference and the rationale for each choice |
-| [architecture-assessment.md](docs/architecture-assessment.md) | The legacy Python system and the failure modes that motivated the rewrite |
 | [security-trust-model.md](docs/security-trust-model.md) | Threat model, control matrix, secrets inventory, and what a worker can and cannot do |
 | [deployment.md](docs/deployment.md) | Standing up the core and worker hosts, the Cloudflare tunnel and WAF, upgrades, backups |
 | [operations.md](docs/operations.md) | Day-2 runbooks: triage, worker lifecycle, secret rotation, dead letters, incidents |
@@ -156,7 +153,6 @@ Full procedure in [docs/deployment.md](docs/deployment.md).
 | [ipc-to-api-mapping.md](docs/ipc-to-api-mapping.md) | Which endpoint replaced each legacy IPC command |
 | [bot.md](docs/bot.md) | Discord bot setup, the admin-gating model, and the command reference |
 | [webhooks.md](docs/webhooks.md) | Publishing extension bundles from a GitHub push: setup, the signature check, and why CI-side publishing is preferred |
-| [implementation-plan.md](docs/implementation-plan.md) | Historical: the original milestone plan |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Branch workflow, definition of done, and the review checklist |
 
 ---
@@ -164,7 +160,6 @@ Full procedure in [docs/deployment.md](docs/deployment.md).
 ## Layout
 
 ```
-platform/                     everything current
 ├── prisma/
 │   ├── schema.prisma         the single source of truth for state
 │   └── migrations/           versioned; two are hand-written to preserve data
@@ -184,11 +179,10 @@ platform/                     everything current
 │   ├── cli/                  publoader-admin, and the legacy importers
 │   └── services/             the six process entry points
 ├── runner-node/runner.mjs    the sandbox. Self-contained; no platform imports
-├── test/                     unit / integration (real Postgres) / e2e (Docker)
+├── test/                     unit / integration (real Postgres) / browser (Chrome) / e2e (Docker)
 ├── docker/                   core, worker, and dev compose stacks + Dockerfiles
 └── scripts/publoader         the dev/staging/prod entry point
 docs/                         the documentation set above
-run.py, publoader/, tests/    the LEGACY Python monolith — reference only
 ```
 
 Extensions live in their own repositories:
@@ -203,7 +197,7 @@ into a running platform with `publoader-admin bundle publish`.
 
 - **How does something work?** Start with
   [docs/architecture-guide.md](docs/architecture-guide.md), then the code — the
-  comments in `platform/src/core/store/jobs.ts`, `core/api/scopes.ts`, and
+  comments in `src/core/store/jobs.ts`, `core/api/scopes.ts`, and
   `core/ingest/ingest.ts` carry the reasoning behind the parts that look
   surprising.
 - **Something is broken in a deployment?**

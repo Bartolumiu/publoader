@@ -1,8 +1,8 @@
 # HTTP API reference
 
 Every endpoint the platform serves, derived from the route files. The server is
-built in [`platform/src/core/api/server.ts`](../platform/src/core/api/server.ts);
-routes live in `platform/src/core/api/routes/`, `session.ts`, `oauth.ts`, and
+built in [`src/core/api/server.ts`](../src/core/api/server.ts);
+routes live in `src/core/api/routes/`, `session.ts`, `oauth.ts`, and
 `dashboard.ts`.
 
 Only `core-api` serves this API. The other three core services expose a small
@@ -14,7 +14,7 @@ Only `core-api` serves this API. The other three core services expose a small
 
 There are two strictly separated token audiences, and crossing them is a 401
 regardless of how privileged the token is (`auth.ts:17-25`, tested at
-`platform/test/integration/api.test.ts:97`).
+`test/integration/api.test.ts:97`).
 
 | Audience | Credential | Reaches |
 | --- | --- | --- |
@@ -40,7 +40,7 @@ Dashboard accounts have three roles (`scopes.ts:103-121`):
 That an API token is never `OWNER` is what makes "no token can mint or widen
 another token" hold: token management requires both `users:admin` **and** the
 owner role (`routes/tokens.ts:24-29`, tested at
-`platform/test/integration/tokens.test.ts:129`).
+`test/integration/tokens.test.ts:129`).
 
 If `ADMIN_TOKEN` is unset the entire admin API answers **503**, not 200
 (`auth.ts:103-106`).
@@ -56,8 +56,8 @@ x-requested-with: publoader-dash
 ```
 
 Missing it is a **403**. Bearer-authenticated writes are unaffected. Tested at
-`platform/test/integration/dashboard.test.ts:306` and
-`platform/test/integration/ops.test.ts:423`.
+`test/integration/dashboard.test.ts:306` and
+`test/integration/ops.test.ts:423`.
 
 ### Actor attribution
 
@@ -65,7 +65,7 @@ Machine credentials may name the human they act for with `x-actor` (max 64
 chars). A `pa_…` token's audit actor becomes `token:<name> for <claimed>`;
 sessions are always named by their own account and **may not** claim someone else
 (`routes/admin.ts:33-50`). The Discord bot always sends
-`x-actor: discord:<username>` (`platform/src/bot/apiClient.ts:362-364`).
+`x-actor: discord:<username>` (`src/bot/apiClient.ts:362-364`).
 
 ### Rate limits
 
@@ -95,7 +95,7 @@ raise it explicitly.
 ## Worker API
 
 Base: `/api/v1/worker`. Auth: `pw_…` bearer, except enrollment.
-Client: [`platform/src/worker/coreApi.ts`](../platform/src/worker/coreApi.ts).
+Client: [`src/worker/coreApi.ts`](../src/worker/coreApi.ts).
 
 ### `POST /enroll`
 
@@ -200,7 +200,7 @@ burn the TTL they are trying to extend (`worker/coreApi.ts:311-323`).
 
 ### `POST /jobs/:jobId/results`
 
-Submit the [result envelope](../platform/src/contracts/envelope.ts). Body limit
+Submit the [result envelope](../src/contracts/envelope.ts). Body limit
 raised to **32 MiB**.
 
 | Status | Meaning |
@@ -404,7 +404,7 @@ is logged even if the publish then fails for another reason).
 | `422` | missing or invalid `manifest.json`, invalid zip, or the bundle was rejected — a Python runtime without the override, a missing/empty entrypoint, a non-`.mjs`/`.js` entrypoint, or an entrypoint with no default export |
 
 `routes/admin.ts:283-337`; rejection rules in `store/bundles.ts:37-46`,
-`172-209`, tested at `platform/test/unit/bundlePublish.test.ts`.
+`172-209`, tested at `test/unit/bundlePublish.test.ts`.
 
 ### Untracked series
 
@@ -425,7 +425,7 @@ is logged even if the publish then fails for another reason).
 | `POST` | `/upload-tasks/:id/cancel` | `runs:write` | `PENDING`/`FAILED`/`DEAD_LETTER` → `DONE` with the reason in `lastError`. **`409` for a `LEASED` task** — an uploader owns it mid-flight and forcing it would race into a duplicate upload or a lost result |
 | `POST` | `/upload-tasks/requeue-stale` | `runs:write` | Manual lease sweep → `{ok, requeued}` |
 
-`routes/ops.ts:103-217`, tested at `platform/test/integration/ops.test.ts`.
+`routes/ops.ts:103-217`, tested at `test/integration/ops.test.ts`.
 
 ### MangaDex session
 
@@ -460,7 +460,7 @@ token can mint or widen another (`routes/tokens.ts:24-29`).
 
 > `GET /api/v1/admin/tokens/self` does **not** exist. The Discord bot's
 > `/whoami` probes for it and treats 403/404/405 as "unknown"
-> (`platform/src/bot/apiClient.ts:444`), so the command degrades rather than
+> (`src/bot/apiClient.ts:444`), so the command degrades rather than
 > failing — but do not build against that path.
 
 ### Accounts and sessions
@@ -483,7 +483,7 @@ from inheriting it by accident (`routes/users.ts:34-37`).
 | `POST` | `/settings/signups` | `{enabled}` — the Discord self-signup gate, off unless turned on |
 
 `routes/users.ts:41-143`, tested at
-`platform/test/integration/dashboard.test.ts:184`.
+`test/integration/dashboard.test.ts:184`.
 
 ---
 
@@ -516,13 +516,13 @@ Discord identity resolution is deliberately ordered — a linked `discord_id` is
 the account; otherwise a **verified** email may claim an existing account;
 otherwise it is a gated signup that always lands unapproved
 (`api/oauth.ts:49-105`, unit-tested at
-`platform/test/unit/discordOauth.test.ts`).
+`test/unit/discordOauth.test.ts`).
 
 ---
 
 ## GitHub push webhook
 
-`platform/src/core/api/routes/webhooks.ts`. Builds and publishes extension bundles
+`src/core/api/routes/webhooks.ts`. Builds and publishes extension bundles
 from a push. Full setup, and the argument for publishing from CI instead, in
 [webhooks.md](webhooks.md).
 
@@ -577,7 +577,7 @@ Only these exact routes are claimed — there is **no root-level wildcard**, so 
 dashboard can never shadow `/healthz`, `/readyz`, `/metrics`, or the API
 namespaces, and an unknown top-level path still 404s
 (`dashboard.ts:48-57`, tested at
-`platform/test/integration/dashboard.test.ts:492`).
+`test/integration/dashboard.test.ts:492`).
 
 Assets are served under a strict CSP with no `unsafe-inline`, plus
 `x-frame-options: DENY` (`dashboard.ts:27-37`):
@@ -637,7 +637,7 @@ heartbeat file the entry point refreshes on work-related traffic with the core
 
 ### Exported metrics
 
-`platform/src/metrics.ts`.
+`src/metrics.ts`.
 
 | Metric | Type | Labels |
 | --- | --- | --- |

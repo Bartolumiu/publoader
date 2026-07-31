@@ -76,7 +76,7 @@ mongosh "$MONGODB_URI" --quiet --eval '
 Full detail is in `docs/deployment.md`; the short version:
 
 ```bash
-cd $REPO/platform/docker/core
+cd $REPO/docker/core
 cp .env.example .env
 # Fill in: POSTGRES_PASSWORD, ADMIN_TOKEN (openssl rand -base64 48),
 # MANGADEX_*, DISCORD_WEBHOOK_URLS, TUNNEL_TOKEN.
@@ -93,8 +93,8 @@ legacy is still the live system:
 export PUBLOADER_API_URL=https://publoader.ardax.dev
 export PUBLOADER_ADMIN_TOKEN=<the ADMIN_TOKEN you just set>
 
-node $REPO/platform/dist/src/cli/admin.js pause     # indefinite
-node $REPO/platform/dist/src/cli/admin.js stats     # expect paused: true
+node $REPO/dist/src/cli/admin.js pause     # indefinite
+node $REPO/dist/src/cli/admin.js stats     # expect paused: true
 ```
 
 (If you have not built locally, run the CLI from the image instead —
@@ -124,7 +124,7 @@ Do a dry run first. It reads everything and writes nothing, so it costs only
 time and tells you whether every document is accounted for:
 
 ```bash
-cd $REPO/platform/docker/core
+cd $REPO/docker/core
 
 docker compose run --rm --no-deps \
   -e MONGODB_URI="$MONGODB_URI" \
@@ -162,7 +162,7 @@ timestamps there; the transient `upload_tasks.chapter` payload keeps them as
 ISO-8601 strings inside JSONB. Any key a legacy document carries that has no
 column (`_id`, the GridFS `images` list, `archivedAt`) is parked in that table's
 nullable `extra` JSONB rather than dropped, so a migrated row stays traceable
-back to Mongo — see §3.1 of `target-architecture.md`. Queue documents keep their
+back to Mongo. Queue documents keep their
 non-chapter sidecars (`payload`, `oldInfo`, `unavailableAt`) in the JSONB
 payload, since the upload workers read them alongside the chapter.
 Images larger than 20 MiB are skipped with a warning (they are not real pages).
@@ -249,7 +249,7 @@ For each extension directory (one containing `manifest.json`):
 cd $EXTENSIONS_REPO
 git rev-parse HEAD                      # record this
 
-node $REPO/platform/dist/src/cli/admin.js bundle publish ./src/mangaplus \
+node $REPO/dist/src/cli/admin.js bundle publish ./src/mangaplus \
   --source-commit "$(git rev-parse HEAD)"
 ```
 
@@ -261,7 +261,7 @@ problem with the manifest, not a transport error — read the 422 message.
 Publish from **both** extension repos (public and private). Then:
 
 ```bash
-node $REPO/platform/dist/src/cli/admin.js extensions list
+node $REPO/dist/src/cli/admin.js extensions list
 ```
 
 Every extension you expect to run must appear here, at the version you expect.
@@ -292,7 +292,7 @@ Check the counts against the JSON files, per extension:
 jq '[.[] | length] | add' ./src/mangaplus/manga_id_map.json
 
 # What the database got.
-node $REPO/platform/dist/src/cli/admin.js tracked list mangaplus | tail -1
+node $REPO/dist/src/cli/admin.js tracked list mangaplus | tail -1
 ```
 
 These must match. If the database count is lower, the usual causes are a
@@ -303,7 +303,7 @@ duplicate external ids in the JSON (which collapse onto the
 Then the override options:
 
 ```bash
-node $REPO/platform/dist/src/cli/admin.js ext-config get mangaplus \
+node $REPO/dist/src/cli/admin.js ext-config get mangaplus \
   | diff - <(jq -S . ./src/mangaplus/override_options.json) && echo "match"
 ```
 
@@ -333,14 +333,14 @@ letting it act on them.
 ### 4a. Enrol one trusted worker
 
 ```bash
-node $REPO/platform/dist/src/cli/admin.js enroll-token create --trust \
+node $REPO/dist/src/cli/admin.js enroll-token create --trust \
   --note "shadow-phase worker"
 ```
 
 On the worker host:
 
 ```bash
-cd $REPO/platform/docker/worker
+cd $REPO/docker/worker
 cp .env.example .env
 # Set WORKER_NAME and paste the token as ENROLL_TOKEN.
 docker compose up -d --build
@@ -349,7 +349,7 @@ docker compose up -d --build
 Back on the operator machine:
 
 ```bash
-node $REPO/platform/dist/src/cli/admin.js workers list
+node $REPO/dist/src/cli/admin.js workers list
 # STATUS ACTIVE, TRUST TRUSTED, HEARTBEAT within a minute
 ```
 
@@ -361,7 +361,7 @@ not upload them — the platform is paused, so `core-uploader` is not draining
 the queue.
 
 ```bash
-node $REPO/platform/dist/src/cli/admin.js runs trigger mangaplus --kind FORCE
+node $REPO/dist/src/cli/admin.js runs trigger mangaplus --kind FORCE
 ```
 
 > If the platform is paused, `runs trigger` returns 409. For the shadow test,
@@ -374,7 +374,7 @@ node $REPO/platform/dist/src/cli/admin.js runs trigger mangaplus --kind FORCE
 Watch it:
 
 ```bash
-node $REPO/platform/dist/src/cli/admin.js runs show <runId>
+node $REPO/dist/src/cli/admin.js runs show <runId>
 ```
 
 ### 4c. Compare against legacy
@@ -418,7 +418,7 @@ This is the actual gate. Check all four:
    equivalent, so give it a careful first look:
 
    ```bash
-   node $REPO/platform/dist/src/cli/admin.js untracked list
+   node $REPO/dist/src/cli/admin.js untracked list
    ```
 
    Every series the extension reported that has no `tracked_manga` mapping
@@ -473,7 +473,7 @@ that legacy *updated in place* (edits, changed metadata) are rewritten rather
 than skipped:
 
 ```bash
-cd $REPO/platform/docker/core
+cd $REPO/docker/core
 
 docker compose run --rm --no-deps \
   -e MONGODB_URI="$MONGODB_URI" -e MONGODB_DB_NAME="$MONGODB_DB_NAME" \
@@ -491,8 +491,8 @@ SQLite, and you paused legacy in 5.1, so the platform is now paused by that
 setting as well as by yours:
 
 ```bash
-node $REPO/platform/dist/src/cli/admin.js resume
-node $REPO/platform/dist/src/cli/admin.js stats     # paused: false
+node $REPO/dist/src/cli/admin.js resume
+node $REPO/dist/src/cli/admin.js stats     # paused: false
 ```
 
 **5.5 — Watch the first hour.** The migrated `upload_tasks` queue drains
@@ -500,7 +500,7 @@ immediately once resumed. This is the highest-risk window in the whole
 migration, because it is the first time the platform writes to MangaDex.
 
 ```bash
-watch -n 30 "node $REPO/platform/dist/src/cli/admin.js stats"
+watch -n 30 "node $REPO/dist/src/cli/admin.js stats"
 ```
 
 Check on MangaDex directly that the first few chapters uploaded correctly
@@ -523,8 +523,8 @@ platform has uploaded much, and gets progressively more manual after that.
 **Immediate rollback (platform has uploaded little or nothing):**
 
 ```bash
-node $REPO/platform/dist/src/cli/admin.js pause
-docker compose -f $REPO/platform/docker/core/docker-compose.yml stop \
+node $REPO/dist/src/cli/admin.js pause
+docker compose -f $REPO/docker/core/docker-compose.yml stop \
   core-scheduler core-processor core-uploader
 docker compose -f $LEGACY/docker-compose.yml start publoader
 # then unpause legacy over Discord: /resume
@@ -653,8 +653,6 @@ This document is one of the set below. Start at
 | [data-model.md](data-model.md) | Every table, column, index, and invariant |
 | [extension-guide.md](extension-guide.md) | Writing an extension: the v2 contract, the manifest, the sandbox, publishing |
 | [glossary.md](glossary.md) | Every load-bearing term, with the file that defines it |
-| [target-architecture.md](target-architecture.md) | The binding design reference and the rationale for each choice |
-| [architecture-assessment.md](architecture-assessment.md) | The legacy Python system and the failure modes that motivated the rewrite |
 | [security-trust-model.md](security-trust-model.md) | Threat model, control matrix, secrets inventory, and what a worker can and cannot do |
 | [deployment.md](deployment.md) | Standing up the core and worker hosts, the tunnel and WAF, upgrades, backups |
 | [operations.md](operations.md) | Day-2 runbooks: triage, worker lifecycle, secret rotation, dead letters, incidents |
@@ -662,6 +660,5 @@ This document is one of the set below. Start at
 | [ipc-to-api-mapping.md](ipc-to-api-mapping.md) | Which endpoint replaced each legacy IPC command |
 | [bot.md](bot.md) | Discord bot setup, the admin-gating model, and the command reference |
 | [webhooks.md](webhooks.md) | Publishing extension bundles from a GitHub push: setup, the signature check, and why CI-side publishing is preferred |
-| [implementation-plan.md](implementation-plan.md) | Historical: the original milestone plan |
 | [../README.md](../README.md) | What publoader is, and the five-minute quickstart |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | Branch workflow, definition of done, and the review checklist |

@@ -18,3 +18,27 @@ __pycache__
 publoader
 tests
 scripts
+
+# Merged from platform/.dockerignore when platform/ was promoted.
+node_modules
+dist
+*.tsbuildinfo
+test
+docker
+.dockerignore
+runner
+.gitignore
+.vscode
+.idea
+**/.DS_Store
+.env
+.env.*
+!.env.example
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.venv
+venv
+*.log
+coverage
+.nyc_output
