@@ -90,7 +90,7 @@ x-core-build: &core-build
   # referencing the same `image:` tag everywhere means all four are guaranteed
   # to run the identical build — a mixed-version control plane is a class of
   # bug that is very hard to see.
-  image: ${PUBLOADER_CORE_IMAGE:-ardax/publoader-core:2.0.0}
+  image: ${PUBLOADER_CORE_IMAGE:-ardax/publoader-core:2.1.1}
   build:
     context: ../../..
     dockerfile: platform/docker/core/Dockerfile
@@ -162,7 +162,7 @@ services:
       context: ../../..
       dockerfile: platform/docker/core/Dockerfile
       target: migrate
-    image: ${PUBLOADER_MIGRATE_IMAGE:-ardax/publoader-core-migrate:2.0.0}
+    image: ${PUBLOADER_MIGRATE_IMAGE:-ardax/publoader-core-migrate:2.1.1}
     restart: "no"
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://publoader:${POSTGRES_PASSWORD}@postgres:5432/publoader?schema=public&connection_limit=5}
