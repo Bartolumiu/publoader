@@ -37,6 +37,105 @@
  * is a result, not a crash.
  */
 
+
+// --- browser headers -------------------------------------------------------
+// A verbatim copy of src/extsdk/browserHeaders.ts, for the same reason the rest
+// of this file duplicates guardedFetch: the runner is self-contained and imports
+// nothing from dist/. The two must stay in step; browserHeaders.test.ts asserts
+// the profiles here match.
+const BROWSER_PROFILES = [
+  {
+    // Chrome on Windows
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Sec-CH-UA": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": '"Windows"',
+  },
+  {
+    // Chrome on macOS
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Sec-CH-UA": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": '"macOS"',
+  },
+  {
+    // Firefox on Windows — no Sec-CH-UA at all, which is itself correct:
+    // Firefox does not send client hints, and sending them with a Firefox UA
+    // is a contradiction a fingerprinter checks for.
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
+  },
+  {
+    // Safari on macOS — likewise no client hints.
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 " +
+      "(KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+  },
+  {
+    // Chrome on Android
+    "User-Agent":
+      "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
+      "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+    "Sec-CH-UA": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "Sec-CH-UA-Mobile": "?1",
+    "Sec-CH-UA-Platform": '"Android"',
+  },
+];
+
+function browserHeaders({ document: isDoc = false, pick } = {}) {
+  const choose = pick ?? ((n) => Math.floor(Math.random() * n));
+  const profile = BROWSER_PROFILES[choose(BROWSER_PROFILES.length)] ?? BROWSER_PROFILES[0];
+  const headers = {
+    Accept: isDoc
+      ? "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+      : "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+    ...profile,
+  };
+  if (isDoc) {
+    Object.assign(headers, {
+      "Upgrade-Insecure-Requests": "1",
+      "Sec-Fetch-Dest": "document",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "none",
+      "Sec-Fetch-User": "?1",
+    });
+  }
+  return headers;
+}
+
+function isApiLike(url) {
+  const path = url.pathname.toLowerCase();
+  if (/\.(json|xml|proto|pb)$/.test(path)) return true;
+  return /(^|\/)(api|v\d+|graphql|rpc)(\/|$)/.test(path);
+}
+
+function withBrowserHeaders(caller, options) {
+  const out = {};
+  const seen = new Map();
+  const set = (name, value) => {
+    const lower = name.toLowerCase();
+    const existing = seen.get(lower);
+    if (existing !== undefined) delete out[existing];
+    seen.set(lower, name);
+    out[name] = value;
+  };
+  for (const [k, v] of Object.entries(browserHeaders(options))) set(k, v);
+  if (caller) {
+    const entries = Array.isArray(caller)
+      ? caller
+      : typeof caller.entries === "function"
+        ? [...caller.entries()]
+        : Object.entries(caller);
+    for (const [k, v] of entries) set(k, String(v));
+  }
+  return out;
+}
+
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -206,7 +305,15 @@ function createGuardedFetch(allowedHosts) {
       let res;
       state.requestCount += 1;
       try {
-        res = await fetch(url, { ...init, method, body, redirect: "manual", signal });
+        res = await fetch(url, {
+            ...init,
+            // Fresh headers on every request, redirect hop and retry included.
+            headers: withBrowserHeaders(init.headers, { document: !isApiLike(url) }),
+            method,
+            body,
+            redirect: "manual",
+            signal,
+          });
       } catch (err) {
         if (init.signal?.aborted) throw err;
         if (attempt >= FETCH_DEFAULTS.maxRetries || !replayable) throw err;

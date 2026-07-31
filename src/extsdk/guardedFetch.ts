@@ -1,3 +1,4 @@
+import { withBrowserHeaders } from "./browserHeaders.js";
 import { hostAllowed } from "../contracts/manifest.js";
 
 /**
@@ -105,6 +106,19 @@ async function drain(res: Response): Promise<void> {
   }
 }
 
+/**
+ * Is this URL an API call rather than a page a browser would navigate to?
+ *
+ * Only decides which `Accept` and `Sec-Fetch-*` set to send. Getting it wrong is
+ * cosmetic, but asking for HTML on a JSON endpoint is the kind of mismatch a
+ * fingerprinter notices, so it is worth a cheap guess.
+ */
+function isApiLike(url: URL): boolean {
+  const path = url.pathname.toLowerCase();
+  if (/\.(json|xml|proto|pb)$/.test(path)) return true;
+  return /(^|\/)(api|v\d+|graphql|rpc)(\/|$)/.test(path);
+}
+
 export function createGuardedFetch(opts: GuardedFetchOptions): GuardedFetch {
   const allowedHosts = [...opts.allowedHosts];
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
@@ -171,6 +185,10 @@ export function createGuardedFetch(opts: GuardedFetchOptions): GuardedFetch {
       try {
         res = await fetchImpl(url, {
           ...init,
+          // Fresh browser headers on EVERY request issued, which includes each
+          // redirect hop and each retry — rotating only on the first attempt
+          // leaves a pattern of its own. Anything the extension set still wins.
+          headers: withBrowserHeaders(init.headers as never, { document: !isApiLike(url) }),
           method,
           body,
           // Redirects are followed by hand so each hop can be re-checked.
