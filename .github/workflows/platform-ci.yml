@@ -1,17 +1,21 @@
 name: Platform CI
 
-# The TypeScript platform is the repository (the legacy Python
-# stack. Path filters keep this workflow off Python-only changes and vice
-# versa. `pull_request` and `push` both run so a merge to master is verified
-# even if the branch was stale.
+# The TypeScript platform is now the whole repository, so there is nothing to
+# filter this workflow away from — it runs on every change.
+#
+# It previously listed `platform/**` alongside the legacy Python tree. When that
+# tree was deleted and the platform moved to the root, removing the stale entry
+# left the filter matching only this file, which silently disabled CI: pull
+# requests reported no checks at all while still showing as mergeable. No paths
+# filter is the correct answer for a single-project repository, and it cannot
+# fail that way.
+#
+# `pull_request` and `push` both run so a merge to master is verified even if the
+# branch was stale.
 on:
   push:
     branches: [master]
-    paths:
-      - ".github/workflows/platform-ci.yml"
   pull_request:
-    paths:
-      - ".github/workflows/platform-ci.yml"
 
 # A new push supersedes an in-flight run of the same ref; master is never
 # cancelled so the branch protection status is always from the real tip.
