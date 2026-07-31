@@ -376,9 +376,24 @@ docker inspect publoader-prod-core-api-1 \
 # want: publoader-prod_data publoader-prod_edge
 ```
 
-and repair with `docker compose up -d --force-recreate core-api`. The general
-lesson is the same as above: hand-deploying a single service skips the
-guarantees `docker compose up -d` gives you, so verify what you get.
+Neither `up -d` nor `up -d --force-recreate` reliably repairs it. Plain `up -d`
+does nothing at all, because the service's configuration has not changed and
+compose sees no reason to recreate it. `--force-recreate` recreates in place and
+has been observed *causing* this — once dropping `data`, once dropping `edge`.
+What works is removing the container and creating it again:
+
+```bash
+docker compose -p publoader-prod --env-file docker/core/.env.production \
+  -f docker/core/docker-compose.yml rm -sf core-api
+docker compose -p publoader-prod --env-file docker/core/.env.production \
+  -f docker/core/docker-compose.yml up -d core-api
+```
+
+Note this is worth checking even when nothing looks wrong: the service reports
+healthy either way, because its health check is local. With `edge` missing,
+cloudflared cannot reach it and the public site is down while every panel says
+the stack is fine. `docker compose config` is the tiebreaker — if it lists both
+networks, the file is right and only the running container is stale.
 
 **Rolling back a core upgrade** is only safe if the migration was additive. If
 it was not, restore from backup (below) — which is why you take one before a
@@ -437,9 +452,20 @@ becomes incompatible, `workers revoke` is the enforcement mechanism.
 > | `POSTGRES_PASSWORD` | The database, if the port is ever reachable. |
 > | `TUNNEL_TOKEN` | Running a Cloudflare tunnel for the hostname — an attacker can serve traffic as publoader.ardax.dev. |
 >
-> Rotate all four using the procedures below, `TUNNEL_TOKEN` first: it is the one
-> that lets someone else answer on your domain. MangaDex credentials were
-> placeholders at the time and were never exposed.
+> **Status: three of the four are rotated.** `POSTGRES_PASSWORD`, `ADMIN_TOKEN`
+> and `SESSION_SECRET` were replaced on 2026-07-31; the leaked admin token now
+> answers 401 and the leaked database password is refused by the server. The
+> published values for those three are inert.
+>
+> **`TUNNEL_TOKEN` is NOT rotated and cannot be from here** — it is issued by
+> Cloudflare and only the account that owns the tunnel can revoke it. Until it is,
+> anyone who read it can run a tunnel for publoader.ardax.dev. Rotate it in the
+> Cloudflare dashboard (Zero Trust → Networks → Tunnels → the tunnel → refresh
+> its token), put the new value in `.env.production`, and recreate cloudflared.
+>
+> MangaDex credentials were placeholders throughout the exposure window and were
+> never published; they were filled in from `config.ini` afterwards, into a file
+> that is now ignored.
 >
 > Purging them from history (`git filter-repo`, or deleting the branch) is worth
 > doing afterwards, but rotation is what actually ends the exposure — assume the
