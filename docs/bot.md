@@ -92,7 +92,7 @@ missing scope *and* lists the ones the token holds, so you never have to guess.
 
 ## 3. Configure and start
 
-Set these in `platform/docker/core/.env` (see `.env.example` for the annotated
+Set these in `docker/core/.env` (see `.env.example` for the annotated
 versions):
 
 | Variable | Required | Meaning |
@@ -108,8 +108,8 @@ versions):
 Then:
 
 ```
-docker compose -f platform/docker/core/docker-compose.yml up -d publoader-bot
-docker compose -f platform/docker/core/docker-compose.yml logs -f publoader-bot
+docker compose -f docker/core/docker-compose.yml up -d publoader-bot
+docker compose -f docker/core/docker-compose.yml logs -f publoader-bot
 ```
 
 A healthy start logs `admin API reachable; bot authorization model loaded` with
@@ -162,7 +162,7 @@ This bot refuses instead, and says which variable to set:
 Reads stay permissive on purpose: their worst case is a noisy channel, and
 leaving `/status` working while the allowlists are being filled in makes the bot
 useful during setup. This is deliberate and tested
-(`platform/test/unit/botAuthz.test.ts`).
+(`test/unit/botAuthz.test.ts`).
 
 ### Where replies go
 
@@ -299,7 +299,7 @@ plus the renamed `/load`, `/unload`, `/force`, `/clean`, `/history` and
 `/removal`. Each reply says what to do instead.
 
 `/queue` and `/mdauth` used to be on that list and are now real commands (see
-above) — `platform/src/core/api/routes/ops.ts` closed those gaps. `/logs` points
+above) — `src/core/api/routes/ops.ts` closed those gaps. `/logs` points
 at `/errors` for failures and at `docker compose logs` for process output, since
 container logs describe processes rather than platform state.
 
@@ -317,7 +317,7 @@ Full rationale per command: `docs/ipc-to-api-mapping.md`.
 - **Logs** are structured JSON on stdout (pino), like every other service.
   Denied commands log at `warn` with the user, channel and reason — that log is
   the only place a pattern of attempts is visible.
-- **Adding a command.** Add a `BotCommand` to `platform/src/bot/commands.ts`
+- **Adding a command.** Add a `BotCommand` to `src/bot/commands.ts`
   with its `sensitivity`, add the API call to `apiClient.ts` with the scope the
   route enforces, and add a row to the table above. A subcommand present in the
   builder but missing from the `sensitivity` map is treated as `destructive`, so
@@ -327,14 +327,14 @@ Full rationale per command: `docs/ipc-to-api-mapping.md`.
 
 | Path | What |
 |---|---|
-| `platform/src/services/bot.ts` | Process entrypoint: credentials, signals, fatal-exit policy. |
-| `platform/src/bot/bot.ts` | discord.js client, command registration, interaction routing. |
-| `platform/src/bot/commands.ts` | Command definitions and handlers (no discord.js in the handlers). |
-| `platform/src/bot/apiClient.ts` | Typed admin-API client, scope tagging, error messaging. |
-| `platform/src/bot/authz.ts` | The gating model. Pure functions. |
-| `platform/test/unit/botAuthz.test.ts` | Gating, including every fail-closed path. |
-| `platform/test/unit/botCommands.test.ts` | Every handler against a fake API client. |
-| `platform/test/unit/botApiClient.test.ts` | Request construction and error mapping. |
+| `src/services/bot.ts` | Process entrypoint: credentials, signals, fatal-exit policy. |
+| `src/bot/bot.ts` | discord.js client, command registration, interaction routing. |
+| `src/bot/commands.ts` | Command definitions and handlers (no discord.js in the handlers). |
+| `src/bot/apiClient.ts` | Typed admin-API client, scope tagging, error messaging. |
+| `src/bot/authz.ts` | The gating model. Pure functions. |
+| `test/unit/botAuthz.test.ts` | Gating, including every fail-closed path. |
+| `test/unit/botCommands.test.ts` | Every handler against a fake API client. |
+| `test/unit/botApiClient.test.ts` | Request construction and error mapping. |
 
 
 ---

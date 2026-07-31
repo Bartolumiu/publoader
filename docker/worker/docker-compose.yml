@@ -1,7 +1,7 @@
 # Publoader worker host.
 #
 #   cp .env.example .env      # set ENROLL_TOKEN + WORKER_NAME
-#   docker compose -f platform/docker/worker/docker-compose.yml up -d
+#   docker compose -f docker/worker/docker-compose.yml up -d
 #
 # This is what a volunteer or a secondary machine runs. It is deliberately the
 # smallest thing in the system: one container, one outbound HTTPS connection,

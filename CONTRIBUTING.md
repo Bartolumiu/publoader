@@ -21,9 +21,8 @@ The extension repositories depend on this one only through the
 format. They are not submodules and are not built by this repo's CI; bundles are
 published into a running platform with `publoader-admin bundle publish`.
 
-Inside this repo, everything of substance is under `platform/`. The legacy Python
-monolith that used to sit at the root has been removed; it survives in git history
-and is described in the migration guide, kept for
+The legacy Python monolith that used to sit alongside this code has been
+removed; it survives in git history and is described in the migration guide, kept for
 reference during the migration. Do not add to it.
 
 ---
@@ -105,7 +104,7 @@ A change is not done until all of these are true.
 **1. `tsc` is clean.**
 
 ```bash
-cd platform && pnpm run typecheck
+pnpm run typecheck
 ```
 
 Zero errors. Note that `prisma generate` must have run — `src/` imports the
@@ -174,13 +173,12 @@ an existing column.** It generates drop-and-add. In this repo it has twice
 generated SQL that would have discarded every chapter snapshot the platform holds
 — 8.5k uploaded, 25k deleted, 429 unavailable rows at the time. Both were caught
 in review, and both are now hand-written
-(`platform/prisma/migrations/20260729214943_optimise_names/`,
+(`prisma/migrations/20260729214943_optimise_names/`,
 `20260729225058_normalise_chapter_storage/`).
 
 The required workflow:
 
 ```bash
-cd platform
 pnpm exec prisma migrate dev --create-only --name describe_the_change
 ```
 
@@ -296,7 +294,7 @@ of which are database constraints. So:
 - Does any log line, error message, or audit `detail` include a credential? Note
   the specific hazards already handled: a Discord token-exchange failure body can
   echo the authorization code, so it is never logged verbatim
-  (`platform/src/core/api/oauth.ts:187-190`); the MangaDex auth endpoint reports
+  (`src/core/api/oauth.ts:187-190`); the MangaDex auth endpoint reports
   only *whether* tokens exist and when they expire, never their values
   (`routes/ops.ts:219-247`).
 - Does an error response leak internals? The handler collapses every 5xx to
@@ -316,12 +314,12 @@ of which are database constraints. So:
 - **Fail closed.** A new gate with nothing configured should deny, not allow. The
   bot's authz is the reference: an unconfigured admin allowlist denies every
   mutating command and names the variable to set.
-- **The guarded fetch exists twice.** `platform/src/extsdk/guardedFetch.ts` and an
-  inline copy in `platform/runner-node/runner.mjs`, because the runner executes
+- **The guarded fetch exists twice.** `src/extsdk/guardedFetch.ts` and an
+  inline copy in `runner-node/runner.mjs`, because the runner executes
   under a read allowlist that cannot see `dist/`. Change one, change the other.
 - **Comments explain why.** A comment restating the next line will be asked about.
 - **Metrics that measure liveness** must not be written by the process being
-  measured — see the note at `platform/src/metrics.ts:19-33`.
+  measured — see the note at `src/metrics.ts:19-33`.
 
 ---
 
@@ -330,7 +328,6 @@ of which are database constraints. So:
 Before marking a PR ready:
 
 ```bash
-cd platform
 
 pnpm exec prisma generate       # if the schema changed
 pnpm run typecheck              # zero errors
@@ -358,7 +355,7 @@ lease expiry and reassignment work end to end, and it takes about two minutes.
 ## Where to ask
 
 - **How does X work?** [docs/architecture-guide.md](docs/architecture-guide.md),
-  then the code. The comments in `platform/src/core/store/jobs.ts`,
+  then the code. The comments in `src/core/store/jobs.ts`,
   `core/api/scopes.ts`, and `core/ingest/ingest.ts` carry the reasoning behind the
   parts that look surprising.
 - **Why is X like this?** [docs/architecture-guide.md](docs/architecture-guide.md)

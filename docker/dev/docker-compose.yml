@@ -1,10 +1,10 @@
 # Local end-to-end stack: the whole system on one machine, with MangaDex faked.
 #
-#   docker compose -f platform/docker/dev/docker-compose.yml up -d --build
+#   docker compose -f docker/dev/docker-compose.yml up -d --build
 #   curl -s -H 'authorization: Bearer dev-admin-not-a-secret' \
 #        http://127.0.0.1:8100/api/v1/admin/workers | jq
 #   curl -s http://mock-md.../_test/uploads          # see docs/deployment.md
-#   docker compose -f platform/docker/dev/docker-compose.yml down -v
+#   docker compose -f docker/dev/docker-compose.yml down -v
 #
 # What it proves that unit tests cannot: a real Postgres, real leases expiring
 # in real time, two independent workers competing for jobs over HTTP, and the
@@ -38,8 +38,8 @@ x-app-security: &app-security
 x-core-build: &core-build
   image: publoader/core:dev
   build:
-    context: ../../..
-    dockerfile: platform/docker/core/Dockerfile
+    context: ../..
+    dockerfile: docker/core/Dockerfile
 
 # Everything points at the mock instead of MangaDex. The credentials are
 # nonsense because the mock accepts anything — and because a dev stack that
@@ -103,8 +103,8 @@ services:
   migrate:
     <<: *core-build
     build:
-      context: ../../..
-      dockerfile: platform/docker/core/Dockerfile
+      context: ../..
+      dockerfile: docker/core/Dockerfile
       target: migrate
     image: publoader/core-migrate:dev
     restart: "no"

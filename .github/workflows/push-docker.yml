@@ -70,7 +70,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: platform/docker/core/Dockerfile
+          file: docker/core/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
@@ -83,7 +83,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: platform/docker/core/Dockerfile
+          file: docker/core/Dockerfile
           target: migrate
           platforms: linux/amd64,linux/arm64
           push: true
@@ -96,8 +96,8 @@ jobs:
       - name: worker
         uses: docker/build-push-action@v6
         with:
-          context: platform
-          file: platform/docker/worker/Dockerfile
+          context: .
+          file: docker/worker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |

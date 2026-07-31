@@ -1,6 +1,6 @@
 name: Platform CI
 
-# The TypeScript platform lives under platform/ alongside the legacy Python
+# The TypeScript platform is the repository (the legacy Python
 # stack. Path filters keep this workflow off Python-only changes and vice
 # versa. `pull_request` and `push` both run so a merge to master is verified
 # even if the branch was stale.
@@ -8,11 +8,9 @@ on:
   push:
     branches: [master]
     paths:
-      - "platform/**"
       - ".github/workflows/platform-ci.yml"
   pull_request:
     paths:
-      - "platform/**"
       - ".github/workflows/platform-ci.yml"
 
 # A new push supersedes an in-flight run of the same ref; master is never
@@ -32,7 +30,6 @@ env:
 
 defaults:
   run:
-    working-directory: platform
 
 jobs:
   lint-typecheck:
@@ -59,7 +56,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('platform/pnpm-lock.yaml') }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-${{ runner.os }}-
 
       # --frozen-lockfile fails rather than silently updating the lockfile, so
@@ -98,7 +95,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('platform/pnpm-lock.yaml') }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-${{ runner.os }}-
 
       - name: Install
@@ -154,7 +151,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('platform/pnpm-lock.yaml') }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: pnpm-${{ runner.os }}-
 
       - name: Install
@@ -186,13 +183,8 @@ jobs:
       - name: Build core image
         uses: docker/build-push-action@v6
         with:
-          # Repo root, not `platform`: the core image copies `docs/` into the
-          # runtime so the dashboard can serve the operator handbook, and that
-          # is a sibling of `platform/`. A context of `platform` cannot see it,
-          # and the failure is a confusing "/platform/package.json: not found"
-          # rather than anything naming docs. Matches docker/core/docker-compose.yml.
           context: .
-          file: platform/docker/core/Dockerfile
+          file: docker/core/Dockerfile
           push: false
           load: false
           tags: publoader/core:ci
@@ -204,13 +196,8 @@ jobs:
       - name: Build core migrate image
         uses: docker/build-push-action@v6
         with:
-          # Repo root, not `platform`: the core image copies `docs/` into the
-          # runtime so the dashboard can serve the operator handbook, and that
-          # is a sibling of `platform/`. A context of `platform` cannot see it,
-          # and the failure is a confusing "/platform/package.json: not found"
-          # rather than anything naming docs. Matches docker/core/docker-compose.yml.
           context: .
-          file: platform/docker/core/Dockerfile
+          file: docker/core/Dockerfile
           target: migrate
           push: false
           load: false
@@ -221,8 +208,8 @@ jobs:
       - name: Build worker image
         uses: docker/build-push-action@v6
         with:
-          context: platform
-          file: platform/docker/worker/Dockerfile
+          context: .
+          file: docker/worker/Dockerfile
           push: false
           load: false
           tags: publoader/worker:ci

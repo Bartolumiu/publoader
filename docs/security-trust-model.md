@@ -42,7 +42,7 @@ not how much you personally trust the person running it.
 |---|---|
 | **Assets** | `ADMIN_TOKEN` (in memory); the database connection; every worker token hash; every result envelope before validation. |
 | **Trust level** | Fully trusted. It is the policy decision point. |
-| **Authn/authz** | Two strictly separated bearer audiences (`platform/src/core/api/auth.ts`): `pw_…` worker tokens authorise **only** `/api/v1/worker/*`; the admin token authorises **only** `/api/v1/admin/*`. There is no shared session and no token that does both. Comparison is `timingSafeEqual`, with a burned comparison on length mismatch so length is the only observable difference. Worker tokens are sha256-hashed at rest and looked up by hash; the admin token is compared directly. |
+| **Authn/authz** | Two strictly separated bearer audiences (`src/core/api/auth.ts`): `pw_…` worker tokens authorise **only** `/api/v1/worker/*`; the admin token authorises **only** `/api/v1/admin/*`. There is no shared session and no token that does both. Comparison is `timingSafeEqual`, with a burned comparison on length mismatch so length is the only observable difference. Worker tokens are sha256-hashed at rest and looked up by hash; the admin token is compared directly. |
 | **Network exposure** | `expose: 8100` only — reachable from the compose network (i.e. from cloudflared) and nowhere else. |
 | **Hardening** | `read_only` + noexec/nosuid tmpfs, `cap_drop: ALL`, `no-new-privileges`, non-root uid 10001, 768 MB cap. Per-IP rate limiter on enrol, per-worker limiter on the worker scope, per-IP limiter on admin. Body size caps on envelopes, artifacts, and bundles (64 MB). Fastify JSON Schema on transport, strict zod on payloads. Fails **closed**: no `ADMIN_TOKEN` → the admin API answers 503, not 200. |
 | **Residual risks** | Single admin token, unscoped — it grants bundle publishing as well as pause/resume, and the bot holds it while every dashboard operator types it. A bug in envelope handling is reachable pre-validation by any enrolled worker. `/metrics` is unauthenticated and relies on the edge to block it; if the WAF rule is missing, fleet and queue topology leak. |
@@ -326,7 +326,7 @@ Recommended before enabling `auto_create_titles` on anything busy.
 | Discord bot token | Discord bot | Bot's own config | Discord developer portal. |
 | GitHub PAT (legacy `pull`) | **Retired** | Was in `config.ini` | **Revoke outright at decommission.** The bundle pipeline does not need it, and it had write-capable scope on the source tree of a running deployment. |
 
-**Convention.** `platform/src/config.ts` honours `<VAR>_FILE` for **every**
+**Convention.** `src/config.ts` honours `<VAR>_FILE` for **every**
 variable, so any secret can come from a Docker secret file instead of the
 environment — it then never appears in `docker inspect`, in shell history, or
 in a compose file committed by accident. Prefer this for anything above.
@@ -349,7 +349,7 @@ one — the question that decides which credential a given client should carry.
 | Operator password | The operator | Authenticates to a session; the session's role is the authority | Whatever that account's role grants. | scrypt at rest, never returned by any endpoint, login rate-limited per IP (5/min), unapproved accounts refused even with the right password. |
 
 **Recommended scope sets** (`SCOPE_PRESETS` in
-`platform/src/core/api/scopes.ts`, surfaced by `padmin tokens scopes` and the
+`src/core/api/scopes.ts`, surfaced by `padmin tokens scopes` and the
 dashboard's mint form, so the easy path is the least-privilege one):
 
 | Preset | Scopes | For |

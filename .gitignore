@@ -24,3 +24,13 @@ publoader/extensions/.*
 node_modules/
 dist/
 .vite/
+
+# Merged from platform/.gitignore when platform/ was promoted to the root.
+*.tsbuildinfo
+.env.local
+coverage/
+!docker/worker/extensions/
+.env*
+!.env.example
+!.env.production.example
+!.env.staging.example

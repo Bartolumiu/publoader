@@ -51,10 +51,9 @@ all the way through.
 
 ## Get running in five minutes
 
-Requires Node 24, pnpm, and Docker. Everything runs from `platform/`.
+Requires Node 24, pnpm, and Docker.
 
 ```bash
-cd platform
 pnpm install
 pnpm exec prisma generate
 
@@ -98,7 +97,7 @@ Tear it down with `./scripts/publoader dev down -v`.
 
 ## Environments
 
-`platform/scripts/publoader` is the single entry point for all three
+`scripts/publoader` is the single entry point for all three
 environments. It exists because three things have to agree for two environments to
 coexist safely — the env file, the compose project name (which namespaces
 containers, networks, **and the database volume**), and the ingress overlay — and
@@ -161,7 +160,6 @@ Full procedure in [docs/deployment.md](docs/deployment.md).
 ## Layout
 
 ```
-platform/                     everything current
 ├── prisma/
 │   ├── schema.prisma         the single source of truth for state
 │   └── migrations/           versioned; two are hand-written to preserve data
@@ -199,7 +197,7 @@ into a running platform with `publoader-admin bundle publish`.
 
 - **How does something work?** Start with
   [docs/architecture-guide.md](docs/architecture-guide.md), then the code — the
-  comments in `platform/src/core/store/jobs.ts`, `core/api/scopes.ts`, and
+  comments in `src/core/store/jobs.ts`, `core/api/scopes.ts`, and
   `core/ingest/ingest.ts` carry the reasoning behind the parts that look
   surprising.
 - **Something is broken in a deployment?**

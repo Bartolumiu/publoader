@@ -26,7 +26,7 @@ Extensions live in a separate repository (`publoader-extensions`, plus
 ## The v2 contract
 
 Defined in
-[`platform/src/contracts/extensionApi.ts`](../platform/src/contracts/extensionApi.ts).
+[`src/contracts/extensionApi.ts`](../src/contracts/extensionApi.ts).
 A module default-exports a factory; the factory returns something with one
 method.
 
@@ -136,7 +136,7 @@ through Node directly, which is what the sandbox refuses.
 
 This is the platform's own e2e fixture — real, executed by the real runner in CI,
 and deliberately plain ESM with no build step
-([`platform/test/e2e/fixtures/e2etest/`](../platform/test/e2e/fixtures/e2etest/)).
+([`test/e2e/fixtures/e2etest/`](../test/e2e/fixtures/e2etest/)).
 
 `index.mjs`:
 
@@ -233,7 +233,7 @@ doing it *well*.
 ## `manifest.json` field by field
 
 Schema and defaults:
-[`platform/src/contracts/manifest.ts:10-79`](../platform/src/contracts/manifest.ts).
+[`src/contracts/manifest.ts:10-79`](../src/contracts/manifest.ts).
 The schema is `.passthrough()`, so extra keys are preserved rather than rejected —
 but nothing reads them.
 
@@ -253,7 +253,7 @@ but nothing reads them.
 Matching is exact-host or subdomain: `example.com` matches `example.com` and
 `api.example.com`, but **not** `notexample.com`
 (`manifest.ts:89-100`, tested at
-`platform/test/unit/guardedFetch.test.ts:52`).
+`test/unit/guardedFetch.test.ts:52`).
 
 It is enforced at two independent points:
 
@@ -454,7 +454,6 @@ it by hand. Write a `job.json` shaped like the runner's input protocol
 (`runner.mjs:16-22`), then:
 
 ```bash
-cd platform
 node --disallow-code-generation-from-strings --permission \
      --allow-fs-read="$PWD/bundle" --allow-fs-read="$PWD/runner-node" \
      --allow-fs-read="$PWD/work" \
@@ -467,7 +466,7 @@ The last line of stdout is your envelope; everything else is stderr. Running it
 under the real flags is the only way to find out that you were relying on
 something the sandbox denies.
 
-`platform/test/unit/nodeRunner.test.ts` does exactly this against the e2e fixture
+`test/unit/nodeRunner.test.ts` does exactly this against the e2e fixture
 and is worth reading as a template — it covers segment filtering, dropped
 unmapped chapters, `postedChapterIds` handling, and stdout hygiene.
 
@@ -476,7 +475,6 @@ unmapped chapters, `postedChapterIds` handling, and stdout hygiene.
 Bring up the local stack, publish your bundle, trigger a run:
 
 ```bash
-cd platform
 ./scripts/publoader dev up -d --build
 
 export PUBLOADER_API_URL=http://127.0.0.1:8100
@@ -501,7 +499,7 @@ publoader-admin bundle publish <extension-dir> [--source-commit <sha>]
 ```
 
 The build-and-zip step lives in
-[`platform/src/core/webhooks/bundleBuilder.ts`](../platform/src/core/webhooks/bundleBuilder.ts),
+[`src/core/webhooks/bundleBuilder.ts`](../src/core/webhooks/bundleBuilder.ts),
 not in the CLI, because **two callers need it**: an operator on a laptop, and the
 [GitHub push webhook](webhooks.md) building a directory it just extracted from a
 repo archive. Both must produce byte-identical archives for the same input — the
@@ -538,7 +536,7 @@ and whether it was `created`; `created: false` means byte-identical content was
 already published.
 
 If a build is needed and esbuild is not installed, the error says so and tells you
-to run `pnpm install` in `platform/` or ship a prebuilt `index.mjs`
+to run `pnpm install` at the repo root or ship a prebuilt `index.mjs`
 (`bundleBuilder.ts:105-110`).
 
 Publishing needs the `bundles:write` scope — the `ci-publisher` preset is exactly

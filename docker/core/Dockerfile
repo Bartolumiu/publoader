@@ -5,8 +5,8 @@
 # entrypoints (see package.json start:*), so a single build, a single digest
 # and a single upgrade step cover the whole control plane.
 #
-# Build context is platform/ (see platform/.dockerignore):
-#   docker build -f platform/docker/core/Dockerfile -t publoader/core:local platform
+# Build context is the REPO ROOT (see .dockerignore): the image copies docs/
+#   docker build -f docker/core/Dockerfile -t publoader/core:local .
 #
 # ---------------------------------------------------------------------------
 # Base image is pinned BY DIGEST, not by tag: `node:24-bookworm-slim` is a
@@ -62,11 +62,11 @@ WORKDIR /build
 # Dependency install is its own layer keyed only on the manifests, so editing
 # src/ does not re-download the dependency tree.
 FROM base AS deps
-COPY platform/package.json platform/pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml ./
 # --frozen-lockfile: fail rather than silently resolve a different tree than
 # the one reviewed (§8). This REQUIRES pnpm-lock.yaml to be committed; if the
 # build errors with "no lockfile found", generate it with `pnpm install` in
-# platform/ and commit the result — do not "fix" it by dropping the flag.
+# the repo root and commit the result — do not "fix" it by dropping the flag.
 # NODE_ENV=production would skip devDependencies, and we need tsc/prisma here.
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
     NODE_ENV=development pnpm install --frozen-lockfile
@@ -76,9 +76,9 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 # prisma generate + tsc. Both need devDependencies, neither belongs in the
 # runtime image.
 FROM deps AS build
-COPY platform/tsconfig.json ./
-COPY platform/prisma ./prisma
-COPY platform/src ./src
+COPY tsconfig.json ./
+COPY prisma ./prisma
+COPY src ./src
 # Generates node_modules/.prisma/client against the committed schema. Runs
 # before tsc because the TypeScript in src/ imports the generated types.
 RUN pnpm exec prisma generate
@@ -175,10 +175,10 @@ ENV NODE_ENV=production \
 COPY --from=prune --chown=root:root /build/node_modules ./node_modules
 COPY --from=build --chown=root:root /build/dist ./dist
 COPY --from=build --chown=root:root /build/prisma ./prisma
-COPY --chown=root:root platform/package.json ./
+COPY --chown=root:root package.json ./
 # The docs the dashboard serves (GET /api/v1/admin/docs). They live at the repo
-# root because they document the whole project, not just platform/ — which is
-# why this image's build context is the repo root rather than platform/.
+# root because they document the whole project, and the dashboard serves them
+# from the running image.
 #
 # The API finds this directory by walking up from its own module, so /app/docs is
 # what makes the "Read the docs" view work in the container (see

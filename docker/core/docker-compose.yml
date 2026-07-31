@@ -1,6 +1,6 @@
 # Publoader core control plane.
 #
-#   docker compose -f platform/docker/core/docker-compose.yml up -d
+#   docker compose -f docker/core/docker-compose.yml up -d
 #
 # Runs on the operator's own host. Everything that holds a credential lives
 # here: the database, the MangaDex account, the Discord webhooks, the admin
@@ -92,8 +92,8 @@ x-core-build: &core-build
   # bug that is very hard to see.
   image: ${PUBLOADER_CORE_IMAGE:-ardax/publoader-core:2.1.1}
   build:
-    context: ../../..
-    dockerfile: platform/docker/core/Dockerfile
+    context: ../..
+    dockerfile: docker/core/Dockerfile
 
 services:
   # --- postgres -------------------------------------------------------------
@@ -159,8 +159,8 @@ services:
     <<: [*app-security, *core-build]
     # `migrate` is a separate Dockerfile target that keeps the prisma CLI.
     build:
-      context: ../../..
-      dockerfile: platform/docker/core/Dockerfile
+      context: ../..
+      dockerfile: docker/core/Dockerfile
       target: migrate
     image: ${PUBLOADER_MIGRATE_IMAGE:-ardax/publoader-core-migrate:2.1.1}
     restart: "no"

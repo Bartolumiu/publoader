@@ -5,8 +5,8 @@ canonical chapter history, configuration, and audit. There are no JSON config
 files at runtime and no in-memory queues: if it is not in Postgres, it did not
 happen.
 
-Schema: [`platform/prisma/schema.prisma`](../platform/prisma/schema.prisma).
-Migrations: [`platform/prisma/migrations/`](../platform/prisma/migrations/).
+Schema: [`prisma/schema.prisma`](../prisma/schema.prisma).
+Migrations: [`prisma/migrations/`](../prisma/migrations/).
 Table and column names are snake_case-mapped so the hot-path raw SQL
 (`FOR UPDATE SKIP LOCKED`) stays unquoted (`schema.prisma:1-4`).
 
@@ -51,7 +51,7 @@ DEAD_LETTER ──operator retry──> PENDING  (attempt := 0; the parent run i
 There is deliberately **no `FAILED`** state. A job that exhausts its attempts
 goes straight to `DEAD_LETTER`, which is why the merged error feed filters jobs
 and upload tasks on different state sets
-(`platform/src/core/api/routes/ops.ts:269-272`).
+(`src/core/api/routes/ops.ts:269-272`).
 
 ### `RunState` (`schema.prisma:32-40`)
 
@@ -62,7 +62,7 @@ PENDING ──first job claimed──> EXECUTING ──all jobs SUCCEEDED──>
 ```
 
 `PENDING → EXECUTING` is set opportunistically by the first successful claim
-(`platform/src/core/store/jobs.ts:191-195`). `→ INGESTING` and `→ DEAD_LETTER`
+(`src/core/store/jobs.ts:191-195`). `→ INGESTING` and `→ DEAD_LETTER`
 are computed by `advanceRuns()` (`jobs.ts:405-431`) — a set-based query, so it is
 correct however many jobs a run has. `FAILED` exists in the enum but nothing
 currently writes it; `advanceRuns` uses `DEAD_LETTER` for the terminal-failure
@@ -92,7 +92,7 @@ PENDING ──claim──> LEASED ──> DONE
 
 `FAILED` exists in the enum and is accepted by the operator retry filter
 (`ops.ts:151`) but the uploader itself only ever writes `PENDING`,
-`DEAD_LETTER`, or `DONE` (`platform/src/core/store/uploadTasks.ts:62-91`). There
+`DEAD_LETTER`, or `DONE` (`src/core/store/uploadTasks.ts:62-91`). There
 is no `CANCELLED`: operator cancellation marks the row `DONE` and records why in
 `lastError`, because the row has to leave the queue and a silent `DONE` would be
 indistinguishable from a real upload (`ops.ts:174-206`).
@@ -108,9 +108,9 @@ NEW ──CAS claim──> CREATING ──title created + tracked──> TRACKED
 ```
 
 `CREATED` exists in the enum and is accepted as a filter value by the admin API
-(`platform/src/core/api/routes/admin.ts:398`) but no code path writes it — the
+(`src/core/api/routes/admin.ts:398`) but no code path writes it — the
 service goes `CREATING → TRACKED` in one step, because tracking is what actually
-unblocks uploads (`platform/src/core/md/titleService.ts:125-138`).
+unblocks uploads (`src/core/md/titleService.ts:125-138`).
 
 ### Remaining enums
 
@@ -162,7 +162,7 @@ Single-use, expiring invitations to join the fleet.
 **Invariant:** one enroll token yields at most one worker. Enforced by
 `updateMany({ where: { id, usedByWorkerId: null, revoked: false } })` and
 checking the affected count — not by a read-then-write. Tested at
-`platform/test/integration/api.test.ts:116`.
+`test/integration/api.test.ts:116`.
 
 ### `runs` (derived)
 
@@ -212,7 +212,7 @@ Indexes:
 - *A job is claimed by at most one worker.* Enforced by
   `FOR UPDATE SKIP LOCKED … LIMIT 1` inside the claiming `UPDATE`
   (`jobs.ts:153-186`). Two concurrent claimers cannot select the same row.
-  Tested at `platform/test/integration/lease.test.ts:41`.
+  Tested at `test/integration/lease.test.ts:41`.
 - *Only the current lease holder may advance a job.* Every transition names
   `lease_id` (`jobs.ts:201-207`, `214-232`, `235-241`, `247-286`) and reports
   `count === 1` as success. A zero-row update means the caller lost and must
@@ -252,7 +252,7 @@ original holder and its replacement commit results for the same job, and the
 chapter is uploaded twice. With it, the second `UPDATE … SET state='COMMITTED'`
 raises `P2002`, the transaction rolls back, and the submission is recorded
 `SUPERSEDED` (`store/results.ts:70-97`). Verified against a real Postgres at
-`platform/test/integration/lease.test.ts:142` and end-to-end at
+`test/integration/lease.test.ts:142` and end-to-end at
 `lease.test.ts:108`.
 
 The commit is also a transaction that flips the submission **and** marks the job
@@ -336,7 +336,7 @@ fixed and known, so the document bought nothing and cost type enforcement,
 indexability, and `chapter->>'x'` in every query. They now use **typed columns
 plus a narrow `extra` escape hatch**, and the single mapping both directions
 lives in one module — which is what stops the four tables from drifting apart
-(`platform/src/core/md/chapterRows.ts:4-19`).
+(`src/core/md/chapterRows.ts:4-19`).
 
 Shared columns (all nullable unless noted):
 

@@ -8,7 +8,7 @@ Every procedure here assumes:
 ```bash
 export PUBLOADER_API_URL=https://publoader.ardax.dev
 export PUBLOADER_ADMIN_TOKEN=<admin token>
-alias padmin='node /path/to/publoader/platform/dist/src/cli/admin.js'
+alias padmin='node /path/to/publoader/dist/src/cli/admin.js'
 ```
 
 `padmin` sends your `$USER` as `X-Actor`, so everything you do below appears in
@@ -211,7 +211,7 @@ retrieve it again, so if you lose it, mint another and let the first expire.
 **2. Start the agent** (worker side).
 
 ```bash
-cd publoader/platform/docker/worker
+cd publoader/docker/worker
 cp .env.example .env
 # WORKER_NAME=hetzner-fsn-1
 # ENROLL_TOKEN=pe_...
@@ -302,7 +302,7 @@ Core services are stateless; the schema is not. Migration runs first, as a
 one-shot container, and every service waits on it.
 
 ```bash
-cd platform/docker/core
+cd docker/core
 
 # 1. Quiesce. Not strictly required for additive migrations, but it means an
 #    in-flight MangaDex upload cannot be interrupted by a restart.
@@ -415,7 +415,7 @@ padmin workers drain <workerId>
 padmin stats
 
 # worker host
-cd platform/docker/worker
+cd docker/worker
 docker compose pull      # or: docker compose build
 docker compose up -d
 
@@ -438,8 +438,8 @@ becomes incompatible, `workers revoke` is the enforcement mechanism.
 
 > **Unresolved incident — these four secrets are public.**
 >
-> `platform/docker/core/.env.production` and `.env.staging` were tracked and
-> pushed to this repository, which is public. `platform/.gitignore` matched
+> `docker/core/.env.production` and `.env.staging` were tracked and
+> pushed to this repository, which is public. `platform/.gitignore` (as it then was) matched
 > `.env` but not `.env.production`, so neither file was ever ignored. Commit
 > `d472f8d` untracks them and ignores `.env*`, which stops it recurring — it does
 > **not** unpublish anything. The values remain readable in the history of every
@@ -1386,7 +1386,7 @@ history, queues, and audit all live there.
 **Backup** (run on a schedule — daily is reasonable):
 
 ```bash
-cd platform/docker/core
+cd docker/core
 docker compose exec -T postgres pg_dump -U publoader -Fc publoader \
   > "$HOME/backups/publoader-$(date +%F-%H%M).dump"
 ```
@@ -1636,7 +1636,7 @@ Two consequences worth knowing before you write a query:
   route records it. Treat it as absent, and use `publoader_job_queue_depth` and
   `publoader_jobs_succeeded_total` instead.
 
-Metric names are defined in `platform/src/metrics.ts`.
+Metric names are defined in `src/metrics.ts`.
 
 ### Counters
 
@@ -2068,7 +2068,7 @@ build.
 ## What bundle intake does and does not protect against
 
 Both install paths — the zip an operator uploads and the archive fetched from
-GitHub — go through one intake (`platform/src/core/sysops/bundleIntake.ts`)
+GitHub — go through one intake (`src/core/sysops/bundleIntake.ts`)
 before anything is written to disk or built. A repository is not treated as more
 trustworthy than an upload: the zipball is written by anyone who can push to that
 repo and arrives over the network.

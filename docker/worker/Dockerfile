@@ -12,8 +12,8 @@
 # no interpreter, no pip, and no per-extension dependency install. Adding an
 # extension no longer means rebuilding and redeploying workers.
 #
-# Build context is platform/ (see platform/.dockerignore):
-#   docker build -f platform/docker/worker/Dockerfile -t publoader/worker:local platform
+# Build context is the REPO ROOT (see .dockerignore):
+#   docker build -f docker/worker/Dockerfile -t publoader/worker:local .
 #
 # Base pinning: see the long note in docker/core/Dockerfile. This is the SAME
 # digest and must be refreshed together with it — keeping core and worker on

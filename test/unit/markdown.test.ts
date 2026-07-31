@@ -275,7 +275,7 @@ describe("the real documentation", () => {
    * passes twenty unit tests and mangles deployment.md is no use to the operator
    * reading deployment.md at 03:00.
    */
-  const docsDir = fileURLToPath(new URL("../../../docs/", import.meta.url));
+  const docsDir = fileURLToPath(new URL("../../docs/", import.meta.url));
   const files = existsSync(docsDir) ? readdirSync(docsDir).filter((f) => f.endsWith(".md")) : [];
 
   it.skipIf(files.length === 0)("renders every shipped document safely", () => {

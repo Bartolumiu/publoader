@@ -25,14 +25,14 @@ is `https://publoader.ardax.dev`. Substitute your own hostname throughout.
 
 Two independently deployed things that only ever meet over HTTPS.
 
-**Core** (`platform/docker/core/`) runs on your host and holds everything
+**Core** (`docker/core/`) runs on your host and holds everything
 sensitive: PostgreSQL, the MangaDex account, the Discord webhooks, the admin
 token. Five containers — `postgres`, `core-api`, `core-scheduler`,
 `core-processor`, `core-uploader` — plus a one-shot `migrate` and the
 `cloudflared` tunnel. Nothing is published on the host; the tunnel is the only
 way in.
 
-**Workers** (`platform/docker/worker/`) run anywhere, including on machines you
+**Workers** (`docker/worker/`) run anywhere, including on machines you
 do not control. One container that long-polls the core API for a job, runs an
 extension under Node's permission model, and posts back a result envelope. A worker holds
 a single revocable token and nothing else. It cannot upload to MangaDex — only
@@ -60,9 +60,9 @@ repository today; each fails the build loudly if one ever goes missing:
 
 | What | Why | If missing |
 | --- | --- | --- |
-| `platform/pnpm-lock.yaml` | Images install with `--frozen-lockfile` so the dependency tree is the reviewed one | `cd platform && pnpm install`, commit the lockfile — do not drop the flag |
-| `platform/prisma/migrations/` | The `migrate` service runs `prisma migrate deploy`, which applies committed migrations and never infers a schema | `cd platform && pnpm prisma migrate dev --name init` against a scratch database, commit the result |
-| `platform/runner-node/` | The worker image ships `runner.mjs`, which executes extension API v2 bundles | Part of the worker runtime |
+| `pnpm-lock.yaml` | Images install with `--frozen-lockfile` so the dependency tree is the reviewed one | `pnpm install`, commit the lockfile — do not drop the flag |
+| `prisma/migrations/` | The `migrate` service runs `prisma migrate deploy`, which applies committed migrations and never infers a schema | `pnpm prisma migrate dev --name init` against a scratch database, commit the result |
+| `runner-node/` | The worker image ships `runner.mjs`, which executes extension API v2 bundles | Part of the worker runtime |
 
 The base image is pinned by digest in all three Dockerfiles — the multi-arch
 index digest of `node:24-bookworm-slim` as of 2026-07-29, so builds are
@@ -73,9 +73,9 @@ and whenever a base CVE lands) rather than letting a tag drift:
 docker pull node:24-bookworm-slim
 docker buildx imagetools inspect node:24-bookworm-slim   # take "Digest:"
 # update NODE_IMAGE in all three, together:
-#   platform/docker/core/Dockerfile
-#   platform/docker/worker/Dockerfile
-#   platform/docker/dev/mock-md/Dockerfile
+#   docker/core/Dockerfile
+#   docker/worker/Dockerfile
+#   docker/dev/mock-md/Dockerfile
 ```
 
 A digest that no longer exists fails the build immediately, so a stale pin is a
@@ -96,7 +96,7 @@ CREATE UNIQUE INDEX result_committed_one_per_job
 ## Core bring-up
 
 ```bash
-cd platform/docker/core
+cd docker/core
 cp .env.example .env
 chmod 600 .env
 ```
@@ -123,8 +123,8 @@ accepted as `<VAR>_FILE`, and the commented `secrets:` block at the bottom of
 Then bring it up from the repository root:
 
 ```bash
-docker compose -f platform/docker/core/docker-compose.yml up -d --build
-docker compose -f platform/docker/core/docker-compose.yml ps
+docker compose -f docker/core/docker-compose.yml up -d --build
+docker compose -f docker/core/docker-compose.yml ps
 ```
 
 Expected: `postgres` healthy, `migrate` exited 0, four core services up,
@@ -135,7 +135,7 @@ successfully, so the stack cannot come up half-migrated.
 Verify from inside the network (nothing is published on the host, by design):
 
 ```bash
-docker compose -f platform/docker/core/docker-compose.yml exec core-api \
+docker compose -f docker/core/docker-compose.yml exec core-api \
   node -e "fetch('http://127.0.0.1:8100/readyz').then(r=>r.text()).then(console.log)"
 ```
 
@@ -211,7 +211,7 @@ stack.
 
    `core-api` resolves over the compose network; no host port is involved.
 3. Restart the tunnel if you added the token after bring-up:
-   `docker compose -f platform/docker/core/docker-compose.yml up -d cloudflared`
+   `docker compose -f docker/core/docker-compose.yml up -d cloudflared`
 
 ### WAF rules
 
@@ -280,7 +280,7 @@ Two settings worth checking while you are in the dashboard:
 lands on the sign-in page, and `/dash` is kept as an alias. Same origin as the
 API, so there is no second deployment, no CORS, and no build step. The assets
 are static HTML/CSS/JS read once at boot from
-`platform/src/core/api/dashboard/` (copied into `dist/` by `pnpm build`).
+`src/core/api/dashboard/` (copied into `dist/` by `pnpm build`).
 
 **This replaces the legacy `publoader-dash` container.** The tunnel's Public
 Hostname for `publoader.ardax.dev` points at `core-api:8100` and nothing else;
@@ -463,12 +463,12 @@ curl -sX POST "$ADMIN/api/v1/admin/enroll-tokens" "${auth[@]}" \
 
 ```bash
 git clone https://github.com/publoader/publoader && cd publoader
-cd platform/docker/worker
+cd docker/worker
 cp .env.example .env && chmod 600 .env
 # set WORKER_NAME and paste the pe_… token into ENROLL_TOKEN
 cd -
-docker compose -f platform/docker/worker/docker-compose.yml up -d --build
-docker compose -f platform/docker/worker/docker-compose.yml logs -f
+docker compose -f docker/worker/docker-compose.yml up -d --build
+docker compose -f docker/worker/docker-compose.yml logs -f
 ```
 
 The agent exchanges the enroll token for a permanent worker token on first
@@ -503,7 +503,7 @@ a distinct project name, `WORKER_NAME` and volume:
 
 ```bash
 docker compose -p publoader-worker-2 \
-  -f platform/docker/worker/docker-compose.yml up -d
+  -f docker/worker/docker-compose.yml up -d
 ```
 
 Size the fleet by watching `PENDING` job depth in
@@ -521,15 +521,15 @@ drops anything, so re-running it is safe.
 
 ```bash
 git pull
-docker compose -f platform/docker/core/docker-compose.yml up -d --build
+docker compose -f docker/core/docker-compose.yml up -d --build
 ```
 
 **From a registry** — set `PUBLOADER_CORE_IMAGE` and `PUBLOADER_MIGRATE_IMAGE`
 in `.env` to a digest-pinned tag, then:
 
 ```bash
-docker compose -f platform/docker/core/docker-compose.yml pull
-docker compose -f platform/docker/core/docker-compose.yml up -d
+docker compose -f docker/core/docker-compose.yml pull
+docker compose -f docker/core/docker-compose.yml up -d
 ```
 
 Workers upgrade independently and can lag the core by a version; the API is
@@ -539,7 +539,7 @@ wait for the current job to finish, `up -d --build`, un-drain (next section).
 Watch the first minutes after an upgrade:
 
 ```bash
-docker compose -f platform/docker/core/docker-compose.yml logs -f --tail=100
+docker compose -f docker/core/docker-compose.yml logs -f --tail=100
 curl -s "$ADMIN/api/v1/admin/stats" "${auth[@]}"
 ```
 
@@ -550,7 +550,7 @@ tag:
 
 ```bash
 PUBLOADER_CORE_IMAGE=ardax/publoader-core:2.1.1 \
-  docker compose -f platform/docker/core/docker-compose.yml up -d
+  docker compose -f docker/core/docker-compose.yml up -d
 ```
 
 If the bad release **did** apply a migration, the old code is running against a
@@ -566,11 +566,11 @@ tolerated; destructive ones are not. In order of preference:
 
    ```bash
    # Mark a failed migration as rolled back, after manually reverting its SQL:
-   docker compose -f platform/docker/core/docker-compose.yml run --rm \
+   docker compose -f docker/core/docker-compose.yml run --rm \
      migrate migrate resolve --rolled-back 20260101120000_bad_migration
 
    # Or mark one as applied, if you applied its SQL by hand:
-   docker compose -f platform/docker/core/docker-compose.yml run --rm \
+   docker compose -f docker/core/docker-compose.yml run --rm \
      migrate migrate resolve --applied 20260101120000_partly_applied
    ```
 
@@ -624,7 +624,7 @@ Do it on the [local stack](#local-end-to-end-stack), where `LEASE_TTL_SECONDS`
 is 30 instead of 300:
 
 ```bash
-cd platform/docker/dev
+cd docker/dev
 docker compose up -d --build
 export DEV=http://127.0.0.1:8100
 dev_auth=(-H 'authorization: Bearer dev-admin-not-a-secret')
@@ -672,7 +672,7 @@ Everything else is rebuildable from the repository.
 **Backup** — a custom-format dump, which restores selectively and compresses:
 
 ```bash
-docker compose -f platform/docker/core/docker-compose.yml exec -T postgres \
+docker compose -f docker/core/docker-compose.yml exec -T postgres \
   pg_dump -U publoader -Fc publoader > publoader-$(date +%F).dump
 ```
 
@@ -685,17 +685,17 @@ everything else.
 
 ```bash
 # Stop everything that writes; leave postgres running.
-docker compose -f platform/docker/core/docker-compose.yml stop \
+docker compose -f docker/core/docker-compose.yml stop \
   core-api core-scheduler core-processor core-uploader
 
-docker compose -f platform/docker/core/docker-compose.yml exec -T postgres \
+docker compose -f docker/core/docker-compose.yml exec -T postgres \
   dropdb -U publoader --if-exists publoader
-docker compose -f platform/docker/core/docker-compose.yml exec -T postgres \
+docker compose -f docker/core/docker-compose.yml exec -T postgres \
   createdb -U publoader publoader
-docker compose -f platform/docker/core/docker-compose.yml exec -T postgres \
+docker compose -f docker/core/docker-compose.yml exec -T postgres \
   pg_restore -U publoader -d publoader --no-owner < publoader-2026-07-29.dump
 
-docker compose -f platform/docker/core/docker-compose.yml up -d
+docker compose -f docker/core/docker-compose.yml up -d
 ```
 
 Verify the restore before trusting it — the migration history in particular,
@@ -703,7 +703,7 @@ because that is what decides whether the next deploy tries to re-apply
 everything:
 
 ```bash
-docker compose -f platform/docker/core/docker-compose.yml exec -T postgres \
+docker compose -f docker/core/docker-compose.yml exec -T postgres \
   psql -U publoader -d publoader -c \
   'select migration_name, finished_at from _prisma_migrations order by finished_at desc limit 5;'
 ```
@@ -717,12 +717,12 @@ behaviour and needs no intervention.
 
 ## Local end-to-end stack
 
-`platform/docker/dev/docker-compose.yml` runs the entire system on one machine
+`docker/dev/docker-compose.yml` runs the entire system on one machine
 with MangaDex replaced by a mock. It is the only place the failover, dedup and
 concurrency behaviours can be exercised for real.
 
 ```bash
-docker compose -f platform/docker/dev/docker-compose.yml up -d --build
+docker compose -f docker/dev/docker-compose.yml up -d --build
 ```
 
 You get: Postgres (tmpfs — `down` really resets), `migrate`, all four core
@@ -822,7 +822,7 @@ platform is the scope list on its token.
 2. Mint the bot's own control-plane token from the core host:
 
    ```
-   docker compose -f platform/docker/core/docker-compose.yml exec core-api \
+   docker compose -f docker/core/docker-compose.yml exec core-api \
      node dist/src/cli/admin.js tokens create --name discord-bot \
      --scopes runs:write,workers:read,extensions:read,untracked:write,stats:read,audit:read,settings:write
    ```
@@ -837,7 +837,7 @@ platform is the scope list on its token.
    worker fleet — and `users:admin`. The token is printed once and cannot be
    recovered.
 
-3. Add to `platform/docker/core/.env` (annotated in `.env.example`):
+3. Add to `docker/core/.env` (annotated in `.env.example`):
 
    ```
    DISCORD_BOT_TOKEN=...        # from the Developer Portal
@@ -855,8 +855,8 @@ platform is the scope list on its token.
 4. Start it and watch the first ten seconds of log:
 
    ```
-   docker compose -f platform/docker/core/docker-compose.yml up -d publoader-bot
-   docker compose -f platform/docker/core/docker-compose.yml logs -f publoader-bot
+   docker compose -f docker/core/docker-compose.yml up -d publoader-bot
+   docker compose -f docker/core/docker-compose.yml logs -f publoader-bot
    ```
 
    A good start logs, in order: `admin API reachable; bot authorization model
@@ -875,7 +875,7 @@ one — in that order, so the bot is never without a working credential:
 ```
 ... tokens create --name discord-bot-2 --scopes <same list>
 # edit .env, then:
-docker compose -f platform/docker/core/docker-compose.yml up -d publoader-bot
+docker compose -f docker/core/docker-compose.yml up -d publoader-bot
 ... tokens revoke <old-id>
 ```
 
