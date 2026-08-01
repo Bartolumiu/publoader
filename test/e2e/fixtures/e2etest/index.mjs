@@ -15,6 +15,13 @@
 const MANGA_ID = "m1";
 const SLOW_MARKER = "slow";
 const SLOW_MS = 90_000;
+/**
+ * Marker that makes this fixture return a catalogue too large for a pipe
+ * buffer. A real CLEAN run over a thousand-series extension does the same thing
+ * naturally; this reproduces it deterministically and in a fraction of a second.
+ */
+const BULK_MARKER = "bulk";
+const BULK_CHAPTERS = 4000;
 
 /** An ExtensionFactory: takes the context, returns something with collect(). */
 const factory = (ctx) => ({
@@ -28,8 +35,14 @@ const factory = (ctx) => ({
     const now = new Date();
     const expire = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
+    // Bulk mode returns a catalogue too large for a pipe buffer, which is what
+    // a real CLEAN run over a thousand-series extension produces naturally.
+    const numbers = ctx.mangaIdMap.has(BULK_MARKER)
+      ? Array.from({ length: BULK_CHAPTERS }, (_, i) => String(i + 1))
+      : ["1", "2"];
+
     const updatedChapters = [];
-    for (const number of ["1", "2"]) {
+    for (const number of numbers) {
       const chapterId = `c${number}`;
       if (posted.has(chapterId)) continue;
       updatedChapters.push({

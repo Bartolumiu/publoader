@@ -208,3 +208,32 @@ describe("node runner", () => {
     expect(envelope.status).toBe("ok");
   });
 });
+
+describe("large envelopes", () => {
+  /**
+   * The runner writes its envelope to stdout and then calls `process.exit()`.
+   * stdout to a pipe — which is always the case, because the agent captures it —
+   * is asynchronous: past the pipe buffer (~64 KiB) `write()` queues the rest and
+   * returns false, and `process.exit()` discards whatever is still queued.
+   *
+   * The result was a runner that exited 0 having printed a truncated line the
+   * agent could not parse: "runner exited 0/null without an envelope", classed
+   * TRANSIENT and retried forever. It only happened when the answer was big, so
+   * ordinary UPDATE runs always worked and a CLEAN run over a large catalogue
+   * did not.
+   */
+  it("delivers an envelope far larger than the pipe buffer", async () => {
+    const envelope = await runFixture({
+      kind: "CLEAN",
+      mangaIdMap: { [MD_MANGA_ID]: ["m1", "bulk"] },
+    });
+
+    expect(envelope.status).toBe("ok");
+    expect(envelope.updatedChapters.length).toBeGreaterThan(1000);
+
+    // The assertion that matters is the size: anything under the buffer would
+    // pass whether or not the flush is awaited.
+    const bytes = Buffer.byteLength(JSON.stringify(envelope));
+    expect(bytes, "envelope is too small to exercise the bug").toBeGreaterThan(256 * 1024);
+  });
+});
