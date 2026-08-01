@@ -298,6 +298,24 @@ worker submitted.
 
 ## Upgrade the core
 
+> **One-off: the compose files moved.** Everything that lived under `platform/`
+> is now at the repository root, so the stack is at `docker/core/`, not
+> `platform/docker/core/`. A server still sitting in the old directory fails with
+>
+> ```
+> lstat /docker: no such file or directory
+> ```
+>
+> which names neither the path nor the move. The compose file's `context: ../..`
+> resolves to `platform/` there, and `platform/` no longer contains `docker/`.
+>
+> ```bash
+> cd <repo> && git pull
+> rm -rf platform          # leftovers; git does not remove an untracked directory
+> cd docker/core
+> docker compose --env-file .env config | grep image:   # proves you are in the right place
+> ```
+
 Core services are stateless; the schema is not. Migration runs first, as a
 one-shot container, and every service waits on it.
 

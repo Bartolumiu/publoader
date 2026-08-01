@@ -134,6 +134,10 @@ docker image inspect ardax/publoader-worker:2.1.1 --format '{{.Architecture}}'
 Note `.env` overrides the compose default, so `docker compose pull` alone will not
 move you off a bad tag — and Docker caches by tag, so remove the image first.
 
+**`lstat /docker: no such file or directory`** — the compose files moved to the
+repository root. Run from `docker/worker/`, not `platform/docker/worker/`, and
+delete the leftover `platform/` directory.
+
 **`invalid or used enrollment token`** — it's single-use and may have expired, or
 the volume was deleted after a successful enrolment. Ask for a new one.
 
