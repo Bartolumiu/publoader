@@ -80,7 +80,8 @@ cd $REPO/docker/core
 cp .env.example .env
 # Fill in: POSTGRES_PASSWORD, ADMIN_TOKEN (openssl rand -base64 48),
 # MANGADEX_*, DISCORD_WEBHOOK_URLS, TUNNEL_TOKEN.
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 The `migrate` service runs `prisma migrate deploy` and exits 0 before any
@@ -343,7 +344,8 @@ On the worker host:
 cd $REPO/docker/worker
 cp .env.example .env
 # Set WORKER_NAME and paste the token as ENROLL_TOKEN.
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
 
 Back on the operator machine:

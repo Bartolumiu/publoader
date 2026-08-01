@@ -114,7 +114,7 @@ All optional; the defaults are fine.
 | `WORKER_MEM_LIMIT` | `2g` | Raise for image-heavy extensions. `/tmp` is a 2g tmpfs and counts against this. |
 | `WORKER_CPUS` | `2.0` | |
 | `LOG_LEVEL` | `info` | `debug` when something is wrong. |
-| `PUBLOADER_WORKER_IMAGE` | `ardax/publoader-worker:2.1.1` | Pin an older release or a digest. Multi-arch: works on x86-64 and arm64. |
+| `PUBLOADER_WORKER_IMAGE` | `ardax/publoader-worker:2.1.3` | Pin an older release or a digest. Multi-arch: works on x86-64 and arm64. |
 | `WORKER_HEARTBEAT_MAX_AGE_SECONDS` | `600` | Only alongside a matching change to the core's `LEASE_TTL_SECONDS`. |
 
 Pin an extension set to this host from the operator's side — Workers → Change.
@@ -128,11 +128,15 @@ Takes effect on your next poll; no restart.
 multi-arch, and check what you actually pulled:
 
 ```bash
-docker image inspect ardax/publoader-worker:2.1.1 --format '{{.Architecture}}'
+docker image inspect ardax/publoader-worker:2.1.3 --format '{{.Architecture}}'
 ```
 
 Note `.env` overrides the compose default, so `docker compose pull` alone will not
 move you off a bad tag — and Docker caches by tag, so remove the image first.
+
+**`lstat /docker: no such file or directory`** — the compose files moved to the
+repository root. Run from `docker/worker/`, not `platform/docker/worker/`, and
+delete the leftover `platform/` directory.
 
 **`invalid or used enrollment token`** — it's single-use and may have expired, or
 the volume was deleted after a successful enrolment. Ask for a new one.

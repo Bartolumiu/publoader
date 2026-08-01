@@ -1,0 +1,17 @@
+# Build the worker image from this checkout instead of pulling it.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# Kept apart from docker-compose.yml for the same reason as the core stack: that
+# file is copied to worker hosts with nothing beside it but `.env`, and a
+# `build:` section there makes compose try to build rather than pull, failing on
+# the absent source tree with `lstat /docker: no such file or directory`.
+#
+# Published images are built by .github/workflows/push-docker.yml, so this is
+# only for running a local patch or building where pulling is not possible.
+
+services:
+  worker-agent:
+    build:
+      context: ../..
+      dockerfile: docker/worker/Dockerfile
