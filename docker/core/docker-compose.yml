@@ -187,12 +187,25 @@ services:
   # host would put the enroll endpoint and the admin API on the host's
   # interfaces, reachable without passing the tunnel's WAF rules.
   core-api:
-    <<: [*app-security, *core-build]
+    # `public-dns` for the same reason core-uploader has it: this service now
+    # reaches MangaDex directly.
+    <<: [*app-security, *core-build, *public-dns]
     depends_on:
       migrate:
         condition: service_completed_successfully
     environment:
-      <<: *core-env
+      # MangaDex credentials, for the two operator actions that touch a title
+      # synchronously: approving an untracked series (which must create the title
+      # and hand back its id) and pushing corrections to an existing entry.
+      # Without them both endpoints answer 503 "title service not available on
+      # this instance", which reads like a broken deployment rather than a
+      # missing variable.
+      #
+      # This does widen what an internet-facing service holds, so to be precise
+      # about what has NOT changed: uploading chapters remains core-uploader's
+      # alone — it owns the upload queue and the upload session, and no other
+      # process claims from it.
+      <<: [*core-env, *md-env]
       PORT: "8100"
       HOST: 0.0.0.0
       # Metrics are NOT on 8100. The tunnel forwards every path on the public

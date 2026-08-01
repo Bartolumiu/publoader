@@ -811,8 +811,29 @@ function durationS(startedAt) {
   return Math.round(performance.now() - startedAt) / 1000;
 }
 
+/**
+ * Write the envelope and WAIT for it to reach the OS.
+ *
+ * `process.stdout.write` to a pipe is asynchronous: past the pipe buffer
+ * (~64 KiB on Linux) it queues the rest and returns false, and `process.exit()`
+ * discards whatever is still queued. The agent captures stdout, so it is always
+ * a pipe — and a CLEAN run returns the extension's whole catalogue, which for a
+ * thousand-series extension is far over that buffer.
+ *
+ * The result was a runner that exited 0 having printed nothing the agent could
+ * find: "runner exited 0/null without an envelope", reported as TRANSIENT and
+ * retried forever, with the size of the answer deciding whether it happened.
+ * Small UPDATE runs fit in the buffer and always worked, which is why this hid.
+ */
 function emit(payload) {
-  emitLine(JSON.stringify(payload) + "\n");
+  const line = JSON.stringify(payload) + "\n";
+  return new Promise((resolve) => {
+    // The callback fires once the chunk is flushed, not merely accepted.
+    if (!emitLine(line, () => resolve())) return;
+    // Fully buffered: the callback still runs, but resolving here too keeps the
+    // common small-envelope path from waiting a tick.
+    resolve();
+  });
 }
 
 async function main() {
@@ -839,8 +860,8 @@ async function main() {
     const budgetS = Number(job.timeoutSeconds);
     if (Number.isFinite(budgetS) && budgetS > 0) {
       const timer = setTimeout(
-        () => {
-          emit(
+        async () => {
+          await emit(
             errorEnvelope("TRANSIENT", `collect() exceeded the ${budgetS}s job budget`, startedAt),
           );
           process.exit(0);
@@ -859,12 +880,12 @@ async function main() {
     // of the wrong shape: all properties of the pinned bundle, so a retry
     // cannot help. A throw from inside collect() is usually the upstream site.
     const errClass = err instanceof Error && err.publoaderPhase === "run" ? "TRANSIENT" : "PERMANENT";
-    emit(errorEnvelope(errClass, `${name}: ${message}`, startedAt));
+    await emit(errorEnvelope(errClass, `${name}: ${message}`, startedAt));
     return 0;
   }
 
   const { httpRequests, ...envelopeFields } = result;
-  emit({
+  await emit({
     runnerVersion: RUNNER_VERSION,
     status: "ok",
     error: null,
