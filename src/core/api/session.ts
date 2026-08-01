@@ -125,7 +125,10 @@ export function cleanActor(raw: string): string | null {
 }
 
 const TokenLogin = z.object({
-  token: z.string().min(1).max(512),
+  // Trimmed to match `bearerToken()`, which has always trimmed: without this the
+  // same token authenticates a curl `Authorization: Bearer …` call and is
+  // rejected from the login form, purely because a paste carried a newline.
+  token: z.string().trim().min(1).max(512),
   actor: z.string().min(1).max(64).optional(),
 });
 

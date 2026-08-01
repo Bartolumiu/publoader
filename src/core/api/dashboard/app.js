@@ -1232,7 +1232,9 @@ const loginWithPassword = (event) =>
 const loginWithToken = (event) =>
   submitLogin(
     event,
-    { token: $("login-token").value, actor: $("login-actor").value.trim() || undefined },
+    // Trimmed like the actor beside it: a token is pasted, and a paste from a
+    // terminal or password manager routinely brings a trailing newline with it.
+    { token: $("login-token").value.trim(), actor: $("login-actor").value.trim() || undefined },
     () => {
       $("login-token").value = "";
     },

@@ -21,8 +21,16 @@ const ConfigSchema = z.object({
   databaseUrl: z.string().default(""),
   port: z.coerce.number().int().default(8100),
   host: z.string().default("0.0.0.0"),
-  /** Admin bearer token for operator endpoints (bot/dash/CLI). */
-  adminToken: z.string().min(16).optional(),
+  /**
+   * Admin bearer token for operator endpoints (bot/dash/CLI).
+   *
+   * Trimmed because this value is compared for exact equality and is typically
+   * put in `.env` by hand or by shell redirection, which is how a trailing
+   * newline gets in. Untrimmed, the stored token silently stops matching the
+   * one the operator holds and every login fails as "invalid admin token" — a
+   * message that points at the token rather than at the whitespace around it.
+   */
+  adminToken: z.string().trim().min(16).optional(),
   /**
    * HMAC key for short-lived signed cookies (currently the OAuth state
    * cookie). Session cookies are DB-backed and do not depend on it. Optional:
@@ -113,8 +121,10 @@ const ConfigSchema = z.object({
 
   // Worker agent settings (worker process only)
   coreUrl: z.string().optional(),
-  workerToken: z.string().optional(),
-  enrollToken: z.string().optional(),
+  // Trimmed for the same reason as adminToken: compared for exact equality,
+  // and written into .env by hand on every worker host.
+  workerToken: z.string().trim().optional(),
+  enrollToken: z.string().trim().optional(),
   workerName: z.string().optional(),
   workerStatePath: z.string().default("/var/lib/publoader-worker"),
   /**
