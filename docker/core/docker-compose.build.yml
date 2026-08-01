@@ -1,0 +1,43 @@
+# Build the core images from this checkout instead of pulling them.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# Kept apart from docker-compose.yml because that file is deployed on its own:
+# servers copy it next to a `.env` and run it with no source tree present. A
+# `build:` section there is not inert — compose resolves the build context and
+# tries to build, so a server that has only the two files fails with
+#
+#   lstat /docker: no such file or directory
+#
+# naming neither the missing source tree nor the fix. Splitting the two means
+# the deploy path cannot accidentally take the build path, and the paths below
+# are free to assume a full checkout because reaching this file requires one.
+#
+# You do not need this to run the stack, and you do not need it to release:
+# .github/workflows/push-docker.yml builds the published multi-arch images with
+# buildx directly. Use it to run a local patch, or to build where pulling is not
+# possible. For day-to-day development prefer docker/dev/docker-compose.yml,
+# which builds the whole system with MangaDex faked.
+
+services:
+  core-api:
+    build: &core-image
+      context: ../..
+      dockerfile: docker/core/Dockerfile
+
+  core-scheduler:
+    build: *core-image
+
+  core-processor:
+    build: *core-image
+
+  core-uploader:
+    build: *core-image
+
+  # The one service built from a different target: `migrate` keeps the prisma
+  # CLI that the runtime image drops.
+  migrate:
+    build:
+      context: ../..
+      dockerfile: docker/core/Dockerfile
+      target: migrate

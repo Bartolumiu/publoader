@@ -123,7 +123,8 @@ accepted as `<VAR>_FILE`, and the commented `secrets:` block at the bottom of
 Then bring it up from the repository root:
 
 ```bash
-docker compose -f docker/core/docker-compose.yml up -d --build
+docker compose -f docker/core/docker-compose.yml pull
+docker compose -f docker/core/docker-compose.yml up -d
 docker compose -f docker/core/docker-compose.yml ps
 ```
 
@@ -467,7 +468,8 @@ cd docker/worker
 cp .env.example .env && chmod 600 .env
 # set WORKER_NAME and paste the pe_… token into ENROLL_TOKEN
 cd -
-docker compose -f docker/worker/docker-compose.yml up -d --build
+docker compose -f docker/worker/docker-compose.yml pull
+docker compose -f docker/worker/docker-compose.yml up -d
 docker compose -f docker/worker/docker-compose.yml logs -f
 ```
 
@@ -521,7 +523,8 @@ drops anything, so re-running it is safe.
 
 ```bash
 git pull
-docker compose -f docker/core/docker-compose.yml up -d --build
+docker compose -f docker/core/docker-compose.yml pull
+docker compose -f docker/core/docker-compose.yml up -d
 ```
 
 **From a registry** — set `PUBLOADER_CORE_IMAGE` and `PUBLOADER_MIGRATE_IMAGE`
@@ -534,7 +537,7 @@ docker compose -f docker/core/docker-compose.yml up -d
 
 Workers upgrade independently and can lag the core by a version; the API is
 versioned (`/api/v1/`) for exactly that reason. Rolling the fleet is: drain,
-wait for the current job to finish, `up -d --build`, un-drain (next section).
+wait for the current job to finish, `pull && up -d`, un-drain (next section).
 
 Watch the first minutes after an upgrade:
 
@@ -549,7 +552,7 @@ Code-only rollback (no new migration in the bad release) is just the previous
 tag:
 
 ```bash
-PUBLOADER_CORE_IMAGE=ardax/publoader-core:2.1.1 \
+PUBLOADER_CORE_IMAGE=ardax/publoader-core:2.1.3 \
   docker compose -f docker/core/docker-compose.yml up -d
 ```
 

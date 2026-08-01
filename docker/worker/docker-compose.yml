@@ -26,16 +26,16 @@ name: publoader-worker
 
 services:
   worker-agent:
-    # Built from this repo by default. Once images are published, set
-    # PUBLOADER_WORKER_IMAGE to a digest-pinned tag in .env and remove nothing
-    # else — worker hosts should not need a source checkout to run.
-    image: ${PUBLOADER_WORKER_IMAGE:-ardax/publoader-worker:2.1.1}
-    build:
-      context: ../..
-      dockerfile: docker/worker/Dockerfile
-      # No build args: extensions are self-contained ESM bundles built at
-      # publish time, so the image has no per-extension dependencies to bake in
-      # and adding an extension no longer requires rebuilding workers.
+    # Pulled, not built: a worker host runs this file next to a `.env` and
+    # nothing else. A `build:` section here would break exactly that — compose
+    # would resolve the build context relative to this file, find no source
+    # tree, and fail with `lstat /docker: no such file or directory`. To build
+    # from a checkout, add `-f docker-compose.build.yml`.
+    #
+    # Nothing per-extension is baked in either way: extensions are
+    # self-contained ESM bundles built at publish time, so adding one never
+    # requires rebuilding or redeploying a worker.
+    image: ${PUBLOADER_WORKER_IMAGE:-ardax/publoader-worker:2.1.3}
     # No `container_name:` on purpose — a fixed name would make it impossible
     # to run a second worker on the same machine with `-p`, since the two
     # projects would collide on the container name.

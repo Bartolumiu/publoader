@@ -215,7 +215,8 @@ cd publoader/docker/worker
 cp .env.example .env
 # WORKER_NAME=hetzner-fsn-1
 # ENROLL_TOKEN=pe_...
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 docker compose logs -f worker-agent
 ```
 
@@ -328,7 +329,8 @@ padmin pause --minutes 30
 
 # 2. New image.
 #    Set PUBLOADER_CORE_IMAGE in .env to the new tag, or rebuild from source:
-docker compose build
+#    (to build from source instead: add -f docker-compose.build.yml)
+docker compose pull
 
 # 3. Migrate + restart. `up -d` reruns `migrate deploy` (idempotent — it applies
 #    only migrations absent from _prisma_migrations) before starting services.
@@ -434,7 +436,7 @@ padmin stats
 
 # worker host
 cd docker/worker
-docker compose pull      # or: docker compose build
+docker compose pull
 docker compose up -d
 
 # operator
