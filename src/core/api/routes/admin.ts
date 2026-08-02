@@ -284,6 +284,45 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { run };
     });
 
+    /**
+     * Kill a run in progress: every job it still has outstanding is cancelled,
+     * and workers already executing one abort on their next lease renewal.
+     *
+     * Deliberately harder-edged than cancelling a job. Cancelling one job of a
+     * partitioned run leaves the others to finish and the run to be processed
+     * from incomplete results — which for a CLEAN run means the processor
+     * concludes that every chapter the missing segment covers has vanished
+     * upstream. Killing the run avoids that entirely: it never reaches the
+     * processor.
+     */
+    scope.post("/api/v1/admin/runs/:id/cancel", { preHandler: requireScope("runs:write") }, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const outcome = await ctx.jobs.cancelRun(id);
+      if (!outcome) return reply.code(404).send({ error: "unknown run" });
+      if (outcome.result === "rejected") {
+        return reply
+          .code(409)
+          .send({ error: `run already finished (${outcome.previousState.toLowerCase()})` });
+      }
+      await ctx.audit.record(actor(req), "run.cancel", id, {
+        jobsCancelled: outcome.jobsCancelled,
+        previousState: outcome.previousState,
+      });
+      return { ok: true, ...outcome };
+    });
+
+    /**
+     * The same, for everything unfinished at once — optionally scoped to one
+     * extension. For when something is wrong across the board and cancelling
+     * runs one id at a time is not fast enough.
+     */
+    scope.post("/api/v1/admin/runs/cancel-all", { preHandler: requireScope("runs:write") }, async (req) => {
+      const body = z.object({ extension: z.string().min(1).max(64).optional() }).parse(req.body ?? {});
+      const stopped = await ctx.jobs.cancelActiveRuns(body.extension);
+      await ctx.audit.record(actor(req), "run.cancel_all", body.extension ?? "*", stopped);
+      return { ok: true, ...stopped };
+    });
+
     scope.post("/api/v1/admin/jobs/:id/cancel", { preHandler: requireScope("runs:write") }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const result = await ctx.jobs.cancel(id);

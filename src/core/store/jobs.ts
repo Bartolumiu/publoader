@@ -436,6 +436,82 @@ export class JobStore {
     return { cancelled: cancelled.count, flagged: flagged.count };
   }
 
+  /**
+   * Kill one run and everything it has outstanding.
+   *
+   * Distinct from `cancel(jobId)`, which is graceful: it flags a running job and
+   * lets the worker finish its current step. This is the operator saying "stop
+   * this run now" — usually because it is doing something wrong — so every
+   * non-terminal job goes straight to CANCELLED rather than being asked nicely.
+   *
+   * That is safe in flight for two reasons already built into the system:
+   *
+   *  - `cancel_requested = true` is set on every job, and `claim` filters on it,
+   *    so nothing can be re-leased even after the lease sweeper requeues an
+   *    abandoned job to PENDING;
+   *  - ingest's lease-validity gate only accepts envelopes for a job in LEASED or
+   *    RUNNING, so a worker that finishes the work anyway has its envelope
+   *    superseded instead of committed. A killed run cannot produce late writes.
+   *
+   * The run itself is set to CANCELLED directly. `advanceRuns` only ever moves
+   * runs out of PENDING/EXECUTING, so it cannot resurrect this one — and it
+   * would otherwise have landed the run in DEAD_LETTER, which reads as a failure
+   * rather than a decision.
+   *
+   * Returns null when the run does not exist, and "rejected" when it has already
+   * finished — cancelling a PROCESSED run would be a lie, its work is done.
+   */
+  async cancelRun(
+    runId: string,
+  ): Promise<{ result: "cancelled" | "rejected"; jobsCancelled: number; previousState: string } | null> {
+    const run = await this.prisma.run.findUnique({ where: { id: runId } });
+    if (!run) return null;
+
+    const TERMINAL = ["PROCESSED", "FAILED", "DEAD_LETTER", "CANCELLED"];
+    if (TERMINAL.includes(run.state)) {
+      return { result: "rejected", jobsCancelled: 0, previousState: run.state };
+    }
+
+    const jobs = await this.prisma.job.updateMany({
+      where: { runId, state: { in: ["PENDING", "LEASED", "RUNNING"] } },
+      data: { state: "CANCELLED", cancelRequested: true },
+    });
+    await this.prisma.run.updateMany({
+      // Guarded on the state we read, so two operators cancelling at once do not
+      // both count as the one that did it.
+      where: { id: runId, state: run.state },
+      data: { state: "CANCELLED", completedAt: new Date() },
+    });
+
+    return { result: "cancelled", jobsCancelled: jobs.count, previousState: run.state };
+  }
+
+  /**
+   * Kill every run that has not finished, optionally for one extension.
+   *
+   * The blunt instrument, for when something is wrong across the board and
+   * cancelling runs one id at a time is not fast enough.
+   */
+  async cancelActiveRuns(extension?: string): Promise<{ runs: number; jobs: number }> {
+    const active = await this.prisma.run.findMany({
+      where: {
+        state: { in: ["PENDING", "EXECUTING", "INGESTING"] },
+        ...(extension ? { extension } : {}),
+      },
+      select: { id: true },
+    });
+    let jobs = 0;
+    let runs = 0;
+    for (const { id } of active) {
+      const outcome = await this.cancelRun(id);
+      if (outcome?.result === "cancelled") {
+        runs += 1;
+        jobs += outcome.jobsCancelled;
+      }
+    }
+    return { runs, jobs };
+  }
+
   /** Same, for every job pinned to one bundle — used when a bundle is yanked. */
   async cancelAllForBundle(sha256: string): Promise<{ cancelled: number; flagged: number }> {
     const cancelled = await this.prisma.job.updateMany({

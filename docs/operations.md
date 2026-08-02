@@ -743,6 +743,41 @@ tails a log file.
 
 ---
 
+## Kill a run in progress
+
+When a run is doing something wrong — a bad extension build, a mapping mistake,
+an upstream site returning nonsense — stop the whole run rather than its jobs one
+at a time:
+
+```bash
+curl -sX POST $CORE/api/v1/admin/runs/$RUN_ID/cancel -H "authorization: Bearer $ADMIN_TOKEN"
+
+# everything unfinished, optionally for one extension
+curl -sX POST $CORE/api/v1/admin/runs/cancel-all \
+  -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"extension":"mangaplus"}'
+```
+
+Every job the run still has outstanding goes to `CANCELLED` immediately, and a
+worker mid-execution aborts at its next lease renewal. Nothing can land
+afterwards: `cancel_requested` blocks a re-claim even after the lease sweeper
+requeues an abandoned job, and ingest only accepts an envelope for a job still in
+`LEASED`/`RUNNING`, so a worker that finishes anyway has its result superseded
+rather than committed.
+
+**Prefer this to cancelling individual jobs on a partitioned run.** Cancelling
+one segment leaves the others to finish, and the run is then processed from
+incomplete results — which on a CLEAN run means the processor concludes that
+every chapter the missing segment covered has vanished upstream, and queues it
+for removal. A killed run never reaches the processor at all.
+
+A finished run is refused with 409 rather than "cancelled", because cancelling
+completed work would misreport what happened. The run lands in `CANCELLED`, not
+`DEAD_LETTER` — this was a decision, and the state an operator reads later should
+say so.
+
+---
+
 ## Queue management
 
 The section above is triage: look at a stuck task, retry it, cancel it. This one
