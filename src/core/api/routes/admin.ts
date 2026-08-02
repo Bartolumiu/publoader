@@ -16,8 +16,21 @@ import { sessionAuthenticator } from "../session.js";
 import { Manifest, EXTENSION_NAME_RE } from "../../../contracts/manifest.js";
 import { MANGADEX_LANGUAGES } from "../../../contracts/languages.js";
 
-/** The worker image the enrolment snippet tells a new host to run. */
-const WORKER_IMAGE = process.env["PUBLOADER_WORKER_IMAGE"] ?? "ardax/publoader-worker:2.1.1";
+/**
+ * The worker image the enrolment snippet tells a new host to run.
+ *
+ * Set `PUBLOADER_WORKER_IMAGE` on core-api to pin it — the compose file does,
+ * defaulting to the same release as the core itself, so the snippet moves with
+ * every version bump instead of being a literal somebody has to remember.
+ *
+ * The fallback is `:latest` deliberately. A hardcoded version here is not a safe
+ * default but a slowly-rotting one: this constant said `2.1.1` for three
+ * releases while the env var it reads was never passed to core-api at all, so
+ * every enrolment snippet handed out an image two versions behind and nothing
+ * pointed at the cause. `:latest` can be wrong about immutability; it cannot be
+ * wrong about being stale, and it is only reached when nothing is configured.
+ */
+const WORKER_IMAGE = process.env["PUBLOADER_WORKER_IMAGE"] ?? "ardax/publoader-worker:latest";
 import { VALID_REMOVAL_MODES } from "../../store/settings.js";
 import { BundleRejectedError } from "../../store/bundles.js";
 import AdmZip from "adm-zip";

@@ -229,6 +229,11 @@ services:
       # a fresh database is never locked out of its own dashboard.
       DASH_OWNER_EMAIL: ${DASH_OWNER_EMAIL:-iam@ardax.dev}
       DASH_PUBLIC_URL: ${DASH_PUBLIC_URL:-https://publoader.ardax.dev}
+      # The image the enrolment snippet tells a new worker host to run. Defaults
+      # to the same release as the core above, so bumping the version in one
+      # place moves the snippet with it — before this was passed, core-api fell
+      # back to a literal in the source and handed out a two-release-old tag.
+      PUBLOADER_WORKER_IMAGE: ${PUBLOADER_WORKER_IMAGE:-ardax/publoader-worker:2.1.4}
       # --- GitHub push webhook (core-api only) -----------------------------
       # POST /webhook publishes a new bundle for each changed extension. Blank
       # secret = the endpoint answers 503 rather than accepting unsigned

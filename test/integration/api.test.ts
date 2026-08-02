@@ -114,6 +114,28 @@ describe.skipIf(!dbReady())("control-plane API", () => {
     expect(noToken.statusCode).toBe(401);
   });
 
+  it("advertises a worker image that is configured, not frozen in the source", async () => {
+    // This regressed silently for three releases: the constant said 2.1.1 while
+    // the env var it reads was never passed to core-api at all, so every
+    // enrolment snippet handed out a two-release-old image and nothing in the
+    // system pointed at why. The assertion is deliberately "not a stale pin"
+    // rather than a specific tag — pinning the expected version here would rot
+    // in exactly the same way the thing it tests did.
+    const mint = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/enroll-tokens",
+      headers: admin,
+      payload: {},
+    });
+    const { workerImage } = mint.json();
+    expect(workerImage, "the snippet must name an image at all").toBeTruthy();
+    expect(workerImage).toContain("publoader-worker");
+    expect(
+      workerImage,
+      "unset PUBLOADER_WORKER_IMAGE must fall back to a tag that cannot go stale",
+    ).toBe("ardax/publoader-worker:latest");
+  });
+
   it("enrollment tokens are single-use and expiring", async () => {
     const mint = await app.inject({
       method: "POST",

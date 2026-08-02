@@ -5311,14 +5311,26 @@ function showEnrollToken(minted, workerName) {
   // onto a host, and a name nobody published turns "enrol a worker" into a pull
   // failure with no clue that the dashboard invented the tag. WORKER_IMAGE comes
   // from the server so the snippet tracks the deployed release rather than a
-  // constant that goes stale here.
-  const image = minted.workerImage || "ardax/publoader-worker:2.1.1";
+  // constant that goes stale here — which is exactly what this fallback did when
+  // it was a pinned version, quietly handing out an image two releases old.
+  // `latest` cannot rot; a version literal in a browser bundle can and did.
+  const image = minted.workerImage || "ardax/publoader-worker:latest";
   const snippet = [
     "# publoader worker — one-time enrolment token",
     `# expires ${fmtTime(minted.expiresAt)}; it enrols exactly one worker.`,
     "#",
     "# The token is traded once for a permanent one kept in the named volume.",
     "# Losing that volume means asking the operator for a new enrolment token.",
+    "#",
+    // The tag below is whatever this deployment was told to advertise, which is
+    // not necessarily the newest release — a core that has not been upgraded in
+    // a while advertises what it knew at the time. Saying so beats a worker host
+    // silently starting on an old image because the snippet looked current.
+    `# Image below (${image}) is what this control plane advertises.`,
+    "# Check for a newer production release before pasting, and prefer it:",
+    "#   docker pull ardax/publoader-worker:latest",
+    "#   docker image inspect ardax/publoader-worker:latest --format '{{index .RepoTags 0}}'",
+    "# Releases: https://hub.docker.com/r/ardax/publoader-worker/tags",
     "services:",
     "  publoader-worker:",
     `    image: ${image}`,
