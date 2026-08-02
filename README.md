@@ -127,9 +127,9 @@ Published images:
 
 | Image | Runs |
 | --- | --- |
-| `ardax/publoader-core:2.1.4` | `core-api`, `core-scheduler`, `core-processor`, `core-uploader`, and the Discord bot — one image, several entry points |
-| `ardax/publoader-core-migrate:2.1.4` | The one-shot migration container, the only thing able to alter the schema |
-| `ardax/publoader-worker:2.1.4` | The worker agent and the extension runtime |
+| `ardax/publoader-core:2.1.5` | `core-api`, `core-scheduler`, `core-processor`, `core-uploader`, and the Discord bot — one image, several entry points |
+| `ardax/publoader-core-migrate:2.1.5` | The one-shot migration container, the only thing able to alter the schema |
+| `ardax/publoader-worker:2.1.5` | The worker agent and the extension runtime |
 
 Base images are pinned by digest; the tag in an env file is what a deploy runs.
 Full procedure in [docs/deployment.md](docs/deployment.md).

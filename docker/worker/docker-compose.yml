@@ -35,7 +35,7 @@ services:
     # Nothing per-extension is baked in either way: extensions are
     # self-contained ESM bundles built at publish time, so adding one never
     # requires rebuilding or redeploying a worker.
-    image: ${PUBLOADER_WORKER_IMAGE:-ardax/publoader-worker:2.1.4}
+    image: ${PUBLOADER_WORKER_IMAGE:-ardax/publoader-worker:2.1.5}
     # No `container_name:` on purpose — a fixed name would make it impossible
     # to run a second worker on the same machine with `-p`, since the two
     # projects would collide on the container name.
