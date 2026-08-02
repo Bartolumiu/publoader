@@ -437,6 +437,27 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { ok: true, mode: body.mode };
     });
 
+    // ---- webhook verbosity ----
+    // Only the successful per-chapter embeds are switchable. Failures are
+    // deliberately not offered as a toggle: there is no reading of this system
+    // in which silently dropping a failed upload is what an operator wanted.
+    scope.get(
+      "/api/v1/admin/webhook-verbosity",
+      { preHandler: requireScope("settings:read") },
+      async () => ({ uploadSuccesses: await ctx.settings.getWebhookUploadSuccesses() }),
+    );
+
+    scope.post(
+      "/api/v1/admin/webhook-verbosity",
+      { preHandler: requireScope("settings:write") },
+      async (req) => {
+        const body = z.object({ uploadSuccesses: z.boolean() }).parse(req.body);
+        await ctx.settings.setWebhookUploadSuccesses(body.uploadSuccesses);
+        await ctx.audit.record(actor(req), "webhook_verbosity.set", String(body.uploadSuccesses));
+        return { ok: true, uploadSuccesses: body.uploadSuccesses };
+      },
+    );
+
     // ---- bundles ----
     scope.post(
       "/api/v1/admin/bundles",

@@ -5,7 +5,14 @@ import { type MangaRecord } from "../../contracts/records.js";
 import { Manifest } from "../../contracts/manifest.js";
 import { uploadedChapterColumns } from "../md/chapterRows.js";
 import type { DiscordEmbedInput } from "../md/webhook.js";
-import { updatesEmbeds } from "../md/webhookEmbeds.js";
+import {
+  foundChaptersEmbed,
+  noUpdatesEmbed,
+  runErrorEmbed,
+  untrackedMangaEmbeds,
+  updatesEmbeds,
+  type UntrackedMangaLike,
+} from "../md/webhookEmbeds.js";
 import { chapterFromRecord, type Chapter, type MdApi, type MdChapter } from "../md/types.js";
 import { ExtensionConfigStore } from "../store/extensionConfig.js";
 import { ResultStore } from "../store/results.js";
@@ -135,6 +142,41 @@ export class RunProcessor {
     }
   }
 
+  /**
+   * The three run-level embeds Python sent per extension: the untracked series
+   * it found, and either "Found N chapters" or "No new updates found".
+   *
+   * Swallows failures for the same reason reportUpdates does — a Discord outage
+   * must not fail a run whose real work succeeded.
+   */
+  private async reportRunSummary(
+    extension: string,
+    untracked: readonly UntrackedMangaLike[],
+    updatedCount: number,
+  ): Promise<void> {
+    if (!this.notifier?.enabled) return;
+    try {
+      const embeds = [
+        ...untrackedMangaEmbeds(extension, untracked),
+        updatedCount > 0 ? foundChaptersEmbed(extension, updatedCount) : noUpdatesEmbed(extension),
+      ];
+      await this.notifier.send(embeds);
+    } catch (err) {
+      this.log.warn({ err, extension }, "could not send the run summary webhook");
+    }
+  }
+
+  /** `Error in extensions.{name}`, red, with the exception in a code fence. */
+  private async reportRunError(extension: string, err: unknown): Promise<void> {
+    if (!this.notifier?.enabled) return;
+    try {
+      await this.notifier.send([runErrorEmbed(extension, err)]);
+    } catch (sendErr) {
+      // Never let the error reporter mask the error it was reporting.
+      this.log.warn({ err: sendErr, extension }, "could not send the run error webhook");
+    }
+  }
+
   /** Process every run currently waiting in INGESTING. Returns the count. */
   async tick(): Promise<number> {
     const attempted = new Set<string>();
@@ -152,6 +194,11 @@ export class RunProcessor {
         // Deliberately left in INGESTING: the next tick retries, and every
         // effect this run may already have had is idempotent.
         this.log.error({ err, runId: run.id, extension: run.extension }, "run processing failed");
+        // Python's `Error in extensions.{name}` embed. A run that keeps failing
+        // is otherwise completely silent in Discord — it never reaches the
+        // "Found N chapters" line, so the channel just shows nothing and the
+        // absence reads as "no updates today".
+        await this.reportRunError(run.extension, err);
       }
     }
     return processed;
@@ -222,6 +269,12 @@ export class RunProcessor {
       manifest?.chapter_removal_mode ?? (await this.settings.getRemovalMode());
 
     await this.persistUntrackedManga(run.extension, merged.untrackedManga, log);
+
+    // The run-level report Python sent around each extension: what turned up,
+    // and how much of it. Without these the channel only ever hears about
+    // individual uploads, which says nothing on a run that found nothing — the
+    // case where an operator most wants to know the run happened at all.
+    await this.reportRunSummary(run.extension, merged.untrackedManga, merged.updatedChapters.length);
 
     const updatedByManga = groupByMdManga(merged.updatedChapters);
     const allByManga = merged.allChapters === null ? null : groupByMdManga(merged.allChapters);

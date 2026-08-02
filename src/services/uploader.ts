@@ -36,7 +36,7 @@ const tasks = new UploadTaskStore(prisma);
 const settings = new SettingsStore(prisma);
 const md = new MdClient(config, prisma, log);
 const notifier = DiscordNotifier.fromConfig(config, log);
-const workers = new UploadTaskWorkers({ prisma, md, notifier, config, log });
+const workers = new UploadTaskWorkers({ prisma, md, notifier, settings, config, log });
 const titles = new TitleService(prisma, md, notifier, log);
 
 let running = true;
@@ -108,6 +108,10 @@ while (running) {
       await sleep(IDLE_SLEEP_MS);
       continue;
     }
+
+    // Once per pass, not per task: a setting changed mid-drain should not split
+    // one batch into two reporting styles.
+    await workers.refreshReporting();
 
     let processed = 0;
     // Per-kind counts, so the end-of-drain summary can name the queue that did

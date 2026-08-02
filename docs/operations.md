@@ -1334,6 +1334,79 @@ padmin ext-config set mangaplus /tmp/o.json
 
 Both are audited, so `padmin audit` shows who repointed a mapping and when.
 
+### `custom_language` widens what a chapter may be published as
+
+`custom_language` maps an external manga id to a MangaDex language code, and it
+is the one override that changes what the ingest gate will *accept*: chapters of
+that title are allowed to carry that language even though the extension's
+manifest does not declare it. mangaplus reports `SPANISH` for everything, so the
+one title that is actually Latin-American Spanish is mapped to `es-la` here.
+
+The map is read from the **database**, never from the worker's envelope — a
+worker cannot vote on which languages it may publish. So a chapter rejected as
+
+```
+chapter language es-la not declared by manifest (declared: en, es)
+```
+
+means the mapping is missing from `ext-config`, not that the manifest is wrong.
+Values are validated against MangaDex's language list on write, so a typo like
+`pt_br` is refused at that point rather than silently failing to protect
+Brazilian-Portuguese chapters from the removal pass.
+
+---
+
+## Webhook verbosity
+
+By default the channel gets **failures only** for individual chapters. Python
+sent an embed per chapter either way, which on a normal run is almost entirely
+`Success: True` — and the one failure worth acting on scrolls past between them.
+The run-level embeds (`Reading data from …`, `Found N chapters for …`, the
+untracked-series list) already report that the work happened.
+
+```bash
+curl -s $CORE/api/v1/admin/webhook-verbosity -H "authorization: Bearer $ADMIN_TOKEN"
+curl -sX POST $CORE/api/v1/admin/webhook-verbosity \
+  -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"uploadSuccesses": true}'          # back to the Python firehose
+```
+
+Failure embeds are not switchable, and they carry the reason in the description
+— a failure notification that does not say why is one you cannot act on.
+
+---
+
+## Extensions publish themselves from GitHub
+
+Two paths keep the fleet current, and they overlap on purpose:
+
+1. **The push webhook** — fires within seconds of a push, carrying the exact
+   commit. This is the fast path.
+2. **A poll every 15 minutes** — the scheduler asks each repo in
+   `GITHUB_EXTENSIONS_REPOS` for its HEAD and publishes anything that changed.
+
+The poll exists because the webhook fails *silently*: an unregistered hook, a
+revoked secret or a dropped delivery all look identical to "nobody pushed", and
+the first symptom is a run producing stale results days later. Publishing is
+idempotent — an unchanged tree hashes the same and returns `unchanged` — so the
+two overlapping costs nothing.
+
+The poll discovers extensions by directory (`src/<name>/manifest.json`), so an
+extension **added** to a repo is picked up on its own. The sysops sync button
+walks already-published bundles and therefore can only ever update extensions
+somebody installed by hand first.
+
+A commit is only remembered when every extension in it published cleanly, so a
+transient build failure is retried next pass rather than being skipped until the
+next push. Publishes are audited under `github.autosync`.
+
+```bash
+# freeze the fleet on what is published now (e.g. while investigating a bad extension)
+docker compose exec postgres psql -U publoader -d publoader \
+  -c "insert into settings (key, value) values ('github_auto_sync','false')
+      on conflict (key) do update set value = 'false';"
+```
+
 ---
 
 ## Lease-expiry storms

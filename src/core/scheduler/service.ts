@@ -7,8 +7,15 @@ import { BundleStore } from "../store/bundles.js";
 import { SettingsStore, AuditLog } from "../store/settings.js";
 import { UploadTaskStore } from "../store/uploadTasks.js";
 import { computeSegments, dueSlot, effectiveSchedules, slotId } from "./slots.js";
+import type { DiscordEmbedInput } from "../md/webhook.js";
+import { runStartedEmbed } from "../md/webhookEmbeds.js";
+import type { RepoSyncResult } from "../webhooks/autoSync.js";
 
 const LAST_TICK_KEY = "scheduler_last_tick";
+const GITHUB_SYNC_LAST_KEY = "github_auto_sync_last";
+/** How often the repos are polled. The push webhook covers the fast path;
+ * this only has to catch what it missed, so it is deliberately slow. */
+const GITHUB_SYNC_INTERVAL_MS = 15 * 60 * 1000;
 
 /**
  * The scheduling loop: turns due schedule slots into durable runs+jobs, and
@@ -23,16 +30,35 @@ export class SchedulerService {
   private readonly uploadTasks: UploadTaskStore;
   private readonly audit: AuditLog;
 
+  /**
+   * Where the "run started" notice goes. Optional for the same reason the
+   * processor's is: scheduling must keep working when Discord is not configured
+   * or is down.
+   */
+  private readonly notifier: { enabled: boolean; send(embeds: DiscordEmbedInput[]): Promise<void> } | null;
+  /**
+   * Runs one GitHub poll. Injected rather than built here so the scheduler
+   * core keeps no GitHub dependency, and so tests drive it without a network.
+   * Absent means the deployment has no repos configured.
+   */
+  private readonly autoSync: (() => Promise<RepoSyncResult[]>) | null;
+
   constructor(
     private readonly prisma: PrismaClient,
     private readonly log: Logger,
     retry: { baseSeconds: number; maxSeconds: number },
+    options: {
+      notifier?: { enabled: boolean; send(embeds: DiscordEmbedInput[]): Promise<void> };
+      autoSync?: () => Promise<RepoSyncResult[]>;
+    } = {},
   ) {
     this.jobs = new JobStore(prisma, retry);
     this.bundles = new BundleStore(prisma);
     this.settings = new SettingsStore(prisma);
     this.uploadTasks = new UploadTaskStore(prisma);
     this.audit = new AuditLog(prisma);
+    this.notifier = options.notifier ?? null;
+    this.autoSync = options.autoSync ?? null;
   }
 
   /** One scheduler tick. Exposed for tests; the service loop calls it forever. */
@@ -68,6 +94,52 @@ export class SchedulerService {
     const sweptTasks = await this.uploadTasks.sweepExpired();
     if (sweptTasks > 0) {
       this.log.warn({ count: sweptTasks }, "requeued expired upload-task leases");
+    }
+
+    // Last, and isolated: publishing extension code is the least urgent thing
+    // this tick does and the most likely to be slow (a 32 MB archive per changed
+    // repo), so it must not be able to delay or abort the queue work above.
+    try {
+      await this.maybeSyncGithub(now);
+    } catch (err) {
+      this.log.error({ err }, "github auto-sync failed");
+    }
+  }
+
+  /**
+   * Poll GitHub for changed extensions, at most once per SYNC_INTERVAL_MS.
+   *
+   * Rate-limited by a persisted timestamp rather than a timer so that restarts
+   * do not reset the clock — a crash-looping scheduler must not turn into a
+   * GitHub API hammer.
+   */
+  private async maybeSyncGithub(now: Date): Promise<void> {
+    if (!this.autoSync) return;
+    if (!(await this.settings.getGithubAutoSync())) return;
+
+    const lastRaw = await this.settings.getSetting(GITHUB_SYNC_LAST_KEY);
+    const last = lastRaw ? Date.parse(lastRaw) : 0;
+    if (Number.isFinite(last) && now.getTime() - last < GITHUB_SYNC_INTERVAL_MS) return;
+    // Written BEFORE the work, so a sync that throws or hangs still holds the
+    // interval open rather than retrying on every tick.
+    await this.settings.setSetting(GITHUB_SYNC_LAST_KEY, now.toISOString());
+
+    const results = await this.autoSync();
+    for (const result of results) {
+      const published = result.outcomes.filter((o) => o.status === "published");
+      if (published.length > 0) {
+        this.log.info(
+          { repo: result.repo, commit: result.commit, extensions: published.map((o) => o.extension) },
+          "github auto-sync published new extension bundles",
+        );
+        await this.audit.record("scheduler", "github.autosync", result.repo, {
+          commit: result.commit,
+          published: published.map((o) => ({ extension: o.extension, version: o.version })),
+        });
+      }
+      if (result.status === "failed") {
+        this.log.warn({ repo: result.repo, detail: result.detail }, "github auto-sync had failures");
+      }
     }
   }
 
@@ -181,8 +253,27 @@ export class SchedulerService {
         kind: opts.kind,
         idempotencyKey: opts.idempotencyKey,
       });
+      // Python announced each extension as it began reading it. Only on
+      // `created`: createRun is idempotent by key, and a duplicate trigger must
+      // not produce a second "started" that implies a second run.
+      await this.reportRunStarted(manifest.name);
     }
     return { runId: run.id, created, segments: Math.max(1, segments.length) };
+  }
+
+  /**
+   * `Reading data from {extension}`: the run has begun.
+   *
+   * Swallows failures — a Discord outage must not stop runs being scheduled,
+   * which is the one thing this service exists to do.
+   */
+  private async reportRunStarted(extension: string): Promise<void> {
+    if (!this.notifier?.enabled) return;
+    try {
+      await this.notifier.send([runStartedEmbed(extension)]);
+    } catch (err) {
+      this.log.warn({ err, extension }, "could not send the run started webhook");
+    }
   }
 
 }

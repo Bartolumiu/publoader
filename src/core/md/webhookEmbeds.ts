@@ -200,10 +200,20 @@ export function updatesEmbeds(input: UpdatesInput): DiscordEmbedInput[] {
  * "Editor"). The new pipeline has one uploader draining typed queues, so the
  * kind of work is the closest equivalent and is what is used here.
  */
-export function queueEmbed(workerType: string, chapter: EmbedChapter, processed: boolean): DiscordEmbedInput {
+export function queueEmbed(
+  workerType: string,
+  chapter: EmbedChapter,
+  processed: boolean,
+  detail?: string | null,
+): DiscordEmbedInput {
   return {
     title: titleCase(workerType),
     colour: COLOUR_DEFAULT,
+    // Only on failure, and only when there is something to say. Python's embed
+    // had no description, and a successful upload needs no explanation — but a
+    // failure that does not say why is a notification the operator cannot act
+    // on, which is the whole reason to be told about it.
+    ...(!processed && detail ? { description: detail } : {}),
     timestamp: new Date().toISOString(),
     fields: [chapterField(chapter, { success: processed, failedUpload: !processed })],
   };
@@ -302,6 +312,87 @@ export function messageEmbed(
     timestamp: new Date().toISOString(),
     ...(options.extensionName ? { footer: `extensions.${options.extensionName}` } : {}),
   };
+}
+
+// ------------------------------------------------------- run-level messages
+//
+// The five `PubloaderWebhook` calls the Python run made around each extension.
+// They are what tells a channel that a run started, what it found, and whether
+// it blew up — without them the only traffic is per-chapter upload results,
+// which says nothing until uploads are already happening.
+//
+// Titles are reproduced verbatim, including Python's `extensions.` prefix on
+// two of the five (`normalised_extension_name` in load_extensions.py:283) and
+// its absence on the other three. The inconsistency is Python's; a channel that
+// has been reading these for years should not have to relearn them.
+
+/** Python batched untracked series 30 to a message. */
+export const UNTRACKED_PER_EMBED = 30;
+
+export interface UntrackedMangaLike {
+  mangaName?: string | null;
+  mangaLanguage?: string | null;
+  mangaId?: string | null;
+  mangaUrl?: string | null;
+}
+
+/**
+ * `send_untracked_manga_webhook`: series the extension reports that have no
+ * MangaDex mapping yet, so somebody can go and create or link them.
+ *
+ * Note the count in every title is the TOTAL, not the size of that page — a
+ * reader seeing "47 Untracked Manga (2)" learns there are 47 in all, which is
+ * the number that matters.
+ */
+export function untrackedMangaEmbeds(
+  extensionName: string,
+  manga: readonly UntrackedMangaLike[],
+): DiscordEmbedInput[] {
+  if (manga.length === 0) return [];
+  const pages: UntrackedMangaLike[][] = [];
+  for (let i = 0; i < manga.length; i += UNTRACKED_PER_EMBED) {
+    pages.push(manga.slice(i, i + UNTRACKED_PER_EMBED));
+  }
+  return pages.map((page, index) => ({
+    title: `${manga.length} Untracked Manga${index > 0 ? ` (${index + 1})` : ""}`,
+    description: page
+      .map(
+        (m) =>
+          `**${m.mangaName ?? "unknown"}** (${m.mangaLanguage ?? "-"}): ` +
+          `[${m.mangaId ?? "-"}](${m.mangaUrl ?? ""})`,
+      )
+      .join("\n"),
+    colour: COLOUR_DEFAULT,
+    timestamp: new Date().toISOString(),
+    footer: `extensions.${extensionName}`,
+  }));
+}
+
+/** `Reading data from {extension}`: the run has started on this extension. */
+export function runStartedEmbed(extensionName: string): DiscordEmbedInput {
+  return messageEmbed(`Reading data from ${extensionName}`, null, { extensionName });
+}
+
+/** `Found N chapters for extensions.{extension}`: the size of the work ahead. */
+export function foundChaptersEmbed(extensionName: string, count: number): DiscordEmbedInput {
+  return messageEmbed(`Found ${count} chapters for extensions.${extensionName}`, null, {
+    extensionName,
+  });
+}
+
+/** `No new updates found for {extension}`: the run's other terminal state. */
+export function noUpdatesEmbed(extensionName: string): DiscordEmbedInput {
+  return messageEmbed(`No new updates found for ${extensionName}`, null, { extensionName });
+}
+
+/** `Error in extensions.{extension}`: red, with the exception in a code fence. */
+export function runErrorEmbed(extensionName: string, error: unknown): DiscordEmbedInput {
+  const text = error instanceof Error ? error.message : String(error);
+  return messageEmbed(
+    `Error in extensions.${extensionName}`,
+    `An exception occurred:\n\`\`\`\n${text.slice(0, 1800)}\n\`\`\``,
+    { colour: "FF0000", extensionName },
+  );
 }
 
 /**

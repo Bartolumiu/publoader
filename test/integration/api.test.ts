@@ -6,6 +6,7 @@ import { createLogger } from "../../src/logging.js";
 import { buildContext } from "../../src/core/api/context.js";
 import { buildServer } from "../../src/core/api/server.js";
 import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
+import { ExtensionConfigStore } from "../../src/core/store/extensionConfig.js";
 
 /**
  * Control-plane API: enrollment lifecycle, audience separation, revocation,
@@ -341,6 +342,111 @@ describe.skipIf(!dbReady())("control-plane API", () => {
     expect(job.errorClass).toBe("POLICY");
     expect(await prisma.uploadTask.count()).toBe(0);
     expect(await prisma.resultSubmission.count({ where: { state: "QUARANTINED" } })).toBe(1);
+  });
+
+  /**
+   * `custom_language` exists to publish a title in a language the extension's
+   * catalogue does not name — mangaplus reports SPANISH for everything, while
+   * one title is Latin-American Spanish and is mapped to `es-la`. Validating
+   * chapters against the manifest alone rejected every chapter of that title,
+   * which reads as a manifest mistake rather than the override working.
+   *
+   * The three cases below are the whole contract: rejected without a mapping,
+   * accepted with one from the DATABASE, and — the reason the union was left out
+   * originally — never widened by the envelope itself.
+   */
+  describe("custom_language and the manifest allowlist", () => {
+    const envelopeWith = (
+      jobId: string,
+      leaseId: string,
+      sha: string,
+      language: string,
+      overrideOptions: Record<string, unknown> = {},
+    ) => ({
+      envelopeVersion: 1,
+      jobId,
+      leaseId,
+      segmentKey: null,
+      extension: "mangaplus",
+      bundleSha256: sha,
+      idempotencyKey: `res:${jobId}:${language}`,
+      status: "ok",
+      error: null,
+      updatedChapters: [
+        {
+          chapterId: "700",
+          chapterNumber: "1",
+          chapterLanguage: language,
+          chapterUrl: "https://mangaplus.shueisha.co.jp/viewer/700",
+          mangaId: "200159",
+          mdMangaId: "b3c7e5d1-0000-4000-8000-000000000001",
+        },
+      ],
+      allChapters: null,
+      untrackedManga: [],
+      trackedMangadexIds: [],
+      mangadexGroupId: manifest.mangadex_group_id,
+      overrideOptions,
+      extensionLanguages: ["en"],
+      stats: {},
+    });
+
+    /** Publish, enroll, trigger a run and take the lease. */
+    async function ready(): Promise<{ sha: string; jobId: string; leaseId: string; headers: Record<string, string> }> {
+      const sha = await publishBundle();
+      const { token } = await enrollWorker();
+      const headers = { authorization: `Bearer ${token}` };
+      await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/runs",
+        headers: admin,
+        payload: { extension: "mangaplus", kind: "FORCE" },
+      });
+      const lease = await app.inject({ method: "POST", url: "/api/v1/worker/lease", headers, payload: {} });
+      const leased = lease.json();
+      return { sha, jobId: leased.job.jobId, leaseId: leased.leaseId, headers };
+    }
+
+    async function submit(
+      headers: Record<string, string>,
+      jobId: string,
+      payload: Record<string, unknown>,
+    ) {
+      return app.inject({ method: "POST", url: `/api/v1/worker/jobs/${jobId}/results`, headers, payload });
+    }
+
+    it("rejects a language no manifest or mapping declares, and says what IS declared", async () => {
+      const { sha, jobId, leaseId, headers } = await ready();
+      const res = await submit(headers, jobId, envelopeWith(jobId, leaseId, sha, "es-la"));
+      expect(res.json().outcome).toBe("quarantined");
+      // The operator's next question is always "declared where?", so the error
+      // carries the answer rather than sending them to the manifest to guess.
+      expect(res.json().reason).toContain("es-la");
+      expect(res.json().reason).toContain("declared: en, es");
+    });
+
+    it("accepts it once an operator has mapped a title to that language", async () => {
+      const { sha, jobId, leaseId, headers } = await ready();
+      await new ExtensionConfigStore(prisma).replace("mangaplus", {
+        custom_language: { "200159": "es-la" },
+      });
+      const res = await submit(headers, jobId, envelopeWith(jobId, leaseId, sha, "es-la"));
+      expect(res.json().outcome).toBe("committed");
+    });
+
+    it("does NOT let the envelope's own custom_language widen the allowlist", async () => {
+      // The security property the union must not cost us: a worker that can
+      // declare its own languages can publish a title in any language it likes.
+      // The map is read from the database precisely so a compromised worker
+      // cannot vote on it.
+      const { sha, jobId, leaseId, headers } = await ready();
+      const res = await submit(
+        headers,
+        jobId,
+        envelopeWith(jobId, leaseId, sha, "es-la", { custom_language: { "200159": "es-la" } }),
+      );
+      expect(res.json().outcome).toBe("quarantined");
+    });
   });
 
   it("a persistently policy-violating job still dead-letters once attempts run out", async () => {

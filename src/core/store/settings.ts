@@ -3,6 +3,8 @@ import type { PrismaClient } from "@prisma/client";
 const PAUSE_KEY = "pause_until";
 const REMOVAL_MODE_KEY = "chapter_removal_mode";
 const SIGNUPS_KEY = "dash_signups_enabled";
+const WEBHOOK_SUCCESSES_KEY = "webhook_upload_successes";
+const GITHUB_AUTO_SYNC_KEY = "github_auto_sync";
 export const VALID_REMOVAL_MODES = ["unavailable", "delete"] as const;
 export type RemovalMode = (typeof VALID_REMOVAL_MODES)[number];
 export const DEFAULT_REMOVAL_MODE: RemovalMode = "unavailable";
@@ -73,6 +75,51 @@ export class SettingsStore {
 
   async setSignupsEnabled(enabled: boolean): Promise<void> {
     await this.setSetting(SIGNUPS_KEY, enabled ? "true" : "false");
+  }
+
+  // -- webhook verbosity --
+
+  /**
+   * Whether a per-chapter embed is sent for uploads that SUCCEEDED.
+   *
+   * Python sent one either way, which on a normal run means the channel is
+   * almost entirely "Success: True" — and a failure, the only thing anyone
+   * needs to act on, scrolls past between them. Off by default so the channel
+   * carries exceptions rather than a transcript; the run-level "Found N
+   * chapters" embed already says the work happened.
+   *
+   * Failures are NOT configurable: there is no reading of this system where
+   * silently dropping a failed upload is what the operator wanted.
+   */
+  async getWebhookUploadSuccesses(): Promise<boolean> {
+    return (await this.getSetting(WEBHOOK_SUCCESSES_KEY)) === "true";
+  }
+
+  async setWebhookUploadSuccesses(enabled: boolean): Promise<void> {
+    await this.setSetting(WEBHOOK_SUCCESSES_KEY, enabled ? "true" : "false");
+  }
+
+  // -- github auto-sync --
+
+  /**
+   * Whether the scheduler polls the configured GitHub repos and publishes what
+   * changed.
+   *
+   * On by default. The push webhook is the fast path, but it fails silently —
+   * an unregistered hook or a dropped delivery just means extensions quietly
+   * stop updating — and polling is the only check that does not depend on
+   * anything inbound. Publishing is idempotent, so the two overlapping costs
+   * nothing.
+   *
+   * Turn it off to freeze the fleet on the currently published bundles, which
+   * is what you want while investigating a bad extension.
+   */
+  async getGithubAutoSync(): Promise<boolean> {
+    return (await this.getSetting(GITHUB_AUTO_SYNC_KEY)) !== "false";
+  }
+
+  async setGithubAutoSync(enabled: boolean): Promise<void> {
+    await this.setSetting(GITHUB_AUTO_SYNC_KEY, enabled ? "true" : "false");
   }
 
   // -- schedule overrides --
