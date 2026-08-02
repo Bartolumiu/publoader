@@ -1308,10 +1308,28 @@ before resuming.
 
 ## Config lives in the database, not in JSON files
 
-`manga_id_map.json` and `override_options.json` are **seed data**, imported
-once when a bundle is first published. After that the database wins and
-republishing does not overwrite it. Editing the files on a live deployment
-changes nothing.
+The two data files behave **differently**, and the difference decides whether
+editing one in git does anything at all on a live deployment.
+
+**`manga_id_map.json` is reconciled on every publish** — so the contributor
+workflow (edit the file, open a PR, merge) does reach the database. Per row:
+
+| Change in git | Effect on the database |
+| --- | --- |
+| A new `(namespace, mangaId)` pair | inserted |
+| A corrected MangaDex id, on a row that came from a previous import | updated |
+| A different id on a row an **operator** set, or the title pipeline auto-created | preserved — git does not win |
+| A line removed | nothing — a series is never untracked by deletion |
+
+The `source` column draws that line. A row set by an operator is a later and
+better-informed decision than the file, and dropping a line from the map must not
+silently stop a series being tracked — untracking is an explicit action
+(dashboard, `padmin tracked remove`, or the bot).
+
+**`override_options.json` is seed data**, imported only when an extension has no
+configuration at all. Once any of it exists — a config row, an alias, a
+multi-chapter entry, a language mapping — republishing does nothing, so editing
+this file on a live deployment changes nothing. Use `ext-config` below.
 
 ```bash
 padmin tracked list <extension>
