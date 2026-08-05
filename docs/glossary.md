@@ -162,7 +162,10 @@ removed everything" (`src/core/scheduler/service.ts:123-125`).
 **tracked / untracked manga** — A series is *tracked* when a `tracked_manga` row
 maps its publisher-side id to a MangaDex title id; that table is the authority,
 and it is delivered to workers on lease as `mangaIdMap`
-(`src/core/api/routes/worker.ts:119-137`). A series an extension reports
+(`src/core/api/routes/worker.ts:119-137`). A weekly job writes that table back
+into each extension's `manga_id_map.json` on GitHub so the file contributors
+read does not drift from it (`src/core/mapsync`, docs/operations.md
+§"Series-map sync"). A series an extension reports
 that has no such mapping is *untracked*: it lands in `untracked_manga` with state
 `NEW` and either gets a MangaDex title created automatically (when the manifest
 sets `auto_create_titles`) or waits for an operator to approve it

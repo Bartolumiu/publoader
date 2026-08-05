@@ -11,6 +11,7 @@ import { IngestService } from "../ingest/ingest.js";
 import { SchedulerService } from "../scheduler/service.js";
 import type { TitleService } from "../md/titleService.js";
 import type { RepoArchiveFetcher } from "../webhooks/repoArchive.js";
+import type { GithubContentsClient } from "../webhooks/repoContents.js";
 import { ApiTokenStore } from "../store/apiTokens.js";
 import { TrackedMangaStore } from "../store/trackedManga.js";
 import { ExtensionConfigStore } from "../store/extensionConfig.js";
@@ -44,6 +45,13 @@ export interface AppContext {
    * unconditionally while tests still avoid the network.
    */
   webhookFetchArchive?: RepoArchiveFetcher;
+  /**
+   * Test seam for the series-map sync's GitHub Contents calls, for the same
+   * reason as `webhookFetchArchive`: the admin route builds the service on
+   * demand, and a test must be able to hand it a client that never leaves the
+   * process.
+   */
+  mapSyncContents?: GithubContentsClient;
   enrollLimiter: RateLimiter;
   workerLimiter: RateLimiter;
   adminLimiter: RateLimiter;

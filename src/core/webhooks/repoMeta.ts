@@ -75,7 +75,7 @@ export interface GithubMetaClient {
   resolveRef(cfg: GithubApiConfig, repo: string, ref: string): Promise<string>;
 }
 
-function headers(cfg: GithubApiConfig): Record<string, string> {
+export function githubHeaders(cfg: GithubApiConfig): Record<string, string> {
   const out: Record<string, string> = {
     accept: "application/vnd.github+json",
     "user-agent": "publoader-core",
@@ -91,7 +91,7 @@ function headers(cfg: GithubApiConfig): Record<string, string> {
  * `res.json()` would buffer whatever GitHub sends; this process runs under a
  * 768 MiB limit, so a large compare must fail rather than be absorbed.
  */
-async function readJson(res: Response): Promise<unknown> {
+export async function readGithubJson(res: Response): Promise<unknown> {
   const declared = Number(res.headers.get("content-length") ?? "");
   if (Number.isFinite(declared) && declared > MAX_JSON_BYTES) {
     throw new GithubApiError(`GitHub response is ${declared} bytes, over the cap`);
@@ -122,7 +122,7 @@ async function readJson(res: Response): Promise<unknown> {
  * "the token is wrong or unset" versus "this repo name is wrong or the token
  * cannot see it".
  */
-function describeFailure(res: Response, cfg: GithubApiConfig, what: string): GithubApiError {
+export function describeGithubFailure(res: Response, cfg: GithubApiConfig, what: string): GithubApiError {
   const rateLimited =
     res.status === 403 && res.headers.get("x-ratelimit-remaining") === "0";
   if (rateLimited) {
@@ -144,7 +144,7 @@ function describeFailure(res: Response, cfg: GithubApiConfig, what: string): Git
   return new GithubApiError(`GitHub ${what} failed with HTTP ${res.status}`, res.status);
 }
 
-const path = (cfg: GithubApiConfig, repo: string, rest: string): string =>
+export const repoApiUrl = (cfg: GithubApiConfig, repo: string, rest: string): string =>
   `${cfg.apiUrl.replace(/\/+$/, "")}/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(repo)}${rest}`;
 
 /**
@@ -154,9 +154,9 @@ const path = (cfg: GithubApiConfig, repo: string, rest: string): string =>
 export const githubMeta: GithubMetaClient = {
   async head(cfg, repo) {
     const signal = AbortSignal.timeout(GITHUB_API_TIMEOUT_MS);
-    const repoRes = await fetch(path(cfg, repo, ""), { headers: headers(cfg), signal });
-    if (!repoRes.ok) throw describeFailure(repoRes, cfg, `lookup of ${repo}`);
-    const meta = (await readJson(repoRes)) as { default_branch?: unknown };
+    const repoRes = await fetch(repoApiUrl(cfg, repo, ""), { headers: githubHeaders(cfg), signal });
+    if (!repoRes.ok) throw describeGithubFailure(repoRes, cfg, `lookup of ${repo}`);
+    const meta = (await readGithubJson(repoRes)) as { default_branch?: unknown };
     const defaultBranch =
       typeof meta.default_branch === "string" && meta.default_branch.length > 0
         ? meta.default_branch
@@ -166,11 +166,11 @@ export const githubMeta: GithubMetaClient = {
     // resolved, so a mistaken default_branch is visible in the response instead
     // of producing a sha with no explanation attached.
     const branchRes = await fetch(
-      path(cfg, repo, `/branches/${encodeURIComponent(defaultBranch)}`),
-      { headers: headers(cfg), signal },
+      repoApiUrl(cfg, repo, `/branches/${encodeURIComponent(defaultBranch)}`),
+      { headers: githubHeaders(cfg), signal },
     );
-    if (!branchRes.ok) throw describeFailure(branchRes, cfg, `lookup of ${repo}@${defaultBranch}`);
-    const branch = (await readJson(branchRes)) as { commit?: { sha?: unknown } };
+    if (!branchRes.ok) throw describeGithubFailure(branchRes, cfg, `lookup of ${repo}@${defaultBranch}`);
+    const branch = (await readGithubJson(branchRes)) as { commit?: { sha?: unknown } };
     const sha = branch.commit?.sha;
     if (typeof sha !== "string" || !/^[0-9a-f]{40}$/.test(sha)) {
       throw new GithubApiError(`GitHub returned no usable HEAD sha for ${repo}@${defaultBranch}`);
@@ -183,15 +183,15 @@ export const githubMeta: GithubMetaClient = {
     // commit it resolved to. A branch name in a bundle's `sourceCommit` would
     // make "is this behind?" unanswerable later, so the resolution happens once,
     // here, at install time.
-    const res = await fetch(path(cfg, repo, `/commits/${encodeURIComponent(ref)}`), {
-      headers: headers(cfg),
+    const res = await fetch(repoApiUrl(cfg, repo, `/commits/${encodeURIComponent(ref)}`), {
+      headers: githubHeaders(cfg),
       signal: AbortSignal.timeout(GITHUB_API_TIMEOUT_MS),
     });
     if (res.status === 404) {
       throw new GithubApiError(`${repo} has no ref '${ref}'`, 404);
     }
-    if (!res.ok) throw describeFailure(res, cfg, `lookup of ${repo}@${ref}`);
-    const body = (await readJson(res)) as { sha?: unknown };
+    if (!res.ok) throw describeGithubFailure(res, cfg, `lookup of ${repo}@${ref}`);
+    const body = (await readGithubJson(res)) as { sha?: unknown };
     if (typeof body.sha !== "string" || !/^[0-9a-f]{40}$/.test(body.sha)) {
       throw new GithubApiError(`GitHub returned no usable commit sha for ${repo}@${ref}`);
     }
@@ -200,18 +200,18 @@ export const githubMeta: GithubMetaClient = {
 
   async compare(cfg, repo, base, head) {
     const signal = AbortSignal.timeout(GITHUB_API_TIMEOUT_MS);
-    const url = path(
+    const url = repoApiUrl(
       cfg,
       repo,
       `/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`,
     );
-    const res = await fetch(url, { headers: headers(cfg), signal });
+    const res = await fetch(url, { headers: githubHeaders(cfg), signal });
     // 404 is not an error here: it is how GitHub says "one of these commits is
     // not in this repo", which is exactly the question being asked when a
     // published bundle has to be matched to one of several repos.
     if (res.status === 404) return null;
-    if (!res.ok) throw describeFailure(res, cfg, `compare in ${repo}`);
-    const body = (await readJson(res)) as {
+    if (!res.ok) throw describeGithubFailure(res, cfg, `compare in ${repo}`);
+    const body = (await readGithubJson(res)) as {
       ahead_by?: unknown;
       files?: { filename?: unknown }[];
     };

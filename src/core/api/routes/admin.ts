@@ -33,6 +33,7 @@ import { MANGADEX_LANGUAGES } from "../../../contracts/languages.js";
 const WORKER_IMAGE = process.env["PUBLOADER_WORKER_IMAGE"] ?? "ardax/publoader-worker:latest";
 import { VALID_REMOVAL_MODES } from "../../store/settings.js";
 import { BundleRejectedError } from "../../store/bundles.js";
+import { MapSyncService } from "../../mapsync/service.js";
 import AdmZip from "adm-zip";
 
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
@@ -777,6 +778,51 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         rejected: result.rejected.length,
       });
       return { ok: true, ...result };
+    });
+
+    /**
+     * Run the series-map write-back now instead of waiting for the weekly
+     * timer. Same code path the timer uses, so a dry run is an honest preview.
+     *
+     * `tracked:write` rather than `tracked:read`: this publishes the map to a
+     * git repository, and — with `force` — can delete mappings from a file that
+     * contributors read. Even the dry run is gated, because its output lists the
+     * full contents of a private repo's map.
+     */
+    scope.post("/api/v1/admin/maps/sync", { preHandler: requireScope("tracked:write") }, async (req) => {
+      const body = parseOrThrow(
+        z.object({
+          dryRun: z.boolean().default(false),
+          /** Bypass the shrink guard. Deliberately not exposed to the timer. */
+          force: z.boolean().default(false),
+          extensions: z.array(z.string().regex(EXTENSION_NAME_RE)).max(50).default([]),
+        }),
+        req.body ?? {},
+      );
+      const service = MapSyncService.fromConfig(ctx.config, {
+        prisma: ctx.prisma,
+        log: ctx.log,
+        audit: ctx.audit,
+        settings: ctx.settings,
+        ...(ctx.mapSyncContents ? { contents: ctx.mapSyncContents } : {}),
+      });
+      const report = await service.sync({
+        dryRun: body.dryRun,
+        force: body.force,
+        extensions: body.extensions,
+        actor: actor(req),
+      });
+      // A dry run is not an event; only a run that could write is audited, and
+      // the per-file writes audit themselves inside the service.
+      if (!body.dryRun) {
+        await ctx.audit.record(actor(req), "map_sync.run", "manual", {
+          written: report.written,
+          failed: report.failed,
+          force: body.force,
+          extensions: body.extensions,
+        });
+      }
+      return { ok: report.failed === 0, ...report };
     });
 
     // ---- untracked series pipeline ----

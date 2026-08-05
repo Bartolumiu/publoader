@@ -244,6 +244,14 @@ services:
       GITHUB_CORE_REPO: ${GITHUB_CORE_REPO:-}
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       GITHUB_API_URL: ${GITHUB_API_URL:-https://api.github.com}
+      # --- series-map write-back (core-api only) ---------------------------
+      # Once a week, writes tracked_manga back into each extension's
+      # manga_id_map.json so the files contributors read stop going stale.
+      # Needs GITHUB_TOKEN to have Contents:WRITE; inert without it. It never
+      # syncs on the first boot after being enabled, so a deploy cannot produce
+      # commits. Set false on any second environment pointed at the same repos.
+      MAP_SYNC_ENABLED: ${MAP_SYNC_ENABLED:-true}
+      MAP_SYNC_INTERVAL_HOURS: ${MAP_SYNC_INTERVAL_HOURS:-168}
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
     expose:

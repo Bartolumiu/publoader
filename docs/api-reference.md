@@ -353,6 +353,7 @@ Pausing stops new leases (`routes/worker.ts:110`), scheduled run creation
 | `GET` | `/extensions/:name/tracked` | `tracked:read` | Every publisher-id → MangaDex-title mapping |
 | `PUT` | `/extensions/:name/tracked` | `tracked:append` | `{mangaId, mdMangaId}`; upsert, records the actor as `source`. **403** when the mapping already exists and points somewhere else and the caller lacks `tracked:write` — repointing a series is an edit, and a silent one |
 | `POST` | `/extensions/:name/tracked/batch` | `tracked:append` | Bulk curation — see below |
+| `POST` | `/maps/sync` | `tracked:write` | Write the tracked map back to `manga_id_map.json` in GitHub — see below |
 | `DELETE` | `/extensions/:name/tracked/:mangaId` | `tracked:write` | → `{ok, removed}`. Does **not** touch MangaDex |
 | `GET` | `/extensions/:name/config` | `extensions:read` | `{extension, overrideOptions}` |
 | `PUT` | `/extensions/:name/config` | `extensions:write` | `{overrideOptions: {…}}` — replaces wholesale |
@@ -384,6 +385,36 @@ Rows are judged and reported **individually** — a contributor pasting 200 line
 needs to know which three were wrong, not that "the batch failed". The response
 carries `parseErrors` plus a per-row outcome. `remove` still requires
 `tracked:write`, per the same append-versus-edit rule as the single-row route.
+
+#### Series-map write-back
+
+`POST /maps/sync`, scope `tracked:write`. Runs the same job the weekly timer
+runs, which is what makes `dryRun` an honest preview:
+
+```json
+{ "dryRun": false, "force": false, "extensions": ["mangaplus"] }
+```
+
+`extensions` empty means every extension with tracked mappings. `force` bypasses
+the guard that refuses a write deleting more than half of a file's mappings —
+operator-only, and never set by the timer. The response is the run report:
+
+```json
+{
+  "ok": true, "ranAt": "…", "dryRun": false, "written": 1, "failed": 0,
+  "outcomes": [{
+    "extension": "mangaplus", "status": "write", "repo": "publoader-extensions",
+    "path": "src/mangaplus/manga_id_map.json", "commit": "<sha>",
+    "added": 3, "removed": 1, "mappings": 412
+  }]
+}
+```
+
+`status` is `write`, `unchanged`, `skipped` (no file, no repo, or two repos
+claim the extension), `refused` (a guard fired — `detail` says which) or
+`failed`. `skippedReason` on the report means the whole run did nothing, most
+often "`GITHUB_TOKEN` is unset; writing to a repo needs Contents: write".
+Behaviour, guards and the weekly schedule: docs/operations.md §"Series-map sync".
 
 ### Bundles
 
@@ -556,9 +587,11 @@ A push to the *core* repo is acknowledged with `action: "none"` and an explanati
 core deploys are image-based, so CI builds the image and
 `./scripts/publoader prod upgrade <tag>` rolls it out.
 
-Configuration (`src/config.ts:82-91`): `GITHUB_WEBHOOK_SECRET` (≥16 chars),
+Configuration (`src/config.ts`): `GITHUB_WEBHOOK_SECRET` (≥16 chars),
 `GITHUB_REPO_OWNER` (default `publoader`), `GITHUB_EXTENSIONS_REPOS`,
-`GITHUB_CORE_REPO`, `GITHUB_TOKEN`, `GITHUB_API_URL`.
+`GITHUB_CORE_REPO`, `GITHUB_TOKEN`, `GITHUB_API_URL`, plus `MAP_SYNC_ENABLED`
+(default true) and `MAP_SYNC_INTERVAL_HOURS` (default 168) for the series-map
+write-back below.
 
 ---
 

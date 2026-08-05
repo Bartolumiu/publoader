@@ -29,6 +29,13 @@ without anyone reading server logs.
 | core | `GITHUB_CORE_REPO` | **Nothing.** Answers 200 with "core deploys are image-based" |
 | anything else | — | 202 `untracked repo '<name>'` |
 
+One delivery is deliberately ignored on top of those rules: a push whose commits
+are **all** marked `[map-sync]`. Those are this platform's own weekly write-back
+of `manga_id_map.json`, and republishing a bundle for them would churn every
+extension's sha256 pin once a week for a data file the workers do not read from
+the bundle. A push mixing one of ours with a human's commit still publishes —
+the test is *every* commit, not any.
+
 Three conditions must all hold before anything is published, ported from the
 legacy `slot_for_push`:
 
@@ -76,7 +83,7 @@ push.
 | `GITHUB_REPO_OWNER` | yes | GitHub account/org that must own the pushing repo. Default `publoader` |
 | `GITHUB_EXTENSIONS_REPOS` | yes | Comma-separated repo names, e.g. `publoader-extensions,publoader-extensions-private` |
 | `GITHUB_CORE_REPO` | no | Repo name for the core service. Set it only to get the explanatory 200 instead of `untracked repo` |
-| `GITHUB_TOKEN` | for private repos | Read access used to download the repo archive. A fine-grained PAT with **Contents: read** on the extensions repos is enough |
+| `GITHUB_TOKEN` | for private repos | Access to the extensions repos. A fine-grained PAT with **Contents: read** is enough for the webhook; the weekly series-map sync (docs/operations.md §"Series-map sync") additionally needs **Contents: write** |
 | `GITHUB_API_URL` | no | Default `https://api.github.com` |
 
 All of these follow the platform's Docker-secrets convention: any `VAR` may be

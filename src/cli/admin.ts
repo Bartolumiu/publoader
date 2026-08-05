@@ -527,6 +527,61 @@ tracked
     );
   });
 
+// ---- series-map write-back (the return trip: database -> manga_id_map.json) ----
+const maps = program
+  .command("maps")
+  .description("write the tracked series map back to the extensions repos");
+
+maps
+  .command("sync")
+  .description("update manga_id_map.json in GitHub from the database (runs weekly on its own)")
+  .option("--dry-run", "report what would be committed and write nothing")
+  .option("--extension <name...>", "only these extensions (default: all tracked)")
+  .option(
+    "--force",
+    "commit even when the write would delete more than half of a file's mappings",
+  )
+  .action(async (opts: { dryRun?: boolean; extension?: string[]; force?: boolean }) => {
+    const res = await api<{
+      dryRun: boolean;
+      written: number;
+      failed: number;
+      skippedReason?: string;
+      outcomes: {
+        extension: string;
+        status: string;
+        repo?: string;
+        path?: string;
+        commit?: string;
+        detail?: string;
+        added: number;
+        removed: number;
+        mappings: number;
+      }[];
+    }>("/api/v1/admin/maps/sync", {
+      method: "POST",
+      json: {
+        dryRun: opts.dryRun === true,
+        force: opts.force === true,
+        extensions: opts.extension ?? [],
+      },
+    });
+    if (res.skippedReason) console.error(`  nothing to do: ${res.skippedReason}`);
+    table(res.outcomes, [
+      { header: "EXTENSION", get: (o) => o["extension"] },
+      { header: "STATUS", get: (o) => o["status"] },
+      { header: "REPO", get: (o) => o["repo"] ?? "-" },
+      { header: "MAPPINGS", get: (o) => o["mappings"] },
+      { header: "DELTA", get: (o) => `+${o["added"]} -${o["removed"]}` },
+      { header: "COMMIT", get: (o) => String(o["commit"] ?? "").slice(0, 7) || "-" },
+      { header: "DETAIL", get: (o) => o["detail"] ?? "" },
+    ], "no extensions have tracked mappings");
+    ok(
+      `${res.dryRun ? "would write" : "wrote"} ${res.written} file(s)` +
+        (res.failed > 0 ? `, ${res.failed} failed` : ""),
+    );
+  });
+
 // ---- extension config (the database replacement for override_options.json) ----
 const extConfig = program
   .command("ext-config")
