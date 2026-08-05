@@ -782,7 +782,29 @@ curl -fsS "$API/api/v1/admin/queues/tasks?state=FAILED&state=DEAD_LETTER" -H "$A
 
 # one series' worth: dedupeKey is a case-insensitive substring
 curl -fsS "$API/api/v1/admin/queues/tasks?dedupeKey=1234%7C&attemptMin=3" -H "$AUTH"
+
+# what is scheduled to be taken down, and for which publisher
+curl -fsS "$API/api/v1/admin/queues/tasks?kind=UNAVAILABLE&extension=mangaplus" -H "$AUTH"
+
+# find a chapter by series, title, number or either MangaDex id
+curl -fsS "$API/api/v1/admin/queues/tasks?chapter=blue%20lock&language=en" -H "$AUTH"
 ```
+
+`dedupeKey` only reads a row's identity for `UPLOAD` tasks; for `EDIT`, `DELETE`
+and `UNAVAILABLE` the dedupe key *is* the MangaDex chapter id, so searching it
+means already knowing the UUID. `extension`, `language` and `chapter` read the
+queued payload instead, which is what makes those three kinds findable:
+`extension` and `language` are exact, `chapter` is a case-insensitive substring
+over the series name, the chapter title, the chapter number and both MangaDex
+ids. Every row also carries an `identity` object — the same fields — so a list
+names the chapters it contains without fetching each payload.
+
+These three are part of the shared filter shape, so they narrow the bulk verbs
+exactly as they narrow the list: `{"filter": {"kind": "UNAVAILABLE", "extension":
+"mangaplus"}}` on `retry`, `remove` or `purge` acts on that set and no other.
+They read JSONB rather than an indexed column, so they scan; that is fine for an
+operator query on a paged view and is the reason they are not offered as an
+uncapped export.
 
 This list is ordered by `notBefore` — the same ordering `core-uploader` claims
 in — so it answers *what runs next*. `GET /api/v1/admin/upload-tasks` (the older

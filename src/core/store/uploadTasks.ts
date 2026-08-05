@@ -89,6 +89,37 @@ export interface UploadTaskFilter {
   dedupeKey?: string;
   attemptMin?: number;
   attemptMax?: number;
+  /** Exact match on the payload's `extensionName`. */
+  extension?: string;
+  /** Exact match on the payload's `chapterLanguage`. */
+  language?: string;
+  /**
+   * Case-insensitive substring across the identity fields an operator would
+   * actually search by — the series, the chapter, or either MangaDex id.
+   */
+  chapter?: string;
+}
+
+/**
+ * Which chapter a queue row is about.
+ *
+ * The `chapter` payload is deliberately absent from every list projection: it
+ * is worker-supplied, carries the page-artifact ids and (for EDIT) a whole
+ * before/after pair, and is read exactly once by the uploader. But with none of
+ * it a row is a bare dedupe key — and for EDIT, DELETE and UNAVAILABLE that key
+ * is the MangaDex chapter UUID (see `taskDedupeKey`), which names nothing an
+ * operator recognises. These are the fields that make a row readable as a
+ * chapter rather than a UUID.
+ */
+export interface UploadTaskIdentity {
+  extension: string | null;
+  mangaName: string | null;
+  mdMangaId: string | null;
+  mdChapterId: string | null;
+  chapterNumber: string | null;
+  chapterVolume: string | null;
+  chapterTitle: string | null;
+  chapterLanguage: string | null;
 }
 
 /** A queue row without its `chapter` payload — what list views return. */
@@ -105,6 +136,7 @@ export interface UploadTaskRow {
   lastError: string | null;
   createdAt: Date;
   updatedAt: Date;
+  identity: UploadTaskIdentity;
 }
 
 /** Enough of a row to explain why a mutation refused it. */
@@ -282,7 +314,7 @@ export class UploadTaskStore {
     // One row beyond the page, so "is there a next page?" needs no second count.
     const [rows, counted] = await Promise.all([
       this.prisma.$queryRaw<UploadTaskRow[]>(Prisma.sql`
-        SELECT ${TASK_COLUMNS} FROM upload_tasks t
+        SELECT ${TASK_COLUMNS}, ${TASK_IDENTITY} FROM upload_tasks t
         ${combine(parts)}
         ORDER BY t.not_before ASC, t.created_at ASC, t.id ASC
         LIMIT ${opts.limit + 1}
@@ -304,7 +336,7 @@ export class UploadTaskStore {
   /** One row including its `chapter` payload — the detail/edit view. */
   async get(id: string): Promise<(UploadTaskRow & { chapter: unknown }) | null> {
     const rows = await this.prisma.$queryRaw<(UploadTaskRow & { chapter: unknown })[]>(Prisma.sql`
-      SELECT ${TASK_COLUMNS}, t.chapter FROM upload_tasks t WHERE t.id = ${id}
+      SELECT ${TASK_COLUMNS}, ${TASK_IDENTITY}, t.chapter FROM upload_tasks t WHERE t.id = ${id}
     `);
     return rows[0] ?? null;
   }
@@ -512,7 +544,8 @@ export class UploadTaskStore {
       RETURNING id, kind::text AS kind, dedupe_key AS "dedupeKey", state::text AS state,
                 attempt, max_attempts AS "maxAttempts", not_before AS "notBefore",
                 lease_id AS "leaseId", lease_expires_at AS "leaseExpiresAt",
-                last_error AS "lastError", created_at AS "createdAt", updated_at AS "updatedAt"
+                last_error AS "lastError", created_at AS "createdAt", updated_at AS "updatedAt",
+                ${TASK_IDENTITY}
     `);
     return rows[0] ?? null;
   }
@@ -564,6 +597,26 @@ const TASK_COLUMNS = Prisma.sql`t.id, t.kind::text AS kind, t.dedupe_key AS "ded
   t.created_at AS "createdAt", t.updated_at AS "updatedAt"`;
 
 /**
+ * `UploadTaskIdentity`, built in the database.
+ *
+ * Projected as one JSON object rather than eight aliased columns so the shape
+ * arrives assembled and the whole `chapter` payload never crosses the wire.
+ * `chapter` is intentionally unqualified: every statement this is spliced into
+ * has exactly one table in scope, including `INSERT … RETURNING`, where the
+ * `t` alias the SELECTs use does not exist.
+ */
+const TASK_IDENTITY = Prisma.sql`jsonb_build_object(
+  'extension', chapter->>'extensionName',
+  'mangaName', chapter->>'mangaName',
+  'mdMangaId', chapter->>'mdMangaId',
+  'mdChapterId', chapter->>'mdChapterId',
+  'chapterNumber', chapter->>'chapterNumber',
+  'chapterVolume', chapter->>'chapterVolume',
+  'chapterTitle', chapter->>'chapterTitle',
+  'chapterLanguage', chapter->>'chapterLanguage'
+) AS identity`;
+
+/**
  * Filter predicates, parameterised. The enum comparisons keep the enum type
  * (via text[] -> enum[]) rather than casting the column to text, so the
  * (state, not_before) index stays usable.
@@ -581,6 +634,27 @@ function taskWhere(filter: UploadTaskFilter): Prisma.Sql[] {
   if (filter.dedupeKey) parts.push(Prisma.sql`t.dedupe_key ILIKE ${`%${filter.dedupeKey}%`}`);
   if (filter.attemptMin !== undefined) parts.push(Prisma.sql`t.attempt >= ${filter.attemptMin}`);
   if (filter.attemptMax !== undefined) parts.push(Prisma.sql`t.attempt <= ${filter.attemptMax}`);
+  // Payload predicates. These read `chapter` rather than a column, so they are
+  // unindexed and scan; that is accounted for. They exist to be ANDed with the
+  // indexed kind/state predicates above, they are only ever reached from an
+  // operator action on a paged view, and `upload_tasks` keeps its DONE rows
+  // forever (they are half of the double-upload guard), so the alternative —
+  // expression indexes — would be permanent write cost and Prisma schema drift
+  // for a query a human runs by hand.
+  if (filter.extension) {
+    parts.push(Prisma.sql`t.chapter->>'extensionName' = ${filter.extension}`);
+  }
+  if (filter.language) {
+    parts.push(Prisma.sql`t.chapter->>'chapterLanguage' = ${filter.language}`);
+  }
+  if (filter.chapter) {
+    const pattern = `%${filter.chapter}%`;
+    parts.push(Prisma.sql`(t.chapter->>'mangaName' ILIKE ${pattern}
+      OR t.chapter->>'chapterTitle' ILIKE ${pattern}
+      OR t.chapter->>'chapterNumber' ILIKE ${pattern}
+      OR t.chapter->>'mdMangaId' ILIKE ${pattern}
+      OR t.chapter->>'mdChapterId' ILIKE ${pattern})`);
+  }
   return parts;
 }
 

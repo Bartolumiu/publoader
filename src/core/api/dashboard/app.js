@@ -65,6 +65,9 @@ const store = {
     queueDedupeKey: "",
     queueAttemptMin: "",
     queueAttemptMax: "",
+    queueExtension: "",
+    queueLanguage: "",
+    queueChapter: "",
     /** Keyset cursors already walked, so "Back" does not need a second scheme. */
     queueCursors: [],
     untrackedState: "NEW",
@@ -534,6 +537,14 @@ const truncate = (text, max = 160) =>
 const mdTitleLink = (id, label) =>
   el("a", {
     href: `https://mangadex.org/title/${encodeURIComponent(id)}`,
+    target: "_blank",
+    rel: "noreferrer noopener",
+    text: label ?? id,
+  });
+
+const mdChapterLink = (id, label) =>
+  el("a", {
+    href: `https://mangadex.org/chapter/${encodeURIComponent(id)}`,
     target: "_blank",
     rel: "noreferrer noopener",
     text: label ?? id,
@@ -2179,6 +2190,9 @@ VIEWS.queues = (route) => {
     if (f().queueDedupeKey) q.set("dedupeKey", f().queueDedupeKey);
     if (f().queueAttemptMin !== "") q.set("attemptMin", f().queueAttemptMin);
     if (f().queueAttemptMax !== "") q.set("attemptMax", f().queueAttemptMax);
+    if (f().queueExtension) q.set("extension", f().queueExtension);
+    if (f().queueLanguage) q.set("language", f().queueLanguage);
+    if (f().queueChapter) q.set("chapter", f().queueChapter);
     for (const [k, v] of Object.entries(extra)) if (v != null) q.set(k, v);
     return q;
   };
@@ -2191,6 +2205,9 @@ VIEWS.queues = (route) => {
     if (f().queueDedupeKey) filter.dedupeKey = f().queueDedupeKey;
     if (f().queueAttemptMin !== "") filter.attemptMin = Number(f().queueAttemptMin);
     if (f().queueAttemptMax !== "") filter.attemptMax = Number(f().queueAttemptMax);
+    if (f().queueExtension) filter.extension = f().queueExtension;
+    if (f().queueLanguage) filter.language = f().queueLanguage;
+    if (f().queueChapter) filter.chapter = f().queueChapter;
     return filter;
   };
 
@@ -2338,10 +2355,24 @@ function queueFilterCard(onChange) {
             queueDedupeKey: "",
             queueAttemptMin: "",
             queueAttemptMax: "",
+            queueExtension: "",
+            queueLanguage: "",
+            queueChapter: "",
           });
           onChange();
         },
       }),
+    ),
+    // Filters over the queued chapter itself. Separated from the row above
+    // because they answer a different question — that one narrows by the state
+    // of the work, this one by which chapter the work is about, which for an
+    // EDIT or UNAVAILABLE row is the only handle an operator has.
+    row(
+      text("queue-chapter", "Chapter", "queueChapter", {
+        placeholder: "series, title, number or either MangaDex id",
+      }),
+      text("queue-extension", "Extension", "queueExtension", { placeholder: "exact name" }),
+      text("queue-language", "Language", "queueLanguage", { placeholder: "exact code, e.g. en" }),
     ),
     row(
       gatedButton("runs:write", {
@@ -2515,9 +2546,64 @@ function reportQueueOutcome(result) {
   );
 }
 
+/**
+ * Which chapter a queue row is about.
+ *
+ * The dedupe key beside this column is the MangaDex chapter UUID for every kind
+ * except UPLOAD (see `taskDedupeKey`), so without this a scheduled edit or
+ * takedown is an unreadable identifier and the only way to learn what it
+ * touches is to open rows one at a time. The fields come from the list
+ * endpoint's `identity` projection, not from the `chapter` payload, which stays
+ * server-side.
+ */
+function queueChapterCell(identity) {
+  const id = identity ?? {};
+  // "0" is a real chapter number and a real volume, so this tests for absence,
+  // not for falsiness.
+  const has = (value) => value !== null && value !== undefined && value !== "";
+  const series = has(id.mangaName) ? id.mangaName : id.mdMangaId;
+
+  if (!has(series) && !has(id.chapterNumber) && !has(id.chapterTitle)) {
+    return el("span", {
+      class: "dim",
+      text: id.mdChapterId ? "no series or chapter on the payload" : "payload carries no identity",
+      title:
+        "The queued payload has none of the fields this column reads. Open the row to see it in full.",
+    });
+  }
+
+  const facets = [];
+  if (has(id.chapterVolume)) facets.push(`Vol. ${id.chapterVolume}`);
+  if (has(id.chapterLanguage)) facets.push(id.chapterLanguage);
+  if (has(id.extension)) facets.push(id.extension);
+
+  return el(
+    "div",
+    {},
+    el(
+      "div",
+      {},
+      has(id.mdMangaId)
+        ? mdTitleLink(id.mdMangaId, truncate(has(id.mangaName) ? id.mangaName : id.mdMangaId, 60))
+        : el("strong", { text: truncate(has(series) ? series : "unknown series", 60) }),
+    ),
+    el(
+      "div",
+      { class: "dim" },
+      has(id.chapterNumber)
+        ? has(id.mdChapterId)
+          ? mdChapterLink(id.mdChapterId, `Ch. ${id.chapterNumber}`)
+          : `Ch. ${id.chapterNumber}`
+        : null,
+      facets.length ? `${has(id.chapterNumber) ? " · " : ""}${facets.join(" · ")}` : null,
+    ),
+    has(id.chapterTitle) ? el("div", { class: "dim", text: truncate(id.chapterTitle, 60) }) : null,
+  );
+}
+
 function queueTable(rows, selected, tasks, reload) {
   return table(
-    ["", "Kind", "State", "Dedupe key", "Attempts", "Not before", "Last error", ""],
+    ["", "Kind", "State", "Chapter", "Dedupe key", "Attempts", "Not before", "Last error", ""],
     rows.map((task) => {
       const retryable = task.state === "FAILED" || task.state === "DEAD_LETTER";
       const editable = task.state === "PENDING";
@@ -2535,6 +2621,7 @@ function queueTable(rows, selected, tasks, reload) {
         }),
         task.kind,
         chip(task.state),
+        queueChapterCell(task.identity),
         el("code", { text: task.dedupeKey }),
         `${task.attempt}/${task.maxAttempts}`,
         fmtTime(task.notBefore),

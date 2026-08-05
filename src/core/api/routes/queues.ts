@@ -125,6 +125,15 @@ const FilterShape = {
   dedupeKey: z.string().min(1).max(256).optional(),
   attemptMin: z.coerce.number().int().min(0).max(1000).optional(),
   attemptMax: z.coerce.number().int().min(0).max(1000).optional(),
+  // Predicates over the queued chapter payload rather than a column. They
+  // matter most on the kinds whose dedupe key is a bare MangaDex UUID — "every
+  // pending UNAVAILABLE for mangaplus" is expressible here and nowhere else,
+  // and because they live in `FilterShape` they narrow the bulk verbs
+  // (retry / remove / purge / reorder) exactly as they narrow the list.
+  extension: z.string().min(1).max(128).optional(),
+  language: z.string().min(1).max(32).optional(),
+  /** Case-insensitive substring over series, title, number, or either MD id. */
+  chapter: z.string().min(1).max(256).optional(),
 };
 
 const FilterSchema = z.object(FilterShape);
@@ -136,6 +145,9 @@ function toFilter(query: z.infer<typeof FilterSchema>): UploadTaskFilter {
     dedupeKey: query.dedupeKey,
     attemptMin: query.attemptMin,
     attemptMax: query.attemptMax,
+    extension: query.extension,
+    language: query.language,
+    chapter: query.chapter,
   };
 }
 
@@ -700,7 +712,15 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
       });
       const remaining = await ctx.uploadTasks.countMatching(selected);
       await ctx.audit.record(actor(req), "queue.purge", undefined, {
-        filter: { kind: body.kind, state: body.state, dedupeKey: body.dedupeKey },
+        // Every filter key, not a hand-listed subset: this record is the only
+        // surviving evidence of a purge, and one that was narrowed by extension
+        // or language must not be audited as the far wider set it would have
+        // been without them.
+        filter: Object.fromEntries(
+          Object.keys(FilterShape)
+            .map((key) => [key, body[key as keyof typeof body]])
+            .filter(([, value]) => value !== undefined),
+        ),
         includeCompleted: body.includeCompleted,
         matched,
         deleted: deleted.length,
