@@ -310,6 +310,10 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
             state: oneOrMany(UPLOAD_TASK_STATES).optional(),
             q: z.string().min(1).max(256).optional(),
             dedupeKey: z.string().min(1).max(256).optional(),
+            // The same two facets `/queues/tasks` takes. Both tabs read one
+            // queue, so a filter has to mean the same thing on either.
+            extension: z.string().min(1).max(128).optional(),
+            language: z.string().min(1).max(32).optional(),
             limit: z.coerce.number().int().min(1).max(MAX_PAGE).default(100),
             cursor: z.string().max(512).optional(),
           }),
@@ -328,6 +332,8 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           states: query.state ?? (["PENDING"] as const),
           q: query.q,
           dedupeKey: query.dedupeKey,
+          extension: query.extension,
+          language: query.language,
         };
         const [page, summary] = await Promise.all([
           ctx.uploadTasks.listChapters(filter, { limit: query.limit, cursor }),

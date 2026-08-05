@@ -789,6 +789,12 @@ curl -fsS "$API/api/v1/admin/queues/chapters?limit=50" -H "$AUTH"
 
 # ...searched by series name rather than by dedupe key
 curl -fsS "$API/api/v1/admin/queues/chapters?q=sakamoto" -H "$AUTH"
+
+# what is scheduled to be taken down, and for which publisher
+curl -fsS "$API/api/v1/admin/queues/tasks?kind=UNAVAILABLE&extension=mangaplus" -H "$AUTH"
+
+# find a chapter by series, title, number or either MangaDex id
+curl -fsS "$API/api/v1/admin/queues/tasks?q=blue%20lock&language=en" -H "$AUTH"
 ```
 
 `GET /queues/chapters` is the same rows and the same ordering as
@@ -798,6 +804,31 @@ identifies a chapter only to someone willing to decode it — and for
 `/queues/tasks` when the question is *what is stuck and why*. It defaults to
 `PENDING`, and its `position` is the place in the whole filtered claim order, so
 "14th" survives paging.
+
+`/queues/tasks` is readable as chapters too: every row carries an `identity`
+object (series, both MangaDex ids, number, volume, title, language, extension)
+built in the same statement, so the incident view names what it contains without
+a fetch per row.
+
+### Filtering a queue by the chapter rather than the row
+
+`dedupeKey` only reads a row's identity for `UPLOAD` tasks; for `EDIT`, `DELETE`
+and `UNAVAILABLE` the dedupe key *is* the MangaDex chapter id, so searching it
+means already knowing the UUID. Three filters read the queued payload instead,
+and they are what make those kinds findable:
+
+| Filter | Match | Reads |
+|---|---|---|
+| `q` | case-insensitive substring | series name, chapter title, chapter number, and both MangaDex ids |
+| `extension` | exact | the payload's `extensionName` |
+| `language` | exact | the payload's `chapterLanguage` |
+
+All three are part of the shared filter shape, so they narrow the bulk verbs
+exactly as they narrow a list: `{"filter": {"kind": "UNAVAILABLE", "extension":
+"mangaplus"}}` on `retry`, `remove` or `purge` acts on that set and no other.
+They read JSONB rather than an indexed column, so they scan; that is fine for an
+operator query on a paged view and is the reason they are not offered as an
+uncapped export.
 
 This list is ordered by `notBefore` — the same ordering `core-uploader` claims
 in — so it answers *what runs next*. `GET /api/v1/admin/upload-tasks` (the older

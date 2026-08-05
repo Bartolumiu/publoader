@@ -280,6 +280,22 @@ describe("dashboard chapter views", () => {
     win.location.hash = "";
     installFetch();
 
+    // jsdom implements <dialog> as an element but not its modal methods, so the
+    // real `showModal()` every dialog in app.js calls throws asynchronously out
+    // of a click handler — which vitest reports as an unhandled error and exits
+    // non-zero even though the assertions below pass. Stubbing the two methods
+    // to the `open` attribute they set is enough for the tests here, which read
+    // a dialog's rendered content rather than its modality.
+    const dialogs = win.HTMLDialogElement?.prototype;
+    if (dialogs && typeof dialogs.showModal !== "function") {
+      dialogs.showModal = function showModal(this: HTMLDialogElement): void {
+        this.setAttribute("open", "");
+      };
+      dialogs.close = function close(this: HTMLDialogElement): void {
+        this.removeAttribute("open");
+      };
+    }
+
     // Evaluated rather than imported. app.js is deliberately a classic script
     // (jsdom cannot execute module scripts) ending in `void boot()`, so this is
     // how a browser runs it and `boot()` is exactly the entry point under test.
