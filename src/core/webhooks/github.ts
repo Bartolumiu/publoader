@@ -70,9 +70,30 @@ export interface PushPayload {
     full_name?: string;
     default_branch?: string;
   };
-  commits?: { added?: string[]; modified?: string[]; removed?: string[] }[];
-  head_commit?: { added?: string[]; modified?: string[]; removed?: string[] } | null;
+  commits?: PushCommit[];
+  head_commit?: PushCommit | null;
 }
+
+export interface PushCommit {
+  message?: string;
+  added?: string[];
+  modified?: string[];
+  removed?: string[];
+}
+
+/**
+ * Marker the weekly series-map sync puts in its commit subjects (see
+ * `core/mapsync/service.ts`).
+ *
+ * Without it the platform answers its own commit: the sync writes
+ * `src/<extension>/manga_id_map.json`, the push webhook sees a changed path
+ * under an extension directory and republishes the bundle — a new sha256 pin
+ * every week for a data file the workers do not read from the bundle anyway
+ * (`tracked_manga` is delivered on lease). The marker is only trusted for
+ * *skipping* work, so a forged one costs nothing an attacker could not get by
+ * simply not pushing.
+ */
+export const MAP_SYNC_COMMIT_MARKER = "[map-sync]";
 
 export type RoleDecision =
   | { role: RepoRole; repo: string; after: string }
@@ -140,6 +161,23 @@ const EXTENSION_PATH_RE = /^src\/([a-z0-9_]+)\//;
  * surfaces as that extension's per-extension error rather than being guessed
  * at here.
  */
+/**
+ * True when EVERY commit in the push is one the series-map sync made.
+ *
+ * Every, not any: a push that carries our map commit alongside a human's commit
+ * still contains code that has to be published. Erring the other way — treating
+ * a mixed push as ours — would silently drop a contributor's change, which is a
+ * far worse failure than one redundant republish.
+ *
+ * A push with no commit list at all is not ours: the fallback must be to
+ * publish, never to skip.
+ */
+export function isMapSyncPush(payload: PushPayload): boolean {
+  const commits = [...(payload.commits ?? []), ...(payload.head_commit ? [payload.head_commit] : [])];
+  if (commits.length === 0) return false;
+  return commits.every((commit) => (commit.message ?? "").includes(MAP_SYNC_COMMIT_MARKER));
+}
+
 export function changedExtensions(payload: PushPayload): string[] {
   const found = new Set<string>();
   const commits = [...(payload.commits ?? []), ...(payload.head_commit ? [payload.head_commit] : [])];

@@ -86,9 +86,27 @@ const ConfigSchema = z.object({
   githubExtensionsRepos: z.string().default(""),
   /** Repo name for the core service; pushes to it are acknowledged, not acted on. */
   githubCoreRepo: z.string().default(""),
-  /** Read access to the extensions repos. Required for the private one. */
+  /**
+   * Access to the extensions repos. Read (archive download, commit lookup) is
+   * required for the private one; the series-map sync below also needs
+   * **Contents: write** on those repos, and is inert without it.
+   */
   githubToken: z.string().optional(),
   githubApiUrl: z.string().default("https://api.github.com"),
+
+  // Series-map write-back (core-api only). See docs/operations.md §"Series-map sync".
+  /**
+   * Whether to write `manga_id_map.json` back to the extensions repos on a
+   * timer. On by default, but it does nothing without a GITHUB_TOKEN that can
+   * write and at least one repo in GITHUB_EXTENSIONS_REPOS — and it never syncs
+   * on the first boot after it is enabled, so a deploy cannot produce commits.
+   */
+  mapSyncEnabled: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
+  /** Weekly. The floor is an hour so a typo cannot turn it into a busy loop. */
+  mapSyncIntervalHours: z.coerce.number().int().min(1).max(8760).default(168),
 
   // Operator self-service (core-api only). See docs/operations.md §"Self-service".
   /**
@@ -170,6 +188,8 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): Con
     githubCoreRepo: get("GITHUB_CORE_REPO"),
     githubToken: get("GITHUB_TOKEN"),
     githubApiUrl: get("GITHUB_API_URL"),
+    mapSyncEnabled: get("MAP_SYNC_ENABLED"),
+    mapSyncIntervalHours: get("MAP_SYNC_INTERVAL_HOURS"),
     docsPath: get("DOCS_PATH"),
     sysopsRestartEnabled: get("SYSOPS_RESTART_ENABLED"),
     coreUrl: get("CORE_URL"),

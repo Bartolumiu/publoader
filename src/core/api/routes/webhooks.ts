@@ -22,12 +22,14 @@ import { RateLimiter } from "../ratelimit.js";
 import {
   MAX_WEBHOOK_BODY_BYTES,
   changedExtensions,
+  isMapSyncPush,
   roleForPush,
   verifySignature,
   type GithubWebhookConfig,
   type PushPayload,
 } from "../../webhooks/github.js";
 import { handleExtensionsPush, type PushHandlerDeps } from "../../webhooks/pushHandler.js";
+import { parseRepoList } from "../../webhooks/repoList.js";
 
 const PATHS = ["/webhook", "/api/v1/webhooks/github"] as const;
 
@@ -119,6 +121,17 @@ export function registerWebhookRoutes(
           });
         }
 
+        if (isMapSyncPush(payload)) {
+          // Our own weekly write-back of manga_id_map.json. Republishing a
+          // bundle for it would churn the sha256 pin every week for a file the
+          // workers do not read from the bundle.
+          return reply.code(200).send({
+            ok: true,
+            commit: decision.after,
+            ignored: "every commit in this push is a publoader series-map sync commit",
+          });
+        }
+
         const changed = changedExtensions(payload);
         if (changed.length === 0) {
           return reply.code(200).send({
@@ -158,10 +171,7 @@ export function registerWebhookRoutes(
   });
 }
 
-/** Comma- or whitespace-separated repo names, blanks dropped. */
-export function parseRepoList(raw: string): string[] {
-  return raw
-    .split(/[,\s]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-}
+// Re-exported so existing importers (and tests) keep finding it here, while
+// background jobs like the series-map sync read the same setting without
+// importing a route.
+export { parseRepoList };

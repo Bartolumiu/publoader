@@ -411,6 +411,12 @@ reaches the extension without republishing it (`routes/worker.ts:119-137`). Bund
 data files only *seed* missing rows and never overwrite existing ones
 (`store/bundles.ts:79-84`, `120`).
 
+The return trip runs weekly: `core/mapsync` writes this table back into each
+extension's `manga_id_map.json` on GitHub, so the file contributors read matches
+what is tracked and a mapping removed here is not re-seeded by the next publish.
+It never creates or empties a file and refuses a write that would delete more
+than half of one — see docs/operations.md §"Series-map sync".
+
 **Known limitation: a namespaced extension runs unpartitioned.** `jobs.segment_manga_ids`
 is a flat list of ids on the wire, so it cannot say which catalogue an id came
 from. For an extension with two, `709` is ambiguous — partitioning on it would

@@ -1336,6 +1336,65 @@ Both are audited, so `padmin audit` shows who repointed a mapping and when.
 
 ---
 
+## Series-map sync
+
+The database winning has one cost: the `manga_id_map.json` files in the
+extensions repos go stale. Every title the pipeline auto-creates and every
+mapping an operator repoints is invisible in git, so a contributor reads the
+file, sees a series missing, and opens a pull request adding something that has
+been tracked for months. A mapping deliberately *removed* from the database is
+worse — the file still has it, so the next publish seeds it straight back.
+
+Once a week core-api writes the table back:
+
+```bash
+padmin maps sync --dry-run     # what the next weekly run would commit
+padmin maps sync               # do it now
+padmin maps sync --extension mangaplus --extension viz
+```
+
+| | |
+| --- | --- |
+| **Where it runs** | core-api. It is the only core service with a GitHub token and egress; core-scheduler sits on the internal `data` network. |
+| **When** | Every `MAP_SYNC_INTERVAL_HOURS` (default 168 = weekly), tracked by the `map_sync_last_run` row in `settings` — so restarts, redeploys and a second replica cannot make it run twice. |
+| **Not on deploy** | The first boot after enabling it only *arms* the timer. The first automatic commit is one interval later. |
+| **Needs** | `GITHUB_TOKEN` with **Contents: write** on the repos in `GITHUB_EXTENSIONS_REPOS`. Without it the feature reports itself off at boot and does nothing. |
+| **Off switch** | `MAP_SYNC_ENABLED=false`. It also skips while the platform is paused (`padmin pause`). |
+
+What it will not do, because it commits unattended:
+
+- **Never creates a file.** An extension with no `manga_id_map.json` is skipped
+  with a note; add the file once by hand and the sync keeps it current.
+- **Never empties one.** No mappings in the database for an extension that has
+  some in git means *refused*, not a deletion.
+- **Refuses a big shrink.** A write that would drop more than half of a file's
+  mappings is refused and logged; `padmin maps sync --force` is the deliberate
+  override once you have looked at the dry run.
+- **Never guesses a repo.** An extension directory present in two configured
+  repos is skipped rather than written to whichever was listed first.
+- **Keeps each file's shape.** mangaplus's `{titleId: [ids]}`, alpha_manga's
+  `{id: titleId}` and viz's nested `{namespace: {…}}` all survive; only the
+  ordering is normalised (once), so a week with no changes makes no commit.
+
+Its commits carry `[map-sync]` in the subject, and the push webhook skips a
+delivery whose commits are *all* marked — otherwise the platform would answer
+its own data-file commit with a bundle republish every week. A push that mixes
+one of ours with a human's still publishes.
+
+Each write is audited as `map_sync.write`, with the commit sha and the counts:
+
+```bash
+curl -s "$PUBLOADER_API_URL/api/v1/admin/audit/search?action=map_sync" \
+  -H "authorization: Bearer $PUBLOADER_ADMIN_TOKEN" | jq '.events[]'
+```
+
+Run it manually in any environment that shares the extensions repos with
+another deployment, and leave `MAP_SYNC_ENABLED=false` there — two deployments
+writing the same files would overwrite each other with whichever database is
+staler.
+
+---
+
 ## Lease-expiry storms
 
 Symptom: `publoader_lease_expiries_total` climbing fast, jobs cycling
