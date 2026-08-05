@@ -743,6 +743,41 @@ tails a log file.
 
 ---
 
+## Kill a run in progress
+
+When a run is doing something wrong — a bad extension build, a mapping mistake,
+an upstream site returning nonsense — stop the whole run rather than its jobs one
+at a time:
+
+```bash
+curl -sX POST $CORE/api/v1/admin/runs/$RUN_ID/cancel -H "authorization: Bearer $ADMIN_TOKEN"
+
+# everything unfinished, optionally for one extension
+curl -sX POST $CORE/api/v1/admin/runs/cancel-all \
+  -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"extension":"mangaplus"}'
+```
+
+Every job the run still has outstanding goes to `CANCELLED` immediately, and a
+worker mid-execution aborts at its next lease renewal. Nothing can land
+afterwards: `cancel_requested` blocks a re-claim even after the lease sweeper
+requeues an abandoned job, and ingest only accepts an envelope for a job still in
+`LEASED`/`RUNNING`, so a worker that finishes anyway has its result superseded
+rather than committed.
+
+**Prefer this to cancelling individual jobs on a partitioned run.** Cancelling
+one segment leaves the others to finish, and the run is then processed from
+incomplete results — which on a CLEAN run means the processor concludes that
+every chapter the missing segment covered has vanished upstream, and queues it
+for removal. A killed run never reaches the processor at all.
+
+A finished run is refused with 409 rather than "cancelled", because cancelling
+completed work would misreport what happened. The run lands in `CANCELLED`, not
+`DEAD_LETTER` — this was a decision, and the state an operator reads later should
+say so.
+
+---
+
 ## Queue management
 
 The section above is triage: look at a stuck task, retry it, cancel it. This one
@@ -1308,10 +1343,28 @@ before resuming.
 
 ## Config lives in the database, not in JSON files
 
-`manga_id_map.json` and `override_options.json` are **seed data**, imported
-once when a bundle is first published. After that the database wins and
-republishing does not overwrite it. Editing the files on a live deployment
-changes nothing.
+The two data files behave **differently**, and the difference decides whether
+editing one in git does anything at all on a live deployment.
+
+**`manga_id_map.json` is reconciled on every publish** — so the contributor
+workflow (edit the file, open a PR, merge) does reach the database. Per row:
+
+| Change in git | Effect on the database |
+| --- | --- |
+| A new `(namespace, mangaId)` pair | inserted |
+| A corrected MangaDex id, on a row that came from a previous import | updated |
+| A different id on a row an **operator** set, or the title pipeline auto-created | preserved — git does not win |
+| A line removed | nothing — a series is never untracked by deletion |
+
+The `source` column draws that line. A row set by an operator is a later and
+better-informed decision than the file, and dropping a line from the map must not
+silently stop a series being tracked — untracking is an explicit action
+(dashboard, `padmin tracked remove`, or the bot).
+
+**`override_options.json` is seed data**, imported only when an extension has no
+configuration at all. Once any of it exists — a config row, an alias, a
+multi-chapter entry, a language mapping — republishing does nothing, so editing
+this file on a live deployment changes nothing. Use `ext-config` below.
 
 ```bash
 padmin tracked list <extension>
@@ -1333,6 +1386,79 @@ padmin ext-config set mangaplus /tmp/o.json
 ```
 
 Both are audited, so `padmin audit` shows who repointed a mapping and when.
+
+### `custom_language` widens what a chapter may be published as
+
+`custom_language` maps an external manga id to a MangaDex language code, and it
+is the one override that changes what the ingest gate will *accept*: chapters of
+that title are allowed to carry that language even though the extension's
+manifest does not declare it. mangaplus reports `SPANISH` for everything, so the
+one title that is actually Latin-American Spanish is mapped to `es-la` here.
+
+The map is read from the **database**, never from the worker's envelope — a
+worker cannot vote on which languages it may publish. So a chapter rejected as
+
+```
+chapter language es-la not declared by manifest (declared: en, es)
+```
+
+means the mapping is missing from `ext-config`, not that the manifest is wrong.
+Values are validated against MangaDex's language list on write, so a typo like
+`pt_br` is refused at that point rather than silently failing to protect
+Brazilian-Portuguese chapters from the removal pass.
+
+---
+
+## Webhook verbosity
+
+By default the channel gets **failures only** for individual chapters. Python
+sent an embed per chapter either way, which on a normal run is almost entirely
+`Success: True` — and the one failure worth acting on scrolls past between them.
+The run-level embeds (`Reading data from …`, `Found N chapters for …`, the
+untracked-series list) already report that the work happened.
+
+```bash
+curl -s $CORE/api/v1/admin/webhook-verbosity -H "authorization: Bearer $ADMIN_TOKEN"
+curl -sX POST $CORE/api/v1/admin/webhook-verbosity \
+  -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"uploadSuccesses": true}'          # back to the Python firehose
+```
+
+Failure embeds are not switchable, and they carry the reason in the description
+— a failure notification that does not say why is one you cannot act on.
+
+---
+
+## Extensions publish themselves from GitHub
+
+Two paths keep the fleet current, and they overlap on purpose:
+
+1. **The push webhook** — fires within seconds of a push, carrying the exact
+   commit. This is the fast path.
+2. **A poll every 15 minutes** — the scheduler asks each repo in
+   `GITHUB_EXTENSIONS_REPOS` for its HEAD and publishes anything that changed.
+
+The poll exists because the webhook fails *silently*: an unregistered hook, a
+revoked secret or a dropped delivery all look identical to "nobody pushed", and
+the first symptom is a run producing stale results days later. Publishing is
+idempotent — an unchanged tree hashes the same and returns `unchanged` — so the
+two overlapping costs nothing.
+
+The poll discovers extensions by directory (`src/<name>/manifest.json`), so an
+extension **added** to a repo is picked up on its own. The sysops sync button
+walks already-published bundles and therefore can only ever update extensions
+somebody installed by hand first.
+
+A commit is only remembered when every extension in it published cleanly, so a
+transient build failure is retried next pass rather than being skipped until the
+next push. Publishes are audited under `github.autosync`.
+
+```bash
+# freeze the fleet on what is published now (e.g. while investigating a bad extension)
+docker compose exec postgres psql -U publoader -d publoader \
+  -c "insert into settings (key, value) values ('github_auto_sync','false')
+      on conflict (key) do update set value = 'false';"
+```
 
 ---
 

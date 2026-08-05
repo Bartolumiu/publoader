@@ -16,8 +16,21 @@ import { sessionAuthenticator } from "../session.js";
 import { Manifest, EXTENSION_NAME_RE } from "../../../contracts/manifest.js";
 import { MANGADEX_LANGUAGES } from "../../../contracts/languages.js";
 
-/** The worker image the enrolment snippet tells a new host to run. */
-const WORKER_IMAGE = process.env["PUBLOADER_WORKER_IMAGE"] ?? "ardax/publoader-worker:2.1.1";
+/**
+ * The worker image the enrolment snippet tells a new host to run.
+ *
+ * Set `PUBLOADER_WORKER_IMAGE` on core-api to pin it — the compose file does,
+ * defaulting to the same release as the core itself, so the snippet moves with
+ * every version bump instead of being a literal somebody has to remember.
+ *
+ * The fallback is `:latest` deliberately. A hardcoded version here is not a safe
+ * default but a slowly-rotting one: this constant said `2.1.1` for three
+ * releases while the env var it reads was never passed to core-api at all, so
+ * every enrolment snippet handed out an image two versions behind and nothing
+ * pointed at the cause. `:latest` can be wrong about immutability; it cannot be
+ * wrong about being stale, and it is only reached when nothing is configured.
+ */
+const WORKER_IMAGE = process.env["PUBLOADER_WORKER_IMAGE"] ?? "ardax/publoader-worker:latest";
 import { VALID_REMOVAL_MODES } from "../../store/settings.js";
 import { BundleRejectedError } from "../../store/bundles.js";
 import AdmZip from "adm-zip";
@@ -284,6 +297,45 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { run };
     });
 
+    /**
+     * Kill a run in progress: every job it still has outstanding is cancelled,
+     * and workers already executing one abort on their next lease renewal.
+     *
+     * Deliberately harder-edged than cancelling a job. Cancelling one job of a
+     * partitioned run leaves the others to finish and the run to be processed
+     * from incomplete results — which for a CLEAN run means the processor
+     * concludes that every chapter the missing segment covers has vanished
+     * upstream. Killing the run avoids that entirely: it never reaches the
+     * processor.
+     */
+    scope.post("/api/v1/admin/runs/:id/cancel", { preHandler: requireScope("runs:write") }, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const outcome = await ctx.jobs.cancelRun(id);
+      if (!outcome) return reply.code(404).send({ error: "unknown run" });
+      if (outcome.result === "rejected") {
+        return reply
+          .code(409)
+          .send({ error: `run already finished (${outcome.previousState.toLowerCase()})` });
+      }
+      await ctx.audit.record(actor(req), "run.cancel", id, {
+        jobsCancelled: outcome.jobsCancelled,
+        previousState: outcome.previousState,
+      });
+      return { ok: true, ...outcome };
+    });
+
+    /**
+     * The same, for everything unfinished at once — optionally scoped to one
+     * extension. For when something is wrong across the board and cancelling
+     * runs one id at a time is not fast enough.
+     */
+    scope.post("/api/v1/admin/runs/cancel-all", { preHandler: requireScope("runs:write") }, async (req) => {
+      const body = z.object({ extension: z.string().min(1).max(64).optional() }).parse(req.body ?? {});
+      const stopped = await ctx.jobs.cancelActiveRuns(body.extension);
+      await ctx.audit.record(actor(req), "run.cancel_all", body.extension ?? "*", stopped);
+      return { ok: true, ...stopped };
+    });
+
     scope.post("/api/v1/admin/jobs/:id/cancel", { preHandler: requireScope("runs:write") }, async (req, reply) => {
       const { id } = req.params as { id: string };
       const result = await ctx.jobs.cancel(id);
@@ -436,6 +488,27 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       await ctx.audit.record(actor(req), "removal_mode.set", body.mode);
       return { ok: true, mode: body.mode };
     });
+
+    // ---- webhook verbosity ----
+    // Only the successful per-chapter embeds are switchable. Failures are
+    // deliberately not offered as a toggle: there is no reading of this system
+    // in which silently dropping a failed upload is what an operator wanted.
+    scope.get(
+      "/api/v1/admin/webhook-verbosity",
+      { preHandler: requireScope("settings:read") },
+      async () => ({ uploadSuccesses: await ctx.settings.getWebhookUploadSuccesses() }),
+    );
+
+    scope.post(
+      "/api/v1/admin/webhook-verbosity",
+      { preHandler: requireScope("settings:write") },
+      async (req) => {
+        const body = z.object({ uploadSuccesses: z.boolean() }).parse(req.body);
+        await ctx.settings.setWebhookUploadSuccesses(body.uploadSuccesses);
+        await ctx.audit.record(actor(req), "webhook_verbosity.set", String(body.uploadSuccesses));
+        return { ok: true, uploadSuccesses: body.uploadSuccesses };
+      },
+    );
 
     // ---- bundles ----
     scope.post(

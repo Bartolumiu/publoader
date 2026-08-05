@@ -8,6 +8,7 @@ import type { MdChapterDetail, MdExtendedApi } from "./client.js";
 import type { DiscordEmbedInput, DiscordNotifier } from "./webhook.js";
 import { queueEmbed, queueFinishedEmbed, queueSummaryEmbed } from "./webhookEmbeds.js";
 import type { Chapter } from "./types.js";
+import type { SettingsStore } from "../store/settings.js";
 
 /**
  * Execution of a single claimed UploadTask — the TypeScript port of
@@ -27,8 +28,6 @@ import type { Chapter } from "./types.js";
  */
 
 const IMAGE_BATCH_SIZE = 10;
-const MD_CHAPTER_URL = "https://mangadex.org/chapter/";
-const MD_MANGA_URL = "https://mangadex.org/manga/";
 
 /** Failure that should send the task back to the queue with its message intact. */
 export class TaskError extends Error {
@@ -42,14 +41,27 @@ export interface TaskWorkerDeps {
   prisma: PrismaClient;
   md: MdExtendedApi;
   notifier: DiscordNotifier;
+  settings: SettingsStore;
   config: Config;
   log: Logger;
 }
 
 export class UploadTaskWorkers {
   private pending: DiscordEmbedInput[] = [];
+  /**
+   * Whether per-chapter embeds are sent for uploads that succeeded. Refreshed
+   * once per drain rather than read per chapter: a setting changed halfway
+   * through a batch should not split it into two different reporting styles,
+   * and it saves a query per task.
+   */
+  private sendSuccesses = false;
 
   constructor(private readonly deps: TaskWorkerDeps) {}
+
+  /** Re-read the reporting settings. Call once at the start of each drain. */
+  async refreshReporting(): Promise<void> {
+    this.sendSuccesses = await this.deps.settings.getWebhookUploadSuccesses();
+  }
 
   /** Run one claimed task. Throws on failure; the caller requeues. */
   async execute(task: UploadTask): Promise<void> {
@@ -572,21 +584,21 @@ export class UploadTaskWorkers {
     detail?: string,
   ): void {
     if (!this.deps.notifier.enabled) return;
-    const lines = [
-      `Manga: ${chapter.mangaName ?? "unknown"}`,
-      `Chapter: ${chapter.chapterNumber ?? "-"}${chapter.chapterTitle ? ` — ${chapter.chapterTitle}` : ""}`,
-      `Language: \`${chapter.chapterLanguage ?? "-"}\``,
-    ];
-    if (mdChapterId) lines.push(`MangaDex chapter: ${MD_CHAPTER_URL}${mdChapterId}`);
-    if (chapter.mdMangaId) lines.push(`MangaDex manga: ${MD_MANGA_URL}${chapter.mdMangaId}`);
-    if (chapter.chapterUrl) lines.push(`Source: ${chapter.chapterUrl}`);
-    if (detail) lines.push("", detail);
+
+    // A successful upload is the expected case, and one embed per chapter turns
+    // the channel into a transcript in which the failures — the only entries
+    // anyone can act on — scroll past unread. Off unless an operator asks for
+    // them; the run-level "Found N chapters" embed already reports the work.
+    // Failures are always sent: dropping one silently has no reading in which
+    // it is what the operator wanted.
+    if (success && !this.sendSuccesses) return;
 
     // The Python shape, not a per-action status line: one field carrying
     // Success/Manga/Chapter/Extension plus the language, title, expiry and the
     // four links, titled after the queue that did the work. A channel that has
-    // been reading these for years should not have to relearn them.
-    this.pending.push(queueEmbed(action, chapter, success));
+    // been reading these for years should not have to relearn them. The failure
+    // reason rides along as the description — see queueEmbed.
+    this.pending.push(queueEmbed(action, chapter, success, detail));
   }
 }
 
