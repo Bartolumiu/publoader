@@ -67,6 +67,27 @@ const store = {
     queueAttemptMax: "",
     /** Keyset cursors already walked, so "Back" does not need a second scheme. */
     queueCursors: [],
+    /**
+     * The queue read as chapters. Separate keys from the row view above rather
+     * than shared ones: the two answer different questions ("what is stuck" vs
+     * "what is about to be published") and an operator switching tabs to check
+     * the other should not find their filter rewritten.
+     */
+    queueChapterKind: "",
+    queueChapterState: "PENDING",
+    queueChapterQuery: "",
+    queueChapterCursors: [],
+    /** What a run found, on the run detail page. */
+    runChapterSet: "updated",
+    runChapterQuery: "",
+    runChapterSegment: "",
+    runChapterPage: 0,
+    /** The chapter archives (uploaded / edited / unavailable / deleted). */
+    chapterTable: "uploaded",
+    chapterExtension: "",
+    chapterQuery: "",
+    chapterLanguage: "",
+    chapterPage: 0,
     untrackedState: "NEW",
     activitySeverity: "all",
     activityHours: 72,
@@ -373,6 +394,7 @@ const ICONS = {
   errors: "M12 4l9 16H3l9-16Zm0 5v6m0 3v.5",
   extensions: "M4 4h7v7H4V4Zm9 0h7v7h-7V4ZM4 13h7v7H4v-7Zm12.5 0v7m-3.5-3.5h7",
   tracked: "M6 4h12v16l-6-4-6 4V4Z",
+  chapters: "M4 5.5A2.5 2.5 0 0 1 6.5 3H19v15H6.5A2.5 2.5 0 0 0 4 20.5V5.5Zm4 3.5h7m-7 3.5h7",
   untracked: "M12 3l9 5v8l-9 5-9-5V8l9-5Zm0 6v4m0 3v.5",
   workers: "M4 17h16M6 17V9l6-4 6 4v8M10 17v-4h4v4",
   users: "M12 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-7 9c0-3.3 3.1-6 7-6s7 2.7 7 6",
@@ -894,11 +916,16 @@ const NAV = [
     group: "Work",
     icon: "queues",
     scope: "runs:read",
+    // Chapters first, and that ordering is the default landing tab: the question
+    // asked of this page far more often than any other is "what is about to go
+    // up, and in what order". Tasks is the same rows keyed on queue mechanics —
+    // one click away, and where incident work still happens.
     tabs: [
+      ["chapters", "Chapters"],
       ["tasks", "Tasks"],
       ["depth", "Depth"],
     ],
-    blurb: "The MangaDex upload queues: every unit of work is a durable row.",
+    blurb: "What is about to be sent to MangaDex, and the durable rows behind it.",
   },
   {
     id: "activity",
@@ -940,6 +967,20 @@ const NAV = [
       ["versions", "Versions"],
     ],
     blurb: "Published bundles, and everything about one extension.",
+  },
+  // Reads `runs:read` rather than a scope of its own: these are the four
+  // chapter tables the run/queue pipeline writes, and anyone who may look at
+  // what the platform is doing may look at what it has done. Queueing a
+  // correction is guarded separately — `runs:write` AND the ADMIN role, the same
+  // bar as hand-enqueueing a task, because it ends in a write to MangaDex.
+  {
+    id: "chapters",
+    label: "Chapters",
+    group: "Catalogue",
+    icon: "chapters",
+    scope: "runs:read",
+    param: true,
+    blurb: "Every chapter this platform has put on MangaDex — and its metadata, correctable.",
   },
   {
     id: "tracked",
@@ -2002,11 +2043,23 @@ VIEWS.runs = (route) => {
       [runs],
       ({ runs: rows }) =>
         table(
-          ["Extension", "Kind", "State", "Segments", "Triggered by", "Created", "Error"],
+          ["Extension", "Kind", "State", "Chapters found", "Segments", "Triggered by", "Created", "Error"],
           rows.map((run) => [
             routeLink(routeTo("runs", run.id, null), run.extension),
             run.kind,
             chip(run.state),
+            // null means no segment has committed an envelope yet, which is not
+            // the same as a run that found nothing — so it reads "—", not "0".
+            run.chaptersFound == null
+              ? "—"
+              : el(
+                  "span",
+                  {},
+                  el("strong", { text: String(run.chaptersFound) }),
+                  run.chaptersSeen == null
+                    ? null
+                    : el("span", { class: "dim small", text: ` of ${run.chaptersSeen} seen` }),
+                ),
             String(run.segmentsTotal),
             run.triggeredBy,
             fmtTime(run.createdAt),
@@ -2014,7 +2067,7 @@ VIEWS.runs = (route) => {
           ]),
           { empty: "No run has been created yet. Trigger one from an extension." },
         ),
-      { reserve: 260, skeleton: () => skeletonTable(6, 7) },
+      { reserve: 260, skeleton: () => skeletonTable(6, 8) },
     ),
   );
 };
@@ -2121,8 +2174,272 @@ function runDetail(runId) {
             { empty: "This run produced no segments." },
           ),
         ),
+        runChaptersCard(runId),
       ),
     { reserve: 400, skeleton: () => el("div", {}, skeletonTable(8, 2), skeletonTable(4, 6)) },
+  );
+}
+
+// ------------------------------------------------- what a run actually found
+
+const RUN_CHAPTER_PAGE = 100;
+
+/**
+ * The chapters an extension reported on one run.
+ *
+ * This is the envelope the worker submitted, read back — not a copy of it. The
+ * run/job/segment model above says whether the scrape WORKED; this says what it
+ * FOUND, which is the question that used to require a `jsonb` path in psql.
+ *
+ * Two sets, because an envelope carries two different things and conflating
+ * them would misreport both. `updated` is what the extension flagged as new or
+ * changed, and is the set the processor turns into upload and edit tasks. `all`
+ * is the optional whole-catalogue snapshot that drives removal detection; many
+ * extensions do not send one, and the summary says so rather than showing an
+ * empty list that reads as "found nothing".
+ */
+/**
+ * Which run's filters are currently in the store. Opening a DIFFERENT run must
+ * not inherit the last one's search and page number (page 4 of a run with one
+ * page is an empty table), but a redraw of the SAME run — a job cancel refreshes
+ * the detail resource — must not wipe what the operator just typed.
+ */
+let runChapterFilterFor = null;
+
+function runChaptersCard(runId) {
+  if (runChapterFilterFor !== runId) {
+    runChapterFilterFor = runId;
+    // Assigned directly rather than through setFilter: this runs inside a
+    // render, and notifying subscribers mid-render would redraw the region
+    // currently being built.
+    Object.assign(store.filters, { runChapterQuery: "", runChapterSegment: "", runChapterPage: 0 });
+  }
+
+  const f = () => store.filters;
+  const set = () => f().runChapterSet;
+
+  const summary = new Resource(`run-chapters-summary:${runId}`, () =>
+    api(`/runs/${encodeURIComponent(runId)}/chapters/summary?set=${encodeURIComponent(set())}`),
+  );
+
+  const listQuery = () => {
+    const q = new URLSearchParams({
+      set: set(),
+      limit: String(RUN_CHAPTER_PAGE),
+      offset: String(f().runChapterPage * RUN_CHAPTER_PAGE),
+    });
+    if (f().runChapterQuery) q.set("q", f().runChapterQuery);
+    if (f().runChapterSegment !== "") q.set("segmentIndex", f().runChapterSegment);
+    return q;
+  };
+  const chapters = new Resource(`run-chapters:${runId}`, () =>
+    api(`/runs/${encodeURIComponent(runId)}/chapters?${listQuery()}`),
+  );
+
+  const reload = () => {
+    void summary.load({ force: true });
+    void chapters.load({ force: true });
+  };
+  /** Any change to what is being asked for invalidates the page number. */
+  const refilter = (patch) => {
+    setFilter({ ...patch, runChapterPage: 0 });
+    reload();
+  };
+
+  const setPicker = el(
+    "select",
+    {
+      id: "run-chapter-set",
+      onchange: (event) => refilter({ runChapterSet: event.target.value }),
+    },
+    el("option", { value: "updated", text: "New or changed", selected: set() === "updated" }),
+    el("option", { value: "all", text: "Full catalogue snapshot", selected: set() === "all" }),
+  );
+
+  const search = el("input", {
+    id: "run-chapter-q",
+    type: "search",
+    value: f().runChapterQuery,
+    placeholder: "series, title, number or source id",
+    onchange: (event) => refilter({ runChapterQuery: event.target.value.trim() }),
+  });
+
+  return card(
+    "Chapters found",
+    el("p", {
+      class: "dim small",
+      text:
+        "Read straight out of the result envelopes this run's workers submitted — the extension's own " +
+        "report, in the order it reported it, before the processor decided anything.",
+    }),
+    live([summary], (data) => runChapterSummary(data, refilter), {
+      reserve: 120,
+      skeleton: () => skeletonGrid(4),
+    }),
+    row(
+      el("span", { class: "row tight" }, el("label", { class: "inline", for: "run-chapter-set", text: "Set" }), setPicker),
+      el("span", { class: "row tight" }, el("label", { class: "inline", for: "run-chapter-q", text: "Search" }), search),
+      el("button", {
+        type: "button",
+        text: "Clear",
+        onclick: () => refilter({ runChapterQuery: "", runChapterSegment: "" }),
+      }),
+    ),
+    live(
+      [chapters],
+      (data) => {
+        const rows = data.chapters ?? [];
+        return el(
+          "div",
+          {},
+          table(
+            ["#", "Series", "Chapter", "Volume", "Title", "Lang", "Released", "Segment", ""],
+            rows.map((entry) => {
+              const c = entry.chapter ?? {};
+              return [
+                String(entry.position),
+                c.mdMangaId
+                  ? mdTitleLink(c.mdMangaId, c.mangaName || c.mangaId || c.mdMangaId)
+                  : (c.mangaName ?? c.mangaId ?? "—"),
+                c.chapterNumber ?? "—",
+                c.chapterVolume ?? "—",
+                truncate(c.chapterTitle, 80),
+                c.chapterLanguage ?? "—",
+                fmtTime(c.chapterTimestamp),
+                String(entry.segmentIndex + 1),
+                [
+                  c.chapterUrl
+                    ? el("a", {
+                        href: c.chapterUrl,
+                        target: "_blank",
+                        rel: "noreferrer noopener",
+                        class: "button-link inline",
+                        text: "Source",
+                      })
+                    : null,
+                  // Present only once the chapter exists on MangaDex — an
+                  // envelope reports what the source has, not what we uploaded.
+                  c.mdChapterId
+                    ? routeLink(routeTo("chapters", c.mdChapterId, null), "On MangaDex", {
+                        class: "button-link inline",
+                      })
+                    : null,
+                ],
+              ];
+            }),
+            {
+              empty:
+                set() === "all"
+                  ? "This run's extension sent no full-catalogue snapshot. Only some extensions do; removal detection is skipped without one."
+                  : "No chapter in this run matches. A completed run with nothing here found nothing new.",
+            },
+          ),
+          pager(data.total ?? 0, f().runChapterPage, RUN_CHAPTER_PAGE, (page) => {
+            setFilter({ runChapterPage: page });
+            void chapters.load({ force: true });
+          }),
+        );
+      },
+      { reserve: 300, skeleton: () => skeletonTable(6, 9) },
+    ),
+  );
+}
+
+/** Coverage and the per-series breakdown, above the chapter list. */
+function runChapterSummary(data, refilter) {
+  const totals = data.totals ?? {};
+  const segments = data.segments ?? [];
+  const byManga = data.byManga ?? [];
+
+  return el(
+    "div",
+    {},
+    el(
+      "div",
+      { class: "grid tight" },
+      el(
+        "div",
+        { class: "stat" },
+        el("div", { class: "n", text: String(totals.updated ?? 0) }),
+        el("div", { class: "k", text: "new or changed" }),
+      ),
+      el(
+        "div",
+        { class: "stat" },
+        el("div", { class: "n", text: totals.all == null ? "—" : String(totals.all) }),
+        el("div", { class: "k", text: "seen in catalogue" }),
+      ),
+      el(
+        "div",
+        { class: "stat" },
+        el("div", { class: "n", text: String(data.mangaTitles ?? 0) }),
+        el("div", { class: "k", text: data.mangaCapped ? "titles (capped)" : "titles" }),
+      ),
+      el(
+        "div",
+        { class: "stat" },
+        el("div", { class: "n", text: `${data.segmentsReported ?? 0}/${data.segmentsTotal ?? 0}` }),
+        el("div", { class: "k", text: "segments reported" }),
+      ),
+    ),
+    // The one line that decides whether the list below can be trusted as whole.
+    data.complete
+      ? null
+      : el("p", {
+          class: "warn-text small",
+          text:
+            `${(data.segmentsTotal ?? 0) - (data.segmentsReported ?? 0)} segment(s) have not committed a ` +
+            "result yet, so this is a partial picture of the run.",
+        }),
+    segments.length > 1
+      ? el(
+          "details",
+          {},
+          el("summary", { text: "By segment" }),
+          table(
+            ["Segment", "Key", "Job state", "New or changed", "Seen", "Submitted"],
+            segments.map((segment) => [
+              el("button", {
+                type: "button",
+                class: "linkish",
+                text: String(segment.segmentIndex + 1),
+                title: "Show only this segment's chapters",
+                onclick: () => refilter({ runChapterSegment: String(segment.segmentIndex) }),
+              }),
+              segment.segmentKey ?? "—",
+              chip(segment.jobState),
+              segment.updated == null ? "not reported" : String(segment.updated),
+              segment.all == null ? "—" : String(segment.all),
+              fmtTime(segment.submittedAt),
+            ]),
+            { empty: "This run has no segments." },
+          ),
+        )
+      : null,
+    byManga.length
+      ? el(
+          "details",
+          {},
+          el("summary", { text: `By series (${byManga.length})` }),
+          table(
+            ["Series", "Chapters", ""],
+            byManga.map((entry) => [
+              entry.mdMangaId
+                ? mdTitleLink(entry.mdMangaId, entry.mangaName || entry.mangaId || entry.mdMangaId)
+                : (entry.mangaName ?? entry.mangaId ?? "—"),
+              String(entry.count),
+              [
+                el("button", {
+                  type: "button",
+                  text: "Filter",
+                  onclick: () => refilter({ runChapterQuery: entry.mangaName ?? entry.mangaId ?? "" }),
+                }),
+              ],
+            ]),
+            { empty: "No series." },
+          ),
+        )
+      : null,
   );
 }
 
@@ -2204,6 +2521,7 @@ VIEWS.queues = (route) => {
   );
 
   if (route.tab === "depth") return queueDepthPanel();
+  if (route.tab === "chapters") return queueChaptersPanel();
 
   // Selection is by id and survives a refresh, but only for rows still present:
   // acting on an id that has drained away is how a bulk action reports failures
@@ -2279,6 +2597,214 @@ function queueDepthPanel() {
       },
       { reserve: 120, skeleton: () => skeletonGrid(6) },
     ),
+  );
+}
+
+/**
+ * The queue as chapters: what is about to be published, in the order it will
+ * be.
+ *
+ * The Tasks tab shows the same rows keyed on queue mechanics — dedupe key,
+ * attempt count, last error — which is the right view during an incident and
+ * the wrong one for the question asked far more often: what is going up next,
+ * and is any of it wrong? A dedupe key of `1015117|142|en` names a chapter only
+ * to someone willing to decode it.
+ *
+ * `position` comes from the server and is the place in the claim order across
+ * everything matching the filter, so "14" means fourteenth in the queue, not
+ * fourteenth on this page. Ordering is the uploader's own: `not_before ASC`,
+ * which is literally the ORDER BY of the claim query.
+ */
+function queueChaptersPanel() {
+  const f = () => store.filters;
+
+  const cursorNow = () => {
+    const walked = f().queueChapterCursors;
+    return walked.length ? walked[walked.length - 1] : null;
+  };
+
+  const queryString = () => {
+    const q = new URLSearchParams({ limit: "100" });
+    if (f().queueChapterKind) q.set("kind", f().queueChapterKind);
+    if (f().queueChapterState) q.set("state", f().queueChapterState);
+    if (f().queueChapterQuery) q.set("q", f().queueChapterQuery);
+    const cursor = cursorNow();
+    if (cursor) q.set("cursor", cursor);
+    return q;
+  };
+
+  const chapters = new Resource("queue-chapters", () => api(`/queues/chapters?${queryString()}`));
+  const reload = () => void chapters.load({ force: true });
+  const refilter = (patch) => {
+    setFilter({ ...patch, queueChapterCursors: [] });
+    reload();
+  };
+
+  const picker = (id, label, values, key, { all = "all" } = {}) =>
+    el(
+      "span",
+      { class: "row tight" },
+      el("label", { class: "inline", for: id, text: label }),
+      el(
+        "select",
+        { id, onchange: (event) => refilter({ [key]: event.target.value }) },
+        el("option", { value: "", text: all, selected: store.filters[key] === "" }),
+        values.map((value) => el("option", { value, text: value, selected: value === store.filters[key] })),
+      ),
+    );
+
+  const search = el("input", {
+    id: "queue-chapter-q",
+    type: "search",
+    value: f().queueChapterQuery,
+    placeholder: "series, title or chapter number",
+    onchange: (event) => refilter({ queueChapterQuery: event.target.value.trim() }),
+  });
+
+  return el(
+    "div",
+    {},
+    card(
+      "Filter",
+      row(
+        picker("queue-chapter-kind", "Kind", UPLOAD_TASK_KINDS, "queueChapterKind"),
+        picker("queue-chapter-state", "State", UPLOAD_TASK_STATES, "queueChapterState", { all: "any state" }),
+        el(
+          "span",
+          { class: "row tight" },
+          el("label", { class: "inline", for: "queue-chapter-q", text: "Search" }),
+          search,
+        ),
+        el("button", {
+          type: "button",
+          text: "Reset",
+          onclick: () =>
+            refilter({ queueChapterKind: "", queueChapterState: "PENDING", queueChapterQuery: "" }),
+        }),
+      ),
+      el("p", {
+        class: "dim small",
+        text:
+          "PENDING by default, because “what is going to be uploaded” is the question. Rows are in the " +
+          "order the uploader will claim them — earliest due first — which is the same order a reorder " +
+          "on the Tasks tab rewrites.",
+      }),
+    ),
+    card(
+      null,
+      live(
+        [chapters],
+        (data) => {
+          const rows = data.chapters ?? [];
+          return el(
+            "div",
+            {},
+            table(
+              ["#", "Kind", "Series", "Chapter", "Volume", "Title", "Lang", "Due", "State", ""],
+              rows.map((row_) => {
+                const editable = row_.state === "PENDING";
+                const leased = row_.state === "LEASED";
+                return [
+                  String(row_.position),
+                  row_.kind,
+                  row_.mdMangaId
+                    ? mdTitleLink(row_.mdMangaId, row_.mangaName || row_.mangaId || row_.mdMangaId)
+                    : (row_.mangaName ?? row_.mangaId ?? "—"),
+                  row_.chapterNumber ?? "—",
+                  row_.chapterVolume ?? "—",
+                  // An EDIT task's interest is what it CHANGES, so show that
+                  // rather than the title it happens to be carrying.
+                  row_.kind === "EDIT" && row_.editPayload
+                    ? el("span", {
+                        class: "small",
+                        text: Object.entries(row_.editPayload)
+                          .map(([key, value]) => `${key} → ${value === null ? "(cleared)" : String(value)}`)
+                          .join(", "),
+                      })
+                    : truncate(row_.chapterTitle, 60),
+                  row_.chapterLanguage ?? "—",
+                  fmtTime(row_.notBefore),
+                  chip(row_.state),
+                  [
+                    gatedButton("runs:write", {
+                      text: "Edit",
+                      disabled: !editable,
+                      title: leased
+                        ? "An uploader holds this task; it cannot be edited while it is leased"
+                        : editable
+                          ? "Correct the chapter before it is sent"
+                          : `${row_.state} tasks cannot be edited`,
+                      onclick: () => queueEditDialog(row_, chapters, reload),
+                    }),
+                    gatedButton("runs:write", {
+                      text: "Run next",
+                      disabled: !editable,
+                      title: "Move to the front of the claim order",
+                      onclick: (event) =>
+                        void act(
+                          "queue.reorder",
+                          () =>
+                            api("/queues/reorder", {
+                              method: "POST",
+                              body: { ids: [row_.id], mode: "front" },
+                            }),
+                          { button: event.currentTarget, refresh: [chapters] },
+                        ),
+                    }),
+                    // The chapter's own page, when it already exists on
+                    // MangaDex — every kind but UPLOAD acts on a live chapter.
+                    row_.mdChapterId
+                      ? routeLink(routeTo("chapters", row_.mdChapterId, null), "History", {
+                          class: "button-link inline",
+                        })
+                      : null,
+                  ],
+                ];
+              }),
+              {
+                empty:
+                  f().queueChapterState === "PENDING"
+                    ? "Nothing is queued for MangaDex. The uploader has drained everything it was given."
+                    : "No queued chapter matches this filter.",
+              },
+            ),
+            queueChapterPager(data, chapters),
+          );
+        },
+        { reserve: 320, skeleton: () => skeletonTable(8, 10) },
+      ),
+    ),
+  );
+}
+
+/** Keyset paging, same scheme as the Tasks tab and for the same reason. */
+function queueChapterPager(data, chapters) {
+  const walked = store.filters.queueChapterCursors;
+  const go = (cursors) => {
+    setFilter({ queueChapterCursors: cursors });
+    void chapters.load({ force: true });
+  };
+
+  return el(
+    "div",
+    { class: "row pager" },
+    el("span", {
+      class: "dim small",
+      text: `${data.chapters?.length ?? 0} shown of ${data.total ?? 0} matching · claim order: ${data.order ?? "unknown"}`,
+    }),
+    el("span", { class: "grow" }),
+    el("button", {
+      type: "button",
+      text: "← Back",
+      disabled: walked.length === 0,
+      onclick: () => go(walked.slice(0, -1)),
+    }),
+    el("button", {
+      type: "button",
+      text: "Next →",
+      disabled: !data.nextCursor,
+      onclick: () => go([...walked, data.nextCursor]),
+    }),
   );
 }
 
@@ -3078,6 +3604,447 @@ function toLocalInput(value) {
   return (
     `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
     `T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  );
+}
+
+// ------------------------------------------------------------------- chapters
+
+const CHAPTER_PAGE = 50;
+
+/**
+ * The four chapter archives, and what each one means. The labels are the whole
+ * documentation an operator gets in the picker, so they say what the table IS
+ * rather than repeating its name.
+ */
+const CHAPTER_TABLES = [
+  ["uploaded", "On MangaDex", "The live mirror: what exists under our group right now."],
+  ["edited", "Edited", "Chapters whose metadata has been corrected, with the history of each change."],
+  ["unavailable", "Marked unavailable", "Chapters the source withdrew, flagged rather than deleted."],
+  ["deleted", "Deleted", "Removed from MangaDex. Archived here because deletion is the one irreversible action."],
+];
+
+/**
+ * Every chapter this platform has put on MangaDex.
+ *
+ * The rest of the dashboard follows the pipeline — runs produce jobs produce
+ * queue rows — and drops the thread the moment a chapter is published. This view
+ * picks it up: what is out there, under which series, in what language, and what
+ * has happened to it since.
+ *
+ * The one write here is a metadata correction, and it does not touch MangaDex.
+ * It enqueues the same EDIT task the processor writes when it detects drift, so
+ * the write happens in the uploader — the only process with the credentials —
+ * and sits on the Queues page, amendable, until it is claimed.
+ */
+VIEWS.chapters = (route) => {
+  if (route.param) return chapterDetail(route.param);
+
+  const f = () => store.filters;
+
+  const queryString = () => {
+    const q = new URLSearchParams({
+      table: f().chapterTable,
+      limit: String(CHAPTER_PAGE),
+      offset: String(f().chapterPage * CHAPTER_PAGE),
+    });
+    if (f().chapterExtension) q.set("extension", f().chapterExtension);
+    if (f().chapterQuery) q.set("q", f().chapterQuery);
+    if (f().chapterLanguage) q.set("language", f().chapterLanguage);
+    return q;
+  };
+
+  const chapters = new Resource("chapters", () => api(`/chapters?${queryString()}`));
+  const extensions = new Resource("chapter-extensions", () =>
+    api(`/chapters/extensions?table=${encodeURIComponent(f().chapterTable)}`),
+  );
+
+  const refilter = (patch) => {
+    setFilter({ ...patch, chapterPage: 0 });
+    void chapters.load({ force: true });
+    if (patch.chapterTable !== undefined) void extensions.load({ force: true });
+  };
+
+  const tablePicker = el(
+    "select",
+    { id: "chapter-table", onchange: (event) => refilter({ chapterTable: event.target.value, chapterExtension: "" }) },
+    CHAPTER_TABLES.map(([value, label]) =>
+      el("option", { value, text: label, selected: value === f().chapterTable }),
+    ),
+  );
+
+  const search = el("input", {
+    id: "chapter-q",
+    type: "search",
+    value: f().chapterQuery,
+    placeholder: "series, title, number, source id or MangaDex id",
+    onchange: (event) => refilter({ chapterQuery: event.target.value.trim() }),
+  });
+
+  const language = el("input", {
+    id: "chapter-lang",
+    type: "text",
+    value: f().chapterLanguage,
+    placeholder: "en",
+    size: "5",
+    onchange: (event) => refilter({ chapterLanguage: event.target.value.trim().toLowerCase() }),
+  });
+
+  const blurbFor = (table) => CHAPTER_TABLES.find(([value]) => value === table)?.[2] ?? "";
+
+  return el(
+    "div",
+    {},
+    card(
+      "Filter",
+      row(
+        el("span", { class: "row tight" }, el("label", { class: "inline", for: "chapter-table", text: "Archive" }), tablePicker),
+        live(
+          [extensions],
+          (data) =>
+            el(
+              "span",
+              { class: "row tight" },
+              el("label", { class: "inline", for: "chapter-extension", text: "Extension" }),
+              el(
+                "select",
+                { id: "chapter-extension", onchange: (event) => refilter({ chapterExtension: event.target.value }) },
+                el("option", { value: "", text: "all", selected: f().chapterExtension === "" }),
+                (data.extensions ?? []).map((entry) =>
+                  el("option", {
+                    value: entry.extension,
+                    text: `${entry.extension} (${entry.count})`,
+                    selected: entry.extension === f().chapterExtension,
+                  }),
+                ),
+              ),
+            ),
+          { reserve: 32, skeleton: () => el("span", { class: "skeleton skeleton-line", text: "extension" }) },
+        ),
+        el("span", { class: "row tight" }, el("label", { class: "inline", for: "chapter-lang", text: "Language" }), language),
+        el("span", { class: "row tight" }, el("label", { class: "inline", for: "chapter-q", text: "Search" }), search),
+        el("button", {
+          type: "button",
+          text: "Clear",
+          onclick: () => refilter({ chapterExtension: "", chapterQuery: "", chapterLanguage: "" }),
+        }),
+      ),
+      liveState(["filters"], () => el("p", { class: "dim small", text: blurbFor(f().chapterTable) })),
+    ),
+    card(
+      null,
+      live(
+        [chapters],
+        (data) => {
+          const rows = data.chapters ?? [];
+          return el(
+            "div",
+            {},
+            table(
+              ["Series", "Chapter", "Volume", "Title", "Lang", "Extension", "Last change", ""],
+              rows.map((c) => [
+                c.mdMangaId
+                  ? mdTitleLink(c.mdMangaId, c.mangaName || c.mangaId || c.mdMangaId)
+                  : (c.mangaName ?? c.mangaId ?? "—"),
+                c.chapterNumber ?? "—",
+                c.chapterVolume ?? "—",
+                truncate(c.chapterTitle, 70),
+                c.chapterLanguage ?? "—",
+                c.extensionName ?? "—",
+                fmtTime(c.at),
+                [
+                  c.mdChapterId
+                    ? routeLink(routeTo("chapters", c.mdChapterId, null), "Open", { class: "button-link inline" })
+                    : null,
+                  c.mdChapterId
+                    ? el("a", {
+                        href: `https://mangadex.org/chapter/${encodeURIComponent(c.mdChapterId)}`,
+                        target: "_blank",
+                        rel: "noreferrer noopener",
+                        class: "button-link inline",
+                        text: "MangaDex",
+                      })
+                    : null,
+                ],
+              ]),
+              { empty: "No chapter in this archive matches." },
+            ),
+            pager(data.total ?? 0, f().chapterPage, CHAPTER_PAGE, (page) => {
+              setFilter({ chapterPage: page });
+              void chapters.load({ force: true });
+            }),
+          );
+        },
+        { reserve: 320, skeleton: () => skeletonTable(8, 8) },
+      ),
+    ),
+  );
+};
+
+/** One chapter: where it is, what it says, what has been done to it. */
+function chapterDetail(mdChapterId) {
+  const detail = new Resource(`chapter:${mdChapterId}`, () =>
+    api(`/chapters/${encodeURIComponent(mdChapterId)}`),
+  );
+
+  return live(
+    [detail],
+    (data) => {
+      const c = data.chapter ?? {};
+      const md = data.mdFields ?? {};
+      const queued = data.queued ?? [];
+      // A queued EDIT already owns the (EDIT, mdChapterId) slot; a second one is
+      // refused by the unique constraint, so the honest offer is to amend that
+      // task rather than to open a form that will 409.
+      const pendingEdit = queued.find((task) => task.kind === "EDIT" && task.state === "PENDING");
+
+      return el(
+        "div",
+        {},
+        card(
+          null,
+          row(
+            ...(data.present ?? []).map((table_) => chip(table_.toUpperCase())),
+            el("span", {
+              class: "dim",
+              text: `${c.extensionName ?? "unattributed"} · ${c.chapterLanguage ?? "no language"}`,
+            }),
+          ),
+          defs([
+            ["Series", c.mdMangaId ? mdTitleLink(c.mdMangaId, c.mangaName || c.mdMangaId) : (c.mangaName ?? "—")],
+            ["Chapter", c.chapterNumber ?? "—"],
+            ["Volume", c.chapterVolume ?? "—"],
+            ["Title", c.chapterTitle ?? "—"],
+            ["Language", c.chapterLanguage ?? "—"],
+            [
+              "MangaDex chapter",
+              el("a", {
+                href: `https://mangadex.org/chapter/${encodeURIComponent(mdChapterId)}`,
+                target: "_blank",
+                rel: "noreferrer noopener",
+                text: mdChapterId,
+              }),
+            ],
+            ["Group", c.mdGroupId ? el("code", { text: c.mdGroupId }) : "—"],
+            ["Source chapter", c.chapterUrl ? el("a", { href: c.chapterUrl, target: "_blank", rel: "noreferrer noopener", text: c.chapterId ?? c.chapterUrl }) : (c.chapterId ?? "—")],
+            ["Released", fmtTime(c.chapterTimestamp)],
+            ["Uploaded", fmtTime(data.uploadedAt)],
+            ["Mirror updated", fmtTime(data.updatedAt)],
+            data.lastEditedAt ? ["Last edited", fmtTime(data.lastEditedAt)] : null,
+            data.unavailableAt ? ["Marked unavailable", fmtTime(data.unavailableAt)] : null,
+            data.deletedAt ? ["Deleted", fmtTime(data.deletedAt)] : null,
+          ]),
+          row(
+            isOperator()
+              ? gatedButton("runs:write", {
+                  class: "primary",
+                  text: "Edit metadata",
+                  disabled: !data.editable || Boolean(pendingEdit),
+                  title: !data.editable
+                    ? "This chapter was deleted from MangaDex; an edit would fail at the API"
+                    : pendingEdit
+                      ? "A correction for this chapter is already queued — amend that task instead"
+                      : "Queue a metadata correction for the uploader to apply",
+                  onclick: () => chapterEditDialog(mdChapterId, c, md, detail),
+                })
+              : null,
+            pendingEdit
+              ? routeLink(routeTo("queues", null, "chapters"), "Open the queued correction", {
+                  class: "button-link inline",
+                })
+              : null,
+            copyLinkButton(routeTo("chapters", mdChapterId, null)),
+          ),
+          data.editable
+            ? null
+            : el("p", {
+                class: "warn-text small",
+                text:
+                  "This chapter is in the deleted archive: it is no longer on MangaDex, so there is nothing " +
+                  "to edit. Re-uploading is the only way back.",
+              }),
+        ),
+        queued.length
+          ? card(
+              "Queued for this chapter",
+              el("p", {
+                class: "dim small",
+                text:
+                  "Upload tasks keyed on this MangaDex id. Until the uploader claims one it can be amended " +
+                  "or removed on the Queues page.",
+              }),
+              table(
+                ["Kind", "State", "Attempts", "Due", "Last error"],
+                queued.map((task) => [
+                  task.kind,
+                  chip(task.state),
+                  `${task.attempt}/${task.maxAttempts}`,
+                  fmtTime(task.notBefore),
+                  truncate(task.lastError, 120),
+                ]),
+                { empty: "Nothing queued." },
+              ),
+            )
+          : null,
+        card(
+          "Edit history",
+          (data.edits ?? []).length
+            ? table(
+                ["When", "Changed", "From"],
+                [...(data.edits ?? [])].reverse().map((edit) => [
+                  fmtTime(edit?.editedAt),
+                  el("span", {
+                    class: "small",
+                    text: Object.entries(edit?.new ?? {})
+                      .map(([key, value]) => `${key} → ${value === null ? "(cleared)" : JSON.stringify(value)}`)
+                      .join(", "),
+                  }),
+                  el("span", {
+                    class: "dim small",
+                    text: Object.keys(edit?.new ?? {})
+                      .map((key) => `${key}: ${JSON.stringify(edit?.old?.[key] ?? null)}`)
+                      .join(", "),
+                  }),
+                ]),
+              )
+            : emptyState("This chapter's metadata has never been corrected."),
+        ),
+      );
+    },
+    { reserve: 420, skeleton: () => el("div", {}, skeletonTable(10, 2), skeletonTable(3, 5)) },
+  );
+}
+
+/**
+ * The chapter fields MangaDex will accept an edit for, named as MangaDex names
+ * them because that is what the request body becomes.
+ */
+const MD_EDIT_FIELDS = [
+  ["chapter", "Chapter number", "e.g. 12, 12.5, or blank for a oneshot"],
+  ["volume", "Volume", "blank if the series has none"],
+  ["title", "Title", "blank for an untitled chapter"],
+  ["translatedLanguage", "Language", "MangaDex code, e.g. en or pt-br"],
+];
+
+/**
+ * Correct a published chapter's metadata.
+ *
+ * Nothing here writes to MangaDex. The save queues an EDIT upload task, and the
+ * dialog says so — an operator who thinks they have just changed a live chapter
+ * and then does not see it change would reasonably click again, which is exactly
+ * what the unique (EDIT, mdChapterId) constraint is there to refuse.
+ *
+ * Only fields that actually differ are sent. The server drops unchanged ones
+ * anyway, but a form that submits all four writes "title → (unchanged)" into a
+ * chapter's permanent edit history.
+ */
+function chapterEditDialog(mdChapterId, chapter, current, detail) {
+  const fields = new Map();
+  for (const [key, label, hint] of MD_EDIT_FIELDS) {
+    fields.set(
+      key,
+      el("input", {
+        id: `md-edit-${key}`,
+        type: "text",
+        value: current[key] ?? "",
+        placeholder: hint,
+        "aria-label": label,
+      }),
+    );
+  }
+
+  const groups = el("input", {
+    id: "md-edit-groups",
+    type: "text",
+    value: (current.groups ?? []).join(", "),
+    placeholder: "comma-separated MangaDex group ids",
+  });
+
+  const status = el("p", { class: "field-error" });
+
+  openModal(
+    "Correct this chapter's metadata",
+    el(
+      "div",
+      {},
+      el("p", {
+        class: "dim small",
+        text:
+          `${chapter.mangaName ?? "This series"} · chapter ${chapter.chapterNumber ?? "?"} · ` +
+          `${chapter.chapterLanguage ?? "no language"}`,
+      }),
+      el("p", {
+        class: "dim small",
+        text:
+          "Saving does not change MangaDex directly. It queues an EDIT task for the uploader — the one " +
+          "process holding the credentials — which you can inspect, amend or remove on the Queues page " +
+          "until it is claimed. Only fields you actually change are sent.",
+      }),
+      ...MD_EDIT_FIELDS.flatMap(([key, label]) => [
+        el("label", { for: `md-edit-${key}`, text: label }),
+        fields.get(key),
+      ]),
+      el(
+        "details",
+        {},
+        el("summary", { text: "Group attribution" }),
+        el("p", {
+          class: "warn-text small",
+          text:
+            "MangaDex REPLACES a chapter's groups with this list. Removing the group that uploaded the " +
+            "chapter detaches it from this platform's catalogue and nothing here can find it again — the " +
+            "server refuses that specific change.",
+        }),
+        el("label", { for: "md-edit-groups", text: "Groups" }),
+        groups,
+      ),
+      status,
+      el(
+        "div",
+        { class: "row end" },
+        el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+        gatedButton("runs:write", {
+          class: "primary",
+          text: "Queue the correction",
+          onclick: async (event) => {
+            const body = {};
+            for (const [key, input] of fields) {
+              const value = input.value.trim();
+              const before = current[key] ?? "";
+              if (value === String(before)) continue;
+              // An emptied field means "clear it", except for the language,
+              // which MangaDex requires — blanking it would be rejected there,
+              // so it is refused here where the message can say why.
+              if (value === "" && key === "translatedLanguage") {
+                status.textContent = "A chapter must have a language; MangaDex will not accept an empty one.";
+                return;
+              }
+              body[key] = value === "" ? null : value;
+            }
+
+            const wanted = groups.value
+              .split(",")
+              .map((id) => id.trim())
+              .filter(Boolean);
+            if (JSON.stringify(wanted) !== JSON.stringify(current.groups ?? [])) body.groups = wanted;
+
+            if (Object.keys(body).length === 0) {
+              status.textContent = "Nothing changed.";
+              return;
+            }
+
+            const result = await act(
+              "chapter.edit",
+              () => api(`/chapters/${encodeURIComponent(mdChapterId)}/edit`, { method: "POST", body }),
+              { button: event.currentTarget, refresh: [detail, summary] },
+            );
+            if (result) {
+              toast("correction queued for the uploader");
+              closeModal();
+            }
+          },
+        }),
+      ),
+    ),
   );
 }
 

@@ -87,6 +87,17 @@ export interface UploadTaskFilter {
   states?: readonly UploadTaskState[];
   /** Case-insensitive substring over `dedupe_key`. */
   dedupeKey?: string;
+  /**
+   * Case-insensitive substring over the chapter payload's human-readable
+   * fields — series name, chapter title, chapter number.
+   *
+   * A dedupe key is machine identity (`chapterId|number|language`, or a
+   * MangaDex uuid), so "everything queued for Sakamoto Days" was not expressible
+   * before this. It applies to every path the filter reaches, purge included,
+   * which is deliberate: pulling one series' worth of bad rows out of the queue
+   * is the case that used to mean `psql`.
+   */
+  q?: string;
   attemptMin?: number;
   attemptMax?: number;
 }
@@ -105,6 +116,30 @@ export interface UploadTaskRow {
   lastError: string | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+/**
+ * A queue row read as the chapter it will act on. Every chapter field is
+ * nullable because the payload is whatever the extension produced — a DELETE
+ * task, for instance, carries a MangaDex id and often little else.
+ */
+export interface QueuedChapterRow extends UploadTaskRow {
+  /** 1-based place in the claim order across everything matching the filter. */
+  position: number;
+  extension: string | null;
+  mangaName: string | null;
+  mdMangaId: string | null;
+  mangaId: string | null;
+  mdChapterId: string | null;
+  chapterId: string | null;
+  chapterNumber: string | null;
+  chapterVolume: string | null;
+  chapterTitle: string | null;
+  chapterLanguage: string | null;
+  chapterUrl: string | null;
+  /** The MangaDex PUT body an EDIT task carries; null for other kinds. */
+  editPayload: Record<string, unknown> | null;
+  pageCount: number;
 }
 
 /** Enough of a row to explain why a mutation refused it. */
@@ -296,6 +331,78 @@ export class UploadTaskStore {
     const last = page[page.length - 1];
     return {
       tasks: page,
+      total: Number(counted[0]?.total ?? 0),
+      nextCursor: rows.length > opts.limit && last ? encodeTaskCursor(last) : null,
+    };
+  }
+
+  /**
+   * The same page as `list`, but as CHAPTERS rather than as queue rows: the
+   * series, number, volume, title and language the uploader is about to send,
+   * with the row's position in the claim order.
+   *
+   * `list` answers "what is in the queue and what state is it in", which is the
+   * incident view. This answers "what is about to happen to the catalogue", and
+   * they are not the same question — a dedupe key of
+   * `1015117|142|en` names a chapter only to someone willing to decode it.
+   *
+   * The position comes from a window function over the whole filtered set in the
+   * same ordering the claim query uses, so "3rd" means third out of everything
+   * matching, not third on this page. Paging stays keyset for the reason `list`
+   * documents: the queue drains while it is being read.
+   */
+  async listChapters(
+    filter: UploadTaskFilter,
+    opts: { limit: number; cursor?: TaskCursor | null },
+  ): Promise<{ chapters: QueuedChapterRow[]; total: number; nextCursor: string | null }> {
+    const parts = taskWhere(filter);
+    const page: Prisma.Sql[] = [];
+    if (opts.cursor) {
+      page.push(
+        Prisma.sql`(o."notBefore", o."createdAt", o.id) > (${opts.cursor.notBefore}, ${opts.cursor.createdAt}, ${opts.cursor.id})`,
+      );
+    }
+
+    const rows = await this.prisma.$queryRaw<QueuedChapterRow[]>(Prisma.sql`
+      WITH ordered AS (
+        SELECT ${TASK_COLUMNS},
+               row_number() OVER (ORDER BY t.not_before ASC, t.created_at ASC, t.id ASC) AS position,
+               t.chapter ->> 'mangaName' AS "mangaName",
+               t.chapter ->> 'mdMangaId' AS "mdMangaId",
+               t.chapter ->> 'mangaId' AS "mangaId",
+               t.chapter ->> 'mdChapterId' AS "mdChapterId",
+               t.chapter ->> 'chapterId' AS "chapterId",
+               t.chapter ->> 'chapterNumber' AS "chapterNumber",
+               t.chapter ->> 'chapterVolume' AS "chapterVolume",
+               t.chapter ->> 'chapterTitle' AS "chapterTitle",
+               t.chapter ->> 'chapterLanguage' AS "chapterLanguage",
+               t.chapter ->> 'chapterUrl' AS "chapterUrl",
+               t.chapter ->> 'extensionName' AS "extension",
+               -- The fields an EDIT task will actually change, so the list can
+               -- show "title → …" without a second fetch per row.
+               CASE WHEN jsonb_typeof(t.chapter -> 'payload') = 'object'
+                    THEN t.chapter -> 'payload' END AS "editPayload",
+               coalesce(jsonb_array_length(
+                 CASE WHEN jsonb_typeof(t.chapter -> 'imageArtifacts') = 'array'
+                      THEN t.chapter -> 'imageArtifacts' ELSE '[]'::jsonb END
+               ), 0) AS "pageCount"
+        FROM upload_tasks t
+        ${combine(parts)}
+      )
+      SELECT o.* FROM ordered o
+      ${combine(page)}
+      ORDER BY o."notBefore" ASC, o."createdAt" ASC, o.id ASC
+      LIMIT ${opts.limit + 1}
+    `);
+
+    const counted = await this.prisma.$queryRaw<{ total: bigint }[]>(Prisma.sql`
+      SELECT count(*) AS total FROM upload_tasks t ${combine(taskWhere(filter))}
+    `);
+
+    const chapters = rows.slice(0, opts.limit).map((row) => ({ ...row, position: Number(row.position) }));
+    const last = chapters[chapters.length - 1];
+    return {
+      chapters,
       total: Number(counted[0]?.total ?? 0),
       nextCursor: rows.length > opts.limit && last ? encodeTaskCursor(last) : null,
     };
@@ -579,6 +686,14 @@ function taskWhere(filter: UploadTaskFilter): Prisma.Sql[] {
   // Parameterised, so a `%` an operator types is a wildcard they meant and a
   // quote is data either way.
   if (filter.dedupeKey) parts.push(Prisma.sql`t.dedupe_key ILIKE ${`%${filter.dedupeKey}%`}`);
+  if (filter.q) {
+    const needle = `%${filter.q}%`;
+    parts.push(Prisma.sql`(
+      t.chapter ->> 'mangaName' ILIKE ${needle}
+      OR t.chapter ->> 'chapterTitle' ILIKE ${needle}
+      OR t.chapter ->> 'chapterNumber' ILIKE ${needle}
+    )`);
+  }
   if (filter.attemptMin !== undefined) parts.push(Prisma.sql`t.attempt >= ${filter.attemptMin}`);
   if (filter.attemptMax !== undefined) parts.push(Prisma.sql`t.attempt <= ${filter.attemptMax}`);
   return parts;

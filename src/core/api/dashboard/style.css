@@ -93,6 +93,45 @@ a {
   margin: 8px 0 0;
 }
 
+/*
+ * A caveat that has to be read but is not a failure — "3 of 4 segments have
+ * reported, so this list is partial". `.error` would be wrong (nothing broke)
+ * and `.dim` would be worse: this is the line that decides whether the numbers
+ * above it can be trusted, and dimming it hides exactly that.
+ */
+.warn-text {
+  color: var(--warn);
+  margin: 8px 0 0;
+}
+
+/*
+ * Collapsible detail inside a card (per-segment and per-series breakdowns).
+ * Closed by default so the panel it sits in stays scannable; the marker and
+ * padding exist because the browser default reads as an unstyled escapee among
+ * the cards.
+ */
+.card details {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 10px 0 0;
+  padding: 0 10px;
+}
+
+.card details[open] {
+  padding-bottom: 10px;
+}
+
+.card details > summary {
+  cursor: pointer;
+  padding: 8px 0;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.card details > summary:hover {
+  color: var(--text);
+}
+
 .ok-text {
   color: var(--ok);
   margin: 8px 0 0;

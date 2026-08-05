@@ -782,7 +782,22 @@ curl -fsS "$API/api/v1/admin/queues/tasks?state=FAILED&state=DEAD_LETTER" -H "$A
 
 # one series' worth: dedupeKey is a case-insensitive substring
 curl -fsS "$API/api/v1/admin/queues/tasks?dedupeKey=1234%7C&attemptMin=3" -H "$AUTH"
+
+# the same queue read as CHAPTERS, numbered in claim order — which series,
+# which chapter, and what an EDIT is going to change
+curl -fsS "$API/api/v1/admin/queues/chapters?limit=50" -H "$AUTH"
+
+# ...searched by series name rather than by dedupe key
+curl -fsS "$API/api/v1/admin/queues/chapters?q=sakamoto" -H "$AUTH"
 ```
+
+`GET /queues/chapters` is the same rows and the same ordering as
+`/queues/tasks`, projected through the chapter payload. Reach for it when the
+question is *what is about to be published* — a dedupe key of `1015117|142|en`
+identifies a chapter only to someone willing to decode it — and for
+`/queues/tasks` when the question is *what is stuck and why*. It defaults to
+`PENDING`, and its `position` is the place in the whole filtered claim order, so
+"14th" survives paging.
 
 This list is ordered by `notBefore` — the same ordering `core-uploader` claims
 in — so it answers *what runs next*. `GET /api/v1/admin/upload-tasks` (the older
@@ -1018,6 +1033,62 @@ superseded and is not going away:
 | Abandon a chapter, keeping its dedupe slot | `POST /admin/upload-tasks/<id>/cancel` |
 | Reclaim expired leases now | `POST /admin/upload-tasks/requeue-stale` |
 | Everything else on this page | `/admin/queues/*` |
+| What is about to be published, as chapters | `GET /admin/queues/chapters` |
+| What a run actually found | `GET /admin/runs/<id>/chapters` |
+| What is on MangaDex now, and its history | `GET /admin/chapters` |
+
+---
+
+## Correct a published chapter's metadata
+
+A wrong chapter number, a volume the source only supplied later, a title that a
+regex mangled: these are on MangaDex already, so the queue endpoints above cannot
+help — the chapter is not queued, it is published.
+
+```bash
+# find it: search runs across series name, title, number and both ids
+curl -fsS "$API/api/v1/admin/chapters?q=sakamoto&extension=mangaplus" -H "$AUTH"
+
+# everything known about one chapter, including its edit history and whether a
+# correction is already queued for it
+curl -fsS "$API/api/v1/admin/chapters/<mdChapterId>" -H "$AUTH"
+
+# queue the correction (dashboard session, ADMIN or OWNER — not an api token)
+curl -fsS -X POST "$API/api/v1/admin/chapters/<mdChapterId>/edit" \
+  -H "content-type: application/json" -H "x-requested-with: publoader-dash" \
+  -b "$COOKIE" \
+  -d '{"chapter": "142.5", "volume": "17"}'
+```
+
+**Nothing is sent to MangaDex by that call.** It writes an `EDIT` row onto the
+upload queue — the same row the processor writes when it detects drift — which
+`core-uploader` picks up, applies with the platform's credentials, and records in
+`edited_chapters`. Until it is claimed the correction is an ordinary queue row:
+it shows up on `GET /queues/chapters?kind=EDIT`, can be amended with
+`PATCH /queues/tasks/<id>`, and can be removed.
+
+Pass `notBefore` to hold it for review, or pause the platform, which holds the
+whole queue.
+
+Five things it will refuse, and each is worth knowing before you hit it:
+
+- **an api token**, however scoped. This is session-only and ADMIN-or-above: the
+  Discord bot holds `runs:write` so it can trigger scrapes, and that is not the
+  same authority as rewriting a published chapter.
+- **a no-op**, where every field already holds the value you asked for. An
+  unchanged "change" would be written into that chapter's history forever.
+- **a second correction** while one is queued (`409`, naming the existing task).
+  The unique `(kind, dedupe_key)` row is what stops a chapter being edited twice
+  in flight — amend the queued task instead.
+- **a deleted chapter** (`409`). It is not on MangaDex any more, so the task
+  would fail at the API after a lease, five attempts and a dead letter.
+- **a `groups` list that omits our own upload group** (`422`). MangaDex replaces
+  attribution wholesale; dropping the uploading group detaches the chapter from
+  this platform's catalogue and nothing here could find it again.
+
+On the dashboard this is the Chapters destination: find the chapter, open it,
+"Edit metadata". The form starts from what our mirror holds and sends only the
+fields you actually changed.
 
 ---
 

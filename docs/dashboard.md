@@ -81,7 +81,7 @@ you are doing rather than by which endpoint serves them:
 |---|---|
 | — | Overview |
 | **Work** | Runs, Queues, Activity, Errors |
-| **Catalogue** | Extensions, Tracked, Untracked |
+| **Catalogue** | Extensions, Chapters, Tracked, Untracked |
 | **Fleet** | Workers |
 | **Admin** | Users, Tokens, Audit, System, Maintenance, Docs |
 
@@ -114,7 +114,10 @@ Routing is hash-based, `#/<destination>[/<thing>][/<tab>]`:
 ```
 #/overview/platform                      the default landing view
 #/runs/dead-letter                       a tab within a destination
-#/runs/<runId>                           one run and all its segments
+#/runs/<runId>                           one run, its segments, and what it found
+#/queues/chapters                        what is about to be uploaded, in order
+#/chapters                               every chapter we have put on MangaDex
+#/chapters/<mdChapterId>                 one chapter, its history, its edit form
 #/extensions/mangaplus/series-map        one extension, one of its tabs
 #/untracked/<id>                         one untracked series, editable
 #/audit/<id>                             one audit event
@@ -138,11 +141,12 @@ leak an id into an access log.
 | View | Needs | Answers |
 |---|---|---|
 | **Overview** | `stats:read` | *Platform*: paused or running, with pause-for-N-minutes / pause indefinitely / resume; jobs by state, workers by status, upload tasks, and the quarantine count. *MangaDex*: the upload side's saved session and its expiry, with "clear saved session". The first screen in an incident. |
-| **Runs** | `runs:read` | *Recent*: the last 50 runs, each linking to its own page — every segment with attempts, lease holder, lease expiry and last error, plus per-job cancel and retry. *Dead letter*: jobs that exhausted their attempt budget, with replay. |
-| **Queues** | `runs:read` | *Tasks*: the MangaDex upload queues filtered by kind and state, with retry, cancel, and "requeue stale leases" (which only touches leases that have already expired). *Depth*: the same queues counted by kind and state. |
+| **Runs** | `runs:read` | *Recent*: the last 50 runs with how many chapters each found, linking to its own page — every segment with attempts, lease holder, lease expiry and last error, plus per-job cancel and retry, and **the chapters that run actually reported**: coverage per segment, a breakdown per series, and the chapter list itself, searchable. *Dead letter*: jobs that exhausted their attempt budget, with replay. |
+| **Queues** | `runs:read` | *Chapters* (the default): what is about to be sent to MangaDex, **numbered in the order the uploader will claim it** — series, number, volume, title, language, and for an EDIT the fields it will change. Correct one or move it to the front from here. *Tasks*: the same rows keyed on queue mechanics — dedupe key, attempts, last error — with retry, remove, purge, reorder and hand-enqueue. *Depth*: the queues counted by kind and state. |
 | **Activity** | `runs:read` | One time-ordered feed merged across runs, jobs, upload tasks, quarantine and the audit log, filtered by severity, time window, extension and free text. Every row links to the thing it is about and offers a permalink. |
 | **Errors** | `runs:read` | *Failures*: everything that failed, newest first, across all three sources. *Quarantine*: result envelopes the core refused to believe — the security-relevant queue, not just an error queue. A non-zero quarantine count also shows as a red badge on Errors in the sidebar. |
 | **Extensions** | `extensions:read` | The published-bundle list, the chapter removal mode, and the publish drop zone. Opening one gives *Overview* (its bundle, its curation counts, and its runs, jobs, upload tasks and quarantine on one screen — the join is the point: green runs beside red upload tasks is the diagnosis), *Series map*, *Schedule*, *Config*, and *Versions* (every version ever published, with yank). |
+| **Chapters** | `runs:read` | Every chapter this platform has put on MangaDex, filtered by extension, language and free text, across four archives: on MangaDex, edited, marked unavailable, and deleted. Opening one gives its metadata, which archives hold it, its edit history, any queued work for it — and, for an operator, **the metadata correction form**. |
 | **Tracked** | `tracked:read` | The series map across every extension: how many mappings each has and the most recent one, linking into the map that can be edited. There is no cross-extension endpoint, so this is an index rather than a merged table. |
 | **Untracked** | `untracked:read` | Series an extension reported that have no mapping yet, filtered by state. Opening one gives its details **editable** — see below. Approve creates the MangaDex title; skip never does. |
 | **Workers** | `workers:read` | *Fleet*: status, trust tier, heartbeat, agent version, which extensions each worker takes, with drain / activate / revoke. *Enrolment*: mint a one-time token and copy the compose snippet that uses it. |

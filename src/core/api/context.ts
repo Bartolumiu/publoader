@@ -7,6 +7,8 @@ import { BundleStore } from "../store/bundles.js";
 import { ArtifactStore } from "../store/artifacts.js";
 import { SettingsStore, AuditLog } from "../store/settings.js";
 import { UploadTaskStore } from "../store/uploadTasks.js";
+import { RunChapterStore } from "../store/runChapters.js";
+import { ChapterStore } from "../store/chapters.js";
 import { IngestService } from "../ingest/ingest.js";
 import { SchedulerService } from "../scheduler/service.js";
 import type { TitleService } from "../md/titleService.js";
@@ -28,6 +30,10 @@ export interface AppContext {
   artifacts: ArtifactStore;
   settings: SettingsStore;
   uploadTasks: UploadTaskStore;
+  /** What each run reported, read back out of the stored result envelopes. */
+  runChapters: RunChapterStore;
+  /** The four chapter archives: uploaded, edited, unavailable, deleted. */
+  chapters: ChapterStore;
   audit: AuditLog;
   /** Scoped per-client `pa_…` credentials. */
   apiTokens: ApiTokenStore;
@@ -67,6 +73,8 @@ export function buildContext(prisma: PrismaClient, config: Config, log: Logger):
     artifacts: new ArtifactStore(prisma),
     settings: new SettingsStore(prisma),
     uploadTasks: new UploadTaskStore(prisma),
+    runChapters: new RunChapterStore(prisma),
+    chapters: new ChapterStore(prisma),
     audit: new AuditLog(prisma),
     apiTokens: new ApiTokenStore(prisma),
     trackedManga: new TrackedMangaStore(prisma),

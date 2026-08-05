@@ -319,14 +319,22 @@ served to workers, not to admin clients.
 | Method | Path | Scope | Notes |
 | --- | --- | --- | --- |
 | `POST` | `/runs` | `runs:write` | `{extension, kind?, idempotencyKey?}`. `kind` defaults to `FORCE`. `201` created / `200` already existed → `{runId, created, segments}`. **`409` platform is paused**; `404` no bundle published for that extension |
-| `GET` | `/runs` | `runs:read` | `?limit=1..200` (25), `?extension=` |
+| `GET` | `/runs` | `runs:read` | `?limit=1..200` (25), `?extension=`. Each row carries `chaptersFound` (new or changed) and `chaptersSeen` (catalogue snapshot), aggregated over the page in one statement. **Both are `null` when no segment has committed an envelope yet** — which is not the same as a run that found nothing |
 | `GET` | `/runs/:id` | `runs:read` | Run plus all its jobs; `404` unknown |
+| `GET` | `/runs/:id/chapters` | `runs:read` | What the run's extension reported, read back out of the stored envelopes. `?set=updated\|all` (updated), `?q=`, `?mdMangaId=`, `?language=`, `?segmentIndex=`, `?limit=1..500` (100), `?offset=`. Ordered `segmentIndex, position` — the extension's own order. Offset paging is safe here because a committed envelope never changes |
+| `GET` | `/runs/:id/chapters/summary` | `runs:read` | Per-segment coverage and a per-series breakdown. A segment with no committed envelope reports `updated: null`, **not `0`**, and `complete` says whether the chapter list can be read as the whole run |
 | `POST` | `/jobs/:id/cancel` | `runs:write` | → `{ok, result: "cancelled"\|"flagged"}`. `PENDING` cancels immediately; a live lease is flagged and the worker aborts on its next renew. **`409`** if the job is in neither state |
 | `POST` | `/jobs/:id/retry` | `runs:write` | Replay a dead letter with a fresh attempt budget. **`409` job is not dead-lettered** |
 | `GET` | `/dead-letter` | `runs:read` | Up to 100 `DEAD_LETTER` jobs, newest first |
 | `GET` | `/quarantine` | `runs:read` | Up to 100 quarantined submissions — id, jobId, workerId, rejectReason, createdAt. **The envelope body is not returned** |
 
-`routes/admin.ts:100-187`. There is no run-level cancel; cancel the jobs.
+`routes/admin.ts:100-187`; the two chapter endpoints are `routes/chapters.ts`,
+backed by `store/runChapters.ts`. There is no run-level cancel; cancel the jobs.
+
+The chapters a run found are **not** copied into a table on ingest: they are
+unnested from `result_submissions.envelope` on demand
+(`jsonb_array_elements … WITH ORDINALITY`), so the envelope stays the single
+source of truth and paging happens in Postgres rather than in the API process.
 
 ### Pause gate
 
@@ -425,7 +433,43 @@ is logged even if the publish then fails for another reason).
 | `POST` | `/upload-tasks/:id/cancel` | `runs:write` | `PENDING`/`FAILED`/`DEAD_LETTER` → `DONE` with the reason in `lastError`. **`409` for a `LEASED` task** — an uploader owns it mid-flight and forcing it would race into a duplicate upload or a lost result |
 | `POST` | `/upload-tasks/requeue-stale` | `runs:write` | Manual lease sweep → `{ok, requeued}` |
 
-`routes/ops.ts:103-217`, tested at `test/integration/ops.test.ts`.
+| `GET` | `/queues/chapters` | `runs:read` | The queue read as chapters rather than as rows: series, number, volume, title, language, and an EDIT task's `editPayload`. `?kind=`, `?state=` (**defaults to `PENDING`**), `?q=` (searches the payload's series name, title and number — not the dedupe key), `?dedupeKey=`, `?limit=1..500` (100), `?cursor=`. `position` is the place in the claim order across **everything matching the filter**, not within the page |
+
+`routes/ops.ts:103-217`, tested at `test/integration/ops.test.ts`;
+`/queues/chapters` is `routes/chapters.ts`, tested at
+`test/integration/chapters.test.ts`.
+
+### Chapters on MangaDex
+
+| Method | Path | Scope | Notes |
+| --- | --- | --- | --- |
+| `GET` | `/chapters` | `runs:read` | One of the four chapter archives. `?table=uploaded\|edited\|unavailable\|deleted` (uploaded), `?extension=`, `?q=`, `?mdMangaId=`, `?language=`, `?limit=1..500` (50), `?offset=`. Newest first by the instant that table records (`updated_at`, `last_edited_at`, `unavailable_at`, `deleted_at`) |
+| `GET` | `/chapters/extensions` | `runs:read` | Which extensions have rows in an archive, with counts — for a filter picker |
+| `GET` | `/chapters/:mdChapterId` | `runs:read` | One chapter across all four tables: the canonical row, `present` (which archives hold it), `edits` (append-only history), `queued` (upload tasks keyed on this id), `mdFields` (the MangaDex-shaped starting point for an edit) and `editable`. `404` when no table has it |
+| `POST` | `/chapters/:mdChapterId/edit` | `runs:write` **+ ADMIN role, session only** | Queue a metadata correction. Body: any of `{volume, chapter, title, translatedLanguage, groups, notBefore}` → `201 {ok, task, payload, oldInfo}` |
+
+`routes/chapters.ts`, backed by `store/chapters.ts`.
+
+**The edit endpoint does not talk to MangaDex.** It enqueues the same `EDIT`
+upload task `processor.ts` writes when it detects a metadata drift, so the write
+happens in the uploader — the only process holding the credentials — with the
+same lease, retry and audit treatment as everything else, and is visible and
+amendable on the Queues page until it is claimed.
+
+Five refusals, each protecting something that is awkward or impossible to undo:
+
+| Answer | When | Why |
+|---|---|---|
+| `403` | an `pa_…` api token, or a non-ADMIN session | `runs:write` is held by the Discord bot so it can trigger scrapes; rewriting a published chapter is a different authority, so this is session-only |
+| `400` | every field already holds the value asked for | A "change" to an unchanged value would be written into that chapter's permanent edit history |
+| `409` | an `EDIT` for this chapter is already queued | The unique `(kind, dedupe_key)` row is what stops one chapter being edited twice in flight. Amend the existing task instead — the response names it |
+| `409` | the chapter is in the `deleted` archive | It is not on MangaDex any more; the task would fail at the API after a lease, five attempts and a dead letter |
+| `422` | `groups` omits our own upload group | MangaDex **replaces** attribution wholesale; dropping the uploading group detaches the chapter from this platform's catalogue and nothing here could find it again |
+
+Unchanged fields are dropped from `payload`. The task carries the **new** values
+on its chapter as well as the diff, because the uploader mirrors that chapter
+into `uploaded_chapters` on success — a payload carrying the old values would
+land the edit and leave the mirror describing what the chapter used to say.
 
 ### MangaDex session
 

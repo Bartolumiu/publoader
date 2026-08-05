@@ -274,7 +274,22 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         orderBy: { createdAt: "desc" },
         take: query.limit,
       });
-      return { runs };
+      // How much each run actually found, aggregated in ONE statement over the
+      // page being returned. A run's state says whether it worked; this says
+      // whether it was worth running, which is the thing an operator scanning
+      // this list is usually after. `chaptersFound` is null for a run with no
+      // committed envelope yet — distinct from a run that found nothing.
+      const totals = await ctx.runChapters.totalsForRuns(runs.map((run) => run.id));
+      return {
+        runs: runs.map((run) => {
+          const found = totals.get(run.id);
+          return {
+            ...run,
+            chaptersFound: found ? found.updated : null,
+            chaptersSeen: found ? found.all : null,
+          };
+        }),
+      };
     });
 
     scope.get("/api/v1/admin/runs/:id", { preHandler: requireScope("runs:read") }, async (req, reply) => {
