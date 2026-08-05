@@ -8,15 +8,42 @@ import { SettingsStore } from "../core/store/settings.js";
 import { shouldRestart } from "../core/sysops/restartSignal.js";
 import { startMetricsServer } from "../core/observability/metricsServer.js";
 import { collectInventoryMetrics } from "../core/observability/inventory.js";
+import { DiscordNotifier } from "../core/md/webhook.js";
+import { autoSyncExtensions } from "../core/webhooks/autoSync.js";
+import { parseRepoList } from "../core/api/routes/webhooks.js";
+import { BundleStore } from "../core/store/bundles.js";
+import { AuditLog } from "../core/store/settings.js";
 
 const config = loadConfig();
 const log = createLogger("core-scheduler", config.logLevel);
 const prisma = getPrisma(config.databaseUrl);
 const settings = new SettingsStore(prisma);
-const scheduler = new SchedulerService(prisma, log, {
-  baseSeconds: config.retryBaseSeconds,
-  maxSeconds: config.retryMaxSeconds,
-});
+const notifier = DiscordNotifier.fromConfig(config, log);
+
+// Polling the extension repos is only wired up when there are repos to poll:
+// with GITHUB_EXTENSIONS_REPOS unset there is nothing to compare against, and
+// an auto-sync that runs anyway would log a failure every quarter of an hour.
+const extensionRepos = parseRepoList(config.githubExtensionsRepos);
+const autoSync =
+  extensionRepos.length > 0
+    ? () =>
+        autoSyncExtensions(
+          { bundles: new BundleStore(prisma), audit: new AuditLog(prisma), log, settings },
+          {
+            repos: extensionRepos,
+            owner: config.githubRepoOwner,
+            apiUrl: config.githubApiUrl,
+            ...(config.githubToken ? { token: config.githubToken } : {}),
+          },
+        )
+    : undefined;
+
+const scheduler = new SchedulerService(
+  prisma,
+  log,
+  { baseSeconds: config.retryBaseSeconds, maxSeconds: config.retryMaxSeconds },
+  { notifier, ...(autoSync ? { autoSync } : {}) },
+);
 
 let running = true;
 process.on("SIGTERM", () => (running = false));

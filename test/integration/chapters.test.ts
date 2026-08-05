@@ -6,6 +6,7 @@ import { buildContext, type AppContext } from "../../src/core/api/context.js";
 import { buildServer } from "../../src/core/api/server.js";
 import { registerChapterRoutes } from "../../src/core/api/routes/chapters.js";
 import { UploadTaskWorkers } from "../../src/core/md/taskWorkers.js";
+import { SettingsStore } from "../../src/core/store/settings.js";
 import type { MdChapterDetail, MdExtendedApi } from "../../src/core/md/client.js";
 import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
 
@@ -833,6 +834,10 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
         prisma,
         md: stubMd(calls),
         notifier: notifier as never,
+        // A real store against the test database rather than a stub: the worker
+        // reads settings to decide whether to send per-chapter embeds, and the
+        // defaults it returns are the ones production starts from.
+        settings: new SettingsStore(prisma),
         config,
         log,
       });

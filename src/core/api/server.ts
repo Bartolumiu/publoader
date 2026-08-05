@@ -10,6 +10,7 @@ import { registerChapterRoutes } from "./routes/chapters.js";
 import { registerSysopsRoutes } from "./routes/sysops.js";
 import { registerWebhookRoutes } from "./routes/webhooks.js";
 import { registerSessionRoutes } from "./session.js";
+import { registerMagicLinkRoutes } from "./magicLink.js";
 import { registerOAuthRoutes } from "./oauth.js";
 import { registerUserRoutes } from "./routes/users.js";
 import { registerDashboardRoutes } from "./dashboard.js";
@@ -99,6 +100,7 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   // they register outside the admin scope and guard themselves with the
   // per-IP login limiter.
   registerSessionRoutes(app, ctx);
+  registerMagicLinkRoutes(app, ctx);
   registerOAuthRoutes(app, ctx);
   registerAdminRoutes(app, ctx);
   registerTokenRoutes(app, ctx);

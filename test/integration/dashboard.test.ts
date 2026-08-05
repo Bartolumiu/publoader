@@ -613,6 +613,37 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     expect(await prisma.auditEvent.count({ where: { action: "session.login.rejected" } })).toBe(5);
   });
 
+  it("accepts the admin token with whitespace around it", async () => {
+    // Reported from production as "invalid admin token" on a token that was
+    // correct: the value is pasted, and a paste out of a terminal or password
+    // manager routinely carries a trailing newline. The bearer path has always
+    // trimmed, so the same token authenticated `curl -H 'Authorization: Bearer'`
+    // while the login form refused it — which sends the operator looking for a
+    // rotation problem that does not exist.
+    for (const padded of [`${ADMIN_TOKEN}\n`, ` ${ADMIN_TOKEN}`, `  ${ADMIN_TOKEN}\r\n`]) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/session",
+        payload: { token: padded, actor: "tester" },
+      });
+      expect(res.statusCode, JSON.stringify(padded)).toBe(200);
+    }
+  });
+
+  it("still refuses a token that is wrong once trimmed", async () => {
+    // Trimming must not have widened what counts as a match: whitespace is
+    // removed, nothing else is, and a token that differs in any real character
+    // is still rejected.
+    for (const wrong of [` ${ADMIN_TOKEN}x `, `${ADMIN_TOKEN.slice(0, -1)}\n`, "   ", `AD MIN${ADMIN_TOKEN}`]) {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/session",
+        payload: { token: wrong, actor: "mallory" },
+      });
+      expect([400, 401], JSON.stringify(wrong)).toContain(res.statusCode);
+    }
+  });
+
   it("rejects forged, tampered, and expired session cookies", async () => {
     const cookie = await loginWithToken();
     const value = cookie.slice("publoader_session=".length);

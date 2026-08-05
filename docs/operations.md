@@ -31,14 +31,22 @@ Everything in this document can also be done from a browser at
 so the CLI remains authoritative and the two are interchangeable — every
 dashboard action lands in `padmin audit` exactly like a CLI one.
 
-**Sign in** with your email and password, or with Discord if this deployment
-has OAuth configured. Your account name becomes the audit actor, so "who paused
-the platform" is answerable without anyone having to set a header.
+**Sign in** with your email and password, with an emailed sign-in link, or with
+Discord if this deployment has OAuth configured. Your account name becomes the
+audit actor, so "who paused the platform" is answerable without anyone having
+to set a header.
 
-If you have no account yet, or nobody does — a fresh database seeds one `OWNER`
+**Invited, or forgot your password?** Enter your address and click **Email me a
+sign-in link**. The link works once and signs you straight in; set a password
+from **the profile menu → Your account** while you are there, or you will need
+another link next time. You can also attach Discord to the same account from
+that dialog, after which either method signs you in.
+
+If nobody has an account — a fresh database seeds one `OWNER`
 (`DASH_OWNER_EMAIL`) with no credentials — use **"Use the admin token
 instead"** on the login page, then **Users → Set password**. That is the
-bootstrap path and the break-glass path both.
+bootstrap path and the break-glass path both. (With email configured, the
+seeded owner can also just ask for a link.)
 
 Sessions last `SESSION_TTL_MINUTES` (12h default) and are individually
 revocable from **Users → Live sessions**. Full setup, including the Discord
@@ -740,6 +748,41 @@ read, so `docker compose logs -f core-uploader` remains the way to read them.
 `padmin errors` reports platform state; `docker logs` reports processes. The
 same split holds in the dashboard: Errors shows the feed, and nothing in the UI
 tails a log file.
+
+---
+
+## Kill a run in progress
+
+When a run is doing something wrong — a bad extension build, a mapping mistake,
+an upstream site returning nonsense — stop the whole run rather than its jobs one
+at a time:
+
+```bash
+curl -sX POST $CORE/api/v1/admin/runs/$RUN_ID/cancel -H "authorization: Bearer $ADMIN_TOKEN"
+
+# everything unfinished, optionally for one extension
+curl -sX POST $CORE/api/v1/admin/runs/cancel-all \
+  -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"extension":"mangaplus"}'
+```
+
+Every job the run still has outstanding goes to `CANCELLED` immediately, and a
+worker mid-execution aborts at its next lease renewal. Nothing can land
+afterwards: `cancel_requested` blocks a re-claim even after the lease sweeper
+requeues an abandoned job, and ingest only accepts an envelope for a job still in
+`LEASED`/`RUNNING`, so a worker that finishes anyway has its result superseded
+rather than committed.
+
+**Prefer this to cancelling individual jobs on a partitioned run.** Cancelling
+one segment leaves the others to finish, and the run is then processed from
+incomplete results — which on a CLEAN run means the processor concludes that
+every chapter the missing segment covered has vanished upstream, and queues it
+for removal. A killed run never reaches the processor at all.
+
+A finished run is refused with 409 rather than "cancelled", because cancelling
+completed work would misreport what happened. The run lands in `CANCELLED`, not
+`DEAD_LETTER` — this was a decision, and the state an operator reads later should
+say so.
 
 ---
 
@@ -1511,10 +1554,28 @@ before resuming.
 
 ## Config lives in the database, not in JSON files
 
-`manga_id_map.json` and `override_options.json` are **seed data**, imported
-once when a bundle is first published. After that the database wins and
-republishing does not overwrite it. Editing the files on a live deployment
-changes nothing.
+The two data files behave **differently**, and the difference decides whether
+editing one in git does anything at all on a live deployment.
+
+**`manga_id_map.json` is reconciled on every publish** — so the contributor
+workflow (edit the file, open a PR, merge) does reach the database. Per row:
+
+| Change in git | Effect on the database |
+| --- | --- |
+| A new `(namespace, mangaId)` pair | inserted |
+| A corrected MangaDex id, on a row that came from a previous import | updated |
+| A different id on a row an **operator** set, or the title pipeline auto-created | preserved — git does not win |
+| A line removed | nothing — a series is never untracked by deletion |
+
+The `source` column draws that line. A row set by an operator is a later and
+better-informed decision than the file, and dropping a line from the map must not
+silently stop a series being tracked — untracking is an explicit action
+(dashboard, `padmin tracked remove`, or the bot).
+
+**`override_options.json` is seed data**, imported only when an extension has no
+configuration at all. Once any of it exists — a config row, an alias, a
+multi-chapter entry, a language mapping — republishing does nothing, so editing
+this file on a live deployment changes nothing. Use `ext-config` below.
 
 ```bash
 padmin tracked list <extension>
@@ -1536,6 +1597,138 @@ padmin ext-config set mangaplus /tmp/o.json
 ```
 
 Both are audited, so `padmin audit` shows who repointed a mapping and when.
+
+### `custom_language` widens what a chapter may be published as
+
+`custom_language` maps an external manga id to a MangaDex language code, and it
+is the one override that changes what the ingest gate will *accept*: chapters of
+that title are allowed to carry that language even though the extension's
+manifest does not declare it. mangaplus reports `SPANISH` for everything, so the
+one title that is actually Latin-American Spanish is mapped to `es-la` here.
+
+The map is read from the **database**, never from the worker's envelope — a
+worker cannot vote on which languages it may publish. So a chapter rejected as
+
+```
+chapter language es-la not declared by manifest (declared: en, es)
+```
+
+means the mapping is missing from `ext-config`, not that the manifest is wrong.
+Values are validated against MangaDex's language list on write, so a typo like
+`pt_br` is refused at that point rather than silently failing to protect
+Brazilian-Portuguese chapters from the removal pass.
+
+---
+
+## Webhook verbosity
+
+By default the channel gets **failures only** for individual chapters. Python
+sent an embed per chapter either way, which on a normal run is almost entirely
+`Success: True` — and the one failure worth acting on scrolls past between them.
+The run-level embeds (`Reading data from …`, `Found N chapters for …`, the
+untracked-series list) already report that the work happened.
+
+```bash
+curl -s $CORE/api/v1/admin/webhook-verbosity -H "authorization: Bearer $ADMIN_TOKEN"
+curl -sX POST $CORE/api/v1/admin/webhook-verbosity \
+  -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"uploadSuccesses": true}'          # back to the Python firehose
+```
+
+Failure embeds are not switchable, and they carry the reason in the description
+— a failure notification that does not say why is one you cannot act on.
+
+---
+
+## Extensions publish themselves from GitHub
+
+Two paths keep the fleet current, and they overlap on purpose:
+
+1. **The push webhook** — fires within seconds of a push, carrying the exact
+   commit. This is the fast path.
+2. **A poll every 15 minutes** — the scheduler asks each repo in
+   `GITHUB_EXTENSIONS_REPOS` for its HEAD and publishes anything that changed.
+
+The poll exists because the webhook fails *silently*: an unregistered hook, a
+revoked secret or a dropped delivery all look identical to "nobody pushed", and
+the first symptom is a run producing stale results days later. Publishing is
+idempotent — an unchanged tree hashes the same and returns `unchanged` — so the
+two overlapping costs nothing.
+
+The poll discovers extensions by directory (`src/<name>/manifest.json`), so an
+extension **added** to a repo is picked up on its own. The sysops sync button
+walks already-published bundles and therefore can only ever update extensions
+somebody installed by hand first.
+
+A commit is only remembered when every extension in it published cleanly, so a
+transient build failure is retried next pass rather than being skipped until the
+next push. Publishes are audited under `github.autosync`.
+
+```bash
+# freeze the fleet on what is published now (e.g. while investigating a bad extension)
+docker compose exec postgres psql -U publoader -d publoader \
+  -c "insert into settings (key, value) values ('github_auto_sync','false')
+      on conflict (key) do update set value = 'false';"
+```
+
+---
+
+## Series-map sync
+
+The database winning has one cost: the `manga_id_map.json` files in the
+extensions repos go stale. Every title the pipeline auto-creates and every
+mapping an operator repoints is invisible in git, so a contributor reads the
+file, sees a series missing, and opens a pull request adding something that has
+been tracked for months. A mapping deliberately *removed* from the database is
+worse — the file still has it, so the next publish seeds it straight back.
+
+Once a week core-api writes the table back:
+
+```bash
+padmin maps sync --dry-run     # what the next weekly run would commit
+padmin maps sync               # do it now
+padmin maps sync --extension mangaplus --extension viz
+```
+
+| | |
+| --- | --- |
+| **Where it runs** | core-api. It is the only core service with a GitHub token and egress; core-scheduler sits on the internal `data` network. |
+| **When** | Every `MAP_SYNC_INTERVAL_HOURS` (default 168 = weekly), tracked by the `map_sync_last_run` row in `settings` — so restarts, redeploys and a second replica cannot make it run twice. |
+| **Not on deploy** | The first boot after enabling it only *arms* the timer. The first automatic commit is one interval later. |
+| **Needs** | `GITHUB_TOKEN` with **Contents: write** on the repos in `GITHUB_EXTENSIONS_REPOS`. Without it the feature reports itself off at boot and does nothing. |
+| **Off switch** | `MAP_SYNC_ENABLED=false`. It also skips while the platform is paused (`padmin pause`). |
+
+What it will not do, because it commits unattended:
+
+- **Never creates a file.** An extension with no `manga_id_map.json` is skipped
+  with a note; add the file once by hand and the sync keeps it current.
+- **Never empties one.** No mappings in the database for an extension that has
+  some in git means *refused*, not a deletion.
+- **Refuses a big shrink.** A write that would drop more than half of a file's
+  mappings is refused and logged; `padmin maps sync --force` is the deliberate
+  override once you have looked at the dry run.
+- **Never guesses a repo.** An extension directory present in two configured
+  repos is skipped rather than written to whichever was listed first.
+- **Keeps each file's shape.** mangaplus's `{titleId: [ids]}`, alpha_manga's
+  `{id: titleId}` and viz's nested `{namespace: {…}}` all survive; only the
+  ordering is normalised (once), so a week with no changes makes no commit.
+
+Its commits carry `[map-sync]` in the subject, and the push webhook skips a
+delivery whose commits are *all* marked — otherwise the platform would answer
+its own data-file commit with a bundle republish every week. A push that mixes
+one of ours with a human's still publishes.
+
+Each write is audited as `map_sync.write`, with the commit sha and the counts:
+
+```bash
+curl -s "$PUBLOADER_API_URL/api/v1/admin/audit/search?action=map_sync" \
+  -H "authorization: Bearer $PUBLOADER_ADMIN_TOKEN" | jq '.events[]'
+```
+
+Run it manually in any environment that shares the extensions repos with
+another deployment, and leave `MAP_SYNC_ENABLED=false` there — two deployments
+writing the same files would overwrite each other with whichever database is
+staler.
 
 ---
 

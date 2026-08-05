@@ -19,6 +19,15 @@ import { randomBytes } from "node:crypto";
  * instead — useful when inspecting leftover state after a failure.
  */
 export default async function setup(): Promise<() => Promise<void>> {
+  // Nothing in a test run may send mail. Inviting an operator now mails a
+  // sign-in link, and `loadConfig` falls through to the ambient environment for
+  // anything a test does not override — so a developer with a real key in their
+  // shell would have the suite posting to Resend, from a verified domain, to
+  // addresses like `new@example.com`. Those bounce, and bounces are charged to
+  // the sending domain's reputation. Blanked here rather than in each test so a
+  // future test cannot forget.
+  process.env.RESEND_API_KEY = "";
+
   const base =
     process.env.TEST_DATABASE_URL ??
     "postgresql://postgres:devpass@localhost:55432/publoader_test";

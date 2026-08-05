@@ -7,6 +7,7 @@ import { JobStore } from "../store/jobs.js";
 import { ResultStore, type IngestOutcome } from "../store/results.js";
 import { ArtifactStore } from "../store/artifacts.js";
 import { AuditLog } from "../store/settings.js";
+import { ExtensionConfigStore } from "../store/extensionConfig.js";
 
 /**
  * Result-envelope ingestion: the ONLY path by which worker output enters the
@@ -21,6 +22,7 @@ export class IngestService {
   private readonly results: ResultStore;
   private readonly artifacts: ArtifactStore;
   private readonly audit: AuditLog;
+  private readonly extensionConfig: ExtensionConfigStore;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -30,6 +32,7 @@ export class IngestService {
     this.results = new ResultStore(prisma);
     this.artifacts = new ArtifactStore(prisma);
     this.audit = new AuditLog(prisma);
+    this.extensionConfig = new ExtensionConfigStore(prisma);
   }
 
   async ingest(rawEnvelope: unknown, workerId: string): Promise<IngestOutcome | { outcome: "invalid"; reason: string }> {
@@ -149,13 +152,34 @@ export class IngestService {
       return `mangadex group id ${envelope.mangadexGroupId} does not match manifest ${m.mangadex_group_id}`;
     }
 
-    // Languages come from the manifest ONLY. The worker also sends
-    // `overrideOptions.custom_language`, and unioning that in here would have
-    // let the envelope widen the very allowlist meant to constrain it.
-    const allowedLanguages = new Set(m.languages);
+    // Manifest languages, plus the MangaDex codes the operator mapped titles to
+    // via `custom_language`.
+    //
+    // The union is required for correctness, not convenience: `custom_language`
+    // exists precisely to publish a title in a language the extension's own
+    // catalogue does not name — mangaplus reports SPANISH ("es") for everything,
+    // while one title is actually Latin-American Spanish and is mapped to
+    // "es-la". Validating against the manifest alone rejected every chapter of
+    // that title as "not declared by manifest", which reads as a manifest
+    // mistake rather than as the override doing its job.
+    //
+    // Crucially the map is read from the DATABASE, never from the envelope. The
+    // worker also sends `overrideOptions.custom_language`, and trusting that
+    // would let a compromised worker widen the very allowlist meant to constrain
+    // it. The stored copy is operator-controlled and its values are validated
+    // against MANGADEX_LANGUAGES on write, so unioning it in adds no reachable
+    // value that an operator did not already choose. This mirrors
+    // findExtraChapters, which has always unioned the same map.
+    const customLanguages = Object.values(
+      (await this.extensionConfig.load(m.name)).custom_language,
+    );
+    const allowedLanguages = new Set([...m.languages, ...customLanguages]);
+    const declared = (): string =>
+      `declared: ${[...allowedLanguages].sort().join(", ") || "none"}`;
+
     for (const language of envelope.extensionLanguages) {
       if (!allowedLanguages.has(language)) {
-        return `extension language ${language} not declared by manifest`;
+        return `extension language ${language} not declared by manifest (${declared()})`;
       }
     }
 
@@ -180,7 +204,7 @@ export class IngestService {
         return `manga url host not in manifest allowed_hosts: ${chapter.mangaUrl}`;
       }
       if (chapter.chapterLanguage && !allowedLanguages.has(chapter.chapterLanguage)) {
-        return `chapter language ${chapter.chapterLanguage} not declared by manifest`;
+        return `chapter language ${chapter.chapterLanguage} not declared by manifest (${declared()})`;
       }
       // Grouping key for every downstream decision, including removal.
       if (chapter.mdMangaId !== null && !tracked.has(chapter.mdMangaId)) {
@@ -208,7 +232,7 @@ export class IngestService {
         return `untracked manga url host not in manifest allowed_hosts: ${manga.mangaUrl}`;
       }
       if (!allowedLanguages.has(manga.mangaLanguage)) {
-        return `untracked manga language ${manga.mangaLanguage} not declared by manifest`;
+        return `untracked manga language ${manga.mangaLanguage} not declared by manifest (${declared()})`;
       }
     }
     return null;

@@ -32,8 +32,13 @@ env:
   # resolves in CI also resolves in the image build.
   PNPM_VERSION: "10.12.1"
 
-defaults:
-  run:
+# NOTE: no `defaults:` block. It used to carry `run.working-directory: platform`;
+# when the platform moved to the repository root the value was removed and the
+# empty `run:` key was left behind. `defaults.run` must contain `shell` or
+# `working-directory`, so an empty mapping is an INVALID workflow — every run
+# failed in 0s with "workflow file issue", which reads like infrastructure
+# flakiness rather than a syntax error in this file. Same failure shape as the
+# paths filter before it: the stale entry was deleted, not the container.
 
 jobs:
   lint-typecheck:

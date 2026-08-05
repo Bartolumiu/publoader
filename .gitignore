@@ -34,3 +34,6 @@ coverage/
 !.env.example
 !.env.production.example
 !.env.staging.example
+
+# Screenshots from test/browser/shots.mjs — a design-review tool, not an artefact.
+test/browser/.shots/

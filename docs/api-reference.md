@@ -77,7 +77,9 @@ In-process token buckets, keyed per principal (`api/ratelimit.ts`,
 | Enroll | remote IP | 5 | 1/min | `POST /worker/enroll` |
 | Worker | worker id | 60 | 10/s | all authenticated worker routes |
 | Admin | remote IP | 120 | 20/s | all admin routes except `/tokens` |
-| Session | remote IP | 5 | 5/min | `POST /admin/session`, OAuth start |
+| Session | remote IP | 5 | 5/min | `POST /admin/session`, OAuth start and link |
+| Magic link | remote IP | 5 | 1/2min | requesting and redeeming an emailed sign-in link |
+| Magic link | email address | 3 | 1/5min | requesting one — the per-IP bucket alone lets a distributed caller mailbomb one inbox |
 
 ### Shared response conventions
 
@@ -369,6 +371,7 @@ Pausing stops new leases (`routes/worker.ts:110`), scheduled run creation
 | `GET` | `/extensions/:name/tracked` | `tracked:read` | Every publisher-id → MangaDex-title mapping |
 | `PUT` | `/extensions/:name/tracked` | `tracked:append` | `{mangaId, mdMangaId}`; upsert, records the actor as `source`. **403** when the mapping already exists and points somewhere else and the caller lacks `tracked:write` — repointing a series is an edit, and a silent one |
 | `POST` | `/extensions/:name/tracked/batch` | `tracked:append` | Bulk curation — see below |
+| `POST` | `/maps/sync` | `tracked:write` | Write the tracked map back to `manga_id_map.json` in GitHub — see below |
 | `DELETE` | `/extensions/:name/tracked/:mangaId` | `tracked:write` | → `{ok, removed}`. Does **not** touch MangaDex |
 | `GET` | `/extensions/:name/config` | `extensions:read` | `{extension, overrideOptions}` |
 | `PUT` | `/extensions/:name/config` | `extensions:write` | `{overrideOptions: {…}}` — replaces wholesale |
@@ -400,6 +403,36 @@ Rows are judged and reported **individually** — a contributor pasting 200 line
 needs to know which three were wrong, not that "the batch failed". The response
 carries `parseErrors` plus a per-row outcome. `remove` still requires
 `tracked:write`, per the same append-versus-edit rule as the single-row route.
+
+#### Series-map write-back
+
+`POST /maps/sync`, scope `tracked:write`. Runs the same job the weekly timer
+runs, which is what makes `dryRun` an honest preview:
+
+```json
+{ "dryRun": false, "force": false, "extensions": ["mangaplus"] }
+```
+
+`extensions` empty means every extension with tracked mappings. `force` bypasses
+the guard that refuses a write deleting more than half of a file's mappings —
+operator-only, and never set by the timer. The response is the run report:
+
+```json
+{
+  "ok": true, "ranAt": "…", "dryRun": false, "written": 1, "failed": 0,
+  "outcomes": [{
+    "extension": "mangaplus", "status": "write", "repo": "publoader-extensions",
+    "path": "src/mangaplus/manga_id_map.json", "commit": "<sha>",
+    "added": 3, "removed": 1, "mappings": 412
+  }]
+}
+```
+
+`status` is `write`, `unchanged`, `skipped` (no file, no repo, or two repos
+claim the extension), `refused` (a guard fired — `detail` says which) or
+`failed`. `skippedReason` on the report means the whole run did nothing, most
+often "`GITHUB_TOKEN` is unset; writing to a repo needs Contents: write".
+Behaviour, guards and the weekly schedule: docs/operations.md §"Series-map sync".
 
 ### Bundles
 
@@ -556,11 +589,13 @@ from inheriting it by accident (`routes/users.ts:34-37`).
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/users` | Accounts with `hasPassword` instead of the hash |
-| `POST` | `/users` | `{email, role?}` — invite an approved account with no credentials. **`409`** email exists |
-| `POST` | `/users/:id/approve` | **`409`** unknown or already approved |
+| `POST` | `/users` | `{email, role?}` — invite an approved account and mail it a sign-in link, in one action. Returns `{user, emailed, linkExpiresAt?, emailError?}`: a failed send does **not** roll the account back, because the account is the durable half and the link can be re-sent. **`409`** email exists |
+| `POST` | `/users/:id/approve` | Approves and mails a "your account is ready" link, same `{emailed, …}` fields. **`409`** unknown or already approved |
+| `POST` | `/users/:id/magic-link` | Re-send a sign-in link — the recovery path for an invite that went to spam or expired. **`404`** unknown, **`409`** not approved yet, **`503`** no mailer, **`502`** the send failed |
+| `DELETE` | `/users/:id/discord` | Unlink Discord. Self-service, or an OWNER for anyone (`403` otherwise). **`409`** nothing linked, or Discord is the only way into that account (no password and no mailer) |
 | `POST` | `/users/:id/role` | `{role}`. **`409` cannot demote the last owner**; `404` unknown |
 | `DELETE` | `/users/:id` | **`409` cannot delete the last owner**. Sessions cascade, so deletion is also a logout |
-| `POST` | `/users/:id/password` | `{password}`, min **12** chars. Self-service, or an owner setting one for someone else — which is how the seeded owner gets its first password after logging in with the break-glass token. **`403`** if you are neither the owner nor that user; `400` on a short password; `404` unknown |
+| `POST` | `/users/:id/password` | `{password}`, min **12** chars. Self-service — what an account that got in by emailed link does first — or an owner setting one for someone else, which is how the seeded owner gets its first password after logging in with the break-glass token. Retires every outstanding sign-in link for that account and mails a "your password was changed" notice. **`403`** if you are neither the owner nor that user; `400` on a short password; `404` unknown |
 | `GET` | `/sessions` | Live sessions only — id, actor, email, role, createdAt, expiresAt |
 | `DELETE` | `/sessions/:id` | Force logout. `404` unknown or already revoked |
 | `GET` | `/settings/signups` | `{enabled}` |
@@ -578,12 +613,23 @@ their own per-IP limiter (`session.ts:137-141`).
 
 | Method | Path | Auth | Notes |
 | --- | --- | --- | --- |
-| `GET` | `/api/v1/admin/session/methods` | none | `{discord, signups, password}` — which login methods to render. Safe to leave open: everything it reports is visible from the login page anyway |
+| `GET` | `/api/v1/admin/session/methods` | none | `{discord, signups, password, magicLink}` — which login methods to render. Safe to leave open: everything it reports is visible from the login page anyway |
 | `POST` | `/api/v1/admin/session` | none — **this is** the authentication | Two shapes. `{token, actor?}` is the break-glass path and attaches a session to the seeded owner. `{email, password}` is the normal path. Sets an `HttpOnly; SameSite=Strict` cookie and returns `{ok, actor, role, email, expiresAt}` |
-| `GET` | `/api/v1/admin/session` | cookie | Who am I → `{actor, role, userId, email, hasPassword}`. The cookie is HttpOnly, so a reloaded page has to ask. **`401`** with no active session |
+| `GET` | `/api/v1/admin/session` | cookie | Who am I → `{actor, role, userId, email, hasPassword, discordLinked, discordUsername, magicLink, discordAvailable}`. The cookie is HttpOnly, so a reloaded page has to ask. **`401`** with no active session |
 | `DELETE` | `/api/v1/admin/session` | cookie | Revokes the session row and clears the cookie. Always `200` |
-| `GET` | `/api/v1/admin/oauth/discord/start` | none | Redirects to Discord with a signed, `SameSite=Lax`, 10-minute state nonce. **`503`** when no OAuth app is configured; **`429`** rate limited. Answers HTML, not JSON |
-| `GET` | `/api/v1/admin/oauth/discord/callback` | none | Completes the exchange and issues a session, then `302` to `/`. Answers a small HTML notice page on every failure: `400` missing code or replayed/expired state, `403` no verified email / signups closed, `502` exchange failed, `200` "awaiting approval" |
+| `POST` | `/api/v1/admin/session/magic-link/request` | none | `{email}` → mails a single-use sign-in link. Always **`202`** with one message, whatever the address turns out to be — anything else is an account-enumeration oracle. **`503`** when no mailer is configured; **`429`** per-IP (5 burst, 1/2min) or per-address (3 burst, 1/5min) |
+| `POST` | `/api/v1/admin/session/magic-link` | none — **this is** the authentication | `{token}` → issues a session, same cookie as above, and returns `{ok, actor, role, email, userId, hasPassword, expiresAt}`. A `POST` rather than the `GET` the email links to, because the secret rides in the URL fragment (see below). **`401`** unknown / used / expired / superseded, **`403`** account awaiting approval, **`429`** rate limited |
+| `GET` | `/api/v1/admin/oauth/discord/start` | none | Redirects to Discord with a signed, `SameSite=Lax`, 10-minute state nonce carrying a `login` intent. **`503`** when no OAuth app is configured; **`429`** rate limited. Answers HTML, not JSON |
+| `GET` | `/api/v1/admin/oauth/discord/link` | cookie | Same round-trip with a `link` intent bound to the signed-in account, so a Discord identity can be attached to an account whose email differs. **`401`** with no session; **`503`**/**`429`** as above |
+| `GET` | `/api/v1/admin/oauth/discord/callback` | none, or cookie for a link | Completes the exchange. For `login`, issues a session and `302`s to `/`. For `link`, attaches the identity and answers a `200` notice. HTML on every failure: `400` missing code or replayed/expired state, `401` the session ended mid-link, `403` no verified email / signups closed, `409` that Discord account is on another operator account, `502` exchange failed, `200` "awaiting approval" |
+
+The link's secret travels in the URL **fragment**
+(`https://<dash>/#token=<secret>`), which is never sent to a server: it stays
+out of request logs, proxy logs and `Referer` headers, and a mail-scanner that
+fetches the URL cannot burn a single-use token before its owner clicks it. The
+dashboard reads the fragment and posts it to the endpoint above. The intent in
+the OAuth state cookie is covered by the same HMAC as the nonce, so a login
+round-trip cannot be finished as a link, or the reverse.
 
 Failure statuses on the password path: **`401`** with one message for both "no
 such account" and "wrong password"; **`403` account is awaiting approval**;
@@ -640,9 +686,11 @@ A push to the *core* repo is acknowledged with `action: "none"` and an explanati
 core deploys are image-based, so CI builds the image and
 `./scripts/publoader prod upgrade <tag>` rolls it out.
 
-Configuration (`src/config.ts:82-91`): `GITHUB_WEBHOOK_SECRET` (≥16 chars),
+Configuration (`src/config.ts`): `GITHUB_WEBHOOK_SECRET` (≥16 chars),
 `GITHUB_REPO_OWNER` (default `publoader`), `GITHUB_EXTENSIONS_REPOS`,
-`GITHUB_CORE_REPO`, `GITHUB_TOKEN`, `GITHUB_API_URL`.
+`GITHUB_CORE_REPO`, `GITHUB_TOKEN`, `GITHUB_API_URL`, plus `MAP_SYNC_ENABLED`
+(default true) and `MAP_SYNC_INTERVAL_HOURS` (default 168) for the series-map
+write-back below.
 
 ---
 

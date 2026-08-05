@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { AdminUser } from "@prisma/client";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook, requireOwner, requireScope } from "../auth.js";
@@ -44,12 +45,45 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
     // keeps a future non-owner principal from inheriting it by accident.
     const owner = { preHandler: [requireOwner, requireScope("users:admin")] };
 
+    /**
+     * Mail a sign-in link, reporting rather than throwing.
+     *
+     * Sending is a side effect of an account action, and the account action is
+     * the one that must not be lost: an invite whose mail bounced is still an
+     * invite an owner can re-send. So the failure travels back in the response
+     * body — `emailed: false` plus a reason — instead of failing the request.
+     */
+    const sendLink = async (
+      user: AdminUser,
+      purpose: "INVITE" | "WELCOME" | "LOGIN",
+      req: FastifyRequest,
+    ): Promise<{ emailed: boolean; linkExpiresAt?: string; emailError?: string }> => {
+      if (!ctx.magicLinks.enabled) {
+        return { emailed: false, emailError: "email is not configured on this deployment" };
+      }
+      try {
+        const { expiresAt } = await ctx.magicLinks.send(user, purpose, { requestedIp: req.ip });
+        return { emailed: true, linkExpiresAt: expiresAt.toISOString() };
+      } catch (err) {
+        return { emailed: false, emailError: (err as Error).message };
+      }
+    };
+
     // ---- accounts ----
 
     scope.get("/api/v1/admin/users", owner, async () => ({
       users: (await ctx.adminUsers.list()).map(toPublicUser),
     }));
 
+    /**
+     * Invite an operator. The account and the sign-in link are one action: an
+     * invited account has no password and no Discord linkage, so an invite
+     * that did not mail a link would create something nobody can reach.
+     *
+     * A failed send is reported but does NOT roll the account back — the
+     * account is the durable half, and the link can be re-sent. `emailed`
+     * tells the caller which of the two happened.
+     */
     scope.post("/api/v1/admin/users", owner, async (req, reply) => {
       const body = z
         .object({ email: z.string().email().max(320), role: z.enum(ASSIGNABLE_ROLES).default("ADMIN") })
@@ -62,15 +96,43 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
         email: user.email,
         role: user.role,
       });
-      return reply.code(201).send({ user: toPublicUser(user) });
+      const invite = await sendLink(user, "INVITE", req);
+      return reply.code(201).send({ user: toPublicUser(user), ...invite });
     });
 
+    /**
+     * Approve a pending signup, and tell them so with a link. Without the
+     * mail, approval is invisible to the person waiting on it.
+     */
     scope.post("/api/v1/admin/users/:id/approve", owner, async (req, reply) => {
       const { id } = req.params as { id: string };
       const user = await ctx.adminUsers.approve(id);
       if (!user) return reply.code(409).send({ error: "unknown account, or already approved" });
       await ctx.audit.record(actor(req), "admin_user.approve", id, { email: user.email });
-      return { ok: true, user: toPublicUser(user) };
+      const welcome = await sendLink(user, "WELCOME", req);
+      return { ok: true, user: toPublicUser(user), ...welcome };
+    });
+
+    /**
+     * Re-send a sign-in link. The invite mail is the part most likely to go
+     * missing — spam folders, typo'd addresses, expiry over a long weekend —
+     * so recovering from that must not require an owner to invent a password
+     * for somebody else and send it over some other channel.
+     */
+    scope.post("/api/v1/admin/users/:id/magic-link", owner, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      const user = await ctx.adminUsers.byId(id);
+      if (!user) return reply.code(404).send({ error: "unknown account" });
+      if (!user.approved) {
+        return reply.code(409).send({ error: "approve the account before sending a sign-in link" });
+      }
+      if (!ctx.magicLinks.enabled) {
+        return reply.code(503).send({ error: "email is not configured on this deployment" });
+      }
+      const sent = await sendLink(user, user.passwordHash ? "LOGIN" : "INVITE", req);
+      if (!sent.emailed) return reply.code(502).send({ error: sent.emailError });
+      await ctx.audit.record(actor(req), "admin_user.magic_link", id, { email: user.email });
+      return { ok: true, ...sent };
     });
 
     scope.post("/api/v1/admin/users/:id/role", owner, async (req, reply) => {
@@ -95,9 +157,10 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
     });
 
     /**
-     * Set a password. Self-service, or an owner setting one for somebody else
-     * — which is also how the seeded owner gets its first password after
-     * logging in with the break-glass token.
+     * Set a password. Self-service — which is what an account that got in with
+     * an emailed link does first — or an owner setting one for somebody else,
+     * which is also how the seeded owner gets its first password after logging
+     * in with the break-glass token.
      */
     scope.post("/api/v1/admin/users/:id/password", async (req, reply) => {
       const { id } = req.params as { id: string };
@@ -110,10 +173,49 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
       if (!body.success) {
         return reply.code(400).send({ error: `password must be at least ${MIN_PASSWORD_LENGTH} characters` });
       }
-      if (!(await ctx.adminUsers.byId(id))) return reply.code(404).send({ error: "unknown account" });
+      const user = await ctx.adminUsers.byId(id);
+      if (!user) return reply.code(404).send({ error: "unknown account" });
       await ctx.adminUsers.setPassword(id, body.data.password);
-      await ctx.audit.record(actor(req), "admin_user.password", id);
+      // The account now has a credential its holder chose, so any link still
+      // sitting in an inbox stops being a second way in.
+      const retired = await ctx.loginTokens.revokeOutstanding(id);
+      await ctx.audit.record(actor(req), "admin_user.password", id, { retiredLinks: retired });
+      // Told, not asked: a password change the account holder did not make is
+      // the one thing they need to hear about immediately.
+      await ctx.magicLinks.notify("password-changed", user.email);
       return { ok: true };
+    });
+
+    /**
+     * Detach Discord. Self-service, or an owner doing it for somebody who has
+     * lost the Discord account — which is the case that matters, because
+     * without this the operator account is stranded behind a credential nobody
+     * holds any more.
+     *
+     * Refused when it would leave the account with no way in at all: no
+     * password, and no mailer to send a sign-in link with. Removing the last
+     * credential from an account is deletion with extra steps, and deletion is
+     * its own button.
+     */
+    scope.delete("/api/v1/admin/users/:id/discord", async (req, reply) => {
+      const { id } = req.params as { id: string };
+      if (req.adminRole !== "OWNER" && req.adminUserId !== id) {
+        return reply.code(403).send({ error: "you may only unlink your own Discord account" });
+      }
+      const user = await ctx.adminUsers.byId(id);
+      if (!user) return reply.code(404).send({ error: "unknown account" });
+      if (!user.discordId) return reply.code(409).send({ error: "no Discord account is linked" });
+      if (!user.passwordHash && !ctx.magicLinks.enabled) {
+        return reply.code(409).send({
+          error:
+            "Discord is the only way into this account: set a password first, or configure email sign-in links.",
+        });
+      }
+      const updated = await ctx.adminUsers.unlinkDiscord(id);
+      await ctx.audit.record(actor(req), "admin_user.discord_unlink", id, {
+        discordUsername: user.discordUsername,
+      });
+      return { ok: true, user: toPublicUser(updated) };
     });
 
     // ---- live sessions ----

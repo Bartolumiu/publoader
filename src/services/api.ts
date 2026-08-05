@@ -7,6 +7,8 @@ import { MdClient } from "../core/md/client.js";
 import { DiscordNotifier } from "../core/md/webhook.js";
 import { TitleService } from "../core/md/titleService.js";
 import { startMetricsServer } from "../core/observability/metricsServer.js";
+import { MapSyncService } from "../core/mapsync/service.js";
+import { startMapSyncTimer } from "../core/mapsync/timer.js";
 
 const config = loadConfig();
 const log = createLogger("core-api", config.logLevel);
@@ -26,6 +28,25 @@ if (config.mdUsername && config.mdPassword) {
   ctx.md = md;
 }
 const server = buildServer(ctx);
+
+/**
+ * The weekly write-back of tracked_manga to each extension's manga_id_map.json.
+ *
+ * core-api hosts it because it is the only core service with a GitHub token and
+ * egress; core-scheduler runs on the internal `data` network. It is a timer, not
+ * a scheduler slot, and its dueness lives in the `settings` table — so replicas,
+ * restarts and redeploys cannot make it run twice or drift. See
+ * docs/operations.md §"Series-map sync".
+ */
+const mapSync = startMapSyncTimer(
+  MapSyncService.fromConfig(config, {
+    prisma,
+    log,
+    audit: ctx.audit,
+    settings: ctx.settings,
+  }),
+  log,
+);
 
 /**
  * Make sure there is always a way in. A fresh database has no accounts, so
@@ -68,6 +89,7 @@ const metricsServer = await startMetricsServer({
 
 const shutdown = async (signal: string) => {
   log.info({ signal }, "shutting down");
+  mapSync.stop();
   await server.close();
   await metricsServer.close();
   await prisma.$disconnect();

@@ -21,8 +21,16 @@ const ConfigSchema = z.object({
   databaseUrl: z.string().default(""),
   port: z.coerce.number().int().default(8100),
   host: z.string().default("0.0.0.0"),
-  /** Admin bearer token for operator endpoints (bot/dash/CLI). */
-  adminToken: z.string().min(16).optional(),
+  /**
+   * Admin bearer token for operator endpoints (bot/dash/CLI).
+   *
+   * Trimmed because this value is compared for exact equality and is typically
+   * put in `.env` by hand or by shell redirection, which is how a trailing
+   * newline gets in. Untrimmed, the stored token silently stops matching the
+   * one the operator holds and every login fails as "invalid admin token" — a
+   * message that points at the token rather than at the whitespace around it.
+   */
+  adminToken: z.string().trim().min(16).optional(),
   /**
    * HMAC key for short-lived signed cookies (currently the OAuth state
    * cookie). Session cookies are DB-backed and do not depend on it. Optional:
@@ -72,6 +80,33 @@ const ConfigSchema = z.object({
   discordClientId: z.string().optional(),
   discordClientSecret: z.string().optional(),
 
+  // Transactional email (core-api only). See docs/dashboard.md §"Signing in".
+  /**
+   * Resend API key. Its presence is what enables email sign-in links, and
+   * therefore what makes an invited account able to reach the dashboard at
+   * all. Without it, invited accounts need an owner to set their password.
+   */
+  resendApiKey: z.string().optional(),
+  /**
+   * Envelope sender, `Name <address@domain>`. The domain must be verified in
+   * Resend; the default is Resend's sandbox address, which only ever delivers
+   * to the Resend account holder's own inbox.
+   */
+  mailFrom: z.string().default("publoader <onboarding@resend.dev>"),
+  /** Optional Reply-To, so a confused recipient reaches a human. */
+  mailReplyTo: z.string().optional(),
+  /**
+   * Lifetime of a "email me a sign-in link" link. Short: it is a bearer
+   * credential sitting in an inbox, and the holder is by definition at the
+   * keyboard when they ask for it.
+   */
+  magicLinkTtlMinutes: z.coerce.number().int().min(5).max(120).default(15),
+  /**
+   * Lifetime of an invite/approval link. Long, because nobody is waiting at
+   * the keyboard for it — it has to survive a weekend and a spam folder.
+   */
+  inviteTtlHours: z.coerce.number().int().min(1).max(336).default(72),
+
   // GitHub push webhook (core-api only). See docs/webhooks.md — CI-side
   // publishing is the preferred alternative to all of this.
   /**
@@ -86,9 +121,27 @@ const ConfigSchema = z.object({
   githubExtensionsRepos: z.string().default(""),
   /** Repo name for the core service; pushes to it are acknowledged, not acted on. */
   githubCoreRepo: z.string().default(""),
-  /** Read access to the extensions repos. Required for the private one. */
+  /**
+   * Access to the extensions repos. Read (archive download, commit lookup) is
+   * required for the private one; the series-map sync below also needs
+   * **Contents: write** on those repos, and is inert without it.
+   */
   githubToken: z.string().optional(),
   githubApiUrl: z.string().default("https://api.github.com"),
+
+  // Series-map write-back (core-api only). See docs/operations.md §"Series-map sync".
+  /**
+   * Whether to write `manga_id_map.json` back to the extensions repos on a
+   * timer. On by default, but it does nothing without a GITHUB_TOKEN that can
+   * write and at least one repo in GITHUB_EXTENSIONS_REPOS — and it never syncs
+   * on the first boot after it is enabled, so a deploy cannot produce commits.
+   */
+  mapSyncEnabled: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
+  /** Weekly. The floor is an hour so a typo cannot turn it into a busy loop. */
+  mapSyncIntervalHours: z.coerce.number().int().min(1).max(8760).default(168),
 
   // Operator self-service (core-api only). See docs/operations.md §"Self-service".
   /**
@@ -113,8 +166,10 @@ const ConfigSchema = z.object({
 
   // Worker agent settings (worker process only)
   coreUrl: z.string().optional(),
-  workerToken: z.string().optional(),
-  enrollToken: z.string().optional(),
+  // Trimmed for the same reason as adminToken: compared for exact equality,
+  // and written into .env by hand on every worker host.
+  workerToken: z.string().trim().optional(),
+  enrollToken: z.string().trim().optional(),
   workerName: z.string().optional(),
   workerStatePath: z.string().default("/var/lib/publoader-worker"),
   /**
@@ -164,12 +219,19 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): Con
     dashPublicUrl: get("DASH_PUBLIC_URL"),
     discordClientId: get("DISCORD_CLIENT_ID"),
     discordClientSecret: get("DISCORD_CLIENT_SECRET"),
+    resendApiKey: get("RESEND_API_KEY"),
+    mailFrom: get("MAIL_FROM"),
+    mailReplyTo: get("MAIL_REPLY_TO"),
+    magicLinkTtlMinutes: get("MAGIC_LINK_TTL_MINUTES"),
+    inviteTtlHours: get("INVITE_TTL_HOURS"),
     githubWebhookSecret: get("GITHUB_WEBHOOK_SECRET"),
     githubRepoOwner: get("GITHUB_REPO_OWNER"),
     githubExtensionsRepos: get("GITHUB_EXTENSIONS_REPOS"),
     githubCoreRepo: get("GITHUB_CORE_REPO"),
     githubToken: get("GITHUB_TOKEN"),
     githubApiUrl: get("GITHUB_API_URL"),
+    mapSyncEnabled: get("MAP_SYNC_ENABLED"),
+    mapSyncIntervalHours: get("MAP_SYNC_INTERVAL_HOURS"),
     docsPath: get("DOCS_PATH"),
     sysopsRestartEnabled: get("SYSOPS_RESTART_ENABLED"),
     coreUrl: get("CORE_URL"),

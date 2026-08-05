@@ -8,12 +8,17 @@ import {
   chapterFieldChunks,
   dupesEmbeds,
   formatLink,
+  foundChaptersEmbed,
   logEmbed,
   messageEmbed,
+  noUpdatesEmbed,
   notIndexedEmbed,
   queueEmbed,
   queueFinishedEmbed,
   queueSummaryEmbed,
+  runErrorEmbed,
+  runStartedEmbed,
+  untrackedMangaEmbeds,
   updatesEmbeds,
 } from "../../src/core/md/webhookEmbeds.js";
 
@@ -244,5 +249,79 @@ describe("the remaining Python webhooks", () => {
     expect(logEmbed("error", "it broke").title).toBe("ERROR");
     expect(logEmbed("error", "it broke").colour).toBe("E74C3C");
     expect(logEmbed("warn", "hmm").colour).toBe(COLOUR_DEFAULT);
+  });
+
+  // ------------------------------------------------- run-level messages
+  //
+  // These are the embeds that tell a channel a run happened at all. Without
+  // them the only traffic is per-chapter upload results, so a run that found
+  // nothing, or died before uploading, is indistinguishable from no run.
+
+  it("announces the run before anything has been found", () => {
+    const embed = runStartedEmbed("mangaplus");
+    expect(embed.title).toBe("Reading data from mangaplus");
+    expect(embed.footer).toBe("extensions.mangaplus");
+  });
+
+  it("reports the size of the work ahead, and says so when there is none", () => {
+    expect(foundChaptersEmbed("mangaplus", 12).title).toBe(
+      "Found 12 chapters for extensions.mangaplus",
+    );
+    // Python's own inconsistency, kept: this title has no `extensions.` prefix.
+    expect(noUpdatesEmbed("mangaplus").title).toBe("No new updates found for mangaplus");
+  });
+
+  it("puts the exception in a red embed, fenced", () => {
+    const embed = runErrorEmbed("mangaplus", new Error("upstream returned 503"));
+    expect(embed.title).toBe("Error in extensions.mangaplus");
+    expect(embed.colour).toBe("FF0000");
+    expect(embed.description).toContain("```");
+    expect(embed.description).toContain("upstream returned 503");
+  });
+
+  it("survives a thrown non-Error", () => {
+    // `throw "string"` is legal and does happen; the reporter must not itself
+    // throw while reporting.
+    expect(runErrorEmbed("x", "plain string").description).toContain("plain string");
+    expect(runErrorEmbed("x", undefined).description).toContain("undefined");
+  });
+
+  it("lists untracked series 30 to a message, counting the total in every title", () => {
+    const manga = Array.from({ length: 47 }, (_, i) => ({
+      mangaName: `Series ${i}`,
+      mangaLanguage: "en",
+      mangaId: String(i),
+      mangaUrl: `https://example.com/${i}`,
+    }));
+    const embeds = untrackedMangaEmbeds("mangaplus", manga);
+    expect(embeds).toHaveLength(2);
+    // The TOTAL, not the page size — "47" is the number the operator acts on.
+    expect(embeds[0]!.title).toBe("47 Untracked Manga");
+    expect(embeds[1]!.title).toBe("47 Untracked Manga (2)");
+    expect(embeds[0]!.description!.split("\n")).toHaveLength(30);
+    expect(embeds[1]!.description!.split("\n")).toHaveLength(17);
+    expect(embeds[0]!.description).toContain("**Series 0** (en): [0](https://example.com/0)");
+  });
+
+  it("says nothing when there are no untracked series", () => {
+    expect(untrackedMangaEmbeds("mangaplus", [])).toEqual([]);
+  });
+
+  it("tolerates untracked entries with missing fields", () => {
+    const [embed] = untrackedMangaEmbeds("mangaplus", [{ mangaName: null }]);
+    expect(embed!.description).toContain("**unknown**");
+  });
+
+  // ------------------------------------------------- queue embed detail
+
+  it("attaches the failure reason to a failed queue embed, and nothing to a success", () => {
+    // A failure the operator cannot diagnose is a notification that only tells
+    // them to go and look somewhere else.
+    const failed = queueEmbed("Upload", { chapterNumber: "1" }, false, "MangaDex returned 429");
+    expect(failed.description).toBe("MangaDex returned 429");
+    const ok = queueEmbed("Upload", { chapterNumber: "1" }, true, "Already on MangaDex.");
+    expect(ok.description).toBeUndefined();
+    // ...and a failure with no detail must not invent one.
+    expect(queueEmbed("Upload", { chapterNumber: "1" }, false).description).toBeUndefined();
   });
 });
