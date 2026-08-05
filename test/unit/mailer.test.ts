@@ -1,27 +1,38 @@
 import { describe, expect, it, vi } from "vitest";
+import type { CreateEmailResponse } from "resend";
 import { loadConfig } from "../../src/config.js";
 import { createLogger } from "../../src/logging.js";
-import { MailerDisabledError, ResendMailer, createMailer } from "../../src/core/email/mailer.js";
+import {
+  MailerDisabledError,
+  ResendMailer,
+  createMailer,
+  type EmailSender,
+} from "../../src/core/email/mailer.js";
 
 /**
- * The Resend client, exercised with an injected fetch.
+ * The Resend client, exercised through an injected sender.
  *
- * What is worth pinning here is not "it calls an API" but the two properties a
- * sign-in link depends on: the request carries the credential and the
- * idempotency key it was given, and a failure *rejects* rather than resolving
- * quietly. A mailer that swallowed its errors would turn "your invite is on the
- * way" into a lie the sender never hears about.
+ * The property worth pinning is not "it calls the SDK" but the one the SDK
+ * makes easy to get wrong: **an API error is a resolved promise carrying
+ * `error`, not a rejection**. A mailer that only handled thrown errors would
+ * report every rejected send as a success, and an owner would be told an invite
+ * went out when it did not. Everything else here — payload shape, idempotency
+ * key, reply-to — is checked because the whole message is a credential in
+ * transit and it has to arrive intact.
  */
 
 const log = createLogger("test-mailer", "error");
 
-const ok = (body: unknown = { id: "msg_1" }): typeof fetch =>
-  vi.fn(async () =>
-    new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }),
-  ) as unknown as typeof fetch;
+/** A sender that always succeeds, recording what it was asked to send. */
+const okSender = (id = "msg_1") => {
+  const send = vi.fn(
+    async (): Promise<CreateEmailResponse> => ({ data: { id }, error: null, headers: null }),
+  );
+  return { send } as unknown as EmailSender & { send: ReturnType<typeof vi.fn> };
+};
 
-const mailer = (fetchImpl: typeof fetch) =>
-  new ResendMailer({ apiKey: "re_test_key", from: "publoader <no-reply@example.com>", fetchImpl });
+const mailer = (sender: EmailSender) =>
+  new ResendMailer({ apiKey: "re_test_key", from: "publoader <no-reply@example.com>", sender });
 
 const message = {
   to: "ops@example.com",
@@ -30,84 +41,94 @@ const message = {
   text: "hi",
 };
 
-/** The one request the mailer made, unpacked and asserted to exist. */
-function sentRequest(fetchImpl: typeof fetch): {
-  url: string;
-  method: string;
-  headers: Record<string, string>;
-  body: Record<string, unknown>;
+/** The one send the mailer made, unpacked and asserted to exist. */
+function sentCall(sender: { send: ReturnType<typeof vi.fn> }): {
+  payload: Record<string, unknown>;
+  options: { idempotencyKey?: string } | undefined;
 } {
-  const call = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
-  expect(call, "the mailer should have made exactly one request").toBeDefined();
-  const [url, init] = call as [string, { method: string; headers: Record<string, string>; body: string }];
-  return { url, method: init.method, headers: init.headers, body: JSON.parse(init.body) };
+  const call = sender.send.mock.calls[0];
+  expect(call, "the mailer should have made exactly one send").toBeDefined();
+  const [payload, options] = call as [Record<string, unknown>, { idempotencyKey?: string } | undefined];
+  return { payload, options };
 }
 
 describe("ResendMailer", () => {
-  it("posts the message to Resend with the API key and returns the message id", async () => {
-    const fetchImpl = ok();
-    const id = await mailer(fetchImpl).send(message);
+  it("hands Resend the message and returns the id it minted", async () => {
+    const sender = okSender("msg_abc");
+    const id = await mailer(sender).send(message);
 
-    expect(id).toBe("msg_1");
-    const sent = sentRequest(fetchImpl);
-    expect(sent.url).toBe("https://api.resend.com/emails");
-    expect(sent.method).toBe("POST");
-    expect(sent.headers["authorization"]).toBe("Bearer re_test_key");
-    expect(sent.body["from"]).toBe("publoader <no-reply@example.com>");
-    expect(sent.body["to"]).toEqual(["ops@example.com"]);
+    expect(id).toBe("msg_abc");
+    const { payload } = sentCall(sender);
+    expect(payload["from"]).toBe("publoader <no-reply@example.com>");
+    expect(payload["to"]).toEqual(["ops@example.com"]);
+    expect(payload["subject"]).toBe("Sign in");
     // Both parts, always: an operator's inbox may strip the HTML one.
-    expect(sent.body["html"]).toBe("<p>hi</p>");
-    expect(sent.body["text"]).toBe("hi");
+    expect(payload["html"]).toBe("<p>hi</p>");
+    expect(payload["text"]).toBe("hi");
   });
 
-  it("passes an idempotency key through, and omits the header when there is none", async () => {
-    const withKey = ok();
+  it("passes an idempotency key through, and omits the options entirely when there is none", async () => {
+    const withKey = okSender();
     await mailer(withKey).send({ ...message, idempotencyKey: "login-link/abc" });
-    expect(sentRequest(withKey).headers["idempotency-key"]).toBe("login-link/abc");
+    expect(sentCall(withKey).options?.idempotencyKey).toBe("login-link/abc");
 
-    const without = ok();
+    const without = okSender();
     await mailer(without).send(message);
-    expect(sentRequest(without).headers["idempotency-key"]).toBeUndefined();
+    expect(sentCall(without).options).toBeUndefined();
   });
 
-  it("includes reply_to only when one is configured", async () => {
-    const fetchImpl = ok();
+  it("includes replyTo only when one is configured", async () => {
+    const configured = okSender();
     await new ResendMailer({
       apiKey: "re_test_key",
       from: "a@example.com",
       replyTo: "humans@example.com",
-      fetchImpl,
+      sender: configured,
     }).send(message);
-    expect(sentRequest(fetchImpl).body["reply_to"]).toBe("humans@example.com");
+    expect(sentCall(configured).payload["replyTo"]).toBe("humans@example.com");
 
-    const plain = ok();
+    const plain = okSender();
     await mailer(plain).send(message);
-    expect(sentRequest(plain).body["reply_to"]).toBeUndefined();
+    expect(sentCall(plain).payload).not.toHaveProperty("replyTo");
   });
 
-  it("rejects on an API error and names the status", async () => {
-    const fetchImpl = vi.fn(async () =>
-      new Response(JSON.stringify({ name: "validation_error", message: "domain is not verified" }), {
-        status: 403,
-        headers: { "content-type": "application/json" },
+  it("rejects when the SDK RESOLVES with an error — the whole point of this module", async () => {
+    const sender = {
+      send: vi.fn(
+        async (): Promise<CreateEmailResponse> => ({
+          data: null,
+          error: { name: "validation_error", message: "domain is not verified", statusCode: 403 },
+          headers: null,
+        }),
+      ),
+    } as unknown as EmailSender;
+
+    await expect(mailer(sender).send(message)).rejects.toThrow(/403.*domain is not verified/);
+  });
+
+  it("rejects when the SDK itself throws", async () => {
+    const sender = {
+      send: vi.fn(async () => {
+        throw new Error("getaddrinfo ENOTFOUND");
       }),
-    ) as unknown as typeof fetch;
+    } as unknown as EmailSender;
 
-    await expect(mailer(fetchImpl).send(message)).rejects.toThrow(/403.*domain is not verified/);
+    await expect(mailer(sender).send(message)).rejects.toThrow(/could not reach the email provider/);
   });
 
-  it("rejects when the provider is unreachable", async () => {
-    const fetchImpl = vi.fn(async () => {
-      throw new Error("getaddrinfo ENOTFOUND");
-    }) as unknown as typeof fetch;
-
-    await expect(mailer(fetchImpl).send(message)).rejects.toThrow(/could not reach the email provider/);
+  it("does not wait forever on a send that never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const sender = { send: vi.fn(() => new Promise<never>(() => {})) } as unknown as EmailSender;
+      const pending = mailer(sender).send(message);
+      const assertion = expect(pending).rejects.toThrow(/timed out/);
+      await vi.advanceTimersByTimeAsync(15_000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("survives a success response with no parseable body", async () => {
-    const fetchImpl = vi.fn(async () => new Response("", { status: 200 })) as unknown as typeof fetch;
-    await expect(mailer(fetchImpl).send(message)).resolves.toBe("");
-  });
 });
 
 describe("createMailer", () => {
@@ -119,8 +140,15 @@ describe("createMailer", () => {
     await expect(mail.send(message)).rejects.toBeInstanceOf(MailerDisabledError);
   });
 
-  it("returns a live mailer when a key is configured", () => {
-    const mail = createMailer(loadConfig({ RESEND_API_KEY: "re_live", MAIL_FROM: "a@b.co" }), log);
+  it("returns a live mailer when a key is configured", async () => {
+    const sender = okSender();
+    const mail = createMailer(
+      loadConfig({ RESEND_API_KEY: "re_live", MAIL_FROM: "a@b.co" }),
+      log,
+      sender,
+    );
     expect(mail.enabled).toBe(true);
+    await mail.send(message);
+    expect(sentCall(sender).payload["from"]).toBe("a@b.co");
   });
 });

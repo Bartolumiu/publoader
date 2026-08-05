@@ -1,24 +1,29 @@
+import { Resend } from "resend";
 import type { Config } from "../../config.js";
 import type { Logger } from "../../logging.js";
 
 /**
- * Transactional email, via Resend.
+ * Transactional email, via the Resend SDK.
  *
- * Only one thing is sent from this control plane — a sign-in link — and it is
- * a credential in transit, so this is deliberately the smallest surface that
- * works: one POST to `/emails`, no SDK, no template service, nothing about the
- * message held anywhere but the recipient's inbox. Same reasoning as the
- * Discord OAuth client next door: two HTTP calls do not need a dependency, and
- * every dependency reachable from the auth path is a supply-chain edge into
- * the thing that issues sessions.
+ * Only one thing is sent from this control plane — a sign-in link — and it is a
+ * credential in transit, so this module stays deliberately thin: one call, no
+ * template service, nothing about the message held anywhere but the recipient's
+ * inbox.
  *
- * Email is treated as a *fallible* channel, never a silent one. A send that
- * fails is surfaced to the caller (`send` rejects) so a route can tell an
- * operator that an invite did not go out, rather than leaving them waiting on
- * a link that was never delivered.
+ * Email is treated as a *fallible* channel, never a silent one. The SDK does
+ * not throw on an API error — it resolves `{data, error}` — so the single most
+ * important thing here is that `error` is checked and turned into a rejection.
+ * A mailer that returned normally on a failed send would make "your invite is
+ * on the way" a lie the sender never hears about.
  */
 
-const RESEND_ENDPOINT = "https://api.resend.com/emails";
+/**
+ * How long we are willing to wait. The SDK exposes no timeout and Node's fetch
+ * imposes no response deadline, so without this an invite request could hang on
+ * a stalled connection for as long as the socket stays open. Racing does not
+ * cancel the underlying request — it frees the *caller*, which is what an owner
+ * clicking "invite" actually needs.
+ */
 const REQUEST_TIMEOUT_MS = 15_000;
 
 export interface OutgoingEmail {
@@ -42,6 +47,13 @@ export interface Mailer {
   send(email: OutgoingEmail): Promise<string>;
 }
 
+/**
+ * The one SDK surface this module uses. Narrowed to a structural type so a test
+ * can supply a stand-in without a network, an API key, or module mocking —
+ * and so anything else the SDK grows stays out of the auth path.
+ */
+export type EmailSender = Pick<Resend["emails"], "send">;
+
 /** Thrown by `send` on a deployment with no RESEND_API_KEY. */
 export class MailerDisabledError extends Error {
   constructor() {
@@ -59,6 +71,7 @@ class DisabledMailer implements Mailer {
 
 export class ResendMailer implements Mailer {
   readonly enabled = true;
+  private readonly emails: EmailSender;
 
   constructor(
     private readonly opts: {
@@ -66,60 +79,63 @@ export class ResendMailer implements Mailer {
       /** `Name <address@domain>` or a bare address; must be a verified domain. */
       from: string;
       replyTo?: string;
-      fetchImpl?: typeof fetch;
+      /** Test seam; defaults to a real client built from `apiKey`. */
+      sender?: EmailSender;
     },
-  ) {}
+  ) {
+    this.emails = opts.sender ?? new Resend(opts.apiKey).emails;
+  }
 
   async send(email: OutgoingEmail): Promise<string> {
-    const fetchImpl = this.opts.fetchImpl ?? fetch;
-    const headers: Record<string, string> = {
-      authorization: `Bearer ${this.opts.apiKey}`,
-      "content-type": "application/json",
-    };
-    if (email.idempotencyKey) headers["idempotency-key"] = email.idempotencyKey.slice(0, 256);
+    const sent = this.emails.send(
+      {
+        from: this.opts.from,
+        to: [email.to],
+        subject: email.subject,
+        html: email.html,
+        text: email.text,
+        ...(this.opts.replyTo ? { replyTo: this.opts.replyTo } : {}),
+      },
+      // The SDK sends this as the `Idempotency-Key` header. Omitted entirely
+      // when we have none, rather than passed as undefined.
+      email.idempotencyKey ? { idempotencyKey: email.idempotencyKey.slice(0, 256) } : undefined,
+    );
 
-    let res: Response;
+    let result: Awaited<typeof sent>;
     try {
-      res = await fetchImpl(RESEND_ENDPOINT, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          from: this.opts.from,
-          to: [email.to],
-          subject: email.subject,
-          html: email.html,
-          text: email.text,
-          ...(this.opts.replyTo ? { reply_to: this.opts.replyTo } : {}),
-        }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
+      result = await withTimeout(sent, REQUEST_TIMEOUT_MS);
     } catch (err) {
-      // Network/timeout. The message may name the host but never the payload.
+      // Network, timeout, or a genuine SDK throw. The message may name the
+      // host or the deadline but never the payload.
       throw new Error(`could not reach the email provider: ${(err as Error).message}`);
     }
 
-    if (!res.ok) {
-      // Resend answers errors as {name, message}; both are provider-authored
-      // and safe to log, but neither is echoed to an unauthenticated caller —
-      // the routes decide that, not this layer.
-      const detail = await readErrorMessage(res);
-      throw new Error(`email provider returned ${res.status}${detail ? `: ${detail}` : ""}`);
+    // The gotcha this whole module exists to get right: an API error is a
+    // resolved promise carrying `error`, not a rejection.
+    if (result.error) {
+      // Resend's `name` and `message` are provider-authored and safe to log,
+      // but neither is echoed to an unauthenticated caller — the routes decide
+      // that, not this layer.
+      const { name, message, statusCode } = result.error;
+      throw new Error(
+        `email provider rejected the send${statusCode ? ` (${statusCode})` : ""}: ${message || name}`,
+      );
     }
 
-    const body = (await res.json().catch(() => null)) as { id?: unknown } | null;
-    return typeof body?.id === "string" ? body.id : "";
+    // The SDK's response is a discriminated union, so ruling out `error` above
+    // is what makes `data` present here — no defensive fallback needed.
+    return result.data.id;
   }
 }
 
-async function readErrorMessage(res: Response): Promise<string> {
-  try {
-    const body = (await res.json()) as { message?: unknown; name?: unknown };
-    const message = typeof body.message === "string" ? body.message : "";
-    const name = typeof body.name === "string" ? body.name : "";
-    return (message || name).slice(0, 200);
-  } catch {
-    return "";
-  }
+/** Reject if `promise` has not settled in time. Does not cancel it. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+    // Do not hold the process open for a send that nobody is waiting on.
+    timer.unref?.();
+    promise.then(resolve, reject).finally(() => clearTimeout(timer));
+  });
 }
 
 /**
@@ -128,7 +144,7 @@ async function readErrorMessage(res: Response): Promise<string> {
  * operators get in, but a deployment driven entirely by the admin token and
  * Discord login is still a valid one.
  */
-export function createMailer(config: Config, log: Logger, fetchImpl?: typeof fetch): Mailer {
+export function createMailer(config: Config, log: Logger, sender?: EmailSender): Mailer {
   if (!config.resendApiKey) {
     log.warn(
       "RESEND_API_KEY is not set: email sign-in links are disabled. Invited accounts " +
@@ -140,6 +156,6 @@ export function createMailer(config: Config, log: Logger, fetchImpl?: typeof fet
     apiKey: config.resendApiKey,
     from: config.mailFrom,
     replyTo: config.mailReplyTo,
-    fetchImpl,
+    sender,
   });
 }
