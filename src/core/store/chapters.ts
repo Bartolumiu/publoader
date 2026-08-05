@@ -161,6 +161,54 @@ export class ChapterStore {
   }
 
   /**
+   * Rows for many ids from one archive, in ONE query.
+   *
+   * The per-id lookup that `get` supports would be four queries per chapter on
+   * the locate path; a bulk action over two hundred chapters would then be
+   * eight hundred round trips before it wrote anything. This keeps a bulk
+   * resolution at four queries total, whatever the size of the selection.
+   */
+  async manyByIds(archive: ChapterArchive, ids: readonly string[]): Promise<ChapterRow[]> {
+    if (ids.length === 0) return [];
+    const spec = ARCHIVES[archive];
+    return this.prisma.$queryRaw<ChapterRow[]>(Prisma.sql`
+      SELECT ${chapterColumns(spec)} FROM ${Prisma.raw(spec.table)} c
+      WHERE c.md_chapter_id = ANY(${[...ids]}::text[])
+    `);
+  }
+
+  /**
+   * Chapter ids matching a filter, in the list's own order, capped.
+   *
+   * Backs `{filter: …}` bulk calls. The cap is applied here rather than by the
+   * caller so an over-wide filter cannot become an unbounded read on its way to
+   * becoming an unbounded write.
+   */
+  async idsMatching(
+    archive: ChapterArchive,
+    filter: ChapterFilter,
+    cap: number,
+  ): Promise<string[]> {
+    const spec = ARCHIVES[archive];
+    const rows = await this.prisma.$queryRaw<{ mdChapterId: string }[]>(Prisma.sql`
+      SELECT c.md_chapter_id AS "mdChapterId" FROM ${Prisma.raw(spec.table)} c
+      ${combine(chapterWhere(filter, spec))}
+      ORDER BY ${Prisma.raw(`c.${spec.instant}`)} DESC, c.id DESC
+      LIMIT ${cap}
+    `);
+    return rows.map((row) => row.mdChapterId);
+  }
+
+  async countMatching(archive: ChapterArchive, filter: ChapterFilter): Promise<number> {
+    const spec = ARCHIVES[archive];
+    const rows = await this.prisma.$queryRaw<{ total: bigint }[]>(Prisma.sql`
+      SELECT count(*) AS total FROM ${Prisma.raw(spec.table)} c
+      ${combine(chapterWhere(filter, spec))}
+    `);
+    return Number(rows[0]?.total ?? 0);
+  }
+
+  /**
    * Every trace of one MangaDex chapter id.
    *
    * All four tables are read, not just the one the operator arrived from: a
@@ -193,13 +241,19 @@ export class ChapterStore {
   }
 
   /**
-   * Per-extension counts for one archive, for the filter picker and for the
-   * "what does this extension have up?" question the Extensions view asks.
+   * Per-extension counts for one archive, for the filter picker, for the "what
+   * does this extension have up?" question the Extensions view asks, and — with
+   * a filter — for the breakdown a bulk dry run reports, which is how an
+   * operator recognises the set they are about to act on.
    */
-  async byExtension(archive: ChapterArchive): Promise<{ extension: string; count: number }[]> {
+  async byExtension(
+    archive: ChapterArchive,
+    filter: ChapterFilter = {},
+  ): Promise<{ extension: string; count: number }[]> {
     const spec = ARCHIVES[archive];
     const rows = await this.prisma.$queryRaw<{ extension: string | null; count: bigint }[]>(Prisma.sql`
       SELECT c.extension, count(*) AS count FROM ${Prisma.raw(spec.table)} c
+      ${combine(chapterWhere(filter, spec))}
       GROUP BY c.extension ORDER BY count DESC, c.extension ASC
     `);
     // "" is the stand-in uploaded_chapters uses for an unattributed chapter

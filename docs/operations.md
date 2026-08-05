@@ -1114,6 +1114,54 @@ curl -s -X DELETE -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: appl
   "$API/api/v1/admin/chapters/$MD_CHAPTER_ID"
 ```
 
+### Do it to a whole set
+
+The same three actions take a set of chapters — either a list of ids, or a
+filter (`?archive=`, `extension`, `language`, `mdMangaId`, `chapterNumber`,
+`search`, `since`, `until`). The realistic cases are "this series was licensed,
+take the lot down" and "that run uploaded fifty chapters under the wrong volume".
+
+**Every bulk call is a dry run unless you say otherwise.** With no flags it
+writes nothing, queues nothing, audits nothing, and returns a per-chapter
+prediction — including the chapters it would refuse and why. Read that list;
+it is the last chance anyone gets.
+
+```bash
+# what would happen (this is inert)
+curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"filter":{"mdMangaId":"'"$MD_MANGA_ID"'"}}' \
+  "$API/api/v1/admin/chapters/bulk/unavailable" | jq '{matched, wouldQueue, blocked, capped, results}'
+
+# then, and only then
+curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"filter":{"mdMangaId":"'"$MD_MANGA_ID"'"},"dryRun":false,"confirm":true,
+       "footerNote":"Licensed; removed at the publisher'"'"'s request."}' \
+  "$API/api/v1/admin/chapters/bulk/unavailable" | jq '{queued, refused, results}'
+```
+
+A bulk **edit** only takes the fields a set of chapters can legitimately share —
+`volume`, `translatedLanguage`, `groups`. A title, a chapter number or a source
+URL belongs to one chapter, so those stay on the single-chapter route rather than
+being available to apply two hundred times by accident.
+
+```bash
+curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"filter":{"mdMangaId":"'"$MD_MANGA_ID"'"},"changes":{"volume":"3"},"dryRun":false,"confirm":true}' \
+  "$API/api/v1/admin/chapters/bulk/edit"
+```
+
+**200 chapters per call.** A wider filter answers `capped: true`; run it again
+for the rest. The response is a `200` with `queued`, `refused` and a result per
+chapter — a batch is routinely a success and a partial failure at once, and the
+per-chapter rows are the part to act on. Each queued chapter also gets its own
+audit event, correlated by a shared `bulk` id, so the history of one chapter
+still explains itself.
+
+In the dashboard this is the tick-boxes on the Chapters list plus the bar above
+it; the **whole filter** toggle switches the buttons from the ticked rows to
+everything the current filter matches. Each button opens a dialog that previews
+first and only then offers to queue.
+
 ### When it refuses
 
 | Answer | Meaning |

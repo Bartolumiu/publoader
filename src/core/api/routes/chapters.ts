@@ -1,6 +1,7 @@
 // Not self-registering: server.ts is owned elsewhere, so the integrator wires
 // this module in with `registerChapterRoutes(app, ctx)` next to the other route
 // modules.
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
@@ -60,6 +61,17 @@ import { manualTaskProblems } from "./queues.js";
 const MAX_PAGE = 200;
 const DEFAULT_PAGE = 50;
 
+/**
+ * Hard ceiling on one bulk action.
+ *
+ * Lower than the 1000 routes/queues.ts allows, and for a reason: that cap bounds
+ * a change to queue rows, this one bounds a change to public pages that readers
+ * are looking at. Two hundred is a large deliberate action — a whole series, a
+ * bad run's worth of uploads — and small enough that the dry run listing every
+ * affected chapter is still something a person will actually read.
+ */
+const CHAPTER_BULK_CAP = 200;
+
 const MD_CHAPTER_URL = "https://mangadex.org/chapter/";
 const MD_MANGA_URL = "https://mangadex.org/title/";
 
@@ -118,6 +130,20 @@ const EditPayload = z
     translatedLanguage: z.string().min(2).max(16).optional(),
     groups: z.array(z.string().uuid()).min(1).max(5).optional(),
     externalUrl: z.string().max(2048).nullish(),
+  })
+  .strict();
+
+/**
+ * What a *bulk* edit may change: the fields a set of chapters can legitimately
+ * share. Title, chapter number and external URL are one chapter's identity, and
+ * writing one of those across two hundred chapters is not an operation anyone
+ * wants — so it is not expressible here rather than merely discouraged.
+ */
+const BulkEditPayload = z
+  .object({
+    volume: z.string().max(8).nullish(),
+    translatedLanguage: z.string().min(2).max(16).optional(),
+    groups: z.array(z.string().uuid()).min(1).max(5).optional(),
   })
   .strict();
 
@@ -731,6 +757,464 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
             // this audit entry are the only records that the chapter existed.
             chapter: located.row,
           },
+        });
+      },
+    );
+
+    // ----------------------------------------------------------------- bulk
+
+    /**
+     * The same three actions over a set of chapters.
+     *
+     * Two ways to name the set, and they are not symmetrical. `ids` is an
+     * enumeration the operator built by looking at rows; `filter` is a
+     * description, and a description can match more than whoever wrote it
+     * imagined. So:
+     *
+     *  - **`dryRun` defaults to TRUE**, always. The first call anyone makes —
+     *    including a client that forgot the field — writes nothing and reports
+     *    exactly what it would have done, per chapter. A live run needs
+     *    `dryRun: false` AND `confirm: true`, two fields that cannot both be set
+     *    by accident. This is the purge doctrine from routes/queues.ts applied
+     *    to a sharper operation: purge deletes queue rows, this changes public
+     *    pages.
+     *  - **The cap is 200 per call** and is applied inside the id resolution, so
+     *    an over-wide filter cannot become an unbounded read on its way to
+     *    becoming an unbounded write. A truncated set says so and the operator
+     *    calls again.
+     *
+     * The dry run is genuinely predictive: it resolves the same rows, checks the
+     * same refusals (deleted, already-unavailable-without-force, a task already
+     * queued or leased) and reports per-chapter outcomes. It is a preview of
+     * this operation, not an estimate of it. The live path still does not
+     * read-then-write — every insert is the same guarded upsert, and a chapter
+     * whose state changed between the preview and the write comes back refused.
+     */
+    interface BulkItem {
+      mdChapterId: string;
+      ok: boolean;
+      outcome:
+        | "queued"
+        | "requeued"
+        | "would_queue"
+        | "already_queued"
+        | "leased"
+        | "not_found"
+        | "deleted"
+        | "needs_force"
+        | "invalid";
+      taskId?: string;
+      reason?: string;
+      /** Enough to recognise the row in a preview without a second request. */
+      mangaName?: string | null;
+      chapterNumber?: string | null;
+      chapterLanguage?: string | null;
+      extension?: string | null;
+    }
+
+    const BulkFilter = z
+      .object({
+        archive: z.enum(CHAPTER_ARCHIVES).default("uploaded"),
+        extension: z.string().max(64).optional(),
+        language: z.string().max(16).optional(),
+        mdMangaId: z.string().max(64).optional(),
+        chapterNumber: z.string().max(32).optional(),
+        search: z.string().min(1).max(256).optional(),
+        since: z.coerce.date().optional(),
+        until: z.coerce.date().optional(),
+      })
+      .strict();
+
+    /** `ids` XOR `filter`, plus the two flags every bulk body carries. */
+    const bulkBody = <T extends z.ZodRawShape>(extra: T) =>
+      z
+        .object({
+          ids: z.array(MdChapterId).min(1).max(CHAPTER_BULK_CAP).optional(),
+          filter: BulkFilter.optional(),
+          dryRun: z.boolean().default(true),
+          confirm: z.boolean().default(false),
+          ...extra,
+        })
+        .strict()
+        .refine((value) => (value.ids ? 1 : 0) + (value.filter ? 1 : 0) === 1, {
+          message: "provide exactly one of `ids` or `filter`",
+        });
+
+    function toBulkFilter(filter: z.infer<typeof BulkFilter>): ChapterFilter {
+      return {
+        extension: filter.extension,
+        chapterLanguage: filter.language,
+        mdMangaId: filter.mdMangaId,
+        chapterNumber: filter.chapterNumber,
+        search: filter.search,
+        since: filter.since,
+        until: filter.until,
+      };
+    }
+
+    /**
+     * Locate many chapters at once, by the same archive precedence as `locate`.
+     *
+     * Four queries whatever the size of the set — the per-chapter `locate` would
+     * be four *each*, and a two-hundred-chapter preview would spend eight
+     * hundred round trips deciding what it was going to do.
+     */
+    async function locateMany(
+      ids: readonly string[],
+    ): Promise<Map<string, { archive: ChapterArchive; row: ChapterRow }>> {
+      const found = new Map<string, { archive: ChapterArchive; row: ChapterRow }>();
+      // Reverse precedence order: later writes win, so `uploaded` (last) beats
+      // `deleted` (first) for a chapter that is somehow in both.
+      for (const archive of ["deleted", "edited", "unavailable", "uploaded"] as const) {
+        for (const row of await ctx.chapters.manyByIds(archive, ids)) {
+          found.set(row.mdChapterId, { archive, row });
+        }
+      }
+      return found;
+    }
+
+    async function runBulk(
+      req: FastifyRequest,
+      reply: FastifyReply,
+      opts: {
+        kind: "EDIT" | "DELETE" | "UNAVAILABLE";
+        body: { ids?: string[]; filter?: z.infer<typeof BulkFilter>; dryRun: boolean; confirm: boolean };
+        /** Per-chapter task sidecars. Constant across the set by construction. */
+        sidecars: Record<string, unknown>;
+        /** UNAVAILABLE only: re-card chapters that already carry one. */
+        force?: boolean;
+        auditAction: string;
+        auditDetail: Record<string, unknown>;
+      },
+    ): Promise<FastifyReply> {
+      const { kind, body } = opts;
+      const archive = body.filter?.archive ?? "uploaded";
+
+      let ids: string[];
+      let capped = false;
+      let matched: number;
+      if (body.ids) {
+        ids = [...new Set(body.ids)];
+        matched = ids.length;
+      } else {
+        const filter = toBulkFilter(body.filter!);
+        const resolved = await ctx.chapters.idsMatching(archive, filter, CHAPTER_BULK_CAP + 1);
+        capped = resolved.length > CHAPTER_BULK_CAP;
+        ids = resolved.slice(0, CHAPTER_BULK_CAP);
+        matched = await ctx.chapters.countMatching(archive, filter);
+      }
+
+      const [located, unavailableRows, queued] = await Promise.all([
+        locateMany(ids),
+        // Only needed by the UNAVAILABLE path, where "is a card already posted?"
+        // decides whether `force` is required — and `locate` may have resolved
+        // the same chapter from `uploaded`, which does not answer that.
+        opts.kind === "UNAVAILABLE" ? ctx.chapters.manyByIds("unavailable", ids) : Promise.resolve([]),
+        ctx.uploadTasks.forDedupeKeys(ids),
+      ]);
+      const alreadyUnavailable = new Set(unavailableRows.map((row) => row.mdChapterId));
+      const taskByChapter = new Map(
+        queued.filter((task) => task.kind === kind).map((task) => [task.dedupeKey, task]),
+      );
+
+      /** The refusal for one chapter, or null when the write should be tried. */
+      const blockedReason = (id: string): { outcome: BulkItem["outcome"]; reason: string } | null => {
+        const hit = located.get(id);
+        if (!hit) return { outcome: "not_found", reason: "no chapter with that MangaDex id" };
+        if (hit.archive === "deleted") return { outcome: "deleted", reason: DELETED_REASON };
+        if (kind === "UNAVAILABLE" && alreadyUnavailable.has(id) && !opts.force) {
+          return {
+            outcome: "needs_force",
+            reason: "already marked unavailable; pass force: true to post a fresh card over the old one",
+          };
+        }
+        const task = taskByChapter.get(id);
+        if (task?.state === "LEASED") {
+          return { outcome: "leased", reason: `an uploader is executing a ${kind} for this chapter now` };
+        }
+        if (task?.state === "PENDING") {
+          return { outcome: "already_queued", reason: `a ${kind} for this chapter is already queued` };
+        }
+        return null;
+      };
+
+      const describe = (id: string): Partial<BulkItem> => {
+        const row = located.get(id)?.row;
+        return row
+          ? {
+              mangaName: row.mangaName ?? null,
+              chapterNumber: row.chapterNumber ?? null,
+              chapterLanguage: row.chapterLanguage ?? null,
+              extension: row.extension ?? null,
+            }
+          : {};
+      };
+
+      // ---- dry run: predict, write nothing, audit nothing ----
+      if (body.dryRun) {
+        const results: BulkItem[] = ids.map((id) => {
+          const blocked = blockedReason(id);
+          return blocked
+            ? { mdChapterId: id, ok: false, ...blocked, ...describe(id) }
+            : { mdChapterId: id, ok: true, outcome: "would_queue", ...describe(id) };
+        });
+        return reply.send({
+          dryRun: true,
+          action: kind,
+          matched,
+          resolved: ids.length,
+          wouldQueue: results.filter((item) => item.ok).length,
+          blocked: results.filter((item) => !item.ok).length,
+          capped,
+          cap: CHAPTER_BULK_CAP,
+          breakdown: body.filter
+            ? await ctx.chapters.byExtension(archive, toBulkFilter(body.filter))
+            : undefined,
+          results,
+          note:
+            "nothing was changed and nothing was queued. Repeat with {dryRun: false, confirm: true} " +
+            "to queue exactly this set" +
+            (capped ? `, ${CHAPTER_BULK_CAP} chapters at a time` : ""),
+        });
+      }
+
+      if (!body.confirm) {
+        return reply.code(400).send({
+          error: "a live bulk action needs confirm: true alongside dryRun: false",
+          wouldQueue: ids.filter((id) => blockedReason(id) === null).length,
+        });
+      }
+
+      // ---- live: one guarded upsert per chapter ----
+      const bulkId = randomUUID();
+      const results: BulkItem[] = [];
+      const auditRows: { actor: string; action: string; subject: string; detail: unknown }[] = [];
+      const who = actor(req);
+      const lostRace: string[] = [];
+
+      for (const id of ids) {
+        const blocked = blockedReason(id);
+        if (blocked) {
+          results.push({ mdChapterId: id, ok: false, ...blocked, ...describe(id) });
+          continue;
+        }
+        const row = located.get(id)!.row;
+        const chapter = chapterOf(row);
+        const payload: Record<string, unknown> = {
+          ...chapterToTaskPayload(chapter as unknown as Record<string, unknown>, chapter.imageArtifacts),
+          ...opts.sidecars,
+        };
+        const problems = manualTaskProblems(kind, payload);
+        const dedupeKey = taskDedupeKey(kind, chapter);
+        if (problems.length > 0 || dedupeKey === null) {
+          results.push({
+            mdChapterId: id,
+            ok: false,
+            outcome: "invalid",
+            reason: problems[0] ?? "cannot derive a queue key for this chapter",
+            ...describe(id),
+          });
+          continue;
+        }
+
+        const created = await ctx.uploadTasks.requeueForChapter(kind, dedupeKey, payload);
+        if (!created) {
+          // The row moved between the prediction and this statement. The write
+          // was still guarded, so nothing was clobbered; name it afterwards.
+          lostRace.push(id);
+          results.push({
+            mdChapterId: id,
+            ok: false,
+            outcome: "already_queued",
+            reason: "a task for this chapter was queued or claimed while this batch was running",
+            ...describe(id),
+          });
+          continue;
+        }
+        results.push({
+          mdChapterId: id,
+          ok: true,
+          outcome: created.superseded ? "requeued" : "queued",
+          taskId: created.task.id,
+          ...describe(id),
+        });
+        // Per chapter, so "who changed this one, and why?" stays answerable by
+        // subject — a batch that wrote only a summary row would not answer it.
+        auditRows.push({
+          actor: who,
+          action: opts.auditAction,
+          subject: id,
+          detail: {
+            ...opts.auditDetail,
+            bulk: bulkId,
+            extension: row.extension,
+            mdMangaId: row.mdMangaId,
+            chapterNumber: row.chapterNumber,
+            chapterLanguage: row.chapterLanguage,
+            taskId: created.task.id,
+            supersededCompletedTask: created.superseded,
+            ...(kind === "DELETE" ? { chapter: row } : {}),
+          },
+        });
+      }
+
+      if (lostRace.length > 0) {
+        // One query, purely to replace a generic message with the real state.
+        const now = await ctx.uploadTasks.forDedupeKeys(lostRace);
+        const byChapter = new Map(
+          now.filter((task) => task.kind === kind).map((task) => [task.dedupeKey, task]),
+        );
+        for (const item of results) {
+          const task = byChapter.get(item.mdChapterId);
+          if (!task || item.ok) continue;
+          if (task.state === "LEASED") {
+            item.outcome = "leased";
+            item.reason = `an uploader claimed a ${kind} for this chapter while this batch was running`;
+          }
+        }
+      }
+
+      const queuedCount = results.filter((item) => item.ok).length;
+      await ctx.audit.recordMany([
+        ...auditRows,
+        {
+          actor: who,
+          action: `${opts.auditAction}.bulk`,
+          subject: bulkId,
+          detail: {
+            ...opts.auditDetail,
+            bulk: bulkId,
+            requested: ids.length,
+            queued: queuedCount,
+            refused: results.length - queuedCount,
+            capped,
+            ...(body.filter ? { filter: body.filter } : { ids }),
+          },
+        },
+      ]);
+
+      // 200, not 202: a batch where eight chapters queued and two were refused
+      // is a success and a partial failure at once, and only the per-chapter
+      // results say which is which.
+      return reply.send({
+        ok: true,
+        dryRun: false,
+        action: kind,
+        bulk: bulkId,
+        matched,
+        requested: ids.length,
+        queued: queuedCount,
+        refused: results.length - queuedCount,
+        capped,
+        ...(capped
+          ? { cap: CHAPTER_BULK_CAP, note: `more chapters matched than the ${CHAPTER_BULK_CAP}-chapter cap; call again` }
+          : {}),
+        results,
+      });
+    }
+
+    /**
+     * Bulk edit.
+     *
+     * The fields are deliberately a SUBSET of the single-chapter edit: volume,
+     * language and groups are properties a set of chapters can legitimately
+     * share, while a title, a chapter number and an external URL are that one
+     * chapter's identity. Writing one title across two hundred chapters is not
+     * an operation anybody wants — it is a mistake with a keyboard shortcut — so
+     * the schema does not express it.
+     *
+     * `oldInfo` here comes from our own rows rather than a live MangaDex read:
+     * two hundred chapter reads would be slower than the batch itself and would
+     * spend the MangaDex ratelimit the uploader needs. Correctness is unaffected
+     * — the uploader still merges against the live resource when it runs, and
+     * `version` is still read there — only the recorded "old" is our mirror's
+     * view, which is the trade the field is worth.
+     */
+    scope.post(
+      "/api/v1/admin/chapters/bulk/edit",
+      { preHandler: [requireScope("chapters:write"), requireAdminRole] },
+      async (req, reply) => {
+        const body = parseOrThrow(bulkBody({ changes: BulkEditPayload }), req.body ?? {});
+        if (Object.keys(body.changes).length === 0) {
+          return reply.code(400).send({
+            error: "nothing to change: send at least one of volume, translatedLanguage or groups",
+            note:
+              "title, chapter number and externalUrl are per-chapter identity and are only editable " +
+              "one chapter at a time",
+          });
+        }
+
+        const changes: Record<string, unknown> = { ...body.changes };
+        if (body.changes.translatedLanguage !== undefined) {
+          const language = normaliseMangadexLanguage(body.changes.translatedLanguage);
+          if (!language) {
+            return reply.code(400).send({
+              error:
+                `translatedLanguage ${JSON.stringify(body.changes.translatedLanguage)} is not a ` +
+                `language MangaDex accepts (expected e.g. "en", "ja", "pt-br")`,
+            });
+          }
+          changes.translatedLanguage = language;
+        }
+
+        return runBulk(req, reply, {
+          kind: "EDIT",
+          body,
+          sidecars: { payload: changes, oldInfo: null },
+          auditAction: "chapter.edit",
+          auditDetail: { payload: changes, bulkKind: "edit" },
+        });
+      },
+    );
+
+    /** Bulk "replace with an unavailable card", including regenerating cards. */
+    scope.post(
+      "/api/v1/admin/chapters/bulk/unavailable",
+      { preHandler: [requireScope("chapters:write"), requireAdminRole] },
+      async (req, reply) => {
+        const body = parseOrThrow(
+          bulkBody({ force: z.boolean().default(false), footerNote: z.string().max(600).optional() }),
+          req.body ?? {},
+        );
+        return runBulk(req, reply, {
+          kind: "UNAVAILABLE",
+          body,
+          force: body.force,
+          sidecars: {
+            unavailableAt: new Date().toISOString(),
+            ...(body.force ? { force: true } : {}),
+            ...(body.footerNote ? { footerNote: body.footerNote } : {}),
+          },
+          auditAction: "chapter.unavailable",
+          auditDetail: { force: body.force, footerNote: body.footerNote ?? null, bulkKind: "unavailable" },
+        });
+      },
+    );
+
+    /**
+     * Bulk delete — the sharpest thing in this file.
+     *
+     * Nothing extra guards it beyond what the other two have, and that is a
+     * deliberate judgement rather than an oversight: the guards that matter are
+     * already the strongest the codebase has (ADMIN role, no api tokens,
+     * dry-run-by-default, an explicit confirm, a 200-chapter cap, the whole row
+     * in the audit trail per chapter). Adding a fourth flag here would train
+     * operators to set flags without reading them.
+     *
+     * The dry run is where the safety actually lives: it names every chapter it
+     * would remove, which is the last chance anyone gets.
+     */
+    scope.post(
+      "/api/v1/admin/chapters/bulk/delete",
+      { preHandler: [requireScope("chapters:write"), requireAdminRole] },
+      async (req, reply) => {
+        const body = parseOrThrow(bulkBody({ reason: z.string().max(500).optional() }), req.body ?? {});
+        return runBulk(req, reply, {
+          kind: "DELETE",
+          body,
+          sidecars: {},
+          auditAction: "chapter.delete",
+          auditDetail: { reason: body.reason ?? null, bulkKind: "delete" },
         });
       },
     );

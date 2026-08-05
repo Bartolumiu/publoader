@@ -255,8 +255,20 @@ export class UploadTaskStore {
    * answers "is anything already queued against this chapter?".
    */
   async forDedupeKey(dedupeKey: string): Promise<UploadTaskRow[]> {
+    return this.forDedupeKeys([dedupeKey]);
+  }
+
+  /**
+   * The same question for many chapters in one query, which is what a bulk
+   * action's dry run asks: it has to predict, for every chapter in the set,
+   * whether the write would be accepted — and doing that one chapter at a time
+   * would make the preview slower than the operation it previews.
+   */
+  async forDedupeKeys(dedupeKeys: readonly string[]): Promise<UploadTaskRow[]> {
+    if (dedupeKeys.length === 0) return [];
     return this.prisma.$queryRaw<UploadTaskRow[]>(Prisma.sql`
-      SELECT ${TASK_COLUMNS} FROM upload_tasks t WHERE t.dedupe_key = ${dedupeKey}
+      SELECT ${TASK_COLUMNS} FROM upload_tasks t
+      WHERE t.dedupe_key = ANY(${[...dedupeKeys]}::text[])
       ORDER BY t.updated_at DESC
     `);
   }

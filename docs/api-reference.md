@@ -453,6 +453,35 @@ that has not happened yet.
 | `POST` | `/chapters/:mdChapterId/unavailable` | `chapters:write` + ADMIN | `{force?, footerNote?}`. Queues an `UNAVAILABLE`: render the card, attach it as the chapter's only page, repoint `externalUrl`, archive the row. **`409` when the chapter is already marked unavailable unless `force: true`** — without the flag the uploader treats it as done and changes nothing, which would make a wrong card unfixable |
 | `DELETE` | `/chapters/:mdChapterId` | `chapters:write` + ADMIN | `{confirm: true, reason?}`. Queues a `DELETE`. **`400` without `confirm`**, and the refusal names the unavailable route as the reversible alternative. The whole row goes into the audit detail, because afterwards `deleted_chapters` and that entry are the only records the chapter existed |
 
+The same three actions over a set of chapters:
+
+| Method | Path | Scope | Notes |
+| --- | --- | --- | --- |
+| `POST` | `/chapters/bulk/edit` | `chapters:write` + ADMIN | `{ids?, filter?, changes: {volume?, translatedLanguage?, groups?}, dryRun?, confirm?}`. **The fields are a subset of the single-chapter edit on purpose**: a title, a chapter number and an external URL are one chapter's identity, so they are not expressible here. `oldInfo` is taken from our own rows rather than 200 live MangaDex reads; the uploader still merges against the live resource when it runs |
+| `POST` | `/chapters/bulk/unavailable` | `chapters:write` + ADMIN | `{ids?, filter?, force?, footerNote?, dryRun?, confirm?}`. Cards are rendered per chapter from that chapter's own details |
+| `POST` | `/chapters/bulk/delete` | `chapters:write` + ADMIN | `{ids?, filter?, reason?, dryRun?, confirm?}`. The whole row goes into each chapter's audit entry |
+
+Three rules hold across all three:
+
+- **Exactly one of `ids` or `filter`.** `filter` takes the list's own fields plus
+  `archive` (default `uploaded`); `ids` is capped at 200 by the schema.
+- **`dryRun` defaults to `true`.** The first call anyone makes — including a
+  client that forgot the field — writes nothing, queues nothing, audits nothing,
+  and returns a per-chapter prediction: `would_queue`, or the same refusal the
+  live call would give (`not_found`, `deleted`, `needs_force`, `already_queued`,
+  `leased`). A live run needs `dryRun: false` **and** `confirm: true`. It is a
+  preview of the operation, not an estimate of it.
+- **200 chapters per call**, lower than the 1000 of `/queues/*` because this cap
+  bounds a change to public pages rather than to queue rows. A truncated set
+  answers `capped: true` and the operator calls again.
+
+A live bulk call answers **`200`** (not `202`) with `{queued, refused, results}` —
+a batch where eight chapters queued and two were refused is a success and a
+partial failure at once, and only the per-chapter results say which is which.
+Each queued chapter gets **its own audit event** (subject = the chapter id,
+detail carrying a shared `bulk` id) plus one `<action>.bulk` summary row, so
+"why was this chapter deleted?" stays answerable by subject.
+
 Two refusals are worth knowing about:
 
 - **`409` `already_queued` / `leased`.** One queue slot per (kind, chapter): a

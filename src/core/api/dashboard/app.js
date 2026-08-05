@@ -3144,6 +3144,16 @@ VIEWS.chapters = (route) => {
     return q;
   };
 
+  /** The filter as the bulk endpoints take it — same names, no paging keys. */
+  const activeFilter = () => {
+    const filter = { archive };
+    if (f().chapterExtension) filter.extension = f().chapterExtension;
+    if (f().chapterLanguage) filter.language = f().chapterLanguage;
+    if (f().chapterNumber) filter.chapterNumber = f().chapterNumber;
+    if (f().chapterSearch) filter.search = f().chapterSearch;
+    return filter;
+  };
+
   const chapters = new Resource(`chapters:${archive}`, () => api(`/chapters?${queryString()}`));
   const extensions = new Resource(`chapter-extensions:${archive}`, () =>
     api(`/chapters/extensions?archive=${archive}`),
@@ -3152,12 +3162,27 @@ VIEWS.chapters = (route) => {
   const reload = () => void chapters.load({ force: true });
   const resetPaging = () => {
     setFilter({ chapterCursors: { ...f().chapterCursors, [archive]: [] } });
+    selected.clear();
     reload();
   };
   const page = (walked) => {
     setFilter({ chapterCursors: { ...f().chapterCursors, [archive]: walked } });
+    selected.clear();
     reload();
   };
+
+  // Selection is by MangaDex chapter id and survives a refresh, but only for
+  // rows still on screen: acting on an id that has scrolled out of the filter is
+  // how a bulk action reports refusals the operator did not cause.
+  const selected = new Set();
+  const reconcile = (rows) => {
+    const present = new Set(rows.map((r) => r.mdChapterId));
+    for (const id of [...selected]) if (!present.has(id)) selected.delete(id);
+  };
+  // Whether the buttons act on the ticked rows or on everything the filter
+  // matches. One toggle rather than two sets of buttons, because the difference
+  // is the *scope* of an action and not a different action.
+  const scope = { wholeFilter: false };
 
   return el(
     "div",
@@ -3167,18 +3192,98 @@ VIEWS.chapters = (route) => {
       null,
       live(
         [chapters],
-        (data) =>
-          el(
+        (data) => {
+          const rows = data.chapters ?? [];
+          reconcile(rows);
+          return el(
             "div",
             {},
-            chapterTable(data.chapters ?? [], archive),
+            chapterBulkBar(selected, scope, rows, data, activeFilter, archive, reload),
+            chapterTable(rows, archive, selected, reload),
             chapterPager(data, cursors(), page),
-          ),
-        { reserve: 320, skeleton: () => skeletonTable(8, 6) },
+          );
+        },
+        { reserve: 320, skeleton: () => skeletonTable(8, 7) },
       ),
     ),
   );
 };
+
+/**
+ * Bulk actions over the ticked chapters, or over everything the filter matches.
+ *
+ * Every one of these opens the same preview-then-apply dialog rather than
+ * firing: the server's dry run is not optional decoration, it is how an operator
+ * sees the actual list of public pages they are about to change.
+ */
+function chapterBulkBar(selected, scope, rows, data, activeFilter, archive, reload) {
+  const count = selected.size;
+  const total = data.total ?? 0;
+  const targeting = scope.wholeFilter ? total : count;
+
+  const bulk = (label, action, danger) =>
+    gatedButton("chapters:write", {
+      class: danger ? "danger" : null,
+      text: label,
+      disabled: targeting === 0,
+      title:
+        targeting === 0
+          ? "Tick some chapters, or switch to the whole filter"
+          : `Preview this over ${targeting} chapter(s) first`,
+      onclick: () =>
+        chapterBulkDialog({
+          action,
+          archive,
+          target: scope.wholeFilter ? { filter: activeFilter() } : { ids: [...selected] },
+          targeting,
+          done: () => {
+            selected.clear();
+            reload();
+          },
+        }),
+    });
+
+  return el(
+    "div",
+    { class: "row bulk-bar" },
+    el("span", {
+      class: targeting ? null : "dim",
+      text: scope.wholeFilter
+        ? `Acting on all ${total} matching this filter`
+        : count
+          ? `${count} selected`
+          : "Tick chapters to act on them",
+    }),
+    bulk("Edit…", "edit", false),
+    bulk("Mark unavailable…", "unavailable", false),
+    bulk("Delete…", "delete", true),
+    el("span", { class: "grow" }),
+    el(
+      "label",
+      { class: "inline", for: "chapter-whole-filter" },
+      el("input", {
+        id: "chapter-whole-filter",
+        type: "checkbox",
+        checked: scope.wholeFilter,
+        onchange: (event) => {
+          scope.wholeFilter = event.target.checked;
+          reload();
+        },
+      }),
+      " whole filter",
+    ),
+    el("button", {
+      type: "button",
+      text: rows.length && count === rows.length ? "Select none" : "Select all on this page",
+      disabled: rows.length === 0 || scope.wholeFilter,
+      onclick: () => {
+        if (count === rows.length) selected.clear();
+        else for (const entry of rows) selected.add(entry.mdChapterId);
+        reload();
+      },
+    }),
+  );
+}
 
 function chapterFilterCard(extensions, onChange) {
   const text = (id, label, key, placeholder) =>
@@ -3262,10 +3367,20 @@ function chapterFilterCard(extensions, onChange) {
   );
 }
 
-function chapterTable(rows, archive) {
+function chapterTable(rows, archive, selected, reload) {
   return table(
-    ["Series", "Chapter", "Language", "Extension", CHAPTER_ARCHIVE_LABELS[archive] ?? "When", ""],
+    ["", "Series", "Chapter", "Language", "Extension", CHAPTER_ARCHIVE_LABELS[archive] ?? "When", ""],
     rows.map((entry) => [
+      el("input", {
+        type: "checkbox",
+        checked: selected.has(entry.mdChapterId),
+        "aria-label": `Select ${entry.mangaName ?? entry.mdChapterId} ${chapterLabel(entry)}`,
+        onchange: (event) => {
+          if (event.target.checked) selected.add(entry.mdChapterId);
+          else selected.delete(entry.mdChapterId);
+          reload();
+        },
+      }),
       routeLink(routeTo("chapters", entry.mdChapterId, null), truncate(entry.mangaName || "—", 48)),
       chapterLabel(entry),
       entry.chapterLanguage || "—",
@@ -3735,6 +3850,221 @@ function chapterDeleteDialog(data, detail) {
   );
 
   openModal("Delete this chapter from MangaDex", body);
+}
+
+/**
+ * One dialog for all three bulk actions: fill in what changes, **preview**, then
+ * apply.
+ *
+ * The preview is the server's own dry run, and the apply button stays disabled
+ * until it has been seen. That is not UI ceremony duplicating a server check —
+ * the server would refuse a live call without `{dryRun: false, confirm: true}`
+ * anyway — it is making the safe order the only order the page offers, so the
+ * list of public pages about to change is always read before it changes.
+ */
+function chapterBulkDialog({ action, archive, target, targeting, done }) {
+  const inputs = {};
+  const field = (key, label, hint, attrs = {}) => {
+    const id = `chapter-bulk-${key}`;
+    inputs[key] = el("input", { id, type: "text", ...attrs });
+    return [
+      el("label", { for: id, text: label }),
+      inputs[key],
+      hint ? el("p", { class: "dim small", text: hint }) : null,
+    ];
+  };
+
+  const force = el("input", { id: "chapter-bulk-force", type: "checkbox" });
+  const body = el("div", {});
+  const preview = el("div", {});
+
+  const specifics =
+    action === "edit"
+      ? el(
+          "div",
+          {},
+          el("p", {
+            class: "dim small",
+            text:
+              "Only the fields a set of chapters can share. A title, a chapter number or a source URL " +
+              "belongs to one chapter, so those stay on the single-chapter form.",
+          }),
+          field("volume", "Volume", "Blank leaves it alone; “-” is not a clear — use the single-chapter form to clear."),
+          field("translatedLanguage", "Language", "A MangaDex language code, e.g. en, ja, pt-br."),
+          field("groups", "Groups", "Comma-separated MangaDex group ids."),
+        )
+      : action === "unavailable"
+        ? el(
+            "div",
+            {},
+            el("p", {
+              text:
+                "Each chapter keeps its place on MangaDex; its page becomes the card and its publisher " +
+                "link is repointed. Cards are rendered per chapter from that chapter's own details.",
+            }),
+            el("label", { class: "inline", for: "chapter-bulk-force" }, force, " re-card chapters that already have one"),
+            ...field("footerNote", "Footer note", "Replaces the standard wording on every card in this batch.", {
+              maxlength: "600",
+            }),
+          )
+        : el(
+            "div",
+            {},
+            el("p", {
+              text:
+                "Deleting removes these chapters from MangaDex outright. Readers lose them and nothing " +
+                "here brings them back.",
+            }),
+            ...field("reason", "Reason (recorded against every chapter in the audit trail)", "", {
+              maxlength: "500",
+            }),
+          );
+
+  /** The action-specific half of the request body. */
+  const changes = () => {
+    if (action === "edit") {
+      const out = {};
+      const volume = inputs.volume.value.trim();
+      const language = inputs.translatedLanguage.value.trim();
+      const groups = inputs.groups.value
+        .split(",")
+        .map((id) => id.trim())
+        .filter(Boolean);
+      if (volume) out.volume = volume;
+      if (language) out.translatedLanguage = language;
+      if (groups.length) out.groups = groups;
+      return { changes: out };
+    }
+    if (action === "unavailable") {
+      const note = inputs.footerNote.value.trim();
+      return { force: force.checked, ...(note ? { footerNote: note } : {}) };
+    }
+    const reason = inputs.reason.value.trim();
+    return reason ? { reason } : {};
+  };
+
+  const call = (extra) =>
+    api(`/chapters/bulk/${action}`, { method: "POST", body: { ...target, ...changes(), ...extra } });
+
+  const applyButton = gatedButton("chapters:write", {
+    class: action === "delete" ? "danger" : "primary",
+    text: "Preview first",
+    disabled: true,
+    onclick: async (event) => {
+      const result = await act(`chapter.bulk_${action}`, () => call({ dryRun: false, confirm: true }), {
+        button: event.currentTarget,
+      });
+      if (result) {
+        reportChapterBulk(result);
+        closeModal();
+        done();
+      }
+    },
+  });
+
+  const previewButton = gatedButton("chapters:read", {
+    text: "Preview",
+    onclick: async (event) => {
+      const result = await act("chapter.bulk_preview", () => call({ dryRun: true }), {
+        button: event.currentTarget,
+      });
+      if (!result) return;
+      applyButton.disabled = !can("chapters:write") || result.wouldQueue === 0;
+      applyButton.textContent =
+        result.wouldQueue === 0
+          ? "Nothing to queue"
+          : `Queue ${result.wouldQueue} chapter(s)`;
+      setChildren(preview, chapterBulkPreview(result, archive));
+    },
+  });
+
+  setChildren(
+    body,
+    el("p", {
+      class: "dim small",
+      text: target.filter
+        ? `Every chapter matching the current filter (${targeting} right now).`
+        : `${targeting} selected chapter(s).`,
+    }),
+    specifics,
+    el("div", { class: "row end" }, previewButton, applyButton, el("button", { type: "button", text: "Cancel", onclick: closeModal })),
+    preview,
+  );
+
+  openModal(
+    action === "edit"
+      ? "Edit these chapters on MangaDex"
+      : action === "unavailable"
+        ? "Mark these chapters unavailable"
+        : "Delete these chapters from MangaDex",
+    body,
+  );
+}
+
+/** The dry run, rendered: what would happen to each chapter, and what would not. */
+function chapterBulkPreview(result, archive) {
+  const blocked = (result.results ?? []).filter((item) => !item.ok);
+  return el(
+    "div",
+    {},
+    el("h3", { text: "Preview" }),
+    defs([
+      ["Matching the filter", String(result.matched ?? result.resolved ?? 0)],
+      ["Would be queued", String(result.wouldQueue ?? 0)],
+      ["Blocked", String(blocked.length)],
+    ]),
+    result.capped
+      ? el("p", {
+          class: "error",
+          text: `More chapters match than the ${result.cap}-chapter cap. This queues the first ${result.cap}; run it again for the rest.`,
+        })
+      : null,
+    table(
+      ["Series", "Chapter", "Language", "Would happen"],
+      (result.results ?? []).slice(0, 100).map((item) => [
+        truncate(item.mangaName || item.mdChapterId, 40),
+        item.chapterNumber ? `Ch. ${item.chapterNumber}` : "—",
+        item.chapterLanguage || "—",
+        item.ok ? chip("queued") : el("span", { class: "dim small", text: item.reason ?? item.outcome }),
+      ]),
+      { empty: `Nothing in the ${archive} archive matched.` },
+    ),
+    (result.results ?? []).length > 100
+      ? el("p", { class: "dim small", text: `…and ${result.results.length - 100} more.` })
+      : null,
+  );
+}
+
+/**
+ * Per-chapter results, reported rather than summarised — a batch where eight
+ * chapters queued and two were refused is a success and a partial failure at
+ * once, and collapsing that to "ok" loses the only part worth acting on.
+ */
+function reportChapterBulk(result) {
+  const refused = (result.results ?? []).filter((item) => !item.ok);
+  if (refused.length === 0) {
+    toast(`${result.queued} chapter(s) queued`);
+    return;
+  }
+  toast(`${result.queued} queued, ${refused.length} refused`, false);
+  openModal(
+    "Some chapters were refused",
+    el(
+      "div",
+      {},
+      el("p", { class: "dim small", text: "The rest of the batch was queued. These were not, and why:" }),
+      el(
+        "ul",
+        { class: "errors" },
+        refused
+          .slice(0, 50)
+          .map((item) =>
+            el("li", { text: `${item.mangaName ?? item.mdChapterId}: ${item.reason ?? item.outcome}` }),
+          ),
+      ),
+      el("div", { class: "row end" }, el("button", { type: "button", text: "Close", onclick: closeModal })),
+    ),
+  );
 }
 
 /** Say what was queued — including that a completed task was reset in place. */

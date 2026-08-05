@@ -514,6 +514,190 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
     expect(await prisma.uploadTask.count()).toBe(0);
   });
 
+  // ---- bulk ----
+
+  describe("bulk actions", () => {
+    const bulk = (action: string, payload: Record<string, unknown>) =>
+      app.inject({
+        method: "POST",
+        url: `/api/v1/admin/chapters/bulk/${action}`,
+        headers: root,
+        payload,
+      });
+
+    it("previews by default and writes nothing at all", async () => {
+      const a = await uploaded();
+      const b = await uploaded();
+
+      const preview = await bulk("delete", { ids: [a.mdChapterId, b.mdChapterId] });
+      expect(preview.statusCode).toBe(200);
+      expect(preview.json().dryRun).toBe(true);
+      expect(preview.json().wouldQueue).toBe(2);
+      // Predictive, not an estimate: every chapter is named with what would
+      // happen to it.
+      expect(preview.json().results.map((r: { outcome: string }) => r.outcome)).toEqual([
+        "would_queue",
+        "would_queue",
+      ]);
+      expect(preview.json().results[0].mangaName).toBe("Test Series");
+      // Not even an audit row — the first call anyone makes is inert.
+      expect(await prisma.uploadTask.count()).toBe(0);
+      expect(await prisma.auditEvent.count()).toBe(0);
+
+      // dryRun: false alone is not enough; the two flags cannot both be set by
+      // accident.
+      const unconfirmed = await bulk("delete", { ids: [a.mdChapterId], dryRun: false });
+      expect(unconfirmed.statusCode).toBe(400);
+      expect(await prisma.uploadTask.count()).toBe(0);
+    });
+
+    it("queues one task per chapter and audits each one by subject", async () => {
+      const a = await uploaded();
+      const b = await uploaded();
+
+      const res = await bulk("delete", {
+        ids: [a.mdChapterId, b.mdChapterId],
+        dryRun: false,
+        confirm: true,
+        reason: "bad run",
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().queued).toBe(2);
+      expect(res.json().refused).toBe(0);
+      expect(res.json().results.every((r: { taskId?: string }) => r.taskId)).toBe(true);
+
+      const tasks = await prisma.uploadTask.findMany({ where: { kind: "DELETE" } });
+      expect(tasks.map((t) => t.dedupeKey).sort()).toEqual([a.mdChapterId, b.mdChapterId].sort());
+
+      // Per-chapter rows, so "why was this chapter deleted?" is answerable by
+      // subject — a batch that wrote only a summary would not answer it — plus
+      // one summary row correlating them.
+      const perChapter = await prisma.auditEvent.findMany({ where: { action: "chapter.delete" } });
+      expect(perChapter.map((e) => e.subject).sort()).toEqual([a.mdChapterId, b.mdChapterId].sort());
+      const summary = await prisma.auditEvent.findFirstOrThrow({
+        where: { action: "chapter.delete.bulk" },
+      });
+      expect((summary.detail as { queued: number }).queued).toBe(2);
+      expect((perChapter[0]!.detail as { bulk: string }).bulk).toBe(summary.subject);
+      expect((perChapter[0]!.detail as { reason: string }).reason).toBe("bad run");
+    });
+
+    it("acts on everything a filter matches, and caps what one call may touch", async () => {
+      for (let i = 0; i < 3; i++) await uploaded({ extension: "bulkext", mangaName: "Bulk Series" });
+      const other = await uploaded({ extension: "otherext" });
+
+      const preview = await bulk("unavailable", { filter: { extension: "bulkext" } });
+      expect(preview.json().matched).toBe(3);
+      expect(preview.json().wouldQueue).toBe(3);
+      expect(preview.json().breakdown).toEqual([{ extension: "bulkext", count: 3 }]);
+
+      const applied = await bulk("unavailable", {
+        filter: { extension: "bulkext" },
+        dryRun: false,
+        confirm: true,
+        footerNote: "Publisher pulled the series.",
+      });
+      expect(applied.json().queued).toBe(3);
+      const tasks = await prisma.uploadTask.findMany({ where: { kind: "UNAVAILABLE" } });
+      expect(tasks).toHaveLength(3);
+      expect((tasks[0]!.chapter as Record<string, unknown>).footerNote).toBe(
+        "Publisher pulled the series.",
+      );
+      // The filter is the whole selection: a chapter outside it is untouched.
+      expect(tasks.some((t) => t.dedupeKey === other.mdChapterId)).toBe(false);
+    });
+
+    it("reports per chapter when only some of a batch can be queued", async () => {
+      const fine = await uploaded();
+      const carded = await uploaded();
+      const removed = await uploaded();
+      // Already carries a card: needs `force`.
+      await prisma.unavailableChapter.create({
+        data: { mdChapterId: carded.mdChapterId, extension: "exampleext" },
+      });
+      // Already queued by hand, and not run yet.
+      await prisma.uploadTask.create({
+        data: { kind: "UNAVAILABLE", dedupeKey: removed.mdChapterId, chapter: {} },
+      });
+
+      const ids = [fine.mdChapterId, carded.mdChapterId, removed.mdChapterId, uuid(999)];
+      const preview = await bulk("unavailable", { ids });
+      const outcomes = Object.fromEntries(
+        preview.json().results.map((r: { mdChapterId: string; outcome: string }) => [r.mdChapterId, r.outcome]),
+      );
+      expect(outcomes[fine.mdChapterId]).toBe("would_queue");
+      expect(outcomes[carded.mdChapterId]).toBe("needs_force");
+      expect(outcomes[removed.mdChapterId]).toBe("already_queued");
+      expect(outcomes[uuid(999)]).toBe("not_found");
+
+      const applied = await bulk("unavailable", { ids, dryRun: false, confirm: true });
+      expect(applied.json().queued).toBe(1);
+      expect(applied.json().refused).toBe(3);
+      // The one that could go, went; the refusals left everything as it was.
+      expect(await prisma.uploadTask.count({ where: { kind: "UNAVAILABLE" } })).toBe(2);
+
+      // `force` unblocks the carded one without touching the other refusals.
+      const forced = await bulk("unavailable", { ids, dryRun: false, confirm: true, force: true });
+      expect(forced.json().queued).toBe(1);
+      const regenerated = await prisma.uploadTask.findFirstOrThrow({
+        where: { kind: "UNAVAILABLE", dedupeKey: carded.mdChapterId },
+      });
+      expect((regenerated.chapter as Record<string, unknown>).force).toBe(true);
+    });
+
+    it("limits a bulk edit to the fields a set of chapters can share", async () => {
+      const chapter = await uploaded();
+
+      // Per-chapter identity is not expressible here, rather than merely
+      // discouraged: one title across two hundred chapters is a mistake with a
+      // keyboard shortcut.
+      for (const changes of [{ title: "One title" }, { chapter: "12" }, { externalUrl: "https://x.example" }]) {
+        const res = await bulk("edit", { ids: [chapter.mdChapterId], changes });
+        expect(res.statusCode).toBe(400);
+      }
+      expect((await bulk("edit", { ids: [chapter.mdChapterId], changes: {} })).statusCode).toBe(400);
+      expect(
+        (await bulk("edit", { ids: [chapter.mdChapterId], changes: { translatedLanguage: "klingon" } }))
+          .statusCode,
+      ).toBe(400);
+
+      const res = await bulk("edit", {
+        ids: [chapter.mdChapterId],
+        changes: { volume: "3", translatedLanguage: "pt-br" },
+        dryRun: false,
+        confirm: true,
+      });
+      expect(res.statusCode).toBe(200);
+      const task = await prisma.uploadTask.findFirstOrThrow({ where: { kind: "EDIT" } });
+      expect((task.chapter as { payload: Record<string, string> }).payload).toEqual({
+        volume: "3",
+        translatedLanguage: "pt-br",
+      });
+    });
+
+    it("refuses a body that names both a selection and a filter, or neither", async () => {
+      const chapter = await uploaded();
+      expect(
+        (await bulk("delete", { ids: [chapter.mdChapterId], filter: { extension: "exampleext" } }))
+          .statusCode,
+      ).toBe(400);
+      expect((await bulk("delete", {})).statusCode).toBe(400);
+    });
+
+    it("keeps bulk behind the same role gate as the single-chapter routes", async () => {
+      const chapter = await uploaded();
+      const writer = await mint(["chapters:write"]);
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/chapters/bulk/delete",
+        headers: writer,
+        payload: { ids: [chapter.mdChapterId], dryRun: false, confirm: true },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(await prisma.uploadTask.count()).toBe(0);
+    });
+  });
+
   // ---- authorisation ----
 
   it("keeps published chapters out of reach of scopes and roles that should not have them", async () => {
