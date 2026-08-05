@@ -46,13 +46,25 @@
           <button id="login-submit" type="submit" class="primary">Sign in</button>
         </form>
 
+        <!-- An invited account has no password until its holder sets one, so
+             for them this is not an alternative to the form above — it is the
+             only way in. -->
+        <form id="login-link-form" autocomplete="off" hidden>
+          <p class="dim small">
+            Invited, or no password set yet? A single-use sign-in link is emailed to the address
+            above.
+          </p>
+          <button id="login-link-submit" type="submit">Email me a sign-in link</button>
+        </form>
+        <p id="login-link-sent" class="dim small" role="status" hidden></p>
+
         <p id="login-discord-wrap" hidden>
           <a id="login-discord" class="button-link" href="/api/v1/admin/oauth/discord/start">
             Sign in with Discord
           </a>
         </p>
         <p id="login-signups" class="dim small" hidden>
-          New Discord accounts are accepted, but an owner must approve them before first use.
+          New accounts are accepted, but an owner must approve them before first use.
         </p>
 
         <p>

@@ -21,7 +21,7 @@ truncation costs you.
 | --- | --- | --- |
 | **Canonical** | Irreplaceable. Losing a row loses information no other system holds. | `bundles`, `uploaded_chapters`, `uploaded_ids`, `edited_chapters`, `unavailable_chapters`, `deleted_chapters`, `tracked_manga`, `extension_configs`, `schedule_overrides`, `settings`, `admin_users`, `api_tokens`, `audit_events`, `workers`, `disabled_extensions` |
 | **Derived** | Reconstructable by re-running work. Losing it costs time, not truth. | `runs`, `jobs`, `result_submissions`, `untracked_manga` |
-| **Transient** | Queue and cache rows with a natural end of life. | `upload_tasks`, `artifacts`, `enroll_tokens`, `admin_sessions`, `upload_logs` |
+| **Transient** | Queue and cache rows with a natural end of life. | `upload_tasks`, `artifacts`, `enroll_tokens`, `admin_sessions`, `login_tokens`, `upload_logs` |
 
 `upload_logs` is transient in lifetime but load-bearing while a chapter is
 in flight — see [its entry](#upload_logs-transient-load-bearing).
@@ -469,8 +469,8 @@ and the admin API edits them (`schema.prisma:435-437`).
 | `display_name` | Optional; used as the audit actor when present. |
 | `role` | `OWNER` or `ADMIN`. |
 | `approved` | Self-signups land unapproved (`adminUsers.ts:176-186`); an owner approves. An unapproved account cannot log in even with a correct password (`session.ts:218-221`) and its sessions do not resolve (`adminUsers.ts:227`). |
-| `password_hash` | scrypt `salt:hash`, both hex, N=16384/r=8/p=1, 64-byte key (`adminUsers.ts:22-32`). Null when the account is Discord-only. Compared in constant time. |
-| `discord_id` **unique**, `discord_username` | Discord linkage. A linked `discord_id` *is* the account — an email change on Discord's side must not repoint the login (`api/oauth.ts:53-58`). |
+| `password_hash` | scrypt `salt:hash`, both hex, N=16384/r=8/p=1, 64-byte key (`adminUsers.ts:22-32`). Null when the account has no password of its own — Discord-only, or invited and still signing in by emailed link. Compared in constant time. |
+| `discord_id` **unique**, `discord_username` | Discord linkage. A linked `discord_id` *is* the account — an email change on Discord's side must not repoint the login. Attached either by a login whose Discord email matches, or explicitly from a live session (`GET /oauth/discord/link`), which is the only route when the two addresses differ. Unique, so one Discord identity belongs to one account. |
 | `last_login_at` | Set on session creation. |
 
 **Invariant:** at least one `OWNER` always survives. Both demotion and deletion
@@ -485,6 +485,26 @@ otherwise the only way back in is the break-glass token.
 | `token_hash` **unique** | sha256 of the cookie's secret half. The cookie is `${sessionId}.${secret}`: the id is a lookup key and the secret is what is verified, so a session id appearing in a log or an admin list view is not a credential (`adminUsers.ts:190-210`). |
 | `actor` | The display name recorded at login; what audit events name. |
 | `expires_at`, `revoked` | The row — not the cookie's contents — is the authority, which is what makes one session revocable without signing everyone else out. |
+
+Indexes: `(user_id)`, `(expires_at)`.
+
+### `login_tokens` (transient)
+
+Single-use emailed sign-in links. This is the credential for an account that
+has no password yet, which is every invited or freshly approved account.
+
+| Column | Meaning |
+| --- | --- |
+| `user_id` | FK, `onDelete: Cascade` — a link mailed minutes before a revocation must not outlive it. |
+| `token_hash` **unique** | sha256 of the secret half, exactly as for sessions, so the table is not a credential store. Uniqueness is also what makes redemption single-use under two concurrent clicks: the claim is a conditional `UPDATE … WHERE consumed_at IS NULL` (`store/loginTokens.ts`). |
+| `purpose` | `LOGIN` (asked for from the sign-in page), `INVITE`, `WELCOME` (approval). Governs the wording and the lifetime — minutes for `LOGIN`, days for the other two. |
+| `email` | The address it was mailed to, as it was at send time: an account whose email later changes must not make an old link evidence of the new address. |
+| `expires_at`, `consumed_at`, `revoked_at` | Consumed and revoked are kept distinct so the audit trail can tell "used" from "superseded" — the difference between the two messages a locked-out operator gets. |
+| `requested_ip` | For abuse triage. Never shown to the recipient. |
+
+**Invariant:** at most one link is live per account. Issuing one retires the
+previous, redeeming one retires the rest, and setting a password retires all of
+them — otherwise every resend would widen the window rather than move it.
 
 Indexes: `(user_id)`, `(expires_at)`.
 
@@ -552,6 +572,7 @@ because Prisma's generated version would have destroyed data:
 | `20260729214943_optimise_names` | **Hand-written.** Renames blob columns, converts jsonb arrays to `text[]` via add/UPDATE/swap (Postgres rejects subqueries in an `ALTER … USING` transform), lifts `workers.capabilities` to a column, renames `upload_log` → `upload_logs` and converts its free-text outcome to an enum. `migrate dev` had generated drop-and-add for all of it. |
 | `20260729222814_deleted_chapters` | The hard-delete archive. |
 | `20260729225058_normalise_chapter_storage` | **Hand-written.** Promotes the chapter document to typed columns on all four tables: add columns, copy the document into them, park the residue in `extra`, and only then `DROP COLUMN "chapter"`. `migrate dev` had generated `DROP COLUMN` + `ADD COLUMN`, which would have discarded every chapter snapshot the platform holds. Includes an exception-safe ISO-8601 → `timestamp(3)` converter so an unparseable legacy date survives verbatim in `extra` rather than becoming NULL. |
+| `20260805000000_login_tokens` | Single-use emailed sign-in links, plus the `LoginTokenPurpose` enum. |
 
 The lesson, which [CONTRIBUTING.md](../CONTRIBUTING.md#migrations) makes a rule:
 generate the migration with `--create-only` and then write the SQL yourself.

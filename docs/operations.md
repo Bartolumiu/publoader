@@ -31,14 +31,22 @@ Everything in this document can also be done from a browser at
 so the CLI remains authoritative and the two are interchangeable — every
 dashboard action lands in `padmin audit` exactly like a CLI one.
 
-**Sign in** with your email and password, or with Discord if this deployment
-has OAuth configured. Your account name becomes the audit actor, so "who paused
-the platform" is answerable without anyone having to set a header.
+**Sign in** with your email and password, with an emailed sign-in link, or with
+Discord if this deployment has OAuth configured. Your account name becomes the
+audit actor, so "who paused the platform" is answerable without anyone having
+to set a header.
 
-If you have no account yet, or nobody does — a fresh database seeds one `OWNER`
+**Invited, or forgot your password?** Enter your address and click **Email me a
+sign-in link**. The link works once and signs you straight in; set a password
+from **the profile menu → Your account** while you are there, or you will need
+another link next time. You can also attach Discord to the same account from
+that dialog, after which either method signs you in.
+
+If nobody has an account — a fresh database seeds one `OWNER`
 (`DASH_OWNER_EMAIL`) with no credentials — use **"Use the admin token
 instead"** on the login page, then **Users → Set password**. That is the
-bootstrap path and the break-glass path both.
+bootstrap path and the break-glass path both. (With email configured, the
+seeded owner can also just ask for a link.)
 
 Sessions last `SESSION_TTL_MINUTES` (12h default) and are individually
 revocable from **Users → Live sessions**. Full setup, including the Discord

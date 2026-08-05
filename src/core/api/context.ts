@@ -17,6 +17,9 @@ import { ExtensionConfigStore } from "../store/extensionConfig.js";
 import { RateLimiter } from "./ratelimit.js";
 import { deriveSigningKey } from "./session.js";
 import { AdminUserStore } from "../store/adminUsers.js";
+import { LoginTokenStore } from "../store/loginTokens.js";
+import { createMailer, type Mailer } from "../email/mailer.js";
+import { MagicLinkService } from "./magicLink.js";
 
 export interface AppContext {
   prisma: PrismaClient;
@@ -48,8 +51,18 @@ export interface AppContext {
   workerLimiter: RateLimiter;
   adminLimiter: RateLimiter;
   sessionLimiter: RateLimiter;
+  /** Per-IP budget for requesting and redeeming email sign-in links. */
+  magicLinkLimiter: RateLimiter;
+  /** Per-address budget, so a distributed caller cannot mailbomb one inbox. */
+  magicLinkEmailLimiter: RateLimiter;
   /** Dashboard accounts and their revocable sessions. */
   adminUsers: AdminUserStore;
+  /** Single-use emailed sign-in links. */
+  loginTokens: LoginTokenStore;
+  /** Transactional email; a refusing stub when no provider is configured. */
+  mailer: Mailer;
+  /** Issues and mails sign-in links; used by the login page and by invites. */
+  magicLinks: MagicLinkService;
   /** HMAC key for short-lived signed cookies (OAuth state); null when unset. */
   signingKey: Buffer | null;
 }
@@ -57,6 +70,8 @@ export interface AppContext {
 export function buildContext(prisma: PrismaClient, config: Config, log: Logger): AppContext {
   const retry = { baseSeconds: config.retryBaseSeconds, maxSeconds: config.retryMaxSeconds };
   const jobs = new JobStore(prisma, retry);
+  const loginTokens = new LoginTokenStore(prisma);
+  const mailer = createMailer(config, log);
   return {
     prisma,
     config,
@@ -80,7 +95,16 @@ export function buildContext(prisma: PrismaClient, config: Config, log: Logger):
     adminLimiter: new RateLimiter(120, 20),
     // Dashboard logins are password-equivalent: 5 attempts, refill 5/min.
     sessionLimiter: new RateLimiter(5, 5 / 60),
+    // Each request sends real mail to a real inbox, so the budget is tighter
+    // than the password login's: 5 in a burst, then one every two minutes.
+    magicLinkLimiter: new RateLimiter(5, 1 / 120),
+    // Per-address: 3 links in a burst, then one every five minutes. Enough for
+    // "it went to spam, send another", far short of a mailbomb.
+    magicLinkEmailLimiter: new RateLimiter(3, 1 / 300),
     adminUsers: new AdminUserStore(prisma),
+    loginTokens,
+    mailer,
+    magicLinks: new MagicLinkService({ loginTokens, mailer, config, log }),
     signingKey: deriveSigningKey(config, log),
   };
 }

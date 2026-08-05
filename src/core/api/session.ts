@@ -174,6 +174,10 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
     discord: Boolean(ctx.config.discordClientId && ctx.config.discordClientSecret),
     signups: await ctx.settings.getSignupsEnabled(),
     password: true,
+    // Whether "email me a sign-in link" is offered. This is also the only way
+    // into an invited account that has not set a password yet, so a deployment
+    // with it off has to bootstrap those accounts by hand.
+    magicLink: ctx.magicLinks.enabled,
   }));
 
   app.post("/api/v1/admin/session", async (req: FastifyRequest, reply: FastifyReply) => {
@@ -237,6 +241,12 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
       userId: session.userId,
       email: user?.email ?? null,
       hasPassword: Boolean(user?.passwordHash),
+      // Which credentials this account actually has, so the page can offer the
+      // missing ones rather than guessing from the role.
+      discordUsername: user?.discordUsername ?? null,
+      discordLinked: Boolean(user?.discordId),
+      magicLink: ctx.magicLinks.enabled,
+      discordAvailable: Boolean(ctx.config.discordClientId && ctx.config.discordClientSecret),
     };
   });
 

@@ -1165,6 +1165,8 @@ function showLogin(message) {
   $("login-error").textContent = message || "";
   $("login-token").value = "";
   $("login-password").value = "";
+  $("login-link-sent").hidden = true;
+  $("login-link-submit").disabled = false;
   $("view").replaceChildren();
   $("login-email").focus();
   // Also reached on a mid-session 401, so refresh what the page offers.
@@ -1190,10 +1192,12 @@ async function applyLoginMethods() {
   try {
     const methods = await api("/session/methods", { allow401: true });
     $("login-discord-wrap").hidden = !methods.discord;
-    $("login-signups").hidden = !(methods.discord && methods.signups);
+    $("login-link-form").hidden = !methods.magicLink;
+    $("login-signups").hidden = !((methods.discord || methods.magicLink) && methods.signups);
   } catch {
     // A deployment that cannot answer still offers password + token login.
     $("login-discord-wrap").hidden = true;
+    $("login-link-form").hidden = true;
   }
 }
 
@@ -1237,6 +1241,80 @@ const loginWithToken = (event) =>
       $("login-token").value = "";
     },
   );
+
+/**
+ * Ask for an emailed sign-in link.
+ *
+ * The server answers the same way whether or not the address has an account —
+ * otherwise this endpoint would tell an anonymous caller who has one — so the
+ * confirmation here is deliberately non-committal, and the button is left
+ * disabled afterwards so a second click does not look like a way to find out.
+ */
+async function requestMagicLink(event) {
+  event.preventDefault();
+  const email = $("login-email").value.trim();
+  const sent = $("login-link-sent");
+  if (!email) {
+    $("login-error").textContent = "Enter your email address first.";
+    $("login-email").focus();
+    return;
+  }
+  const button = $("login-link-submit");
+  $("login-error").textContent = "";
+  sent.hidden = true;
+  button.dataset.pending = "true";
+  button.disabled = true;
+  try {
+    const res = await api("/session/magic-link/request", {
+      method: "POST",
+      body: { email },
+      allow401: true,
+    });
+    sent.textContent = res?.message ?? "If that address has an account, a sign-in link is on its way.";
+    sent.hidden = false;
+  } catch (err) {
+    $("login-error").textContent = err.message;
+    button.disabled = false;
+  } finally {
+    delete button.dataset.pending;
+  }
+}
+
+/**
+ * Take the sign-in secret out of the URL fragment, if there is one.
+ *
+ * The emailed link carries the secret after the `#` precisely so it never
+ * reaches a server: not this one's request log, not a proxy's, and not a
+ * Referer header. It is stripped from the address bar before anything is done
+ * with it, so a reload or a shared screenshot cannot replay it.
+ */
+function takeMagicToken() {
+  const match = /^#token=([\w.~-]+)$/.exec(window.location.hash || "");
+  if (!match) return null;
+  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+  return match[1];
+}
+
+/** Redeem a link. Returns the session payload, or null with the login screen up. */
+async function redeemMagicToken(token) {
+  try {
+    return await api("/session/magic-link", { method: "POST", body: { token }, allow401: true });
+  } catch (err) {
+    showLogin(err.message);
+    return null;
+  }
+}
+
+/**
+ * A session that got in with an emailed link has no password behind it, which
+ * means every future sign-in needs another email. Say so once, on arrival, with
+ * the fix one click away rather than buried in the profile menu.
+ */
+function promptForPasswordIfMissing(session) {
+  if (session.hasPassword !== false || !store.userId) return;
+  toast("Signed in with an email link — set a password to stop needing one.", true);
+  passwordDialog({ id: store.userId, email: store.email ?? store.actor }, null);
+}
 
 async function logout() {
   try {
@@ -1669,6 +1747,7 @@ function renderPageHead(entry, route) {
 
 async function boot() {
   $("login-form").addEventListener("submit", loginWithPassword);
+  $("login-link-form").addEventListener("submit", requestMagicLink);
   $("login-token-form").addEventListener("submit", loginWithToken);
   $("login-token-toggle").addEventListener("click", () => {
     const form = $("login-token-form");
@@ -1681,7 +1760,7 @@ async function boot() {
   $("profile-toggle").addEventListener("click", () => toggleProfileMenu());
   $("profile-account").addEventListener("click", () => {
     toggleProfileMenu(false);
-    accountDialog();
+    void accountDialog();
   });
   $("nav-toggle").addEventListener("click", () =>
     document.body.classList.contains("nav-open") ? closeDrawer() : openDrawer(),
@@ -1757,6 +1836,19 @@ async function boot() {
     if (target && NAV_BY_ID.has(target)) navigate(routeTo(target, null, null));
   });
 
+  // An emailed sign-in link lands here with its secret in the fragment. Redeem
+  // it before asking about an existing session: arriving with a link is an
+  // explicit instruction to sign in as whoever that link belongs to.
+  const magic = takeMagicToken();
+  if (magic) {
+    const redeemed = await redeemMagicToken(magic);
+    if (!redeemed) return;
+    await showApp(redeemed);
+    renderRoute();
+    promptForPasswordIfMissing(redeemed);
+    return;
+  }
+
   // The session cookie is HttpOnly, so the only way to know whether we are
   // signed in — and as whom — is to ask the API.
   let me;
@@ -1769,6 +1861,11 @@ async function boot() {
   }
   await showApp(me);
   renderRoute();
+  // Not the dialog this time — a returning session has already been told once,
+  // and a modal on every page load is a thing people learn to dismiss.
+  if (me.hasPassword === false) {
+    toast("This account has no password — it can only sign in by email link.", false);
+  }
 }
 
 // ============================================================================
@@ -6237,8 +6334,8 @@ VIEWS.users = (route) => {
       el("p", {
         class: "dim small",
         text:
-          "Creates an approved account with no credentials. They get in by linking Discord with that email, " +
-          "or by you setting a password below.",
+          "Creates an approved account and emails it a single-use sign-in link. The invitee sets their own " +
+          "password once they are in; until they do, another emailed link is their only way back.",
       }),
       el("p", {
         class: "dim small",
@@ -6266,8 +6363,14 @@ VIEWS.users = (route) => {
                   body: { email: inviteEmail.value.trim(), role: inviteRole.value },
                 }),
               { button: event.currentTarget, refresh: [users] },
-            ).then((ok) => {
-              if (ok) inviteEmail.value = "";
+            ).then((result) => {
+              if (!result) return;
+              inviteEmail.value = "";
+              // The account is created either way; whether the invite reached
+              // an inbox is the part an owner has to know about.
+              if (!result.emailed) {
+                toast(`invited, but no email went out: ${result.emailError ?? "unknown reason"}`, false);
+              }
             });
           },
         }),
@@ -6291,7 +6394,12 @@ VIEWS.users = (route) => {
               ),
               chip(user.role),
               chip(user.approved ? "approved" : "pending"),
-              user.hasPassword ? "password" : user.discordId ? "discord only" : "no credentials",
+              // Both can be true — that is the point of linking — so this is a
+              // list, not a ladder. Neither means the account has only ever
+              // been reachable by an emailed sign-in link.
+              [user.hasPassword ? "password" : null, user.discordId ? "discord" : null]
+                .filter(Boolean)
+                .join(" + ") || "email link only",
               user.lastLoginAt ? ago(user.lastLoginAt) : "never",
               [
                 !user.approved
@@ -6315,7 +6423,48 @@ VIEWS.users = (route) => {
                     })
                   : null,
                 roleSelect(user, users),
+                // The recovery path for an invite that never arrived. Only
+                // useful once the account is approved — before that there is
+                // nothing for the link to sign them in to.
+                user.approved
+                  ? el("button", {
+                      type: "button",
+                      text: "Email sign-in link",
+                      onclick: (event) =>
+                        act(
+                          "admin_user.magic_link",
+                          () => api(`/users/${user.id}/magic-link`, { method: "POST", body: {} }),
+                          { button: event.currentTarget },
+                        ),
+                    })
+                  : null,
                 el("button", { type: "button", text: "Set password", onclick: () => passwordDialog(user, users) }),
+                // The recovery path for a Discord account nobody holds any
+                // more — without it that operator account is stranded.
+                user.discordId
+                  ? el("button", {
+                      type: "button",
+                      text: "Unlink Discord",
+                      onclick: async (event) => {
+                        const button = event.currentTarget;
+                        const confirmed = await confirmDialog({
+                          title: `Unlink Discord from ${user.email}`,
+                          lead: `${user.discordUsername ?? "The linked account"} will no longer sign them in.`,
+                          points: user.hasPassword
+                            ? ["Their email and password still work."]
+                            : ["This account has no password, so an emailed sign-in link becomes their only way in."],
+                          confirmLabel: "Unlink it",
+                          danger: false,
+                        });
+                        if (!confirmed) return;
+                        await act(
+                          "admin_user.discord_unlink",
+                          () => api(`/users/${user.id}/discord`, { method: "DELETE" }),
+                          { button, refresh: [users] },
+                        );
+                      },
+                    })
+                  : null,
                 el("button", {
                   type: "button",
                   class: "danger",
@@ -6772,10 +6921,31 @@ function showMintedToken(minted) {
 
 /**
  * The signed-in principal's own view of itself: which credential this is, what
- * it may do, and — for a session backed by an account — a way to set its own
- * password without going through the Users view, which an ADMIN cannot open.
+ * it may do, and — for a session backed by an account — the two credentials it
+ * can manage for itself without going through the Users view, which an ADMIN
+ * cannot open.
+ *
+ * Asks the API rather than reading `store`: the credential set changes under
+ * this page's feet (linking Discord finishes in a redirect, a password is set
+ * from a dialog), and a stale "no password" here is the one thing that would
+ * send somebody looking for a button that is already done.
  */
-function accountDialog() {
+async function accountDialog() {
+  let me = null;
+  try {
+    me = await api("/session", { allow401: true });
+  } catch {
+    // Fall back to what the shell already knows; the credential rows are
+    // simply omitted rather than guessed at.
+  }
+
+  const credentials = [];
+  if (me) {
+    credentials.push(me.hasPassword ? "password" : null);
+    credentials.push(me.discordLinked ? `discord: ${me.discordUsername ?? "linked"}` : null);
+    if (!me.hasPassword && !me.discordLinked && me.magicLink) credentials.push("email sign-in link only");
+  }
+
   const body = el(
     "div",
     {},
@@ -6791,16 +6961,61 @@ function accountDialog() {
             ? "a scoped client token"
             : "a browser session",
       ],
+      ...(me ? [["Sign-in methods", credentials.filter(Boolean).join(" · ") || "none"]] : []),
       ["Scopes", store.scopes.length ? store.scopes.join(", ") : "none"],
     ]),
     store.role ? el("p", { class: "dim small", text: ROLE_BLURB[store.role] ?? "" }) : null,
+    me && me.hasPassword === false
+      ? el("p", {
+          class: "dim small",
+          text:
+            "This account has no password. Every sign-in needs another emailed link until you set one.",
+        })
+      : null,
     store.userId
       ? row(
           el("button", {
             type: "button",
-            text: "Set my password",
+            class: me && me.hasPassword === false ? "primary" : "",
+            text: me && me.hasPassword === false ? "Set a password" : "Change my password",
             onclick: () => passwordDialog({ id: store.userId, email: store.email ?? store.actor }, null),
           }),
+          // Linking is a full-page redirect to Discord and back, so it is a
+          // link, not a fetch: the round-trip has to survive leaving the page.
+          me && me.discordAvailable && !me.discordLinked
+            ? el("a", {
+                class: "button-link",
+                href: `${API}/oauth/discord/link`,
+                text: "Link my Discord account",
+              })
+            : null,
+          me && me.discordLinked
+            ? el("button", {
+                type: "button",
+                text: "Unlink Discord",
+                onclick: async (event) => {
+                  const button = event.currentTarget;
+                  const confirmed = await confirmDialog({
+                    title: "Unlink Discord",
+                    lead: `${me.discordUsername ?? "The linked account"} will no longer sign you in.`,
+                    points: me.hasPassword
+                      ? ["Your email and password still work."]
+                      : ["This account has no password, so an emailed sign-in link becomes the only way in."],
+                    confirmLabel: "Unlink it",
+                  });
+                  if (!confirmed) return;
+                  const ok = await act(
+                    "admin_user.discord_unlink",
+                    () => api(`/users/${store.userId}/discord`, { method: "DELETE" }),
+                    { button },
+                  );
+                  if (ok) {
+                    closeModal();
+                    void accountDialog();
+                  }
+                },
+              })
+            : null,
         )
       : el("p", {
           class: "dim small",

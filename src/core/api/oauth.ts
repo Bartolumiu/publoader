@@ -10,6 +10,7 @@ import {
   cookieHeader,
   isSecureRequest,
   readCookie,
+  sessionAuthenticator,
   signValue,
   unsignValue,
 } from "./session.js";
@@ -104,8 +105,33 @@ export async function matchDiscordIdentity(
   return { outcome: "pending", user: created };
 }
 
+/**
+ * The OAuth state cookie has to carry *why* we sent the operator to Discord,
+ * because the two reasons end in opposite places: a login mints a session for
+ * whoever comes back, a link attaches that identity to a session that already
+ * exists. Encoded into the signed value rather than a second cookie so the
+ * HMAC covers the intent too — otherwise a login round-trip could be replayed
+ * as a link, or the reverse.
+ */
+export type OAuthIntent = { mode: "login" } | { mode: "link"; userId: string };
+
+export function encodeState(intent: OAuthIntent, nonce: string): string {
+  return intent.mode === "link" ? `link.${intent.userId}.${nonce}` : `login.${nonce}`;
+}
+
+export function decodeState(value: string): { intent: OAuthIntent; nonce: string } | null {
+  const parts = value.split(".");
+  if (parts[0] === "login" && parts.length === 2 && parts[1]) {
+    return { intent: { mode: "login" }, nonce: parts[1] };
+  }
+  if (parts[0] === "link" && parts.length === 3 && parts[1] && parts[2]) {
+    return { intent: { mode: "link", userId: parts[1] }, nonce: parts[2] };
+  }
+  return null;
+}
+
 /** Small self-contained result page; the SPA is not involved in the redirect. */
-function notice(title: string, message: string): string {
+function notice(title: string, message: string, linkLabel = "Back to sign in"): string {
   const escape = (text: string) =>
     text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
   return `<!doctype html>
@@ -114,22 +140,20 @@ function notice(title: string, message: string): string {
 <title>${escape(title)} · publoader</title>
 <link rel="stylesheet" href="/dash/style.css"></head>
 <body><main><div class="card"><h2>${escape(title)}</h2>
-<p>${escape(message)}</p><p><a href="/">Back to sign in</a></p></div></main></body></html>`;
+<p>${escape(message)}</p><p><a href="/">${escape(linkLabel)}</a></p></div></main></body></html>`;
 }
 
 export function registerOAuthRoutes(app: FastifyInstance, ctx: AppContext): void {
   const configured = (): boolean =>
     Boolean(ctx.config.discordClientId && ctx.config.discordClientSecret && ctx.signingKey);
   const redirectUri = `${ctx.config.dashPublicUrl.replace(/\/+$/, "")}/api/v1/admin/oauth/discord/callback`;
+  const authenticate = sessionAuthenticator(ctx);
 
   const html = (reply: FastifyReply, code: number, title: string, message: string) =>
     reply.code(code).type("text/html; charset=utf-8").send(notice(title, message));
 
-  app.get("/api/v1/admin/oauth/discord/start", async (req: FastifyRequest, reply: FastifyReply) => {
-    if (!configured()) return html(reply, 503, "Discord login unavailable", "This deployment has no Discord OAuth application configured.");
-    if (!ctx.sessionLimiter.allow(req.ip)) {
-      return html(reply, 429, "Slow down", "Too many login attempts from this address. Try again in a minute.");
-    }
+  /** Both entry points differ only in the intent baked into the state cookie. */
+  const begin = (req: FastifyRequest, reply: FastifyReply, intent: OAuthIntent) => {
     const nonce = randomBytes(24).toString("base64url");
     const params = new URLSearchParams({
       client_id: ctx.config.discordClientId!,
@@ -137,7 +161,10 @@ export function registerOAuthRoutes(app: FastifyInstance, ctx: AppContext): void
       response_type: "code",
       scope: "identify email",
       state: nonce,
-      prompt: "none",
+      // Linking is a deliberate act on an account that is already signed in;
+      // silently reusing whichever Discord session the browser happens to hold
+      // is how the wrong identity gets attached. Make Discord ask.
+      ...(intent.mode === "link" ? { prompt: "consent" } : { prompt: "none" }),
     });
     return reply
       // Lax, not Strict: the cookie has to survive Discord's cross-site
@@ -146,13 +173,42 @@ export function registerOAuthRoutes(app: FastifyInstance, ctx: AppContext): void
         "set-cookie",
         cookieHeader(
           OAUTH_STATE_COOKIE,
-          signValue(nonce, ctx.signingKey!),
+          signValue(encodeState(intent, nonce), ctx.signingKey!),
           STATE_TTL_SECONDS,
           isSecureRequest(req, ctx.config),
           "Lax",
         ),
       )
       .redirect(`${DISCORD_AUTHORIZE}?${params.toString()}`, 302);
+  };
+
+  app.get("/api/v1/admin/oauth/discord/start", async (req: FastifyRequest, reply: FastifyReply) => {
+    if (!configured()) return html(reply, 503, "Discord login unavailable", "This deployment has no Discord OAuth application configured.");
+    if (!ctx.sessionLimiter.allow(req.ip)) {
+      return html(reply, 429, "Slow down", "Too many login attempts from this address. Try again in a minute.");
+    }
+    return begin(req, reply, { mode: "login" });
+  });
+
+  /**
+   * Attach a Discord identity to the account that is already signed in.
+   *
+   * This is the direction the login flow cannot cover: it matches an existing
+   * account only when Discord's *verified* email happens to equal the account
+   * email. Somebody whose Discord address differs from their operator address
+   * has no way to end up with both credentials on one account — this is it.
+   * Here the session is the authorisation, so the emails need not match.
+   */
+  app.get("/api/v1/admin/oauth/discord/link", async (req: FastifyRequest, reply: FastifyReply) => {
+    if (!configured()) return html(reply, 503, "Discord login unavailable", "This deployment has no Discord OAuth application configured.");
+    const session = await authenticate(req);
+    if (!session) {
+      return html(reply, 401, "Sign in first", "Linking Discord attaches it to the account you are signed in as, so you have to be signed in.");
+    }
+    if (!ctx.sessionLimiter.allow(req.ip)) {
+      return html(reply, 429, "Slow down", "Too many attempts from this address. Try again in a minute.");
+    }
+    return begin(req, reply, { mode: "link", userId: session.userId });
   });
 
   app.get("/api/v1/admin/oauth/discord/callback", async (req: FastifyRequest, reply: FastifyReply) => {
@@ -162,7 +218,8 @@ export function registerOAuthRoutes(app: FastifyInstance, ctx: AppContext): void
       .object({ code: z.string().min(1).max(512).optional(), state: z.string().min(1).max(256).optional() })
       .safeParse(req.query ?? {});
     const stateCookie = readCookie(req.headers.cookie, OAUTH_STATE_COOKIE);
-    const expected = stateCookie ? unsignValue(stateCookie, ctx.signingKey!) : null;
+    const signed = stateCookie ? unsignValue(stateCookie, ctx.signingKey!) : null;
+    const state = signed ? decodeState(signed) : null;
 
     const clearState = cookieHeader(OAUTH_STATE_COOKIE, "", 0, isSecureRequest(req, ctx.config), "Lax");
     const fail = (code: number, title: string, message: string) =>
@@ -173,7 +230,7 @@ export function registerOAuthRoutes(app: FastifyInstance, ctx: AppContext): void
     }
     // Constant-time is unnecessary here: the nonce is single-use and both
     // sides are attacker-visible. What matters is that it must match at all.
-    if (!expected || expected !== query.data.state) {
+    if (!state || state.nonce !== query.data.state) {
       return fail(400, "Login failed", "The login link expired or was replayed. Start again from the sign-in page.");
     }
 
@@ -188,6 +245,43 @@ export function registerOAuthRoutes(app: FastifyInstance, ctx: AppContext): void
       // Never log err verbatim: a token exchange failure body can echo the code.
       ctx.log.warn({ stage: "discord-oauth", reason: (err as Error).message }, "discord login failed");
       return fail(502, "Login failed", "Could not complete the exchange with Discord. Try again.");
+    }
+
+    // ---- linking an identity onto the session that started the round-trip ----
+    if (state.intent.mode === "link") {
+      // The signed state says which account asked. The live session says who
+      // is actually here. Both must agree: a signed-out or switched browser
+      // must not be able to finish somebody else's linking round-trip.
+      const session = await authenticate(req);
+      if (!session || session.userId !== state.intent.userId) {
+        return fail(401, "Linking failed", "Your session ended before Discord came back. Sign in and try again.");
+      }
+      const linked = await ctx.adminUsers.byDiscordId(identity.id);
+      if (linked && linked.id !== session.userId) {
+        await ctx.audit.record(`admin:${session.actor}`, "admin_user.discord_link.rejected", session.userId, {
+          reason: "already linked to another account",
+        });
+        return fail(
+          409,
+          "Already linked",
+          "That Discord account is already attached to a different operator account. Unlink it there first.",
+        );
+      }
+      await ctx.adminUsers.linkDiscord(session.userId, identity.id, identity.username);
+      await ctx.audit.record(`admin:${session.actor}`, "admin_user.discord_link", session.userId, {
+        discordUsername: identity.username,
+      });
+      return reply
+        .header("set-cookie", clearState)
+        .code(200)
+        .type("text/html; charset=utf-8")
+        .send(
+          notice(
+            "Discord linked",
+            `${identity.username} is now attached to your account. You can sign in with either Discord or your email.`,
+            "Back to the dashboard",
+          ),
+        );
     }
 
     const match = await matchDiscordIdentity(identity, {
