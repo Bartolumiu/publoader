@@ -1,38 +1,34 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
-import { Prisma } from "@prisma/client";
 import { loadConfig } from "../../src/config.js";
 import { createLogger } from "../../src/logging.js";
 import { buildContext, type AppContext } from "../../src/core/api/context.js";
 import { buildServer } from "../../src/core/api/server.js";
 import { registerChapterRoutes } from "../../src/core/api/routes/chapters.js";
+import { UploadTaskWorkers } from "../../src/core/md/taskWorkers.js";
+import type { MdChapterDetail, MdExtendedApi } from "../../src/core/md/client.js";
 import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
 
 /**
- * Chapter visibility and correction: the three views of a chapter, and the one
- * write.
+ * The operator's view of what this platform has published, and the three
+ * actions it offers on a chapter that is already on MangaDex.
  *
- * These need a real Postgres for the same reason the queue tests do, and for one
- * more: two of the three read paths are `jsonb` unnests and window functions
- * over live tables — `jsonb_array_elements … WITH ORDINALITY` on stored
- * envelopes, and `row_number()` over the claim ordering. A mock would assert
- * that the strings were assembled, not that they answer the question.
+ * The properties worth proving are the ones that cost real damage when they
+ * regress, and every one of them needs a live postgres — the queue's unique
+ * (kind, dedupe_key) constraint is the system under test:
  *
- * What is worth proving here:
- *
- *  - a run's chapters come back in the extension's own order, and a segment that
- *    has not reported reads as "not reported" rather than as zero chapters;
- *  - the queue's `position` is the place in the WHOLE claim order, not on the
- *    page, and it tracks a reorder;
- *  - a metadata correction becomes an EDIT task that MangaDex would accept —
- *    the diff in `payload`, the previous values in `oldInfo`, and the NEW values
- *    on the chapter, since the uploader mirrors that chapter back into
- *    `uploaded_chapters` on success;
- *  - and the three refusals that each protect something irreversible: a second
- *    queued edit, an edit to a deleted chapter, and an edit that would detach
- *    the chapter from our own upload group.
+ *  - an action QUEUES work and never touches MangaDex from the API process;
+ *  - a second action on a chapter whose task is still PENDING is refused, not
+ *    silently rewritten, and one whose task has completed is superseded in
+ *    place (without which a chapter could be edited exactly once, ever);
+ *  - deleting needs `confirm: true`, and a chapter already recorded as deleted
+ *    refuses everything;
+ *  - the role gate holds: `chapters:write` alone is not enough, so a leaked
+ *    machine token cannot unpublish anything;
+ *  - and the unavailable card is regenerable, which is the whole reason `force`
+ *    exists — without it the uploader treats an archived chapter as done.
  */
-describe.skipIf(!dbReady())("chapter views and metadata correction", () => {
+describe.skipIf(!dbReady())("chapter management endpoints", () => {
   const prisma = testPrisma();
   const ADMIN_TOKEN = "test-admin-token-0123456789";
   const config = loadConfig({
@@ -44,15 +40,12 @@ describe.skipIf(!dbReady())("chapter views and metadata correction", () => {
   let app: FastifyInstance;
   let ctx: AppContext;
   const root = { authorization: `Bearer ${ADMIN_TOKEN}` };
-  const csrf = { "x-requested-with": "publoader-dash" };
-
-  const MD_MANGA = "9a1b1c1d-0000-4000-8000-000000000000";
-  const MD_GROUP = "4f1de6a2-f0c5-4ac5-bce5-02c7dbb67deb";
-  const MD_CHAPTER = "1c2d3e4f-0000-4000-8000-000000000001";
 
   /**
-   * Same probe as queues.test.ts: register by hand only if `buildServer` has not
-   * wired these routes yet, since registering twice throws on duplicate routes.
+   * server.ts is owned by another module's integrator, so probe first and
+   * register by hand only when these routes are absent — registering twice
+   * throws, and skipping when they are wired would test a different server than
+   * production runs.
    */
   async function buildApp(): Promise<FastifyInstance> {
     const probe = buildServer(ctx);
@@ -76,18 +69,47 @@ describe.skipIf(!dbReady())("chapter views and metadata correction", () => {
     await closeDb();
   });
 
+  const csrf = { "x-requested-with": "publoader-dash" };
+
+  let seq = 0;
+  const uuid = (n: number) => `${String(n).padStart(8, "0")}-0000-4000-8000-000000000000`;
+
+  /** A published chapter, as the uploader would have recorded it. */
+  async function uploaded(overrides: Record<string, unknown> = {}) {
+    seq += 1;
+    return prisma.uploadedChapter.create({
+      data: {
+        mdChapterId: uuid(seq),
+        extension: "exampleext",
+        chapterId: `src-${seq}`,
+        chapterNumber: String(seq),
+        chapterTitle: `Chapter ${seq}`,
+        chapterLanguage: "en",
+        chapterUrl: `https://publisher.example/ch/${seq}`,
+        mangaName: "Test Series",
+        mangaUrl: "https://publisher.example/series",
+        mdMangaId: uuid(900),
+        mdGroupId: uuid(800),
+        chapterTimestamp: new Date("2026-01-01T00:00:00.000Z"),
+        ...overrides,
+      },
+    });
+  }
+
+  async function mint(scopes: string[]): Promise<Record<string, string>> {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/tokens",
+      headers: root,
+      payload: { name: `chapters-${scopes.join("-")}-${(seq += 1)}`, scopes },
+    });
+    expect(res.statusCode).toBe(201);
+    return { authorization: `Bearer ${res.json().token}` };
+  }
+
   /** A logged-in session cookie for a fresh account with `role`. */
-  async function sessionAs(role: "OWNER" | "ADMIN" | "CONTRIBUTOR", email: string): Promise<Record<string, string>> {
+  async function sessionAs(role: "ADMIN" | "CONTRIBUTOR", email: string): Promise<Record<string, string>> {
     await ctx.adminUsers.ensureOwner("owner@example.com");
-    if (role === "OWNER") {
-      const login = await app.inject({
-        method: "POST",
-        url: "/api/v1/admin/session",
-        payload: { token: ADMIN_TOKEN, actor: "ardax" },
-      });
-      const value = login.cookies.find((c) => c.name === "publoader_session")!.value;
-      return { cookie: `publoader_session=${value}`, ...csrf };
-    }
     const password = "correct-horse-battery-staple";
     const user = await ctx.adminUsers.invite(email, role);
     await ctx.adminUsers.setPassword(user.id, password);
@@ -101,661 +123,760 @@ describe.skipIf(!dbReady())("chapter views and metadata correction", () => {
     return { cookie: `publoader_session=${value}`, ...csrf };
   }
 
-  async function mint(scopes: string[]): Promise<Record<string, string>> {
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/v1/admin/tokens",
-      headers: root,
-      payload: { name: `chapters-${scopes.join("-")}`, scopes },
+  // ---- read ----
+
+  it("lists an archive newest first, with filters, totals and a facet", async () => {
+    const first = await uploaded({ chapterLanguage: "en" });
+    const second = await uploaded({ chapterLanguage: "ja", extension: "otherext", mangaName: "Second" });
+    await prisma.deletedChapter.create({
+      data: { mdChapterId: uuid(500), extension: "exampleext", chapterNumber: "9" },
     });
-    expect(res.statusCode).toBe(201);
-    return { authorization: `Bearer ${res.json().token}` };
-  }
-
-  // ------------------------------------------------------ seeding helpers
-
-  const chapterRecord = (overrides: Record<string, unknown> = {}) => ({
-    chapterLookup: null,
-    chapterTimestamp: "2026-08-01T00:00:00.000Z",
-    chapterExpire: null,
-    chapterLanguage: "en",
-    chapterNumber: "1",
-    chapterTitle: null,
-    chapterVolume: null,
-    chapterId: "src-1",
-    chapterUrl: "https://example.test/1",
-    mdChapterId: null,
-    mangaId: "m-1",
-    mdMangaId: MD_MANGA,
-    mdGroupId: MD_GROUP,
-    mangaName: "Test Series",
-    mangaUrl: "https://example.test/series",
-    extensionName: "chaptertest",
-    imageArtifacts: [],
-    ...overrides,
-  });
-
-  /** A run with `segments` jobs, and a committed envelope for the first `reported`. */
-  async function seedRun(opts: {
-    segments: number;
-    reported: number;
-    chaptersPerSegment: Record<string, unknown>[][];
-    allChapters?: Record<string, unknown>[][] | null;
-  }) {
-    const run = await prisma.run.create({
-      data: {
-        idempotencyKey: `run-${Math.random()}`,
-        extension: "chaptertest",
-        extensionVersion: "1.0.0",
-        bundleSha256: "a".repeat(64),
-        kind: "UPDATE",
-        state: "PROCESSED",
-        segmentsTotal: opts.segments,
-      },
-    });
-    const jobs = [];
-    for (let index = 0; index < opts.segments; index++) {
-      const job = await prisma.job.create({
-        data: {
-          idempotencyKey: `job-${run.id}-${index}`,
-          runId: run.id,
-          extension: "chaptertest",
-          extensionVersion: "1.0.0",
-          bundleSha256: "a".repeat(64),
-          kind: "UPDATE",
-          segmentIndex: index,
-          segmentTotal: opts.segments,
-          segmentKey: `seg${index}`,
-          state: index < opts.reported ? "SUCCEEDED" : "PENDING",
-        },
-      });
-      jobs.push(job);
-      if (index >= opts.reported) continue;
-      await prisma.resultSubmission.create({
-        data: {
-          idempotencyKey: `res-${job.id}`,
-          jobId: job.id,
-          attempt: 1,
-          leaseId: "22222222-2222-4222-8222-222222222222",
-          workerId: "w1",
-          state: "COMMITTED",
-          // Cast at the boundary: Prisma's InputJsonValue does not accept a
-          // Record<string, unknown>[] (no index signature), and the shape here
-          // is a real envelope rather than something worth a type of its own.
-          envelope: {
-            envelopeVersion: 1,
-            extension: "chaptertest",
-            status: "ok",
-            updatedChapters: opts.chaptersPerSegment[index] ?? [],
-            allChapters: opts.allChapters ? (opts.allChapters[index] ?? []) : null,
-            untrackedManga: [],
-          } as unknown as Prisma.InputJsonValue,
-        },
-      });
-    }
-    return { run, jobs };
-  }
-
-  /** A chapter in the canonical `uploaded_chapters` mirror. */
-  const uploaded = (overrides: Record<string, unknown> = {}) =>
-    prisma.uploadedChapter.create({
-      data: {
-        mdChapterId: MD_CHAPTER,
-        extension: "chaptertest",
-        chapterId: "src-1",
-        chapterUrl: "https://example.test/1",
-        chapterNumber: "1",
-        chapterTitle: "Beginnings",
-        chapterVolume: "1",
-        chapterLanguage: "en",
-        mangaId: "m-1",
-        mangaName: "Test Series",
-        mdMangaId: MD_MANGA,
-        mdGroupId: MD_GROUP,
-        ...overrides,
-      },
-    });
-
-  let seq = 0;
-  const queued = (overrides: Record<string, unknown> = {}) =>
-    prisma.uploadTask.create({
-      data: {
-        kind: "UPLOAD",
-        dedupeKey: `src-${(seq += 1)}|${seq}|en`,
-        chapter: {
-          chapterId: `src-${seq}`,
-          chapterNumber: String(seq),
-          chapterLanguage: "en",
-          mangaName: "Test Series",
-          mdMangaId: MD_MANGA,
-          extensionName: "chaptertest",
-        },
-        ...overrides,
-      },
-    });
-
-  // -------------------------------------------------- 1. found, per run
-
-  it("reports what a run found, in the extension's own order, per segment", async () => {
-    const { run } = await seedRun({
-      segments: 2,
-      reported: 2,
-      chaptersPerSegment: [
-        [chapterRecord({ chapterNumber: "1" }), chapterRecord({ chapterNumber: "2", chapterId: "src-2" })],
-        [chapterRecord({ chapterNumber: "3", chapterId: "src-3", mangaName: "Other Series" })],
-      ],
-    });
-
-    const list = await app.inject({
-      method: "GET",
-      url: `/api/v1/admin/runs/${run.id}/chapters`,
-      headers: root,
-    });
-    expect(list.statusCode).toBe(200);
-    expect(list.json().total).toBe(3);
-    // Segment order first, then the position the extension reported them in —
-    // this is the extension's own ordering, not a sort we imposed.
-    expect(list.json().chapters.map((c: { position: number; segmentIndex: number }) => [c.segmentIndex, c.position])).toEqual([
-      [0, 1],
-      [0, 2],
-      [1, 1],
-    ]);
-    expect(list.json().chapters[0].chapter.chapterNumber).toBe("1");
-
-    const summary = await app.inject({
-      method: "GET",
-      url: `/api/v1/admin/runs/${run.id}/chapters/summary`,
-      headers: root,
-    });
-    expect(summary.json().totals.updated).toBe(3);
-    expect(summary.json().complete).toBe(true);
-    expect(summary.json().segmentsReported).toBe(2);
-    // Grouped by title, so "41 chapters across 9 series" is one read.
-    expect(summary.json().byManga).toHaveLength(1);
-    expect(summary.json().byManga[0].count).toBe(3);
-  });
-
-  it("distinguishes a segment that found nothing from one that has not reported", async () => {
-    const { run } = await seedRun({
-      segments: 3,
-      reported: 2,
-      chaptersPerSegment: [[chapterRecord()], []],
-    });
-
-    const summary = await app.inject({
-      method: "GET",
-      url: `/api/v1/admin/runs/${run.id}/chapters/summary`,
-      headers: root,
-    });
-    const segments = summary.json().segments;
-    expect(segments).toHaveLength(3);
-    // Zero is a report of nothing; null is no report at all. Collapsing the two
-    // would let a run that half-failed read as a run that found one chapter.
-    expect(segments[1].updated).toBe(0);
-    expect(segments[2].updated).toBeNull();
-    expect(summary.json().complete).toBe(false);
-    expect(summary.json().segmentsReported).toBe(2);
-  });
-
-  it("separates the new-or-changed set from the catalogue snapshot", async () => {
-    const { run } = await seedRun({
-      segments: 1,
-      reported: 1,
-      chaptersPerSegment: [[chapterRecord({ chapterNumber: "9" })]],
-      allChapters: [[chapterRecord({ chapterNumber: "1" }), chapterRecord({ chapterNumber: "9" })]],
-    });
-
-    const updated = await app.inject({
-      method: "GET",
-      url: `/api/v1/admin/runs/${run.id}/chapters?set=updated`,
-      headers: root,
-    });
-    expect(updated.json().total).toBe(1);
-
-    const all = await app.inject({
-      method: "GET",
-      url: `/api/v1/admin/runs/${run.id}/chapters?set=all`,
-      headers: root,
-    });
-    expect(all.json().total).toBe(2);
-
-    // An extension that sends no snapshot reports null, not zero: removal
-    // detection is skipped in that case and the difference has to be visible.
-    const { run: noSnapshot } = await seedRun({
-      segments: 1,
-      reported: 1,
-      chaptersPerSegment: [[chapterRecord()]],
-    });
-    const summary = await app.inject({
-      method: "GET",
-      url: `/api/v1/admin/runs/${noSnapshot.id}/chapters/summary`,
-      headers: root,
-    });
-    expect(summary.json().totals.all).toBeNull();
-  });
-
-  it("filters a run's chapters by search, series and segment", async () => {
-    const { run } = await seedRun({
-      segments: 2,
-      reported: 2,
-      chaptersPerSegment: [
-        [chapterRecord({ chapterTitle: "The Duel", chapterNumber: "1" })],
-        [chapterRecord({ mangaName: "Other Series", mdMangaId: "5555aaaa-0000-4000-8000-000000000000", chapterNumber: "2" })],
-      ],
-    });
-
-    const search = await app.inject({
-      method: "GET",
-      url: `/api/v1/admin/runs/${run.id}/chapters?q=duel`,
-      headers: root,
-    });
-    expect(search.json().total).toBe(1);
-
-    const bySegment = await app.inject({
-      method: "GET",
-      url: `/api/v1/admin/runs/${run.id}/chapters?segmentIndex=1`,
-      headers: root,
-    });
-    expect(bySegment.json().total).toBe(1);
-    expect(bySegment.json().chapters[0].chapter.mangaName).toBe("Other Series");
-
-    const byManga = await app.inject({
-      method: "GET",
-      url: `/api/v1/admin/runs/${run.id}/chapters?mdMangaId=${MD_MANGA}`,
-      headers: root,
-    });
-    expect(byManga.json().total).toBe(1);
-  });
-
-  it("puts the chapters-found count on the runs list without a query per run", async () => {
-    await seedRun({ segments: 1, reported: 1, chaptersPerSegment: [[chapterRecord(), chapterRecord()]] });
-    await seedRun({ segments: 1, reported: 0, chaptersPerSegment: [] });
-
-    const runs = await app.inject({ method: "GET", url: "/api/v1/admin/runs", headers: root });
-    const counts = runs.json().runs.map((r: { chaptersFound: number | null }) => r.chaptersFound);
-    expect(counts).toContain(2);
-    // The unreported run reads "—", not "0".
-    expect(counts).toContain(null);
-  });
-
-  // -------------------------------------------- 2. queued, in claim order
-
-  it("reads the queue as chapters, numbered by their place in the whole claim order", async () => {
-    const later = await queued({ notBefore: new Date(Date.now() + 600_000) });
-    const soon = await queued({ notBefore: new Date(Date.now() - 600_000) });
-    const middle = await queued({ notBefore: new Date(Date.now() - 60_000) });
-
-    const res = await app.inject({ method: "GET", url: "/api/v1/admin/queues/chapters", headers: root });
-    expect(res.statusCode).toBe(200);
-    expect(res.json().order).toBe("notBefore,createdAt,id");
-    const rows = res.json().chapters;
-    expect(rows.map((r: { id: string }) => r.id)).toEqual([soon.id, middle.id, later.id]);
-    expect(rows.map((r: { position: number }) => r.position)).toEqual([1, 2, 3]);
-    // Projected from the payload, so the row names a chapter rather than a
-    // dedupe key.
-    expect(rows[0].mangaName).toBe("Test Series");
-    expect(rows[0].chapterNumber).toBe(soon.dedupeKey.split("|")[1]);
-
-    // Position is the place in the whole ordering, not on the page: page two of
-    // a one-row page starts at 2.
-    const paged = await app.inject({
-      method: "GET",
-      url: "/api/v1/admin/queues/chapters?limit=1",
-      headers: root,
-    });
-    expect(paged.json().chapters[0].position).toBe(1);
-    const next = await app.inject({
-      method: "GET",
-      url: `/api/v1/admin/queues/chapters?limit=1&cursor=${encodeURIComponent(paged.json().nextCursor)}`,
-      headers: root,
-    });
-    expect(next.json().chapters[0].position).toBe(2);
-    expect(next.json().chapters[0].id).toBe(middle.id);
-  });
-
-  it("tracks a reorder, because it reads the same ordering the uploader claims by", async () => {
-    await queued({ notBefore: new Date(Date.now() - 600_000) });
-    const last = await queued({ notBefore: new Date(Date.now() + 600_000) });
-
-    const before = await app.inject({ method: "GET", url: "/api/v1/admin/queues/chapters", headers: root });
-    expect(before.json().chapters.find((c: { id: string }) => c.id === last.id).position).toBe(2);
-
-    const moved = await app.inject({
-      method: "POST",
-      url: "/api/v1/admin/queues/reorder",
-      headers: root,
-      payload: { ids: [last.id], mode: "front" },
-    });
-    expect(moved.statusCode).toBe(200);
-
-    const after = await app.inject({ method: "GET", url: "/api/v1/admin/queues/chapters", headers: root });
-    expect(after.json().chapters[0].id).toBe(last.id);
-    expect(after.json().chapters[0].position).toBe(1);
-  });
-
-  it("defaults to PENDING and searches the payload rather than the dedupe key", async () => {
-    await queued({ chapter: { mangaName: "Sakamoto Days", chapterNumber: "12", chapterLanguage: "en" } });
-    await queued({ chapter: { mangaName: "Other Series", chapterNumber: "3", chapterLanguage: "en" } });
-    await queued({ state: "DONE" });
-
-    const pending = await app.inject({ method: "GET", url: "/api/v1/admin/queues/chapters", headers: root });
-    expect(pending.json().total).toBe(2);
-
-    const byName = await app.inject({
-      method: "GET",
-      url: "/api/v1/admin/queues/chapters?q=sakamoto",
-      headers: root,
-    });
-    expect(byName.json().total).toBe(1);
-    expect(byName.json().chapters[0].mangaName).toBe("Sakamoto Days");
-
-    const done = await app.inject({
-      method: "GET",
-      url: "/api/v1/admin/queues/chapters?state=DONE",
-      headers: root,
-    });
-    expect(done.json().total).toBe(1);
-  });
-
-  it("shows an EDIT task's diff, which is what that row is actually about", async () => {
-    await queued({
-      kind: "EDIT",
-      dedupeKey: MD_CHAPTER,
-      chapter: {
-        mdChapterId: MD_CHAPTER,
-        mangaName: "Test Series",
-        chapterNumber: "12",
-        payload: { title: "Corrected" },
-        oldInfo: { title: "Wrong" },
-      },
-    });
-
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/admin/queues/chapters?kind=EDIT",
-      headers: root,
-    });
-    expect(res.json().chapters[0].editPayload).toEqual({ title: "Corrected" });
-    expect(res.json().chapters[0].mdChapterId).toBe(MD_CHAPTER);
-  });
-
-  // ------------------------------------------- 3. already on MangaDex
-
-  it("browses the archives and filters them", async () => {
-    await uploaded();
-    await uploaded({ mdChapterId: "1c2d3e4f-0000-4000-8000-000000000002", chapterNumber: "2", extension: "other", chapterLanguage: "es" });
 
     const all = await app.inject({ method: "GET", url: "/api/v1/admin/chapters", headers: root });
+    expect(all.statusCode).toBe(200);
+    expect(all.json().archive).toBe("uploaded");
     expect(all.json().total).toBe(2);
-    expect(all.json().table).toBe("uploaded");
+    // Newest first: the row created last leads, which is the ordering an
+    // operator arriving after a bad run needs.
+    expect(all.json().chapters[0].mdChapterId).toBe(second.mdChapterId);
+    // Global, so a narrow filter cannot hide an archive that is filling up.
+    expect(all.json().totals).toEqual({ uploaded: 2, unavailable: 0, deleted: 1, edited: 0 });
 
     const byExtension = await app.inject({
       method: "GET",
-      url: "/api/v1/admin/chapters?extension=chaptertest",
+      url: "/api/v1/admin/chapters?extension=exampleext",
       headers: root,
     });
     expect(byExtension.json().total).toBe(1);
+    expect(byExtension.json().chapters[0].mdChapterId).toBe(first.mdChapterId);
 
     const byLanguage = await app.inject({
       method: "GET",
-      url: "/api/v1/admin/chapters?language=es",
+      url: "/api/v1/admin/chapters?language=ja",
       headers: root,
     });
     expect(byLanguage.json().total).toBe(1);
 
+    // Search covers the ids too, so a chapter id pasted from a MangaDex URL
+    // finds its row without the operator knowing which field it is.
     const bySearch = await app.inject({
       method: "GET",
-      url: "/api/v1/admin/chapters?q=beginnings",
+      url: `/api/v1/admin/chapters?search=${encodeURIComponent(first.mdChapterId.slice(0, 8))}`,
       headers: root,
     });
-    expect(bySearch.json().total).toBe(2);
+    expect(bySearch.json().total).toBe(1);
 
-    const extensions = await app.inject({
+    const archived = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/chapters?archive=deleted",
+      headers: root,
+    });
+    expect(archived.json().total).toBe(1);
+
+    const facet = await app.inject({
       method: "GET",
       url: "/api/v1/admin/chapters/extensions",
       headers: root,
     });
-    expect(extensions.json().extensions).toEqual(
-      expect.arrayContaining([{ extension: "chaptertest", count: 1 }, { extension: "other", count: 1 }]),
+    expect(facet.json().extensions).toEqual(
+      expect.arrayContaining([
+        { extension: "exampleext", count: 1 },
+        { extension: "otherext", count: 1 },
+      ]),
     );
   });
 
-  it("shows one chapter across all four archives, with its history and queued work", async () => {
-    await uploaded();
+  it("pages by cursor without repeating or skipping a row", async () => {
+    const created = [];
+    for (let i = 0; i < 5; i++) created.push(await uploaded());
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 5; page++) {
+      const res: Awaited<ReturnType<typeof app.inject>> = await app.inject({
+        method: "GET",
+        url: `/api/v1/admin/chapters?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+        headers: root,
+      });
+      expect(res.statusCode).toBe(200);
+      seen.push(...res.json().chapters.map((c: { mdChapterId: string }) => c.mdChapterId));
+      cursor = res.json().nextCursor;
+      if (!cursor) break;
+    }
+    expect(new Set(seen).size).toBe(5);
+    expect(seen.length).toBe(5);
+    expect([...seen].sort()).toEqual(created.map((c) => c.mdChapterId).sort());
+
+    const bogus = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/chapters?cursor=not-a-cursor",
+      headers: root,
+    });
+    expect(bogus.statusCode).toBe(400);
+  });
+
+  it("shows one chapter, its archives, its queue rows and why MangaDex is unreadable", async () => {
+    const chapter = await uploaded();
     await prisma.editedChapter.create({
       data: {
-        mdChapterId: MD_CHAPTER,
-        extension: "chaptertest",
-        chapterNumber: "1",
-        edits: [{ editedAt: "2026-07-01T00:00:00.000Z", old: { title: "Typo" }, new: { title: "Beginnings" } }],
+        mdChapterId: chapter.mdChapterId,
+        extension: "exampleext",
+        edits: [{ editedAt: "2026-02-02T00:00:00.000Z", old: { title: "was" }, new: { title: "now" } }],
       },
     });
-    const task = await queued({ kind: "EDIT", dedupeKey: MD_CHAPTER, chapter: { mdChapterId: MD_CHAPTER, payload: { volume: "2" } } });
 
     const res = await app.inject({
       method: "GET",
-      url: `/api/v1/admin/chapters/${MD_CHAPTER}`,
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
       headers: root,
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json().present).toEqual(expect.arrayContaining(["uploaded", "edited"]));
-    expect(res.json().edits).toHaveLength(1);
-    expect(res.json().queued.map((t: { id: string }) => t.id)).toContain(task.id);
-    expect(res.json().editable).toBe(true);
-    // The MangaDex-shaped starting point for an edit, so the form does not have
-    // to re-derive it from column names.
-    expect(res.json().mdFields).toEqual({
-      volume: "1",
-      chapter: "1",
-      title: "Beginnings",
-      translatedLanguage: "en",
-      groups: [MD_GROUP],
-    });
+    const body = res.json();
+    expect(body.chapter.mangaName).toBe("Test Series");
+    expect(body.archives.uploaded).not.toBeNull();
+    expect(body.archives.edited).not.toBeNull();
+    expect(body.archives.deleted).toBeNull();
+    expect(body.edits).toHaveLength(1);
+    expect(body.tasks).toEqual([]);
+    // No MangaDex credentials on this instance: the row still answers in full
+    // and the live column says why it is missing, rather than 500ing.
+    expect(body.mangadex).toBeNull();
+    expect(body.mangadexError).toMatch(/no MangaDex credentials/);
+    expect(body.links.chapter).toBe(`https://mangadex.org/chapter/${chapter.mdChapterId}`);
+    expect(body.actionsBlockedReason).toBeNull();
 
     const missing = await app.inject({
       method: "GET",
-      url: "/api/v1/admin/chapters/1c2d3e4f-0000-4000-8000-0000000000ff",
+      url: `/api/v1/admin/chapters/${uuid(404)}`,
       headers: root,
     });
     expect(missing.statusCode).toBe(404);
   });
 
-  // ---------------------------------------------------- the one write
-
-  it("queues a correction as an EDIT task carrying the diff, the old values and the new chapter", async () => {
-    await uploaded();
-    const session = await sessionAs("OWNER", "owner@example.com");
-
+  it("renders the unavailable card as a PNG without queueing anything", async () => {
+    const chapter = await uploaded();
     const res = await app.inject({
-      method: "POST",
-      url: `/api/v1/admin/chapters/${MD_CHAPTER}/edit`,
-      headers: session,
-      payload: { chapter: "1.5", title: "Beginnings, Revised" },
+      method: "GET",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}/card.png?footerNote=${encodeURIComponent("Taken down.")}`,
+      headers: root,
     });
-    expect(res.statusCode).toBe(201);
-
-    const task = await prisma.uploadTask.findFirstOrThrow({ where: { kind: "EDIT" } });
-    expect(task.dedupeKey).toBe(MD_CHAPTER);
-    const chapter = task.chapter as Record<string, unknown>;
-    // The diff MangaDex will be sent…
-    expect(chapter.payload).toEqual({ chapter: "1.5", title: "Beginnings, Revised" });
-    // …the values it had, for the chapter's permanent edit history…
-    expect(chapter.oldInfo).toEqual({
-      volume: "1",
-      chapter: "1",
-      title: "Beginnings",
-      translatedLanguage: "en",
-      groups: [MD_GROUP],
-    });
-    // …and the chapter carrying the NEW values, because on success the uploader
-    // mirrors this payload into uploaded_chapters. Carrying the old ones would
-    // land the edit and leave our mirror describing what it used to say.
-    expect(chapter.chapterNumber).toBe("1.5");
-    expect(chapter.chapterTitle).toBe("Beginnings, Revised");
-    expect(chapter.mdChapterId).toBe(MD_CHAPTER);
-
-    // Nothing was written to the canonical mirror: that happens when the edit
-    // actually lands, not when it is queued.
-    const mirror = await prisma.uploadedChapter.findUniqueOrThrow({ where: { mdChapterId: MD_CHAPTER } });
-    expect(mirror.chapterNumber).toBe("1");
-
-    const audit = await prisma.auditEvent.findFirstOrThrow({ where: { action: "chapter.edit_queued" } });
-    expect(audit.subject).toBe(MD_CHAPTER);
-  });
-
-  it("drops fields that already hold the requested value, and refuses a no-op edit", async () => {
-    await uploaded();
-    const session = await sessionAs("OWNER", "owner@example.com");
-
-    const partial = await app.inject({
-      method: "POST",
-      url: `/api/v1/admin/chapters/${MD_CHAPTER}/edit`,
-      headers: session,
-      // `volume` is already "1"; only the title actually changes.
-      payload: { volume: "1", title: "New" },
-    });
-    expect(partial.statusCode).toBe(201);
-    expect(partial.json().payload).toEqual({ title: "New" });
-
-    await prisma.uploadTask.deleteMany({});
-    const noop = await app.inject({
-      method: "POST",
-      url: `/api/v1/admin/chapters/${MD_CHAPTER}/edit`,
-      headers: session,
-      payload: { volume: "1", chapter: "1" },
-    });
-    expect(noop.statusCode).toBe(400);
+    expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toBe("image/png");
+    // A real PNG, not an error page rendered as one.
+    expect(res.rawPayload.subarray(1, 4).toString("ascii")).toBe("PNG");
     expect(await prisma.uploadTask.count()).toBe(0);
   });
 
-  it("refuses a second queued correction rather than working around the dedupe constraint", async () => {
-    await uploaded();
-    const session = await sessionAs("OWNER", "owner@example.com");
+  // ---- edit ----
+
+  it("queues an edit carrying the payload and what the fields looked like", async () => {
+    const chapter = await uploaded({ chapterNumber: "12", chapterTitle: "Old title" });
+
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
+      headers: root,
+      payload: { title: "New title", chapter: "12.1" },
+    });
+    // 202: queued, not applied. Anything else would be claiming the chapter has
+    // already changed on MangaDex.
+    expect(res.statusCode).toBe(202);
+    expect(res.json().action).toBe("EDIT");
+    expect(res.json().superseded).toBe(false);
+
+    const task = await prisma.uploadTask.findFirstOrThrow({ where: { kind: "EDIT" } });
+    expect(task.dedupeKey).toBe(chapter.mdChapterId);
+    expect(task.state).toBe("PENDING");
+    const payload = task.chapter as Record<string, unknown>;
+    expect(payload.payload).toEqual({ title: "New title", chapter: "12.1" });
+    // The history is only worth keeping if "old" is what was really there.
+    expect(payload.oldInfo).toEqual({ title: "Old title", chapter: "12" });
+    // Built like a processor payload, so the uploader finds the whole chapter.
+    expect(payload.mdChapterId).toBe(chapter.mdChapterId);
+    expect(payload.mdMangaId).toBe(chapter.mdMangaId);
+
+    const audit = await prisma.auditEvent.findFirstOrThrow({ where: { action: "chapter.edit" } });
+    expect(audit.subject).toBe(chapter.mdChapterId);
+  });
+
+  it("refuses an empty edit and a language MangaDex does not have", async () => {
+    const chapter = await uploaded();
+
+    const empty = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
+      headers: root,
+      payload: {},
+    });
+    expect(empty.statusCode).toBe(400);
+
+    const unknownField = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
+      headers: root,
+      payload: { chapterNumber: "12" },
+    });
+    // Our column names are not MangaDex's field names, and a misspelling must
+    // not look like an edit that changed nothing.
+    expect(unknownField.statusCode).toBe(400);
+
+    const badLanguage = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
+      headers: root,
+      payload: { translatedLanguage: "klingon" },
+    });
+    expect(badLanguage.statusCode).toBe(400);
+
+    const badUrl = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
+      headers: root,
+      payload: { externalUrl: "javascript:alert(1)" },
+    });
+    expect(badUrl.statusCode).toBe(400);
+    expect(await prisma.uploadTask.count()).toBe(0);
+  });
+
+  it("refuses a second action while one is queued, and supersedes a completed one", async () => {
+    const chapter = await uploaded();
 
     const first = await app.inject({
-      method: "POST",
-      url: `/api/v1/admin/chapters/${MD_CHAPTER}/edit`,
-      headers: session,
+      method: "PATCH",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
+      headers: root,
       payload: { title: "One" },
     });
-    expect(first.statusCode).toBe(201);
+    expect(first.statusCode).toBe(202);
+    const taskId = first.json().task.id;
 
     const second = await app.inject({
-      method: "POST",
-      url: `/api/v1/admin/chapters/${MD_CHAPTER}/edit`,
-      headers: session,
+      method: "PATCH",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
+      headers: root,
       payload: { title: "Two" },
     });
     expect(second.statusCode).toBe(409);
-    expect(second.json().existing.id).toBe(first.json().task.id);
-    expect(await prisma.uploadTask.count({ where: { kind: "EDIT" } })).toBe(1);
-  });
+    expect(second.json().outcome).toBe("already_queued");
+    // The queued work is untouched: rewriting it would change what an operator
+    // watching the queue is watching.
+    const stillOne = await prisma.uploadTask.findUniqueOrThrow({ where: { id: taskId } });
+    expect((stillOne.chapter as { payload: { title: string } }).payload.title).toBe("One");
 
-  it("refuses to edit a chapter that has been deleted from MangaDex", async () => {
-    await prisma.deletedChapter.create({
-      data: { mdChapterId: MD_CHAPTER, extension: "chaptertest", chapterNumber: "1", mdGroupId: MD_GROUP },
+    // A LEASED row belongs to a live uploader and is refused for the same reason.
+    await prisma.uploadTask.update({
+      where: { id: taskId },
+      data: { state: "LEASED", leaseId: uuid(700), leaseExpiresAt: new Date(Date.now() + 60_000) },
     });
-    const session = await sessionAs("OWNER", "owner@example.com");
-
-    const detail = await app.inject({
-      method: "GET",
-      url: `/api/v1/admin/chapters/${MD_CHAPTER}`,
+    const whileLeased = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
       headers: root,
+      payload: { title: "Three" },
     });
-    expect(detail.json().editable).toBe(false);
+    expect(whileLeased.statusCode).toBe(409);
+    expect(whileLeased.json().outcome).toBe("leased");
 
-    const res = await app.inject({
-      method: "POST",
-      url: `/api/v1/admin/chapters/${MD_CHAPTER}/edit`,
-      headers: session,
-      payload: { title: "Too late" },
+    // Once it has run, the slot is reusable — otherwise a chapter could be
+    // edited exactly once, ever, because nothing deletes DONE rows.
+    await prisma.uploadTask.update({ where: { id: taskId }, data: { state: "DONE", leaseId: null } });
+    const again = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
+      headers: root,
+      payload: { title: "Four" },
     });
-    // Refused now rather than after a lease, five attempts and a dead letter.
-    expect(res.statusCode).toBe(409);
-    expect(await prisma.uploadTask.count()).toBe(0);
+    expect(again.statusCode).toBe(202);
+    expect(again.json().superseded).toBe(true);
+    // Same row, reset in place: the unique (kind, dedupe_key) constraint is what
+    // makes a double upload impossible and is never worked around.
+    expect(again.json().task.id).toBe(taskId);
+    expect(await prisma.uploadTask.count({ where: { kind: "EDIT" } })).toBe(1);
+    const reset = await prisma.uploadTask.findUniqueOrThrow({ where: { id: taskId } });
+    expect(reset.state).toBe("PENDING");
+    expect(reset.attempt).toBe(0);
+    expect((reset.chapter as { payload: { title: string } }).payload.title).toBe("Four");
   });
 
-  it("refuses a group list that drops our own upload group", async () => {
-    await uploaded();
-    const session = await sessionAs("OWNER", "owner@example.com");
+  // ---- unavailable ----
 
-    const res = await app.inject({
-      method: "POST",
-      url: `/api/v1/admin/chapters/${MD_CHAPTER}/edit`,
-      headers: session,
-      payload: { groups: ["aaaaaaaa-0000-4000-8000-000000000000"] },
-    });
-    // MangaDex replaces attribution wholesale; this would detach the chapter
-    // from the catalogue this platform can see.
-    expect(res.statusCode).toBe(422);
-    expect(res.json().uploadGroupId).toBe(MD_GROUP);
-    expect(await prisma.uploadTask.count()).toBe(0);
+  it("queues an unavailable card, and needs force to replace one already posted", async () => {
+    const chapter = await uploaded();
 
-    // Adding a group alongside ours is fine.
-    const ok = await app.inject({
+    const first = await app.inject({
       method: "POST",
-      url: `/api/v1/admin/chapters/${MD_CHAPTER}/edit`,
-      headers: session,
-      payload: { groups: [MD_GROUP, "aaaaaaaa-0000-4000-8000-000000000000"] },
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}/unavailable`,
+      headers: root,
+      payload: { footerNote: "Pulled by the publisher." },
     });
-    expect(ok.statusCode).toBe(201);
+    expect(first.statusCode).toBe(202);
+    const queued = await prisma.uploadTask.findFirstOrThrow({ where: { kind: "UNAVAILABLE" } });
+    const payload = queued.chapter as Record<string, unknown>;
+    expect(payload.footerNote).toBe("Pulled by the publisher.");
+    expect(payload.unavailableAt).toBeTruthy();
+    expect(payload.force).toBeUndefined();
+
+    // Pretend the uploader ran it.
+    await prisma.uploadTask.update({ where: { id: queued.id }, data: { state: "DONE" } });
+    await prisma.unavailableChapter.create({
+      data: { mdChapterId: chapter.mdChapterId, extension: "exampleext" },
+    });
+
+    const withoutForce = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}/unavailable`,
+      headers: root,
+      payload: {},
+    });
+    // Silently doing nothing is the failure mode this refusal exists to avoid.
+    expect(withoutForce.statusCode).toBe(409);
+    expect(withoutForce.json().outcome).toBe("already_unavailable");
+
+    const forced = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}/unavailable`,
+      headers: root,
+      payload: { force: true, footerNote: "Corrected wording." },
+    });
+    expect(forced.statusCode).toBe(202);
+    const regenerated = await prisma.uploadTask.findUniqueOrThrow({ where: { id: queued.id } });
+    expect((regenerated.chapter as Record<string, unknown>).force).toBe(true);
+    expect(regenerated.state).toBe("PENDING");
   });
 
-  it("rejects a language MangaDex would not accept, and normalises the case of one it would", async () => {
-    await uploaded();
-    const session = await sessionAs("OWNER", "owner@example.com");
+  // ---- delete ----
 
-    const bad = await app.inject({
-      method: "POST",
-      url: `/api/v1/admin/chapters/${MD_CHAPTER}/edit`,
-      headers: session,
-      payload: { translatedLanguage: "klingon" },
+  it("needs confirmation to delete, and records what it removed", async () => {
+    const chapter = await uploaded();
+
+    const unconfirmed = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
+      headers: root,
+      payload: {},
     });
-    expect(bad.statusCode).toBe(400);
-
-    const good = await app.inject({
-      method: "POST",
-      url: `/api/v1/admin/chapters/${MD_CHAPTER}/edit`,
-      headers: session,
-      payload: { translatedLanguage: "PT-BR" },
-    });
-    expect(good.statusCode).toBe(201);
-    expect(good.json().payload.translatedLanguage).toBe("pt-br");
-  });
-
-  // ------------------------------------------------------------ authority
-
-  it("keeps queueing a MangaDex write behind the ADMIN role, not merely runs:write", async () => {
-    await uploaded();
-
-    // A CONTRIBUTOR holds neither the role nor runs:write.
-    const contributor = await sessionAs("CONTRIBUTOR", "contrib@example.com");
-    const byContributor = await app.inject({
-      method: "POST",
-      url: `/api/v1/admin/chapters/${MD_CHAPTER}/edit`,
-      headers: contributor,
-      payload: { title: "No" },
-    });
-    expect(byContributor.statusCode).toBe(403);
-
-    // An api-token with runs:write is the Discord bot's shape: it may trigger a
-    // scrape, and that is not the same authority as rewriting a published
-    // chapter.
-    const bot = await mint(["runs:write"]);
-    const byToken = await app.inject({
-      method: "POST",
-      url: `/api/v1/admin/chapters/${MD_CHAPTER}/edit`,
-      headers: bot,
-      payload: { title: "No" },
-    });
-    expect(byToken.statusCode).toBe(403);
+    expect(unconfirmed.statusCode).toBe(400);
+    expect(unconfirmed.json().alternative).toMatch(/unavailable/);
     expect(await prisma.uploadTask.count()).toBe(0);
 
-    // Reading is a different question: runs:read is enough for all three views.
-    const reader = await mint(["runs:read"]);
-    for (const url of ["/api/v1/admin/chapters", "/api/v1/admin/queues/chapters"]) {
-      const res = await app.inject({ method: "GET", url, headers: reader });
-      expect(res.statusCode).toBe(200);
+    const confirmed = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
+      headers: root,
+      payload: { confirm: true, reason: "duplicate upload" },
+    });
+    expect(confirmed.statusCode).toBe(202);
+    expect(confirmed.json().action).toBe("DELETE");
+    const task = await prisma.uploadTask.findFirstOrThrow({ where: { kind: "DELETE" } });
+    expect(task.dedupeKey).toBe(chapter.mdChapterId);
+
+    // After the uploader runs, this row and deleted_chapters are the only
+    // records that the chapter existed.
+    const audit = await prisma.auditEvent.findFirstOrThrow({ where: { action: "chapter.delete" } });
+    expect((audit.detail as { reason: string }).reason).toBe("duplicate upload");
+    expect((audit.detail as { chapter: { chapterTitle: string } }).chapter.chapterTitle).toBeTruthy();
+
+    // The live row is left alone until the uploader succeeds — a queued delete
+    // that fails must not have already erased our record of the chapter.
+    expect(await prisma.uploadedChapter.count()).toBe(1);
+  });
+
+  it("refuses every action on a chapter already recorded as deleted", async () => {
+    const mdChapterId = uuid(600);
+    await prisma.deletedChapter.create({
+      data: { mdChapterId, extension: "exampleext", chapterNumber: "3" },
+    });
+
+    for (const call of [
+      app.inject({
+        method: "PATCH",
+        url: `/api/v1/admin/chapters/${mdChapterId}`,
+        headers: root,
+        payload: { title: "x" },
+      }),
+      app.inject({
+        method: "POST",
+        url: `/api/v1/admin/chapters/${mdChapterId}/unavailable`,
+        headers: root,
+        payload: {},
+      }),
+      app.inject({
+        method: "DELETE",
+        url: `/api/v1/admin/chapters/${mdChapterId}`,
+        headers: root,
+        payload: { confirm: true },
+      }),
+    ]) {
+      const res = await call;
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/recorded as deleted/);
     }
+    expect(await prisma.uploadTask.count()).toBe(0);
+  });
+
+  // ---- bulk ----
+
+  describe("bulk actions", () => {
+    const bulk = (action: string, payload: Record<string, unknown>) =>
+      app.inject({
+        method: "POST",
+        url: `/api/v1/admin/chapters/bulk/${action}`,
+        headers: root,
+        payload,
+      });
+
+    it("previews by default and writes nothing at all", async () => {
+      const a = await uploaded();
+      const b = await uploaded();
+
+      const preview = await bulk("delete", { ids: [a.mdChapterId, b.mdChapterId] });
+      expect(preview.statusCode).toBe(200);
+      expect(preview.json().dryRun).toBe(true);
+      expect(preview.json().wouldQueue).toBe(2);
+      // Predictive, not an estimate: every chapter is named with what would
+      // happen to it.
+      expect(preview.json().results.map((r: { outcome: string }) => r.outcome)).toEqual([
+        "would_queue",
+        "would_queue",
+      ]);
+      expect(preview.json().results[0].mangaName).toBe("Test Series");
+      // Not even an audit row — the first call anyone makes is inert.
+      expect(await prisma.uploadTask.count()).toBe(0);
+      expect(await prisma.auditEvent.count()).toBe(0);
+
+      // dryRun: false alone is not enough; the two flags cannot both be set by
+      // accident.
+      const unconfirmed = await bulk("delete", { ids: [a.mdChapterId], dryRun: false });
+      expect(unconfirmed.statusCode).toBe(400);
+      expect(await prisma.uploadTask.count()).toBe(0);
+    });
+
+    it("queues one task per chapter and audits each one by subject", async () => {
+      const a = await uploaded();
+      const b = await uploaded();
+
+      const res = await bulk("delete", {
+        ids: [a.mdChapterId, b.mdChapterId],
+        dryRun: false,
+        confirm: true,
+        reason: "bad run",
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().queued).toBe(2);
+      expect(res.json().refused).toBe(0);
+      expect(res.json().results.every((r: { taskId?: string }) => r.taskId)).toBe(true);
+
+      const tasks = await prisma.uploadTask.findMany({ where: { kind: "DELETE" } });
+      expect(tasks.map((t) => t.dedupeKey).sort()).toEqual([a.mdChapterId, b.mdChapterId].sort());
+
+      // Per-chapter rows, so "why was this chapter deleted?" is answerable by
+      // subject — a batch that wrote only a summary would not answer it — plus
+      // one summary row correlating them.
+      const perChapter = await prisma.auditEvent.findMany({ where: { action: "chapter.delete" } });
+      expect(perChapter.map((e) => e.subject).sort()).toEqual([a.mdChapterId, b.mdChapterId].sort());
+      const summary = await prisma.auditEvent.findFirstOrThrow({
+        where: { action: "chapter.delete.bulk" },
+      });
+      expect((summary.detail as { queued: number }).queued).toBe(2);
+      expect((perChapter[0]!.detail as { bulk: string }).bulk).toBe(summary.subject);
+      expect((perChapter[0]!.detail as { reason: string }).reason).toBe("bad run");
+    });
+
+    it("acts on everything a filter matches, and caps what one call may touch", async () => {
+      for (let i = 0; i < 3; i++) await uploaded({ extension: "bulkext", mangaName: "Bulk Series" });
+      const other = await uploaded({ extension: "otherext" });
+
+      const preview = await bulk("unavailable", { filter: { extension: "bulkext" } });
+      expect(preview.json().matched).toBe(3);
+      expect(preview.json().wouldQueue).toBe(3);
+      expect(preview.json().breakdown).toEqual([{ extension: "bulkext", count: 3 }]);
+
+      const applied = await bulk("unavailable", {
+        filter: { extension: "bulkext" },
+        dryRun: false,
+        confirm: true,
+        footerNote: "Publisher pulled the series.",
+      });
+      expect(applied.json().queued).toBe(3);
+      const tasks = await prisma.uploadTask.findMany({ where: { kind: "UNAVAILABLE" } });
+      expect(tasks).toHaveLength(3);
+      expect((tasks[0]!.chapter as Record<string, unknown>).footerNote).toBe(
+        "Publisher pulled the series.",
+      );
+      // The filter is the whole selection: a chapter outside it is untouched.
+      expect(tasks.some((t) => t.dedupeKey === other.mdChapterId)).toBe(false);
+    });
+
+    it("reports per chapter when only some of a batch can be queued", async () => {
+      const fine = await uploaded();
+      const carded = await uploaded();
+      const removed = await uploaded();
+      // Already carries a card: needs `force`.
+      await prisma.unavailableChapter.create({
+        data: { mdChapterId: carded.mdChapterId, extension: "exampleext" },
+      });
+      // Already queued by hand, and not run yet.
+      await prisma.uploadTask.create({
+        data: { kind: "UNAVAILABLE", dedupeKey: removed.mdChapterId, chapter: {} },
+      });
+
+      const ids = [fine.mdChapterId, carded.mdChapterId, removed.mdChapterId, uuid(999)];
+      const preview = await bulk("unavailable", { ids });
+      const outcomes = Object.fromEntries(
+        preview.json().results.map((r: { mdChapterId: string; outcome: string }) => [r.mdChapterId, r.outcome]),
+      );
+      expect(outcomes[fine.mdChapterId]).toBe("would_queue");
+      expect(outcomes[carded.mdChapterId]).toBe("needs_force");
+      expect(outcomes[removed.mdChapterId]).toBe("already_queued");
+      expect(outcomes[uuid(999)]).toBe("not_found");
+
+      const applied = await bulk("unavailable", { ids, dryRun: false, confirm: true });
+      expect(applied.json().queued).toBe(1);
+      expect(applied.json().refused).toBe(3);
+      // The one that could go, went; the refusals left everything as it was.
+      expect(await prisma.uploadTask.count({ where: { kind: "UNAVAILABLE" } })).toBe(2);
+
+      // `force` unblocks the carded one without touching the other refusals.
+      const forced = await bulk("unavailable", { ids, dryRun: false, confirm: true, force: true });
+      expect(forced.json().queued).toBe(1);
+      const regenerated = await prisma.uploadTask.findFirstOrThrow({
+        where: { kind: "UNAVAILABLE", dedupeKey: carded.mdChapterId },
+      });
+      expect((regenerated.chapter as Record<string, unknown>).force).toBe(true);
+    });
+
+    it("limits a bulk edit to the fields a set of chapters can share", async () => {
+      const chapter = await uploaded();
+
+      // Per-chapter identity is not expressible here, rather than merely
+      // discouraged: one title across two hundred chapters is a mistake with a
+      // keyboard shortcut.
+      for (const changes of [{ title: "One title" }, { chapter: "12" }, { externalUrl: "https://x.example" }]) {
+        const res = await bulk("edit", { ids: [chapter.mdChapterId], changes });
+        expect(res.statusCode).toBe(400);
+      }
+      expect((await bulk("edit", { ids: [chapter.mdChapterId], changes: {} })).statusCode).toBe(400);
+      expect(
+        (await bulk("edit", { ids: [chapter.mdChapterId], changes: { translatedLanguage: "klingon" } }))
+          .statusCode,
+      ).toBe(400);
+
+      const res = await bulk("edit", {
+        ids: [chapter.mdChapterId],
+        changes: { volume: "3", translatedLanguage: "pt-br" },
+        dryRun: false,
+        confirm: true,
+      });
+      expect(res.statusCode).toBe(200);
+      const task = await prisma.uploadTask.findFirstOrThrow({ where: { kind: "EDIT" } });
+      expect((task.chapter as { payload: Record<string, string> }).payload).toEqual({
+        volume: "3",
+        translatedLanguage: "pt-br",
+      });
+    });
+
+    it("refuses a body that names both a selection and a filter, or neither", async () => {
+      const chapter = await uploaded();
+      expect(
+        (await bulk("delete", { ids: [chapter.mdChapterId], filter: { extension: "exampleext" } }))
+          .statusCode,
+      ).toBe(400);
+      expect((await bulk("delete", {})).statusCode).toBe(400);
+    });
+
+    it("keeps bulk behind the same role gate as the single-chapter routes", async () => {
+      const chapter = await uploaded();
+      const writer = await mint(["chapters:write"]);
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/chapters/bulk/delete",
+        headers: writer,
+        payload: { ids: [chapter.mdChapterId], dryRun: false, confirm: true },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(await prisma.uploadTask.count()).toBe(0);
+    });
+  });
+
+  // ---- authorisation ----
+
+  it("keeps published chapters out of reach of scopes and roles that should not have them", async () => {
+    const chapter = await uploaded();
+
+    const reader = await mint(["chapters:read"]);
+    const listed = await app.inject({ method: "GET", url: "/api/v1/admin/chapters", headers: reader });
+    expect(listed.statusCode).toBe(200);
+    const readerWrite = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
+      headers: reader,
+      payload: { title: "no" },
+    });
+    expect(readerWrite.statusCode).toBe(403);
+
+    // The sharpest case: a machine credential scoped for exactly this work is
+    // still refused, because an api-token is never ADMIN.
+    const writer = await mint(["chapters:write"]);
+    const tokenWrite = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
+      headers: writer,
+      payload: { confirm: true },
+    });
+    expect(tokenWrite.statusCode).toBe(403);
+    expect(tokenWrite.json().error).toMatch(/closed to api tokens/);
+    expect(tokenWrite.json().requiredRole).toBe("ADMIN");
+
+    // A run-triggering credential has no business here at all.
+    const runner = await mint(["runs:write"]);
+    const runnerRead = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/chapters",
+      headers: runner,
+    });
+    expect(runnerRead.statusCode).toBe(403);
+
+    const contributor = await sessionAs("CONTRIBUTOR", "contrib@example.com");
+    const contributorRead = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/chapters",
+      headers: contributor,
+    });
+    expect(contributorRead.statusCode).toBe(403);
+
+    const admin = await sessionAs("ADMIN", "admin@example.com");
+    const adminWrite = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/admin/chapters/${chapter.mdChapterId}`,
+      headers: admin,
+      payload: { title: "yes" },
+    });
+    expect(adminWrite.statusCode).toBe(202);
+
+    expect(await prisma.uploadTask.count()).toBe(1);
+  });
+
+  // ---- the uploader half ----
+
+  describe("the uploader executing a regeneration", () => {
+    /**
+     * A chapter that has already been marked unavailable: MangaDex still has
+     * the entry, its externalUrl was repointed at the publisher's site root,
+     * and its only page is the card posted last time.
+     */
+    const detail = (): MdChapterDetail => ({
+      id: uuid(1),
+      attributes: {
+        volume: null,
+        chapter: "1",
+        title: "Chapter one",
+        translatedLanguage: "en",
+        externalUrl: null,
+        version: 3,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      relationships: [{ id: uuid(800), type: "scanlation_group" }],
+    });
+
+    function stubMd(calls: string[]): MdExtendedApi {
+      const unexpected = (name: string) => () => {
+        throw new Error(`the uploader should not call ${name} in this test`);
+      };
+      return {
+        chapterById: async () => {
+          calls.push("chapterById");
+          return detail();
+        },
+        beginEditSession: async () => {
+          calls.push("beginEditSession");
+          return { id: uuid(701) };
+        },
+        uploadImages: async (_session: string, files: { name: string; data: Buffer }[]) => {
+          calls.push(`uploadImages:${files.length}`);
+          return files.map((file, index) => ({
+            id: uuid(710 + index),
+            originalFileName: file.name,
+            fileSize: file.data.length,
+          }));
+        },
+        commitUploadSession: async () => {
+          calls.push("commitUploadSession");
+          return { id: uuid(1), attributes: { version: 4 } };
+        },
+        editChapter: async () => {
+          calls.push("editChapter");
+          return true;
+        },
+        deleteChapter: unexpected("deleteChapter"),
+        chaptersForManga: unexpected("chaptersForManga"),
+        chaptersByIds: unexpected("chaptersByIds"),
+        mangaByIds: unexpected("mangaByIds"),
+        mangaById: unexpected("mangaById"),
+        searchManga: unexpected("searchManga"),
+        mangaAggregate: unexpected("mangaAggregate"),
+        currentUploadSession: unexpected("currentUploadSession"),
+        deleteUploadSession: async () => {
+          calls.push("deleteUploadSession");
+        },
+        createUploadSession: unexpected("createUploadSession"),
+        createMangaDraft: unexpected("createMangaDraft"),
+        commitMangaDraft: unexpected("commitMangaDraft"),
+        editManga: unexpected("editManga"),
+      } as unknown as MdExtendedApi;
+    }
+
+    const notifier = { enabled: false, send: async () => {} };
+
+    async function run(force: boolean): Promise<string[]> {
+      const calls: string[] = [];
+      const workers = new UploadTaskWorkers({
+        prisma,
+        md: stubMd(calls),
+        notifier: notifier as never,
+        config,
+        log,
+      });
+      const task = await prisma.uploadTask.create({
+        data: {
+          kind: "UNAVAILABLE",
+          dedupeKey: uuid(1),
+          state: "LEASED",
+          chapter: {
+            mdChapterId: uuid(1),
+            mdMangaId: uuid(900),
+            mdGroupId: uuid(800),
+            chapterNumber: "1",
+            chapterLanguage: "en",
+            mangaName: "Test Series",
+            mangaUrl: "https://publisher.example/series",
+            extensionName: "exampleext",
+            imageArtifacts: [],
+            ...(force ? { force: true, footerNote: "Corrected wording." } : {}),
+          },
+        },
+      });
+      await workers.execute(task);
+      return calls;
+    }
+
+    it("archives without touching MangaDex when the card is already posted", async () => {
+      const calls = await run(false);
+      // The automated pass is right to stop here: the work is done.
+      expect(calls).toEqual(["chapterById"]);
+      expect(await prisma.unavailableChapter.count()).toBe(1);
+    });
+
+    it("renders and posts a fresh card when the operator forces it", async () => {
+      const calls = await run(true);
+      expect(calls).toContain("beginEditSession");
+      // One page: the card itself, replacing whatever was there.
+      expect(calls).toContain("uploadImages:1");
+      expect(calls).toContain("commitUploadSession");
+      expect(calls).toContain("editChapter");
+      const archived = await prisma.unavailableChapter.findUniqueOrThrow({
+        where: { mdChapterId: uuid(1) },
+      });
+      expect(archived.chapterNumber).toBe("1");
+    });
   });
 });

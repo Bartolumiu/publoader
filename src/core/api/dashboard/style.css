@@ -1421,3 +1421,28 @@ dialog::backdrop {
   gap: 8px;
   padding-top: 10px;
 }
+
+/* ---- chapter card preview ------------------------------------------------ */
+
+/* The unavailable card is a square 2000x2000 PNG. Constrained by width AND by
+   viewport height so the dialog's buttons stay reachable on a laptop — a
+   preview you have to scroll past to approve is one nobody looks at. */
+.card-preview {
+  display: block;
+  width: 100%;
+  max-width: 420px;
+  max-height: 50vh;
+  object-fit: contain;
+  margin: 10px auto 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+/* The footer-note box is prose, not the JSON payloads every other textarea in
+   this page holds, so it opts out of the mono/180px default. */
+#chapter-note {
+  font-family: inherit;
+  font-size: 13px;
+  min-height: 72px;
+}

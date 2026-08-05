@@ -297,8 +297,8 @@ The MangaDex work queue.
 
 | Column | Meaning |
 | --- | --- |
-| `kind` + `dedupe_key` **unique together** | The idempotency guard. Insertion is `ON CONFLICT DO NOTHING` (`store/uploadTasks.ts:32`), so re-processing a run is a no-op for already-queued chapters. Dedupe keys differ by kind: `UPLOAD` uses `chapterId|chapterNumber|chapterLanguage` (`uploadTasks.ts:15-21`), `EDIT`/`DELETE`/`UNAVAILABLE` use the MangaDex chapter id (`core/processor/processor.ts:219`, `490`). |
-| `chapter` | JSONB. **Stays JSONB, and the asymmetry with the four chapter tables is deliberate** (documented at `schema.prisma:228-235`): this is a transient payload consumed once by one worker and never queried by field, and it is *not* the canonical chapter shape — `EDIT` rows carry `payload`/`oldInfo` and `UNAVAILABLE` rows carry `unavailableAt` alongside the chapter, which typed columns would have to model as a union. |
+| `kind` + `dedupe_key` **unique together** | The idempotency guard. Insertion is `ON CONFLICT DO NOTHING` (`store/uploadTasks.ts:32`), so re-processing a run is a no-op for already-queued chapters. Dedupe keys differ by kind: `UPLOAD` uses `chapterId\|chapterNumber\|chapterLanguage` (`uploadTasks.ts:15-21`), `EDIT`/`DELETE`/`UNAVAILABLE` use the MangaDex chapter id (`core/processor/processor.ts:219`, `490`). **One slot per (kind, chapter), forever**: nothing deletes `DONE` rows, so an operator action on an already-actioned chapter resets the settled row in place instead of inserting (`uploadTasks.requeueForChapter`), which is refused for a `PENDING` or `LEASED` row and never accepted for `UPLOAD` — that would re-arm a double upload. |
+| `chapter` | JSONB. **Stays JSONB, and the asymmetry with the four chapter tables is deliberate** (documented at `schema.prisma:228-235`): this is a transient payload consumed once by one worker and never queried by field, and it is *not* the canonical chapter shape — `EDIT` rows carry `payload`/`oldInfo` and `UNAVAILABLE` rows carry `unavailableAt` (plus `force` and `footerNote` when an operator asked for a fresh card) alongside the chapter, which typed columns would have to model as a union. |
 | `state`, `attempt`, `max_attempts` (5), `not_before` | Retry budget, backoff. |
 | `lease_id`, `lease_expires_at` | Same SKIP LOCKED lease pattern as jobs, so multiple uploader processes would be safe (`uploadTasks.ts:38-60`). |
 | `last_error` | Failure reason, or the operator's cancellation note. |
@@ -359,6 +359,13 @@ Per-table differences:
 | `edited_chapters` | `edits` JSONB (default `[]`), `last_edited_at` | none beyond the unique key | `edits` **stays JSONB**: an append-only `{editedAt, old, new}` history of genuinely variable length and shape that nothing queries into (`schema.prisma:317-319`). |
 | `unavailable_chapters` | `unavailable_at` | none beyond the unique key | `extra` also holds `mdAttributes`, the chapter as MangaDex had it at takedown — an external API resource, not our shape. |
 | `deleted_chapters` | `deleted_at` | `(extension)` | Deletion is the one irreversible action the platform takes, so the record of what was removed outlives it (`schema.prisma:353-356`). Written *before* the live row is dropped (`taskWorkers.ts:341-350`). |
+
+All four are readable through `GET /api/v1/admin/chapters?archive=…`
+(`store/chapters.ts`), which is what makes them operator-facing rather than
+forensic: one parameterised query serves all four precisely because they share a
+shape, and the only difference the reader sees is which instant dates the row
+(`created_at`, `unavailable_at`, `deleted_at`, `last_edited_at`). Writes still go
+through the upload queue — the API process never touches MangaDex.
 
 ### `uploaded_ids` (canonical)
 

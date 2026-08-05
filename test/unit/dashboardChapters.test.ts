@@ -183,9 +183,14 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
     {
       match: new RegExp(`/chapters/${MD_CHAPTER}$`),
       body: {
+        // The shape `GET /chapters/:mdChapterId` actually returns: the id at the
+        // top level, the four archives with the instant each recorded, the live
+        // MangaDex read (or the reason it failed), and any queue rows keyed on
+        // this chapter.
+        mdChapterId: MD_CHAPTER,
         chapter: {
           mdChapterId: MD_CHAPTER,
-          extensionName: "mangaplus",
+          extension: "mangaplus",
           chapterNumber: "141",
           chapterVolume: "17",
           chapterTitle: "Old title",
@@ -193,18 +198,25 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
           mangaName: "Sakamoto Days",
           mdMangaId: MD_MANGA,
           mdGroupId: "4f1de6a2-f0c5-4ac5-bce5-02c7dbb67deb",
-          imageArtifacts: [],
+          chapterId: null,
+          chapterUrl: null,
         },
-        present: ["uploaded", "edited"],
+        archives: {
+          uploaded: "2026-06-01T00:00:00Z",
+          unavailable: null,
+          deleted: null,
+          edited: "2026-07-01T00:00:00Z",
+        },
         edits: [{ editedAt: "2026-07-01T00:00:00Z", old: { title: "Typo" }, new: { title: "Old title" } }],
-        uploadedAt: "2026-06-01T00:00:00Z",
-        updatedAt: "2026-07-01T00:00:00Z",
-        lastEditedAt: "2026-07-01T00:00:00Z",
-        unavailableAt: null,
-        deletedAt: null,
-        queued: [],
-        mdFields: { volume: "17", chapter: "141", title: "Old title", translatedLanguage: "en", groups: ["4f1de6a2-f0c5-4ac5-bce5-02c7dbb67deb"] },
-        editable: true,
+        mangadex: null,
+        mangadexError: "no MangaDex credentials on this instance",
+        tasks: [],
+        links: {
+          chapter: `https://mangadex.org/chapter/${MD_CHAPTER}`,
+          manga: `https://mangadex.org/title/${MD_MANGA}`,
+          source: null,
+        },
+        actionsBlockedReason: null,
       },
     },
     {
@@ -368,49 +380,56 @@ describe("dashboard chapter views", () => {
 
     await goto(`#/chapters/${MD_CHAPTER}`);
     const view = text();
-    expect(view).toContain("Edit metadata");
+    // The three actions, each of which queues a task rather than writing.
+    expect(view).toContain("Edit metadata…");
+    expect(view).toContain("Mark unavailable…");
+    expect(view).toContain("Delete from MangaDex…");
+    // What the platform holds, what is already queued against it, and how it
+    // got to its current state — the three things the detail view joins.
+    expect(view).toContain("Sakamoto Days");
+    expect(view).toContain("Queued against this chapter");
     expect(view).toContain("Edit history");
-    // The archives this chapter appears in, and the history entry.
-    expect(view).toContain("UPLOADED");
-    expect(view).toContain("title → ");
   });
 
-  it("opens the correction form prefilled with what MangaDex currently holds", async () => {
+  /** The dialog's "Edit metadata…" button, once the detail view has drawn. */
+  async function openEditForm(): Promise<void> {
     await goto(`#/chapters/${MD_CHAPTER}`);
-    const button = [...doc.querySelectorAll("button")].find((b: { textContent: string }) =>
-      b.textContent === "Edit metadata",
+    const button = [...doc.querySelectorAll("button")].find(
+      (b: { textContent: string }) => b.textContent === "Edit metadata…",
     );
     expect(button).toBeTruthy();
     button.click();
     await settle();
+  }
+
+  it("opens the correction form prefilled with what MangaDex currently holds", async () => {
+    await openEditForm();
 
     const dialog = doc.getElementById("modal-body");
-    expect(dialog.textContent).toContain("does not change MangaDex directly");
-    expect(doc.getElementById("md-edit-chapter").value).toBe("141");
-    expect(doc.getElementById("md-edit-title").value).toBe("Old title");
-    expect(doc.getElementById("md-edit-translatedLanguage").value).toBe("en");
+    // The form is explicit that it queues rather than writes, because the whole
+    // point of the design is that core-uploader is the only writer.
+    expect(dialog.textContent).toContain("Only the fields you change are sent");
+    expect(doc.getElementById("chapter-edit-chapter").value).toBe("141");
+    expect(doc.getElementById("chapter-edit-title").value).toBe("Old title");
+    expect(doc.getElementById("chapter-edit-translatedLanguage").value).toBe("en");
   });
 
   it("sends only the fields that changed, as a MangaDex-shaped body", async () => {
-    await goto(`#/chapters/${MD_CHAPTER}`);
-    [...doc.querySelectorAll("button")]
-      .find((b: { textContent: string }) => b.textContent === "Edit metadata")
-      .click();
-    await settle();
+    await openEditForm();
 
-    doc.getElementById("md-edit-title").value = "Corrected title";
+    doc.getElementById("chapter-edit-title").value = "Corrected title";
     [...doc.querySelectorAll("#modal-body button")]
-      .find((b: { textContent: string }) => b.textContent === "Queue the correction")
+      .find((b: { textContent: string }) => b.textContent === "Queue the edit")
       .click();
     await settle();
 
     const call = win.fetch.mock.calls.find(
-      ([url]: [string]) => String(url).includes(`/chapters/${MD_CHAPTER}/edit`),
+      ([url, init]: [string, { method?: string }]) =>
+        String(url).includes(`/chapters/${MD_CHAPTER}`) && init?.method === "PATCH",
     );
     expect(call).toBeTruthy();
-    expect(call[1].method).toBe("POST");
-    // `volume` and `chapter` were left alone, so they are not in the body —
-    // a form that submitted all four would write "unchanged" edits into the
+    // `volume` and `chapter` were left alone, so they are not in the body — a
+    // form that submitted all of them would write "unchanged" edits into the
     // chapter's permanent history.
     expect(JSON.parse(call[1].body)).toEqual({ title: "Corrected title" });
   });

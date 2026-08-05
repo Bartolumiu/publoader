@@ -251,6 +251,95 @@ export class UploadTaskStore {
     return res === 1;
   }
 
+  /**
+   * Queue a chapter action an operator asked for, superseding a settled row.
+   *
+   * `enqueue` cannot serve this. Its ON CONFLICT DO NOTHING is what makes the
+   * processor idempotent, but it also means the (kind, dedupe_key) slot for a
+   * chapter is occupied FOREVER once the task completes — nothing deletes DONE
+   * rows — so a second operator action on the same chapter would silently do
+   * nothing. That is correct for the processor (it re-derives the same work
+   * every run) and wrong for a person who has just corrected a title and wants
+   * it pushed again.
+   *
+   * So a settled row is reset in place: same slot, new payload, PENDING, fresh
+   * attempt budget, due now. Which states count as settled is the whole safety
+   * property and it lives in the WHERE clause of the one statement:
+   *
+   *  - LEASED is excluded because an uploader is mid-flight against MangaDex.
+   *  - PENDING is excluded because the work is already queued; overwriting it
+   *    would change what a queued task does under an operator who is watching
+   *    the queue, and "it is already queued" is a better answer than a silent
+   *    rewrite.
+   *
+   * Both come back as null, and the caller reads the row afterwards purely to
+   * name the state in its refusal — never to decide whether to write.
+   *
+   * UPLOAD is not accepted, by type and at runtime: resetting a DONE UPLOAD row
+   * removes half of the double-upload guard (see REMOVABLE_STATES), and every
+   * chapter this is reachable from is already on MangaDex.
+   */
+  async requeueForChapter(
+    kind: Exclude<UploadTaskKind, "UPLOAD">,
+    dedupeKey: string,
+    chapter: unknown,
+    opts: { maxAttempts?: number } = {},
+  ): Promise<{ task: UploadTaskRow; superseded: boolean } | null> {
+    if (kind === ("UPLOAD" as UploadTaskKind)) {
+      throw new Error("requeueForChapter does not accept UPLOAD: it would re-arm a double upload");
+    }
+    const rows = await this.prisma.$queryRaw<(UploadTaskRow & { inserted: boolean })[]>(Prisma.sql`
+      INSERT INTO upload_tasks (id, kind, dedupe_key, chapter, state, attempt, max_attempts,
+                                not_before, created_at, updated_at)
+      VALUES (${randomUUID()}, ${kind}::"UploadTaskKind", ${dedupeKey},
+              ${JSON.stringify(chapter)}::jsonb, 'PENDING', 0,
+              coalesce(${opts.maxAttempts ?? null}::int, 5), now(), now(), now())
+      ON CONFLICT (kind, dedupe_key) DO UPDATE
+        SET chapter = EXCLUDED.chapter, state = 'PENDING', attempt = 0,
+            max_attempts = EXCLUDED.max_attempts, not_before = now(),
+            lease_id = NULL, lease_expires_at = NULL, last_error = NULL, updated_at = now()
+        WHERE upload_tasks.state IN ('DONE', 'FAILED', 'DEAD_LETTER')
+      -- xmax is 0 on a freshly inserted tuple and carries the updating
+      -- transaction id on one that took the DO UPDATE branch. It is the only
+      -- way to tell "queued" from "requeued" without a second statement, and
+      -- the difference matters: superseding a DONE row is worth saying out loud
+      -- in the response and in the audit trail.
+      RETURNING id, kind::text AS kind, dedupe_key AS "dedupeKey", state::text AS state,
+                attempt, max_attempts AS "maxAttempts", not_before AS "notBefore",
+                lease_id AS "leaseId", lease_expires_at AS "leaseExpiresAt",
+                last_error AS "lastError", created_at AS "createdAt",
+                updated_at AS "updatedAt", (xmax = 0) AS inserted
+    `);
+    const row = rows[0];
+    if (!row) return null;
+    const { inserted, ...task } = row;
+    return { task, superseded: !inserted };
+  }
+
+  /**
+   * Every queue row for one dedupe key, across kinds. For a chapter that is
+   * `mdChapterId` — the key EDIT, DELETE and UNAVAILABLE all use — so this
+   * answers "is anything already queued against this chapter?".
+   */
+  async forDedupeKey(dedupeKey: string): Promise<UploadTaskRow[]> {
+    return this.forDedupeKeys([dedupeKey]);
+  }
+
+  /**
+   * The same question for many chapters in one query, which is what a bulk
+   * action's dry run asks: it has to predict, for every chapter in the set,
+   * whether the write would be accepted — and doing that one chapter at a time
+   * would make the preview slower than the operation it previews.
+   */
+  async forDedupeKeys(dedupeKeys: readonly string[]): Promise<UploadTaskRow[]> {
+    if (dedupeKeys.length === 0) return [];
+    return this.prisma.$queryRaw<UploadTaskRow[]>(Prisma.sql`
+      SELECT ${TASK_COLUMNS} FROM upload_tasks t
+      WHERE t.dedupe_key = ANY(${[...dedupeKeys]}::text[])
+      ORDER BY t.updated_at DESC
+    `);
+  }
+
   /** Claim one due task of the given kind (SKIP LOCKED lease). */
   async claim(kind: UploadTaskKind, leaseTtlSeconds: number): Promise<UploadTask | null> {
     const leaseId = randomUUID();
