@@ -116,11 +116,15 @@
         <button id="nav-toggle" type="button" class="icon-button drawer-only"
                 aria-label="Open navigation" aria-expanded="false" aria-controls="sidebar"></button>
 
-        <!-- Live platform state, polled while the tab is visible. The nodes are
-             created here rather than in JS so the row reserves its height
-             before the first response lands. -->
+        <!-- The annunciator row: live platform state, polled while the tab is
+             visible. Each reading is its own cell, divided by a hairline, the
+             way a control-room strip is — the divider is what stops two
+             adjacent numbers reading as one value.
+
+             The nodes are created here rather than in JS so the row reserves
+             its height before the first response lands. -->
         <div id="summary" class="summary" aria-live="polite" aria-atomic="false">
-          <span id="pause-pill" class="pill">&nbsp;</span>
+          <span class="summary-item lamp"><span id="pause-pill" class="pill">&nbsp;</span></span>
           <span class="summary-item"><span id="sum-workers" class="summary-n">—</span><span class="summary-k">workers</span></span>
           <span class="summary-item"><span id="sum-jobs" class="summary-n">—</span><span class="summary-k">jobs in flight</span></span>
           <span class="summary-item"><span id="sum-queue" class="summary-n">—</span><span class="summary-k">uploads queued</span></span>

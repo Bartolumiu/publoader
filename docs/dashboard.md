@@ -441,6 +441,37 @@ failed. Consequences you will notice:
 - **Every list has an empty state that says what would put something in it**,
   rather than showing a blank table.
 
+### Visual language
+
+The console is styled after industrial HMI practice — ISA-101 is the written-down
+version of it — rather than after web dashboards. Four rules carry it, and
+`style.css` is commented with the reasoning behind each:
+
+- **Colour means abnormal.** The console is greyscale. Cyan, green, amber and red
+  are spent only on state: in-motion, normal, caution, fault. A button is not
+  coloured because it is important, only because it commits something — which is
+  why `primary` and `danger` are the only two that take one. If everything is
+  normal the screen is grey, and that is what makes a single amber chip findable.
+- **Numbers are instrument readings.** Every count, id, timestamp, hash and state
+  token is monospace with tabular figures, so a column lines up digit over digit
+  and a value changing under a ten-second poll does not reflow its neighbours.
+  Prose keeps the UI sans.
+- **Panels are faceplates.** Square corners, one hairline, a captioned header
+  strip, registration ticks at the corners. Nothing casts a shadow.
+- **Motion means something is happening.** The only things that move are the lamp
+  on a `busy` chip, the alarm pulse on the quarantine count, and the spinner on a
+  control with a request in flight. Placeholders are hatched and still — the
+  absence of a reading is not an event.
+
+One caption object — 10px, uppercase, tracked, dim — is used for every legend:
+panel headers, group headings, table headers, readout captions, badges. Anything
+wearing it is a label for something else and never content in its own right.
+
+The class contract at the foot of `style.css` lists every class the four scripts
+emit. Renaming one without the other is how a view silently loses its skin, so
+keep the two in step. There is a published mirror of the system — every preview
+inlines the real stylesheet — in the "Publoader Control Plane" design project.
+
 ### Responsiveness
 
 Usable down to a phone. The sidebar becomes a drawer; below 620px tables restack

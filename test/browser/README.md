@@ -49,6 +49,7 @@ So: **jsdom for behaviour, this for what the operator can see.** A change to
 | `verify-untracked.mjs` | The untracked queue and its detail/edit view. |
 | `verify-modules.mjs` | The two dynamically-imported destinations, Maintenance and Docs. |
 | `verify-features.mjs` | Worker→extension assignment, queue management, the tracked catalogue column and repoint, and the typed config editor. |
+| `shots.mjs` | Not an assertion suite. Signs in and screenshots every destination into `.shots/` (gitignored), so a change to `style.css` can be looked at rather than guessed about. Run it as `./test/browser/run.sh shots.mjs`. |
 
 ## Not covered
 
