@@ -17,12 +17,13 @@ not true, it is listed explicitly at the bottom of this page.
 
 ## Signing in
 
-Three methods, in the order you should prefer them:
+Four methods, in the order you should prefer them:
 
 | Method | For | Notes |
 |---|---|---|
-| Email + password | Day-to-day | Minimum 12 characters. An OWNER sets it from **Users → Accounts**, and anyone signed in can change their own from **the profile menu → Your account**. There is no self-service reset for a password you cannot sign in with. |
-| Discord | Teams already on Discord | Only shown when `DISCORD_CLIENT_ID` is configured. New accounts land unapproved and an OWNER must approve them — and only if self-signup is enabled. |
+| Email + password | Day-to-day | Minimum 12 characters. Anyone signed in sets or changes their own from **the profile menu → Your account**; an OWNER can also set one from **Users → Accounts**. There is no self-service reset for a password you cannot sign in with — use an emailed link instead. |
+| Emailed sign-in link | First sign-in, and forgotten passwords | Shown when `RESEND_API_KEY` is configured. Enter your address, click **Email me a sign-in link**. The link works once, expires (15 minutes when you asked for it, 72 hours for an invite), and is retired by any newer link or by setting a password. |
+| Discord | Teams already on Discord | Only shown when `DISCORD_CLIENT_ID` is configured. Can be *added* to an existing account from **Your account → Link my Discord account**, so one account signs in either way. New Discord accounts land unapproved and an OWNER must approve them — and only if self-signup is enabled. |
 | Admin token | Break-glass | The `ADMIN_TOKEN`, exchanged for a session cookie. Use it when the accounts table is the problem. It is never stored in the browser. |
 
 The session is an HttpOnly, `SameSite=Strict` cookie backed by a revocable row,
@@ -31,7 +32,44 @@ browser to forget. Sessions expire after `SESSION_TTL_MINUTES`; an OWNER can
 revoke any live one from the Users view.
 
 Login is rate limited to 5 attempts per minute per IP, and every rejected
-attempt is audited (`session.login.rejected`).
+attempt is audited (`session.login.rejected`). Emailed links get their own,
+tighter budget: 5 requests per IP in a burst then one every two minutes, and 3
+per *address* then one every five minutes, because each one sends real mail.
+
+### How the emailed link travels
+
+The link is `https://<dash>/#token=<secret>` — the secret is in the URL
+**fragment**, which browsers never send to a server. That keeps it out of
+core-api's request log, out of any proxy's access log, and out of `Referer`
+headers, and it means a mail-scanner that fetches the URL cannot burn a
+single-use token before its owner clicks it. The dashboard reads the fragment,
+posts it back, and strips it from the address bar.
+
+The trade-off: a mail gateway that rewrites links and drops fragments makes the
+link useless. If that is your environment, have an OWNER set passwords directly
+from **Users → Accounts** instead.
+
+### Linking Discord to an existing account
+
+Signing in with Discord already claims an existing account when Discord's
+**verified** email equals the account's. If yours differ, sign in by any method
+and use **Your account → Link my Discord account**: the session is the
+authorisation there, so the two addresses need not match. One Discord identity
+can belong to only one operator account; unlink it from the first account
+(**Your account → Unlink Discord**, or **Users → Accounts** for an OWNER)
+before attaching it elsewhere.
+
+Unlinking is refused when Discord is the only way into that account — no
+password set, and no mailer configured. Removing the last credential is
+deletion with extra steps, and deletion has its own button.
+
+### Invites
+
+**Users → Invite** creates an approved account and emails it a sign-in link in
+one action. The invitee sets their own password once they are in; until they
+do, another emailed link is their only way back. If the mail fails, the account
+is still created and the dashboard says so — use **Email sign-in link** on that
+row to try again.
 
 ---
 

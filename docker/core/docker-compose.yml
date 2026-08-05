@@ -254,6 +254,14 @@ services:
       MAP_SYNC_INTERVAL_HOURS: ${MAP_SYNC_INTERVAL_HOURS:-168}
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
+      # --- transactional email (core-api only) -----------------------------
+      # Emailed sign-in links. Blank key = the feature is off, and an invited
+      # account then has no way in until an owner sets a password for it.
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      MAIL_FROM: ${MAIL_FROM:-publoader <onboarding@resend.dev>}
+      MAIL_REPLY_TO: ${MAIL_REPLY_TO:-}
+      MAGIC_LINK_TTL_MINUTES: ${MAGIC_LINK_TTL_MINUTES:-15}
+      INVITE_TTL_HOURS: ${INVITE_TTL_HOURS:-72}
     expose:
       # 8100: the tunnel's origin (API, dashboard, /healthz, /readyz).
       # 8104: /metrics + the same health probes, for Prometheus. Reachable from

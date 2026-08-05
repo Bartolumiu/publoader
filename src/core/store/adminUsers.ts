@@ -105,11 +105,23 @@ export class AdminUserStore {
 
   /**
    * Invite: an approved account with no credentials yet. The invitee gets in
-   * by linking Discord or by an owner setting a password for them.
+   * with the emailed sign-in link, by linking Discord, or by an owner setting
+   * a password for them.
    */
   invite(email: string, role: AdminRole): Promise<AdminUser> {
     return this.prisma.adminUser.create({
       data: { email: email.trim().toLowerCase(), role, approved: true },
+    });
+  }
+
+  /**
+   * Self-signup by email address. Unapproved and non-privileged by
+   * construction, exactly like the Discord path: mailbox control is evidence
+   * of an address, never of authorisation.
+   */
+  createPendingSignup(email: string): Promise<AdminUser> {
+    return this.prisma.adminUser.create({
+      data: { email: email.trim().toLowerCase(), role: "ADMIN", approved: false },
     });
   }
 
@@ -161,6 +173,18 @@ export class AdminUserStore {
     return this.prisma.adminUser.update({
       where: { id },
       data: { discordId, discordUsername },
+    });
+  }
+
+  /**
+   * Detach Discord from an account. The reverse of `linkDiscord`, and the
+   * thing that makes linking safe to offer: a credential you cannot remove is
+   * one people are right to hesitate before adding.
+   */
+  async unlinkDiscord(id: string): Promise<AdminUser> {
+    return this.prisma.adminUser.update({
+      where: { id },
+      data: { discordId: null, discordUsername: null },
     });
   }
 

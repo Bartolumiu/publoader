@@ -307,13 +307,43 @@ At startup core-api idempotently ensures an `OWNER` account exists for
 credentials yet. It is seeded **without** a password, so first sign-in is:
 
 1. Open `/`, choose "Use the admin token instead", sign in with `ADMIN_TOKEN`.
+   (With `RESEND_API_KEY` configured you can instead enter the owner address
+   and click **Email me a sign-in link** — the seeded owner is a real account,
+   so the link reaches it.)
 2. Go to **Users**, click **Set password** on the owner row (minimum 12
    characters, scrypt-hashed at rest).
 3. Sign out and back in with email + password.
 
 From there, **Users → Invite** creates further accounts. An invited account is
-approved but has no credentials: they get in either by an owner setting a
-password for them, or by linking Discord with that email address.
+approved but has no password: it gets in with the sign-in link emailed by the
+invite itself, by linking Discord with that email address, or by an owner
+setting a password for it.
+
+### Emailed sign-in links (optional, but invites need it)
+
+```bash
+# .env
+RESEND_API_KEY=re_...
+MAIL_FROM=publoader <no-reply@ardax.dev>   # domain must be verified in Resend
+MAIL_REPLY_TO=                              # optional
+MAGIC_LINK_TTL_MINUTES=15                   # link asked for from the login page
+INVITE_TTL_HOURS=72                         # invite / approval link
+```
+
+Leave `RESEND_API_KEY` blank and the feature is off: the sign-in page hides the
+button, `POST /api/v1/admin/session/magic-link/request` answers 503, and an
+invited account has no way in until an owner sets a password for it. core-api
+warns at boot when it is unset.
+
+`MAIL_FROM` must be on a domain verified in Resend, and the `from` domain has
+to match that verified domain exactly. The default
+(`publoader <onboarding@resend.dev>`) is Resend's sandbox sender: it only
+delivers to the Resend account holder's own inbox, which is enough for a smoke
+test and useless for real invites.
+
+Links are single-use rows in `login_tokens`, stored as sha256 like sessions.
+Issuing a new link retires the previous one, redeeming one retires the rest,
+and setting a password retires all of them.
 
 ### Sessions
 
@@ -374,7 +404,20 @@ How a Discord login is matched, in order:
 
 Self-signup is **off by default**. Turn it on from **Users → Self-signup**, and
 remember that it only creates accounts — an owner still has to approve each one
-before it can sign in.
+before it can sign in. With `RESEND_API_KEY` set, the same gate governs signup
+by email address from the sign-in page; approving such an account emails it a
+sign-in link.
+
+Rule 2 only fires when the two addresses are equal, which leaves anyone whose
+Discord email differs from their operator email unable to hold both
+credentials. For them there is the other direction: sign in by any method, then
+**Your account → Link my Discord account**
+(`GET /api/v1/admin/oauth/discord/link`). The live session is the
+authorisation, so the addresses need not match; the round-trip is bound to the
+account that started it, and a Discord identity already attached to another
+account is refused with 409. Unlink with
+`DELETE /api/v1/admin/users/:id/discord` (self, or an OWNER for anyone), which
+is refused when it would leave the account with no password and no mailer.
 
 Nothing from Discord is persisted beyond id, username and email, and neither
 the authorisation code nor the access token is ever logged.
