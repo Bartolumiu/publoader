@@ -1,5 +1,36 @@
-/* Operator dashboard. Dark, dense, system fonts only — no external assets,
-   because the page is served under a CSP that forbids other origins. */
+/* ==========================================================================
+   publoader control plane — operator console
+   ==========================================================================
+
+   The visual language is borrowed from industrial HMI/SCADA practice (ISA-101
+   is the written-down version of it: Ignition, WinCC, FactoryTalk and every
+   control room built to that standard look like this) rather than from web
+   dashboards. Four rules carry almost all of it:
+
+   1. COLOUR MEANS ABNORMAL. The console is greyscale. Green, amber, red and
+      cyan are spent only on state — running, caution, fault, in-motion. A
+      button is not coloured because it is important; it is coloured because it
+      commits something. This is why an amber chip in a table of greys is
+      findable across a room, and why the previous "blue everywhere" scheme
+      could not do that.
+
+   2. NUMBERS ARE INSTRUMENT READINGS. Every count, id, timestamp, hash and
+      state token is monospace with tabular figures, so a column of them lines
+      up digit-over-digit and a changing value does not reflow its neighbours.
+      Prose stays in the UI sans.
+
+   3. PANELS ARE FACEPLATES. Square corners, one hairline, a captioned header
+      strip, registration ticks in the corners. No shadows, no gradients, no
+      rounded cards floating on a background — a faceplate is fixed to a panel.
+
+   4. DENSITY IS THE POINT. An operator compares rows; whitespace between them
+      is distance the eye has to travel. Spacing is tight and on a 4px grid.
+
+   Constraints that shaped the file: served under a CSP that forbids other
+   origins, so system fonts only and no external assets. Every class here is
+   emitted by app.js / sysops.js / docs.js — see the class contract at the foot
+   of this file before renaming anything.
+   ========================================================================== */
 
 /* --------------------------------------------------------------------------
    The `hidden` attribute, made to actually hide.
@@ -22,25 +53,60 @@
 }
 
 :root {
-  --bg: #0d1117;
-  --panel: #151b23;
-  --panel-2: #1c232e;
-  --panel-3: #222b37;
-  --line: #2a323d;
-  --line-2: #384250;
-  --text: #e6edf3;
-  --dim: #8d97a5;
-  --dimmer: #6b7280;
-  --accent: #4f9cf9;
-  --accent-dim: #234670;
-  --ok: #3fb950;
-  --bad: #f85149;
-  --warn: #d29922;
-  --radius: 10px;
+  /* -- surfaces. Desaturated blue-black, the way a night-mode console reads.
+        Four steps only: deck, panel, raised, sunken. More than that and the
+        depth stops meaning anything. */
+  --deck: #090c10;
+  --rail: #06080b;
+  --panel: #10141a;
+  --panel-2: #161b23;
+  --panel-3: #1e242e;
+  --sunken: #05070a;
+
+  /* -- rules. Hairlines do the work shadows would do elsewhere. */
+  --line: #212733;
+  --line-2: #2d3542;
+  --line-3: #3c4756;
+
+  /* -- text */
+  --text: #dce2e9;
+  --dim: #8c96a3;
+  --dimmer: #616b79;
+
+  /* -- state. The only saturated colour in the console.
+        cyan  = in motion / selected / interactive
+        green = normal, running, healthy
+        amber = caution, needs an operator eventually
+        red   = fault, needs an operator now */
+  --accent: #3ab5d2;
+  --accent-2: #1c5c6d;
+  --accent-bg: #0b2731;
+  --ok: #4cae63;
+  --ok-2: #244a2e;
+  --ok-bg: #0e2114;
+  --warn: #d9a12c;
+  --warn-2: #4d3d15;
+  --warn-bg: #211a08;
+  --bad: #e15a4e;
+  --bad-2: #572622;
+  --bad-bg: #24100e;
+
+  /* -- shape. Square. 2px is the largest radius in the console and exists only
+        so 1px hairlines do not look chipped at the corners. */
+  --radius: 2px;
+  --radius-sm: 1px;
+
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  --nav-w: 232px;
-  --topbar-h: 56px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --nav-w: 228px;
+  --topbar-h: 52px;
+
+  /* Micro-label: the uppercase 10px caption used on panel headers, group
+     headings, table headers and annunciator legends. Declared once so every
+     caption in the console is unmistakably the same object. */
+  --cap-size: 10px;
+  --cap-track: 0.11em;
 }
 
 * {
@@ -57,9 +123,9 @@ body {
 
 body {
   margin: 0;
-  background: var(--bg);
+  background: var(--deck);
   color: var(--text);
-  font: 14px/1.55 var(--font);
+  font: 13px/1.5 var(--font);
   -webkit-text-size-adjust: 100%;
 }
 
@@ -73,6 +139,7 @@ h4 {
 
 a {
   color: var(--accent);
+  text-underline-offset: 2px;
 }
 
 .dim {
@@ -80,7 +147,7 @@ a {
 }
 
 .small {
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .grow {
@@ -98,10 +165,12 @@ a {
   margin: 8px 0 0;
 }
 
+/* Focus is a hard cyan box, not a soft glow: on a console the operator must be
+   able to tell where the keyboard is from a metre away. */
 :where(button, input, select, textarea, a, [tabindex]):focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
-  border-radius: 4px;
+  border-radius: 0;
 }
 
 .skip-link {
@@ -111,7 +180,6 @@ a {
   z-index: 100;
   background: var(--panel);
   border: 1px solid var(--accent);
-  border-radius: 0 0 8px 0;
   padding: 10px 14px;
 }
 
@@ -129,6 +197,25 @@ a {
   }
 }
 
+/* ---- the caption ---------------------------------------------------------
+   One object, used for every legend in the console. Anything wearing it is a
+   label for something else and never content in its own right. */
+
+.card > h2,
+.card h3,
+.nav-group h2,
+.summary-k,
+.badge,
+.doc-sidebar h2,
+th {
+  font-size: var(--cap-size);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--cap-track);
+  color: var(--dim);
+  font-family: var(--font);
+}
+
 /* ---- sign-in ------------------------------------------------------------ */
 
 .login-layer {
@@ -136,16 +223,30 @@ a {
   place-items: center;
   min-height: 100dvh;
   padding: 24px 16px;
+  /* The sign-in deck carries the plotter grid on its own, since there is no
+     shell behind it yet. */
+  background:
+    linear-gradient(var(--line) 1px, transparent 1px) 0 0 / 100% 28px,
+    linear-gradient(90deg, var(--line) 1px, transparent 1px) 0 0 / 28px 100%,
+    var(--deck);
+  background-blend-mode: soft-light, soft-light, normal;
 }
 
 .login {
-  width: min(420px, 100%);
+  width: min(400px, 100%);
 }
 
 .login-brand {
-  font-size: 15px;
-  letter-spacing: 0.3px;
-  margin-bottom: 14px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.login-brand .dim {
+  letter-spacing: var(--cap-track);
 }
 
 .login input {
@@ -153,7 +254,7 @@ a {
 }
 
 .login form > button {
-  margin-top: 14px;
+  margin-top: 16px;
   width: 100%;
 }
 
@@ -183,7 +284,7 @@ a {
 }
 
 body.nav-collapsed {
-  --nav-w: 64px;
+  --nav-w: 56px;
 }
 
 /* ---- sidebar ------------------------------------------------------------ */
@@ -196,9 +297,8 @@ body.nav-collapsed {
   height: 100dvh;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  background: #0a0e14;
-  border-right: 1px solid var(--line);
+  background: var(--rail);
+  border-right: 1px solid var(--line-2);
   overflow: hidden auto;
   overscroll-behavior: contain;
 }
@@ -206,48 +306,51 @@ body.nav-collapsed {
 .sidebar-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   height: var(--topbar-h);
-  padding: 0 14px;
+  padding: 0 12px;
   flex: 0 0 auto;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--line-2);
 }
 
+/* The unit tag. Square, mono, hairline — a stencilled asset label, not a logo. */
 .brand {
   display: grid;
   place-items: center;
   width: 26px;
-  height: 26px;
+  height: 22px;
   flex: 0 0 auto;
-  border-radius: 7px;
-  background: var(--accent-dim);
-  color: var(--text);
-  font-size: 12px;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-2);
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .brand-name {
+  font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.2px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
   white-space: nowrap;
 }
 
 .nav {
   flex: 1 1 auto;
-  padding: 10px 8px;
+  padding: 6px 0 10px;
 }
 
 .nav-group + .nav-group {
-  margin-top: 14px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
 }
 
 .nav-group h2 {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.9px;
-  color: var(--dimmer);
-  padding: 0 8px 6px;
+  padding: 8px 12px 5px;
 }
 
 .nav ul {
@@ -259,29 +362,31 @@ body.nav-collapsed {
 .nav a {
   display: flex;
   align-items: center;
-  gap: 10px;
-  /* 40px keeps the target usable with a thumb without loosening the desktop
-     rhythm too much. */
-  min-height: 40px;
-  padding: 0 9px;
-  border-radius: 8px;
+  gap: 9px;
+  /* 34px is dense for a console; the drawer breakpoint below lifts it back to a
+     thumb-sized target where there is no pointer. */
+  min-height: 34px;
+  padding: 0 12px;
+  /* The bar the selected destination fills in. Reserved on every row so nothing
+     shifts sideways when the selection moves. */
+  border-left: 3px solid transparent;
   color: var(--dim);
   text-decoration: none;
   white-space: nowrap;
 }
 
 .nav a:hover {
-  background: var(--panel-2);
+  background: var(--panel);
   color: var(--text);
 }
 
 /* The current destination has to be unmistakable, so it is marked three ways:
-   filled, brighter text, and a left rule. `aria-current` is the source of
+   filled, brighter text, and the left bar lit. `aria-current` is the source of
    truth — the styling keys off it, so the two cannot drift. */
 .nav a[aria-current="page"] {
-  background: var(--panel-3);
+  background: var(--panel-2);
+  border-left-color: var(--accent);
   color: var(--text);
-  box-shadow: inset 2px 0 0 var(--accent);
   font-weight: 600;
 }
 
@@ -291,38 +396,65 @@ body.nav-collapsed {
 
 .nav-icon {
   flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   color: var(--dimmer);
 }
 
+/* An alarm count riding the menu. Square, mono, and slowly pulsing: a number
+   that appears here is a fault someone has to clear, and it should catch a
+   glance from outside the operator's focus. */
 .nav-count {
   margin-left: auto;
-  font-size: 11px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: var(--dim);
   background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 0 7px;
+  border: 1px solid var(--line-2);
+  padding: 0 5px;
+  min-width: 20px;
+  text-align: center;
 }
 
 .nav-count.bad {
   color: var(--bad);
-  border-color: #5a2a28;
+  background: var(--bad-bg);
+  border-color: var(--bad-2);
+  animation: annunciate 2.4s ease-in-out infinite;
+}
+
+@keyframes annunciate {
+  50% {
+    background: var(--bad-2);
+    color: #fff;
+  }
 }
 
 .sidebar-foot {
   flex: 0 0 auto;
-  padding: 8px;
+  padding: 6px 8px;
   border-top: 1px solid var(--line);
 }
 
 #nav-collapse {
   width: 100%;
   justify-content: flex-start;
-  gap: 10px;
-  color: var(--dim);
+  gap: 9px;
+  background: none;
+  border-color: transparent;
+  color: var(--dimmer);
+}
+
+#nav-collapse:hover:not(:disabled) {
+  background: var(--panel);
+  border-color: var(--line-2);
+  color: var(--text);
+}
+
+body.nav-collapsed #nav-collapse .nav-icon {
+  transform: rotate(180deg);
 }
 
 /* Collapsed: icons only. Labels are removed from the accessibility tree along
@@ -341,17 +473,20 @@ body.nav-collapsed #nav-collapse {
   padding: 0;
 }
 
-body.nav-collapsed .nav-group + .nav-group {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
+body.nav-collapsed .sidebar-head {
+  justify-content: center;
+  padding: 0;
 }
 
 .nav-scrim {
   display: none;
 }
 
-/* ---- topbar ------------------------------------------------------------- */
+/* ---- topbar --------------------------------------------------------------
+   The annunciator row: the four numbers an operator watches without being
+   asked to look, plus the run/pause lamp. Opaque, not translucent — a value
+   read through a blur of the content scrolling underneath it is a value you
+   cannot trust. */
 
 .topbar {
   grid-area: topbar;
@@ -359,36 +494,58 @@ body.nav-collapsed .nav-group + .nav-group {
   top: 0;
   z-index: 6;
   display: flex;
-  align-items: center;
-  gap: 14px;
+  align-items: stretch;
+  gap: 0;
   min-height: var(--topbar-h);
-  padding: 8px 18px;
-  background: color-mix(in srgb, var(--bg) 92%, transparent);
-  backdrop-filter: blur(6px);
-  border-bottom: 1px solid var(--line);
+  background: var(--rail);
+  border-bottom: 1px solid var(--line-2);
 }
 
 .summary {
   display: flex;
-  align-items: center;
-  gap: 6px 18px;
+  align-items: stretch;
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
 }
 
+/* Each reading sits in its own cell, divided by a hairline. Cells, not gaps:
+   the boundary is what stops two adjacent numbers reading as one. */
 .summary-item {
   display: flex;
   flex-direction: column;
-  line-height: 1.25;
-  min-width: 54px;
+  justify-content: center;
+  gap: 1px;
+  padding: 0 14px;
+  min-width: 62px;
+  border-right: 1px solid var(--line);
+  /* Never shrink. A flex item allowed below its content width does not clip, it
+     spills — which on a phone put the run/pause lamp on top of the worker count.
+     Fixed cells overflow `.summary`, which hides them, so a narrow strip loses
+     its last reading cleanly instead of printing two on top of each other. */
+  flex: 0 0 auto;
+}
+
+/* The strip ends with the last reading, not with a divider into empty space. */
+.summary-item:last-of-type {
+  border-right: none;
+}
+
+/* The run/pause lamp sits in a cell of its own so it gets the same gutters as
+   a reading, but it is a lamp rather than a number and needs no width floor. */
+.summary-item.lamp {
+  min-width: 0;
+  padding: 0 12px;
 }
 
 .summary-n {
-  font-size: 14px;
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
+  line-height: 1.15;
   /* The row must not reshuffle when a number replaces the placeholder. */
-  min-height: 18px;
+  min-height: 17px;
 }
 
 .summary-n.bad {
@@ -396,20 +553,30 @@ body.nav-collapsed .nav-group + .nav-group {
 }
 
 .summary-k {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--dimmer);
   white-space: nowrap;
+  color: var(--dimmer);
 }
 
 .summary-item.wide {
-  min-width: 150px;
+  min-width: 190px;
+}
+
+.summary-item.wide .summary-n {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .topbar-end {
   position: relative;
   flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 0 10px 0 12px;
+  border-left: 1px solid var(--line);
 }
 
 .profile {
@@ -421,9 +588,9 @@ body.nav-collapsed .nav-group + .nav-group {
   max-width: 260px;
 }
 
-.profile:hover {
-  border-color: var(--line);
-  background: var(--panel-2);
+.profile:hover:not(:disabled) {
+  border-color: var(--line-2);
+  background: var(--panel);
 }
 
 .profile-name {
@@ -433,44 +600,44 @@ body.nav-collapsed .nav-group + .nav-group {
 }
 
 .badge {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
   border: 1px solid var(--line-2);
-  border-radius: 999px;
-  padding: 1px 7px;
+  padding: 1px 5px;
   color: var(--dim);
+  background: var(--panel-2);
 }
 
 .badge.owner {
   color: var(--accent);
-  border-color: var(--accent-dim);
+  border-color: var(--accent-2);
+  background: var(--accent-bg);
 }
 
 .badge.contributor {
   color: var(--warn);
-  border-color: #4a3c1d;
+  border-color: var(--warn-2);
+  background: var(--warn-bg);
 }
 
 .menu {
   position: absolute;
-  right: 0;
-  top: calc(100% + 6px);
+  right: 8px;
+  top: calc(100% - 1px);
   z-index: 20;
   min-width: 240px;
   background: var(--panel);
-  border: 1px solid var(--line-2);
-  border-radius: var(--radius);
-  padding: 6px;
-  box-shadow: 0 12px 32px rgb(0 0 0 / 45%);
+  border: 1px solid var(--line-3);
+  padding: 4px;
 }
 
 .menu-detail {
-  margin: 0;
-  padding: 8px 10px;
-  font-size: 12px;
+  margin: 0 0 4px;
+  padding: 8px 9px;
+  font-family: var(--mono);
+  font-size: 11px;
   color: var(--dim);
-  border-bottom: 1px solid var(--line);
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  overflow-wrap: anywhere;
 }
 
 .menu-item {
@@ -478,21 +645,30 @@ body.nav-collapsed .nav-group + .nav-group {
   width: 100%;
   text-align: left;
   background: none;
-  border: none;
-  border-radius: 7px;
-  padding: 8px 10px;
-  min-height: 36px;
+  border: 1px solid transparent;
+  padding: 7px 9px;
+  min-height: 32px;
 }
 
-.menu-item:hover {
+.menu-item:hover:not(:disabled) {
   background: var(--panel-2);
+  border-color: var(--line-2);
 }
 
 .menu-item.danger {
   color: var(--bad);
+  background: none;
 }
 
-/* ---- content ------------------------------------------------------------ */
+.menu-item.danger:hover:not(:disabled) {
+  background: var(--bad-bg);
+  border-color: var(--bad-2);
+}
+
+/* ---- content -------------------------------------------------------------
+   The plotter grid. 28px hairlines at a few percent, which you do not see and
+   would notice the absence of: it gives the panels something to sit on and
+   stops a half-empty view reading as a broken one. */
 
 .content {
   grid-area: content;
@@ -504,40 +680,59 @@ body.nav-collapsed .nav-group + .nav-group {
   /* The shell does not scroll, so this is the scroll container. */
   overflow: hidden auto;
   overscroll-behavior: contain;
-  padding: 20px;
+  padding: 16px 16px 48px;
+  background-color: var(--deck);
+  background-image:
+    linear-gradient(rgb(255 255 255 / 2.6%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 2.6%) 1px, transparent 1px);
+  background-size: 28px 28px;
+  background-attachment: local;
 }
 
 .page-head {
   display: flex;
-  align-items: flex-end;
+  align-items: baseline;
   flex-wrap: wrap;
-  gap: 4px 14px;
-  margin-bottom: 14px;
+  gap: 2px 12px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line-2);
 }
 
 .page-head h1 {
-  font-size: 19px;
-  letter-spacing: 0.2px;
+  font-size: 15px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
 }
 
 .page-head .crumb {
-  font-size: 12px;
-  color: var(--dimmer);
   width: 100%;
+  margin: 0 0 3px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--dimmer);
 }
 
 .page-head .blurb {
   color: var(--dim);
-  font-size: 13px;
+  font-size: 12px;
   margin: 0;
 }
+
+/* ---- tabs ----------------------------------------------------------------
+   A bank of selector legends, not browser tabs: one strip, hairline dividers,
+   the selected one filled and lit along its bottom edge. */
 
 .tabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  border-bottom: 1px solid var(--line);
-  margin-bottom: 18px;
+  gap: 0;
+  border: 1px solid var(--line-2);
+  background: var(--panel);
+  margin-bottom: 14px;
+  width: fit-content;
+  max-width: 100%;
 }
 
 .tabs:empty {
@@ -546,35 +741,46 @@ body.nav-collapsed .nav-group + .nav-group {
 
 .tabs button {
   background: none;
-  border: 1px solid transparent;
+  border: none;
+  border-right: 1px solid var(--line);
   border-bottom: 2px solid transparent;
-  border-radius: 7px 7px 0 0;
   color: var(--dim);
-  min-height: 38px;
-  margin-bottom: -1px;
+  min-height: 32px;
+  padding: 0 14px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
 }
 
-.tabs button:hover {
+.tabs button:last-child {
+  border-right: none;
+}
+
+.tabs button:hover:not(:disabled) {
+  background: var(--panel-2);
   color: var(--text);
 }
 
 .tabs button[aria-selected="true"] {
+  background: var(--panel-3);
   color: var(--text);
   border-bottom-color: var(--accent);
   font-weight: 600;
 }
 
-/* ---- controls ----------------------------------------------------------- */
+/* ---- controls ------------------------------------------------------------
+   Panel legends. Square, hairline, no fill by default — a button is a switch,
+   and a switch is not coloured unless throwing it does something. */
 
 button {
   background: var(--panel-2);
   color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 6px 11px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 5px 11px;
   font: inherit;
-  font-size: 13px;
-  min-height: 32px;
+  font-size: 12px;
+  min-height: 30px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -583,38 +789,69 @@ button {
 }
 
 button:hover:not(:disabled) {
-  border-color: var(--accent);
+  background: var(--panel-3);
+  border-color: var(--line-3);
 }
 
 button:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
   cursor: default;
 }
 
+/* The two that commit something wear a console legend: uppercase, tracked, and
+   the only buttons in the file allowed a colour. */
+button.primary,
+button.danger {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
 button.primary {
-  background: #16324f;
-  border-color: #26557f;
+  background: var(--accent-bg);
+  border-color: var(--accent-2);
+  color: var(--accent);
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--accent-2);
+  color: #eafaff;
 }
 
 button.danger {
-  background: #3a1d1d;
-  border-color: #5a2a28;
+  background: var(--bad-bg);
+  border-color: var(--bad-2);
+  color: var(--bad);
+}
+
+button.danger:hover:not(:disabled) {
+  background: var(--bad-2);
+  color: #fff;
 }
 
 button.ghost {
   background: none;
+  border-color: transparent;
+  color: var(--dim);
+}
+
+button.ghost:hover:not(:disabled) {
+  background: var(--panel-2);
+  border-color: var(--line-2);
+  color: var(--text);
 }
 
 .icon-button {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   flex: 0 0 auto;
 }
 
 .icon-button svg {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
 }
 
 /* A control that is running. The label is kept — swapping it for "…" loses the
@@ -626,9 +863,9 @@ button[data-pending="true"] {
 
 button[data-pending="true"]::after {
   content: "";
-  width: 11px;
-  height: 11px;
-  border: 2px solid var(--line-2);
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--line-3);
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
@@ -640,37 +877,89 @@ button[data-pending="true"]::after {
   }
 }
 
+/* Fields are sunken: cut into the panel rather than raised off it, which is how
+   an editable value reads as different from a legend. */
 input,
 select,
 textarea {
-  background: #0b1017;
+  background: var(--sunken);
   color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 6px 9px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 5px 8px;
   font: inherit;
-  font-size: 13px;
-  min-height: 32px;
+  font-size: 12px;
+  min-height: 30px;
   max-width: 100%;
+}
+
+input:hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: var(--line-3);
+}
+
+/* Values are data, so they are set in the instrument face. Not selects: a
+   select renders its options in the platform's own font anyway. */
+input:not([type="checkbox"]):not([type="radio"]),
+textarea {
+  font-family: var(--mono);
 }
 
 input[aria-invalid="true"] {
   border-color: var(--bad);
+  background: var(--bad-bg);
 }
 
 textarea {
-  font-family: var(--mono);
   font-size: 12px;
   width: 100%;
   min-height: 180px;
   resize: vertical;
+  line-height: 1.5;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+  min-height: 0;
+}
+
+/* The one control the UA still paints in its own light-grey chrome. Left alone
+   it is the brightest object on the Extensions page, which puts the eye on
+   "Choose file" rather than on the bundle about to replace what every worker
+   runs. */
+input[type="file"] {
+  padding: 4px 7px;
+  font-size: 11.5px;
+}
+
+input[type="file"]::file-selector-button {
+  font: inherit;
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 3px 9px;
+  margin-right: 9px;
+  cursor: pointer;
+}
+
+input[type="file"]::file-selector-button:hover {
+  background: var(--panel-3);
+  border-color: var(--line-3);
 }
 
 label {
   display: block;
   color: var(--dim);
-  font-size: 12px;
-  margin: 10px 0 4px;
+  font-size: 11px;
+  margin: 10px 0 3px;
 }
 
 /* Labels default to their own line, which is right above an input and wrong
@@ -683,8 +972,8 @@ label.inline {
 
 .field-error {
   color: var(--bad);
-  font-size: 12px;
-  margin: 4px 0 0;
+  font-size: 11px;
+  margin: 3px 0 0;
   min-height: 1.1em;
 }
 
@@ -694,8 +983,9 @@ label.inline {
   color: var(--accent);
   padding: 0;
   min-height: 0;
-  font-size: 13px;
+  font-size: 12px;
   text-decoration: underline;
+  text-underline-offset: 2px;
   cursor: pointer;
   display: inline;
   text-align: left;
@@ -705,15 +995,17 @@ label.inline {
   display: block;
   text-align: center;
   background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 7px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  color: var(--text);
   padding: 7px 11px;
-  font-size: 13px;
+  font-size: 12px;
   text-decoration: none;
 }
 
 .button-link:hover {
-  border-color: var(--accent);
+  background: var(--panel-3);
+  border-color: var(--line-3);
 }
 
 .button-link.inline {
@@ -724,95 +1016,154 @@ input[type="search"] {
   min-width: 240px;
 }
 
-/* ---- layout blocks ------------------------------------------------------ */
+/* ---- panels --------------------------------------------------------------
+   A faceplate: hairline box, captioned header strip, registration ticks at the
+   corners. The ticks are the cheapest possible signal that this is an
+   instrument panel and not a content card, and they cost no layout. */
 
 .card {
+  position: relative;
   background: var(--panel);
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-2);
   border-radius: var(--radius);
-  padding: 16px;
-  margin-bottom: 16px;
-}
-
-.card > h2 {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.7px;
-  color: var(--dim);
+  padding: 12px;
   margin-bottom: 12px;
 }
 
+.card::before,
+.card::after {
+  content: "";
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--accent-2);
+  pointer-events: none;
+}
+
+.card::before {
+  top: -1px;
+  left: -1px;
+  border-width: 1px 0 0 1px;
+}
+
+.card::after {
+  bottom: -1px;
+  right: -1px;
+  border-width: 0 1px 1px 0;
+}
+
+/* The caption strip. Full-bleed against the panel edge — negative margins pull
+   it out to the border so it reads as part of the faceplate, not as a heading
+   floating inside it. */
+.card > h2 {
+  margin: -12px -12px 12px;
+  padding: 7px 12px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line-2);
+}
+
 .card h3 {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--dim);
-  margin: 18px 0 8px;
+  margin: 16px 0 7px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line);
+}
+
+.card > h2 + h3,
+.card > h3:first-child {
+  margin-top: 0;
 }
 
 .grid {
   display: grid;
-  gap: 14px;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
 }
 
 .grid.tight {
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
 }
 
 .row {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
   align-items: center;
 }
 
 .row.tight {
-  gap: 4px;
+  gap: 3px;
 }
 
 .row.end {
   justify-content: flex-end;
 }
 
+/* ---- readouts ------------------------------------------------------------
+   A gauge face: big mono value over a caption, sunken into the panel, with the
+   value on the baseline the eye scans. */
+
 .stat {
-  background: var(--panel-2);
+  background: var(--sunken);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border-left: 2px solid var(--line-3);
+  border-radius: var(--radius);
+  padding: 8px 10px;
   min-width: 0;
 }
 
 .stat .n {
-  font-size: 22px;
+  font-family: var(--mono);
+  font-size: 21px;
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
-  min-height: 30px;
+  line-height: 1.2;
+  min-height: 26px;
 }
 
 .stat .k {
   color: var(--dim);
-  font-size: 12px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: var(--cap-track);
 }
 
+/* A label/value ledger. The key column is sized to content so the values start
+   on one rule, which is what makes a column of them scannable. */
 .defs {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
-  gap: 6px 16px;
+  gap: 0;
   margin: 0;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .defs dt {
   color: var(--dim);
+  padding: 4px 16px 4px 0;
+  border-bottom: 1px solid var(--line);
 }
 
 .defs dd {
   margin: 0;
   min-width: 0;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 11.5px;
   overflow-wrap: anywhere;
 }
 
-/* ---- data --------------------------------------------------------------- */
+/* Prose inside a value should not be set as data. */
+.defs dd > p,
+.defs dd > .dim {
+  font-family: var(--font);
+  font-size: 12px;
+}
+
+/* ---- data ----------------------------------------------------------------
+   A log strip. Uppercase captions on a fixed header rule, hairline rows, mono
+   cells, and a cyan gutter on the row under the pointer so the eye can track
+   across twelve columns without losing the line. */
 
 .scroll {
   overflow-x: auto;
@@ -824,129 +1175,237 @@ input[type="search"] {
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 12px;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
 }
 
 th,
 td {
   text-align: left;
-  padding: 7px 9px;
+  padding: 5px 9px;
   border-bottom: 1px solid var(--line);
   vertical-align: top;
 }
 
 th {
-  color: var(--dim);
-  font-weight: 500;
   white-space: nowrap;
   position: sticky;
   top: 0;
-  background: var(--panel);
+  z-index: 1;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line-2);
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+/* The row cursor. Two marks, because on a wide table a background change alone
+   is easy to lose: the row lightens and a cyan bar lights up in the gutter. */
+tbody tr {
+  box-shadow: inset 2px 0 0 transparent;
+}
+
+tbody tr:hover {
+  background: var(--panel-2);
+  box-shadow: inset 2px 0 0 var(--accent-2);
 }
 
 td.actions {
   white-space: nowrap;
 }
 
-tbody tr:hover {
-  background: #131923;
+/* app.js builds an action cell as `class="actions row tight"`, and `.row` is a
+   flex container — which takes the `<td>` out of table layout, so its bottom
+   rule lands at its own height instead of the row's and the hairline under a
+   table visibly steps down in the last column. Put the cell back in the table
+   and reproduce the gap with margins, which is the one thing flex was buying. */
+td.actions.row {
+  display: table-cell;
+  vertical-align: middle;
+}
+
+td.actions.row > * {
+  vertical-align: middle;
+}
+
+td.actions.row > * + * {
+  margin-left: 3px;
+}
+
+/* Actions are controls, not readings. */
+td.actions,
+td .row {
+  font-family: var(--font);
 }
 
 code,
 pre {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 11.5px;
+}
+
+code {
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  padding: 0 4px;
+}
+
+/* A cell is already set in the instrument face, so a boxed `code` inside one
+   reads as an input the operator can type into. Quote it by context instead. */
+td code,
+th code,
+.defs dd > code {
+  background: none;
+  border: none;
+  padding: 0;
 }
 
 pre {
-  background: #080c12;
+  background: var(--sunken);
   border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px;
+  border-left: 2px solid var(--line-3);
+  border-radius: var(--radius);
+  padding: 9px 10px;
   overflow: auto;
   max-height: 340px;
   white-space: pre-wrap;
   word-break: break-word;
+  line-height: 1.5;
 }
+
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+/* ---- status ---------------------------------------------------------------
+   The alarm vocabulary. A chip is a state token with a lamp: the lamp is what
+   you read at a glance, the word is what you read when you have stopped. Both
+   take their colour from one `color` declaration per tone, so a tone can never
+   have a lamp of one colour and text of another. */
 
 .pill,
 .chip {
-  display: inline-block;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 1px 9px;
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  padding: 1px 7px 1px 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   color: var(--dim);
   white-space: nowrap;
+  vertical-align: baseline;
 }
 
-.chip.ok {
-  color: var(--ok);
-  border-color: #27432b;
+/* The lamp. Square, because a round dot reads as decoration and a square reads
+   as an indicator — every annunciator panel ever built is square. */
+.pill::before,
+.chip::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  background: currentColor;
+  box-shadow: 0 0 5px currentColor;
+  opacity: 0.9;
 }
 
-.chip.bad {
-  color: var(--bad);
-  border-color: #5a2a28;
-}
-
-.chip.warn {
-  color: var(--warn);
-  border-color: #4a3c1d;
-}
-
-.chip.busy {
-  color: var(--accent);
-  border-color: var(--accent-dim);
-}
-
+.chip.ok,
 .pill.ok {
   color: var(--ok);
-  border-color: #27432b;
+  border-color: var(--ok-2);
+  background: var(--ok-bg);
 }
 
+.chip.bad,
+.pill.bad {
+  color: var(--bad);
+  border-color: var(--bad-2);
+  background: var(--bad-bg);
+}
+
+.chip.warn,
 .pill.warn {
   color: var(--warn);
-  border-color: #4a3c1d;
+  border-color: var(--warn-2);
+  background: var(--warn-bg);
 }
 
+.chip.busy,
+.pill.busy {
+  color: var(--accent);
+  border-color: var(--accent-2);
+  background: var(--accent-bg);
+}
+
+/* In motion, and saying so. The lamp travels; the text does not move. */
+.chip.busy::before,
+.pill.busy::before {
+  animation: lamp 1.6s ease-in-out infinite;
+}
+
+@keyframes lamp {
+  50% {
+    opacity: 0.25;
+    box-shadow: none;
+  }
+}
+
+/* ---- messages -------------------------------------------------------------
+   An alarm line. Full-width, square, and marked at the left edge in its tone —
+   the same gutter the table rows use, so "something is being said about this"
+   is one shape across the console. */
+
 .banner {
-  border: 1px solid #4a3c1d;
-  background: #241d0d;
+  border: 1px solid var(--warn-2);
+  border-left: 3px solid var(--warn);
+  background: var(--warn-bg);
   color: var(--warn);
-  border-radius: 8px;
-  padding: 10px 12px;
-  margin-bottom: 14px;
+  border-radius: var(--radius);
+  padding: 9px 12px;
+  margin-bottom: 12px;
+  font-size: 12px;
 }
 
 /* Informational, not a warning: "this is how it works" notes must not read as
    something being wrong. */
 .banner.info {
-  border-color: var(--accent-dim);
-  background: #101c2b;
+  border-color: var(--accent-2);
+  border-left-color: var(--accent);
+  background: var(--accent-bg);
   color: var(--text);
 }
 
 .banner.quiet {
-  border-color: var(--line);
+  border-color: var(--line-2);
+  border-left-color: var(--line-3);
   background: var(--panel-2);
   color: var(--dim);
 }
 
 .banner.bad {
-  border-color: #5a2a28;
-  background: #2a1616;
+  border-color: var(--bad-2);
+  border-left-color: var(--bad);
+  background: var(--bad-bg);
   color: var(--bad);
 }
 
 ul.errors {
   color: var(--bad);
   margin: 8px 0 0;
-  padding-left: 20px;
+  padding-left: 18px;
+  font-size: 12px;
 }
 
 ul.errors li {
-  margin: 3px 0;
+  margin: 2px 0;
 }
 
 /* ---- loading, empty, error --------------------------------------------- */
@@ -957,63 +1416,72 @@ ul.errors li {
   min-height: var(--reserve, 0);
 }
 
+/* No shimmer: a sweeping gradient is motion, and motion on a console means
+   something is happening. A placeholder is the absence of a reading, so it is
+   drawn as one — flat, hatched, and still. */
 .skeleton {
-  border-radius: 6px;
-  background: linear-gradient(90deg, var(--panel-2) 25%, var(--panel-3) 50%, var(--panel-2) 75%);
-  background-size: 300% 100%;
-  animation: shimmer 1.3s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--panel-2) 0 4px,
+    var(--panel-3) 4px 8px
+  );
   color: transparent;
-}
-
-@keyframes shimmer {
-  from {
-    background-position: 150% 0;
-  }
-  to {
-    background-position: -150% 0;
-  }
+  opacity: 0.55;
 }
 
 .skeleton-line {
-  height: 11px;
-  margin: 6px 0;
+  height: 10px;
+  margin: 5px 0;
 }
 
 .empty {
   text-align: center;
   color: var(--dim);
-  padding: 26px 14px;
+  padding: 24px 14px;
+  border: 1px dashed var(--line-2);
+  background: var(--sunken);
+  font-size: 12px;
 }
 
 .empty h3 {
   color: var(--text);
-  text-transform: none;
-  letter-spacing: 0;
-  font-size: 14px;
-  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: var(--cap-track);
+  font-size: var(--cap-size);
+  border: none;
+  padding: 0;
+  margin: 0 0 6px;
+}
+
+.empty p {
+  margin: 0;
 }
 
 .retry-row {
   margin-top: 10px;
+  display: flex;
+  justify-content: center;
 }
 
 /* A refresh in flight over data already on screen: dim it, do not remove it. */
 .live[data-refreshing="true"] {
-  opacity: 0.62;
+  opacity: 0.55;
   transition: opacity 0.15s ease-out;
 }
 
 /* ---- drop zone --------------------------------------------------------- */
 
 .dropzone {
-  border: 1px dashed var(--line);
+  border: 1px dashed var(--line-3);
   border-radius: var(--radius);
-  background: var(--panel-2);
+  background: var(--sunken);
   color: var(--dim);
-  padding: 26px 16px;
+  padding: 24px 16px;
   text-align: center;
   cursor: pointer;
   margin-bottom: 10px;
+  font-size: 12px;
 }
 
 .dropzone:hover,
@@ -1023,7 +1491,7 @@ ul.errors li {
 }
 
 .dropzone.over {
-  background: #101c2b;
+  background: var(--accent-bg);
 }
 
 /* ---- overlays ---------------------------------------------------------- */
@@ -1031,7 +1499,7 @@ ul.errors li {
 dialog {
   background: var(--panel);
   color: var(--text);
-  border: 1px solid var(--line-2);
+  border: 1px solid var(--line-3);
   border-radius: var(--radius);
   padding: 0;
   width: min(860px, 94vw);
@@ -1040,57 +1508,58 @@ dialog {
 }
 
 dialog::backdrop {
-  background: rgb(0 0 0 / 62%);
+  background: rgb(3 5 8 / 78%);
 }
 
 .modal-head {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--line);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line-2);
   position: sticky;
   top: 0;
   z-index: 1;
-  background: var(--panel);
+  background: var(--panel-2);
 }
 
 .modal-head h2 {
-  font-size: 14px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
   flex: 1;
   min-width: 0;
 }
 
 #modal-body {
-  padding: 16px;
+  padding: 14px;
 }
 
 .toasts {
   position: fixed;
-  right: 16px;
-  bottom: 16px;
+  right: 14px;
+  bottom: 14px;
   z-index: 30;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  max-width: min(380px, calc(100vw - 32px));
+  gap: 6px;
+  max-width: min(380px, calc(100vw - 28px));
 }
 
 .toast {
   background: var(--panel-2);
-  border: 1px solid var(--line-2);
+  border: 1px solid var(--line-3);
   border-left-width: 3px;
-  border-radius: 8px;
-  padding: 9px 12px;
-  font-size: 13px;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 40%);
+  border-radius: var(--radius);
+  padding: 8px 11px;
+  font-size: 12px;
   animation: toast-in 0.18s ease-out;
 }
 
 @keyframes toast-in {
   from {
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateX(8px);
   }
 }
 
@@ -1100,12 +1569,217 @@ dialog::backdrop {
 
 .toast.bad {
   border-left-color: var(--bad);
+  background: var(--bad-bg);
+}
+
+/* ---- docs ---------------------------------------------------------------
+   The one view that is prose rather than instrumentation. It keeps the console
+   chrome — captions, hairlines, the mono for anything quoted — but the body
+   text gets a reading measure and the sans face, because a paragraph set in a
+   dense mono column is not readable, whatever the rest of the room looks like. */
+
+.doc-layout {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.doc-sidebar {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 10px;
+  max-height: calc(100dvh - var(--topbar-h) - 90px);
+  overflow: hidden auto;
+}
+
+.doc-sidebar h2 {
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.doc-sidebar input {
+  width: 100%;
+  min-width: 0;
+  margin-bottom: 8px;
+}
+
+.doc-index {
+  display: flex;
+  flex-direction: column;
+}
+
+.doc-contents {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+/* The document index is a bank of buttons, so the base button skin has to be
+   taken back off: a document is a destination in a list, not a switch. */
+.doc-link,
+.doc-contents a {
+  display: block;
+  width: 100%;
+  min-height: 0;
+  padding: 5px 8px;
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  color: var(--dim);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  text-decoration: none;
+}
+
+.doc-link:hover:not(:disabled),
+.doc-contents a:hover {
+  background: var(--panel-2);
+  border-color: transparent;
+  border-left-color: var(--line-3);
+  color: var(--text);
+}
+
+.doc-link.active {
+  background: var(--panel-3);
+  border-left-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.doc-contents h3 {
+  margin: 0 0 4px;
+  padding: 0 0 5px 8px;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--cap-size);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: var(--cap-track);
+  color: var(--dimmer);
+}
+
+.doc-contents ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* An H3 in the document is a section of the section above it, and the index
+   should say so. */
+.doc-contents li.sub a {
+  padding-left: 20px;
+  color: var(--dimmer);
+}
+
+.doc-main {
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+}
+
+.doc-meta {
+  font-family: var(--mono);
+  font-size: 11px;
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.markdown {
+  max-width: 74ch;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 22px 0 8px;
+  line-height: 1.3;
+}
+
+.markdown h1 {
+  font-size: 17px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-2);
+}
+
+.markdown h2 {
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text);
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--line);
+}
+
+.markdown h3 {
+  font-size: 13px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: var(--cap-track);
+}
+
+.markdown > *:first-child {
+  margin-top: 0;
+}
+
+.markdown p,
+.markdown ul,
+.markdown ol {
+  margin: 0 0 12px;
+}
+
+.markdown li {
+  margin: 3px 0;
+}
+
+.markdown blockquote {
+  margin: 0 0 12px;
+  padding: 2px 12px;
+  border-left: 3px solid var(--line-3);
+  color: var(--dim);
+}
+
+.markdown hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 20px 0;
+}
+
+.md-table {
+  width: 100%;
+  margin: 0 0 14px;
+  font-size: 12px;
+}
+
+.md-right {
+  text-align: right;
+}
+
+.md-center {
+  text-align: center;
 }
 
 /* ---- responsive -------------------------------------------------------- */
 
 .drawer-only {
   display: none;
+}
+
+@media (max-width: 1040px) {
+  .summary-item.wide {
+    min-width: 150px;
+  }
 }
 
 @media (max-width: 900px) {
@@ -1125,6 +1799,8 @@ dialog::backdrop {
 
   .drawer-only {
     display: inline-flex;
+    margin: 0 0 0 8px;
+    align-self: center;
   }
 
   /* The sidebar becomes an off-canvas drawer. It stays in the DOM and stays
@@ -1138,7 +1814,7 @@ dialog::backdrop {
     height: 100dvh;
     transform: translateX(-101%);
     transition: transform 0.18s ease-out;
-    box-shadow: 0 0 40px rgb(0 0 0 / 55%);
+    border-right: 1px solid var(--line-3);
   }
 
   body.nav-open .sidebar {
@@ -1159,7 +1835,12 @@ dialog::backdrop {
 
   body.nav-collapsed .nav a {
     justify-content: flex-start;
-    padding: 0 9px;
+    padding: 0 12px;
+  }
+
+  body.nav-collapsed .sidebar-head {
+    justify-content: flex-start;
+    padding: 0 12px;
   }
 
   .sidebar-foot {
@@ -1171,15 +1852,20 @@ dialog::backdrop {
     position: fixed;
     inset: 0;
     z-index: 11;
-    background: rgb(0 0 0 / 55%);
+    background: rgb(3 5 8 / 66%);
   }
 
   .content {
-    padding: 16px 14px 40px;
+    padding: 14px 12px 40px;
   }
 
-  .summary {
-    gap: 12px;
+  .doc-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .doc-sidebar {
+    position: static;
+    max-height: none;
   }
 }
 
@@ -1201,15 +1887,16 @@ dialog::backdrop {
 
   table.stack tr {
     background: var(--panel-2);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 4px 10px;
-    margin-bottom: 10px;
+    border: 1px solid var(--line-2);
+    border-left: 2px solid var(--line-3);
+    padding: 3px 10px;
+    margin-bottom: 8px;
+    box-shadow: none;
   }
 
   table.stack td {
-    border-bottom: 1px dashed var(--line);
-    padding: 6px 0;
+    border-bottom: 1px solid var(--line);
+    padding: 5px 0;
     display: grid;
     grid-template-columns: minmax(84px, 34%) minmax(0, 1fr);
     gap: 10px;
@@ -1221,24 +1908,73 @@ dialog::backdrop {
 
   table.stack td::before {
     content: attr(data-label);
-    color: var(--dim);
-    font-size: 11px;
+    color: var(--dimmer);
+    font-family: var(--font);
+    font-size: var(--cap-size);
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: var(--cap-track);
   }
 
-  /* An action cell has no useful label and needs the full width. */
-  table.stack td.actions {
+  /* An action cell has no useful label and needs the full width. The `.row`
+     override above puts it back into table layout for the desktop table, which
+     has to be undone here or the stacked card keeps a stray table cell. */
+  table.stack td.actions,
+  table.stack td.actions.row {
+    display: block;
     grid-template-columns: minmax(0, 1fr);
     white-space: normal;
+  }
+
+  table.stack td.actions.row > * + * {
+    margin-left: 0;
+  }
+
+  table.stack td.actions.row > * {
+    margin: 2px 3px 2px 0;
   }
 
   table.stack td.actions::before {
     display: none;
   }
 
+  /* Two readings at most on a phone, and they are the two an operator would
+     unlock the screen for: is the platform running, and is the queue backing up
+     (that number turns red when anything is quarantined). Workers and jobs are a
+     tap away on Overview. */
+  .summary-item:nth-of-type(2) {
+    display: none;
+  }
+
+  .summary-item,
+  .summary-item.lamp {
+    padding: 0 10px;
+  }
+
+  /* Buy back the ~40px that keeps the last caption from being clipped by the
+     edge of the strip. */
+  .summary-k {
+    font-size: 9px;
+    letter-spacing: 0.08em;
+  }
+
+  .topbar-end {
+    padding: 0 8px;
+  }
+
+  .profile-name {
+    max-width: 84px;
+  }
+
+  /* A grid item stretches by default, which turns a status chip into a full
+     width bar and loses the "small lit token" shape the tone is carried by. */
+  table.stack td > .chip,
+  table.stack td > .pill {
+    justify-self: start;
+  }
+
   .page-head h1 {
-    font-size: 17px;
+    font-size: 14px;
   }
 
   input[type="search"] {
@@ -1262,6 +1998,19 @@ dialog::backdrop {
     min-height: 40px;
   }
 
+  .nav a {
+    min-height: 40px;
+  }
+
+  .tabs {
+    width: 100%;
+  }
+
+  .tabs button {
+    flex: 1 1 auto;
+    min-height: 38px;
+  }
+
   .linkish {
     display: inline-block;
     min-height: 40px;
@@ -1277,11 +2026,15 @@ dialog::backdrop {
 
   .defs {
     grid-template-columns: minmax(0, 1fr);
-    gap: 2px;
   }
 
-  .defs dd {
-    margin-bottom: 8px;
+  .defs dt {
+    padding-bottom: 0;
+    border-bottom: none;
+  }
+
+  .doc-main {
+    padding: 12px;
   }
 }
 
@@ -1290,17 +2043,17 @@ dialog::backdrop {
 .assign-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   max-height: 320px;
   /* The fleet can pin a worker to any published extension, and the list grows
      with the catalogue; scroll it rather than letting the dialog outgrow the
      viewport and push its own buttons off-screen. */
   overflow: hidden auto;
   margin: 6px 0 12px;
-  padding: 6px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--panel-2);
+  padding: 4px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: var(--sunken);
 }
 
 .assign-row {
@@ -1308,12 +2061,15 @@ dialog::backdrop {
   align-items: center;
   gap: 8px;
   padding: 4px 6px;
-  border-radius: 5px;
+  border-left: 2px solid transparent;
+  font-family: var(--mono);
+  font-size: 11.5px;
   cursor: pointer;
 }
 
 .assign-row:hover {
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  background: var(--panel-2);
+  border-left-color: var(--accent-2);
 }
 
 .assign-row input {
@@ -1324,7 +2080,7 @@ dialog::backdrop {
 /* ---- typed relation editors --------------------------------------------- */
 
 .relation {
-  margin: 0 0 22px;
+  margin: 0 0 20px;
 }
 
 .relation h3 {
@@ -1334,7 +2090,7 @@ dialog::backdrop {
 .relation-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
   margin: 8px 0;
 }
 
@@ -1344,7 +2100,7 @@ dialog::backdrop {
      message never shortens the inputs it belongs to. */
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .relation-row .field-error {
@@ -1371,14 +2127,46 @@ dialog::backdrop {
 
 .bulk-bar {
   align-items: center;
-  gap: 8px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--line);
-  margin-bottom: 10px;
+  gap: 6px;
+  padding: 7px 9px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-2);
+  border-left: 2px solid var(--accent-2);
+  border-radius: var(--radius);
+  margin-bottom: 8px;
 }
 
 .pager {
   align-items: center;
   gap: 8px;
   padding-top: 10px;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+  font-family: var(--mono);
 }
+
+/* ==========================================================================
+   Class contract
+
+   Everything below is emitted by app.js, sysops.js, docs.js or markdown.js and
+   is styled above. Renaming one without the other is how a view silently loses
+   its skin, so keep this list in step with those files.
+
+   shell      shell sidebar sidebar-head sidebar-foot brand brand-name nav
+              nav-group nav-label nav-icon nav-count nav-collapse-label
+              nav-scrim topbar summary summary-item summary-n summary-k
+              topbar-end profile profile-name menu menu-detail menu-item
+              content page-head crumb blurb tabs skip-link noscript
+   panels     card grid row stat (.n .k) defs scroll banner empty dropzone
+   status     pill chip badge  — tones: ok bad warn busy, plus info/quiet on
+              .banner and owner/contributor on .badge
+   controls   primary danger ghost icon-button linkish button-link field-error
+              actions stack
+   feedback   toast toasts live skeleton skeleton-line retry-row error ok-text
+              errors modal-head
+   views      assign-list assign-row relation relation-list relation-row
+              bulk-bar pager doc-layout doc-sidebar doc-index doc-contents
+              doc-link doc-main doc-body doc-meta markdown md-table
+              md-left md-center md-right
+   modifiers  dim dimmer small grow tight end wide inline over quiet active
+   ========================================================================== */
