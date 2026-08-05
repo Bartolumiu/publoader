@@ -190,6 +190,28 @@ export class AuditLog {
     });
   }
 
+  /**
+   * Several events in one statement.
+   *
+   * For a bulk operator action the per-subject rows are what keep "why was this
+   * chapter deleted?" answerable — a lookup by `subject` finds nothing if a
+   * batch only writes one summary row — but two hundred sequential inserts
+   * inside a request is a cost with no upside.
+   */
+  async recordMany(
+    rows: readonly { actor: string; action: string; subject?: string; detail?: unknown }[],
+  ): Promise<void> {
+    if (rows.length === 0) return;
+    await this.prisma.auditEvent.createMany({
+      data: rows.map((row) => ({
+        actor: row.actor.slice(0, 256),
+        action: row.action.slice(0, 128),
+        subject: row.subject?.slice(0, 512) ?? null,
+        detail: row.detail === undefined ? undefined : (row.detail as object),
+      })),
+    });
+  }
+
   async recent(limit = 100): Promise<unknown[]> {
     return this.prisma.auditEvent.findMany({ orderBy: { createdAt: "desc" }, take: limit });
   }

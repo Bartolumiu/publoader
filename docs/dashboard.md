@@ -119,7 +119,7 @@ you are doing rather than by which endpoint serves them:
 |---|---|
 | — | Overview |
 | **Work** | Runs, Queues, Activity, Errors |
-| **Catalogue** | Extensions, Tracked, Untracked |
+| **Catalogue** | Extensions, Chapters, Tracked, Untracked |
 | **Fleet** | Workers |
 | **Admin** | Users, Tokens, Audit, System, Maintenance, Docs |
 
@@ -152,7 +152,10 @@ Routing is hash-based, `#/<destination>[/<thing>][/<tab>]`:
 ```
 #/overview/platform                      the default landing view
 #/runs/dead-letter                       a tab within a destination
-#/runs/<runId>                           one run and all its segments
+#/runs/<runId>                           one run, its segments, and what it found
+#/queues/chapters                        what is about to be uploaded, in order
+#/chapters                               every chapter we have put on MangaDex
+#/chapters/<mdChapterId>                 one chapter, its history, its edit form
 #/extensions/mangaplus/series-map        one extension, one of its tabs
 #/untracked/<id>                         one untracked series, editable
 #/audit/<id>                             one audit event
@@ -176,11 +179,12 @@ leak an id into an access log.
 | View | Needs | Answers |
 |---|---|---|
 | **Overview** | `stats:read` | *Platform*: paused or running, with pause-for-N-minutes / pause indefinitely / resume; jobs by state, workers by status, upload tasks, and the quarantine count. *MangaDex*: the upload side's saved session and its expiry, with "clear saved session". The first screen in an incident. |
-| **Runs** | `runs:read` | *Recent*: the last 50 runs, each linking to its own page — every segment with attempts, lease holder, lease expiry and last error, plus per-job cancel and retry. *Dead letter*: jobs that exhausted their attempt budget, with replay. |
-| **Queues** | `runs:read` | *Tasks*: the MangaDex upload queues filtered by kind and state, with retry, cancel, and "requeue stale leases" (which only touches leases that have already expired). *Depth*: the same queues counted by kind and state. |
+| **Runs** | `runs:read` | *Recent*: the last 50 runs with how many chapters each found, linking to its own page — every segment with attempts, lease holder, lease expiry and last error, plus per-job cancel and retry, and **the chapters that run actually reported**: coverage per segment, a breakdown per series, and the chapter list itself, searchable. *Dead letter*: jobs that exhausted their attempt budget, with replay. |
+| **Queues** | `runs:read` | *Chapters* (the default): what is about to be sent to MangaDex, **numbered in the order the uploader will claim it** — series, number, volume, title, language, and for an EDIT the fields it will change. Correct one or move it to the front from here. *Tasks*: the same rows keyed on queue mechanics — dedupe key, attempts, last error — with retry, remove, purge, reorder and hand-enqueue; each row still names its chapter and links the series and chapter on MangaDex, so the incident view is readable too. Both tabs filter by the queued chapter (series/title/number/either MangaDex id, extension, language), which is the only way to find an `EDIT` or `UNAVAILABLE` row — its dedupe key is a bare MangaDex UUID. *Depth*: the queues counted by kind and state. |
 | **Activity** | `runs:read` | One time-ordered feed merged across runs, jobs, upload tasks, quarantine and the audit log, filtered by severity, time window, extension and free text. Every row links to the thing it is about and offers a permalink. |
 | **Errors** | `runs:read` | *Failures*: everything that failed, newest first, across all three sources. *Quarantine*: result envelopes the core refused to believe — the security-relevant queue, not just an error queue. A non-zero quarantine count also shows as a red badge on Errors in the sidebar. |
 | **Extensions** | `extensions:read` | The published-bundle list, the chapter removal mode, and the publish drop zone. Opening one gives *Overview* (its bundle, its curation counts, and its runs, jobs, upload tasks and quarantine on one screen — the join is the point: green runs beside red upload tasks is the diagnosis), *Series map*, *Schedule*, *Config*, and *Versions* (every version ever published, with yank). |
+| **Chapters** | `chapters:read` | Every chapter this platform has published, in four archives — *On MangaDex*, *Unavailable*, *Deleted*, *Edited* — filtered by extension, language, chapter number and a search that matches the series name, the chapter title and any of the four ids. Opening one shows our row beside what MangaDex says right now, anything already queued against it, and its edit history, with the three actions: edit the metadata, replace it with an unavailable card (previewed first), or delete it. The same three run in bulk over ticked rows or over the whole filter. See below. |
 | **Tracked** | `tracked:read` | The series map across every extension: how many mappings each has and the most recent one, linking into the map that can be edited. There is no cross-extension endpoint, so this is an index rather than a merged table. |
 | **Untracked** | `untracked:read` | Series an extension reported that have no mapping yet, filtered by state. Opening one gives its details **editable** — see below. Approve creates the MangaDex title; skip never does. |
 | **Workers** | `workers:read` | *Fleet*: status, trust tier, heartbeat, agent version, which extensions each worker takes, with drain / activate / revoke. *Enrolment*: mint a one-time token and copy the compose snippet that uses it. |
@@ -401,6 +405,78 @@ language** and **Source URL** editable:
 The order this is designed around is: **fix the details, then approve.** A row
 whose title already exists shows a banner saying local edits do not reach
 MangaDex until they are applied.
+
+---
+
+## Fixing a chapter that is already on MangaDex
+
+`#/chapters` is the mirror of what the platform has published. It answers the
+question that used to mean `psql` on the core container — *which MangaDex chapter
+is this, is it still up, and what did we think it was?* — and then lets you change
+it.
+
+Opening one chapter (`#/chapters/<md chapter id>`) puts three things side by side:
+
+- **our row**, written when the chapter was published;
+- **what MangaDex says right now**, read live when the API instance holds
+  credentials. This is the one that decides anything: our row is a mirror that
+  may be days old while you are about to change a public entry. When MangaDex
+  cannot be read the panel says why, and every action still works — the uploader
+  reads MangaDex itself when it runs them;
+- **what is already queued** against the chapter, so you do not queue a second
+  change on top of somebody else's.
+
+The three actions all **queue an upload task** and say so. `core-uploader` is the
+only process holding MangaDex credentials; nothing is applied by the click, and
+the result appears under Queues within seconds.
+
+- **Edit metadata** takes MangaDex's own field names — volume, chapter, title,
+  language, groups, external URL — prefilled from the live values and sending
+  only what you actually changed. Blanking a field clears it; blanking the
+  language leaves it alone, because a chapter always has one.
+- **Mark unavailable** replaces the chapter's page with the info card explaining
+  the publisher removed it, and repoints the publisher link away from the dead
+  URL. **The card is previewed in the dialog first**, rendered by the same code
+  the uploader posts, so what you approve is what readers get. A footer note
+  replaces the standard wording for a takedown whose reason is not "the
+  publisher removed it".
+- **Regenerate the unavailable card** is the same button on a chapter that
+  already carries one, and it is why the underlying task has a `force` flag:
+  without it the uploader treats an archived chapter as done and would change
+  nothing, leaving a card that says the wrong thing on a public page forever.
+- **Delete from MangaDex** is the one irreversible action. It asks for a reason
+  (recorded in the audit trail), states that marking the chapter unavailable is
+  the reversible alternative, and needs an explicit confirmation.
+
+### The same three, in bulk
+
+Tick rows on the list and a bar appears above it with the same three actions.
+The **whole filter** toggle switches them from the ticked rows to every chapter
+the current filter matches — which is how "this series was licensed, take the lot
+down" and "that run got the volume wrong on fifty chapters" are one click each.
+
+Each button opens a dialog that **previews before it offers to apply**. The
+preview is the server's own dry run: it names every chapter in the set, says what
+would happen to each, and lists the ones it would refuse (already carded and no
+`force`, already queued, claimed by an uploader, already deleted). The apply
+button stays disabled until that preview has been fetched, and says how many
+chapters it will queue. One call, one preview, and 200 chapters at a time — a
+wider filter says so and is run again for the rest.
+
+A bulk edit offers only **volume**, **language** and **groups**: the fields a set
+of chapters can share. A title or a chapter number belongs to one chapter, so
+those stay on the single-chapter form rather than being applicable two hundred
+times by accident.
+
+Afterwards the toast reports how many queued and how many were refused, and the
+refusals are listed with their reasons — a batch is routinely a success and a
+partial failure at once.
+
+All of these need the **ADMIN** role on top of `chapters:write`, and all are
+closed to `pa_…` api tokens however broadly they are scoped: changing a public
+catalogue entry under the shared MangaDex account is attributable to a signed-in
+operator or nothing. The buttons are disabled with the server's own reason rather
+than hidden, so a contributor can see that the operation exists and who to ask.
 
 ---
 

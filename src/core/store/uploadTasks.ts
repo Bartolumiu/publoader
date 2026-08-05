@@ -87,8 +87,45 @@ export interface UploadTaskFilter {
   states?: readonly UploadTaskState[];
   /** Case-insensitive substring over `dedupe_key`. */
   dedupeKey?: string;
+  /**
+   * Case-insensitive substring over the chapter payload — series name, chapter
+   * title, chapter number, and both MangaDex ids.
+   *
+   * A dedupe key is machine identity (`chapterId|number|language`, or a
+   * MangaDex uuid), so "everything queued for Sakamoto Days" was not expressible
+   * before this. It applies to every path the filter reaches, purge included,
+   * which is deliberate: pulling one series' worth of bad rows out of the queue
+   * is the case that used to mean `psql`.
+   */
+  q?: string;
   attemptMin?: number;
   attemptMax?: number;
+  /** Exact match on the payload's `extensionName`. */
+  extension?: string;
+  /** Exact match on the payload's `chapterLanguage`. */
+  language?: string;
+}
+
+/**
+ * Which chapter a queue row is about.
+ *
+ * The `chapter` payload is deliberately absent from every list projection: it
+ * is worker-supplied, carries the page-artifact ids and (for EDIT) a whole
+ * before/after pair, and is read exactly once by the uploader. But with none of
+ * it a row is a bare dedupe key — and for EDIT, DELETE and UNAVAILABLE that key
+ * is the MangaDex chapter UUID (see `taskDedupeKey`), which names nothing an
+ * operator recognises. These are the fields that make a row readable as a
+ * chapter rather than a UUID.
+ */
+export interface UploadTaskIdentity {
+  extension: string | null;
+  mangaName: string | null;
+  mdMangaId: string | null;
+  mdChapterId: string | null;
+  chapterNumber: string | null;
+  chapterVolume: string | null;
+  chapterTitle: string | null;
+  chapterLanguage: string | null;
 }
 
 /** A queue row without its `chapter` payload — what list views return. */
@@ -105,6 +142,36 @@ export interface UploadTaskRow {
   lastError: string | null;
   createdAt: Date;
   updatedAt: Date;
+  identity: UploadTaskIdentity;
+}
+
+/**
+ * A queue row read as the chapter it will act on. Every chapter field is
+ * nullable because the payload is whatever the extension produced — a DELETE
+ * task, for instance, carries a MangaDex id and often little else.
+ *
+ * `identity` is dropped rather than inherited: this row already carries every
+ * one of those fields flat, and a nested copy of them would be a second shape
+ * for the same data that `listChapters` does not select — an interface claiming
+ * a property the query never returns, which `$queryRaw` cannot catch.
+ */
+export interface QueuedChapterRow extends Omit<UploadTaskRow, "identity"> {
+  /** 1-based place in the claim order across everything matching the filter. */
+  position: number;
+  extension: string | null;
+  mangaName: string | null;
+  mdMangaId: string | null;
+  mangaId: string | null;
+  mdChapterId: string | null;
+  chapterId: string | null;
+  chapterNumber: string | null;
+  chapterVolume: string | null;
+  chapterTitle: string | null;
+  chapterLanguage: string | null;
+  chapterUrl: string | null;
+  /** The MangaDex PUT body an EDIT task carries; null for other kinds. */
+  editPayload: Record<string, unknown> | null;
+  pageCount: number;
 }
 
 /** Enough of a row to explain why a mutation refused it. */
@@ -182,6 +249,95 @@ export class UploadTaskStore {
       ON CONFLICT (kind, dedupe_key) DO NOTHING
     `);
     return res === 1;
+  }
+
+  /**
+   * Queue a chapter action an operator asked for, superseding a settled row.
+   *
+   * `enqueue` cannot serve this. Its ON CONFLICT DO NOTHING is what makes the
+   * processor idempotent, but it also means the (kind, dedupe_key) slot for a
+   * chapter is occupied FOREVER once the task completes — nothing deletes DONE
+   * rows — so a second operator action on the same chapter would silently do
+   * nothing. That is correct for the processor (it re-derives the same work
+   * every run) and wrong for a person who has just corrected a title and wants
+   * it pushed again.
+   *
+   * So a settled row is reset in place: same slot, new payload, PENDING, fresh
+   * attempt budget, due now. Which states count as settled is the whole safety
+   * property and it lives in the WHERE clause of the one statement:
+   *
+   *  - LEASED is excluded because an uploader is mid-flight against MangaDex.
+   *  - PENDING is excluded because the work is already queued; overwriting it
+   *    would change what a queued task does under an operator who is watching
+   *    the queue, and "it is already queued" is a better answer than a silent
+   *    rewrite.
+   *
+   * Both come back as null, and the caller reads the row afterwards purely to
+   * name the state in its refusal — never to decide whether to write.
+   *
+   * UPLOAD is not accepted, by type and at runtime: resetting a DONE UPLOAD row
+   * removes half of the double-upload guard (see REMOVABLE_STATES), and every
+   * chapter this is reachable from is already on MangaDex.
+   */
+  async requeueForChapter(
+    kind: Exclude<UploadTaskKind, "UPLOAD">,
+    dedupeKey: string,
+    chapter: unknown,
+    opts: { maxAttempts?: number } = {},
+  ): Promise<{ task: UploadTaskRow; superseded: boolean } | null> {
+    if (kind === ("UPLOAD" as UploadTaskKind)) {
+      throw new Error("requeueForChapter does not accept UPLOAD: it would re-arm a double upload");
+    }
+    const rows = await this.prisma.$queryRaw<(UploadTaskRow & { inserted: boolean })[]>(Prisma.sql`
+      INSERT INTO upload_tasks (id, kind, dedupe_key, chapter, state, attempt, max_attempts,
+                                not_before, created_at, updated_at)
+      VALUES (${randomUUID()}, ${kind}::"UploadTaskKind", ${dedupeKey},
+              ${JSON.stringify(chapter)}::jsonb, 'PENDING', 0,
+              coalesce(${opts.maxAttempts ?? null}::int, 5), now(), now(), now())
+      ON CONFLICT (kind, dedupe_key) DO UPDATE
+        SET chapter = EXCLUDED.chapter, state = 'PENDING', attempt = 0,
+            max_attempts = EXCLUDED.max_attempts, not_before = now(),
+            lease_id = NULL, lease_expires_at = NULL, last_error = NULL, updated_at = now()
+        WHERE upload_tasks.state IN ('DONE', 'FAILED', 'DEAD_LETTER')
+      -- xmax is 0 on a freshly inserted tuple and carries the updating
+      -- transaction id on one that took the DO UPDATE branch. It is the only
+      -- way to tell "queued" from "requeued" without a second statement, and
+      -- the difference matters: superseding a DONE row is worth saying out loud
+      -- in the response and in the audit trail.
+      RETURNING id, kind::text AS kind, dedupe_key AS "dedupeKey", state::text AS state,
+                attempt, max_attempts AS "maxAttempts", not_before AS "notBefore",
+                lease_id AS "leaseId", lease_expires_at AS "leaseExpiresAt",
+                last_error AS "lastError", created_at AS "createdAt",
+                updated_at AS "updatedAt", (xmax = 0) AS inserted
+    `);
+    const row = rows[0];
+    if (!row) return null;
+    const { inserted, ...task } = row;
+    return { task, superseded: !inserted };
+  }
+
+  /**
+   * Every queue row for one dedupe key, across kinds. For a chapter that is
+   * `mdChapterId` — the key EDIT, DELETE and UNAVAILABLE all use — so this
+   * answers "is anything already queued against this chapter?".
+   */
+  async forDedupeKey(dedupeKey: string): Promise<UploadTaskRow[]> {
+    return this.forDedupeKeys([dedupeKey]);
+  }
+
+  /**
+   * The same question for many chapters in one query, which is what a bulk
+   * action's dry run asks: it has to predict, for every chapter in the set,
+   * whether the write would be accepted — and doing that one chapter at a time
+   * would make the preview slower than the operation it previews.
+   */
+  async forDedupeKeys(dedupeKeys: readonly string[]): Promise<UploadTaskRow[]> {
+    if (dedupeKeys.length === 0) return [];
+    return this.prisma.$queryRaw<UploadTaskRow[]>(Prisma.sql`
+      SELECT ${TASK_COLUMNS} FROM upload_tasks t
+      WHERE t.dedupe_key = ANY(${[...dedupeKeys]}::text[])
+      ORDER BY t.updated_at DESC
+    `);
   }
 
   /** Claim one due task of the given kind (SKIP LOCKED lease). */
@@ -282,7 +438,7 @@ export class UploadTaskStore {
     // One row beyond the page, so "is there a next page?" needs no second count.
     const [rows, counted] = await Promise.all([
       this.prisma.$queryRaw<UploadTaskRow[]>(Prisma.sql`
-        SELECT ${TASK_COLUMNS} FROM upload_tasks t
+        SELECT ${TASK_COLUMNS}, ${TASK_IDENTITY} FROM upload_tasks t
         ${combine(parts)}
         ORDER BY t.not_before ASC, t.created_at ASC, t.id ASC
         LIMIT ${opts.limit + 1}
@@ -301,10 +457,82 @@ export class UploadTaskStore {
     };
   }
 
+  /**
+   * The same page as `list`, but as CHAPTERS rather than as queue rows: the
+   * series, number, volume, title and language the uploader is about to send,
+   * with the row's position in the claim order.
+   *
+   * `list` answers "what is in the queue and what state is it in", which is the
+   * incident view. This answers "what is about to happen to the catalogue", and
+   * they are not the same question — a dedupe key of
+   * `1015117|142|en` names a chapter only to someone willing to decode it.
+   *
+   * The position comes from a window function over the whole filtered set in the
+   * same ordering the claim query uses, so "3rd" means third out of everything
+   * matching, not third on this page. Paging stays keyset for the reason `list`
+   * documents: the queue drains while it is being read.
+   */
+  async listChapters(
+    filter: UploadTaskFilter,
+    opts: { limit: number; cursor?: TaskCursor | null },
+  ): Promise<{ chapters: QueuedChapterRow[]; total: number; nextCursor: string | null }> {
+    const parts = taskWhere(filter);
+    const page: Prisma.Sql[] = [];
+    if (opts.cursor) {
+      page.push(
+        Prisma.sql`(o."notBefore", o."createdAt", o.id) > (${opts.cursor.notBefore}, ${opts.cursor.createdAt}, ${opts.cursor.id})`,
+      );
+    }
+
+    const rows = await this.prisma.$queryRaw<QueuedChapterRow[]>(Prisma.sql`
+      WITH ordered AS (
+        SELECT ${TASK_COLUMNS},
+               row_number() OVER (ORDER BY t.not_before ASC, t.created_at ASC, t.id ASC) AS position,
+               t.chapter ->> 'mangaName' AS "mangaName",
+               t.chapter ->> 'mdMangaId' AS "mdMangaId",
+               t.chapter ->> 'mangaId' AS "mangaId",
+               t.chapter ->> 'mdChapterId' AS "mdChapterId",
+               t.chapter ->> 'chapterId' AS "chapterId",
+               t.chapter ->> 'chapterNumber' AS "chapterNumber",
+               t.chapter ->> 'chapterVolume' AS "chapterVolume",
+               t.chapter ->> 'chapterTitle' AS "chapterTitle",
+               t.chapter ->> 'chapterLanguage' AS "chapterLanguage",
+               t.chapter ->> 'chapterUrl' AS "chapterUrl",
+               t.chapter ->> 'extensionName' AS "extension",
+               -- The fields an EDIT task will actually change, so the list can
+               -- show "title → …" without a second fetch per row.
+               CASE WHEN jsonb_typeof(t.chapter -> 'payload') = 'object'
+                    THEN t.chapter -> 'payload' END AS "editPayload",
+               coalesce(jsonb_array_length(
+                 CASE WHEN jsonb_typeof(t.chapter -> 'imageArtifacts') = 'array'
+                      THEN t.chapter -> 'imageArtifacts' ELSE '[]'::jsonb END
+               ), 0) AS "pageCount"
+        FROM upload_tasks t
+        ${combine(parts)}
+      )
+      SELECT o.* FROM ordered o
+      ${combine(page)}
+      ORDER BY o."notBefore" ASC, o."createdAt" ASC, o.id ASC
+      LIMIT ${opts.limit + 1}
+    `);
+
+    const counted = await this.prisma.$queryRaw<{ total: bigint }[]>(Prisma.sql`
+      SELECT count(*) AS total FROM upload_tasks t ${combine(taskWhere(filter))}
+    `);
+
+    const chapters = rows.slice(0, opts.limit).map((row) => ({ ...row, position: Number(row.position) }));
+    const last = chapters[chapters.length - 1];
+    return {
+      chapters,
+      total: Number(counted[0]?.total ?? 0),
+      nextCursor: rows.length > opts.limit && last ? encodeTaskCursor(last) : null,
+    };
+  }
+
   /** One row including its `chapter` payload — the detail/edit view. */
   async get(id: string): Promise<(UploadTaskRow & { chapter: unknown }) | null> {
     const rows = await this.prisma.$queryRaw<(UploadTaskRow & { chapter: unknown })[]>(Prisma.sql`
-      SELECT ${TASK_COLUMNS}, t.chapter FROM upload_tasks t WHERE t.id = ${id}
+      SELECT ${TASK_COLUMNS}, ${TASK_IDENTITY}, t.chapter FROM upload_tasks t WHERE t.id = ${id}
     `);
     return rows[0] ?? null;
   }
@@ -512,7 +740,8 @@ export class UploadTaskStore {
       RETURNING id, kind::text AS kind, dedupe_key AS "dedupeKey", state::text AS state,
                 attempt, max_attempts AS "maxAttempts", not_before AS "notBefore",
                 lease_id AS "leaseId", lease_expires_at AS "leaseExpiresAt",
-                last_error AS "lastError", created_at AS "createdAt", updated_at AS "updatedAt"
+                last_error AS "lastError", created_at AS "createdAt", updated_at AS "updatedAt",
+                ${TASK_IDENTITY}
     `);
     return rows[0] ?? null;
   }
@@ -564,6 +793,26 @@ const TASK_COLUMNS = Prisma.sql`t.id, t.kind::text AS kind, t.dedupe_key AS "ded
   t.created_at AS "createdAt", t.updated_at AS "updatedAt"`;
 
 /**
+ * `UploadTaskIdentity`, built in the database.
+ *
+ * Projected as one JSON object rather than eight aliased columns so the shape
+ * arrives assembled and the whole `chapter` payload never crosses the wire.
+ * `chapter` is intentionally unqualified: every statement this is spliced into
+ * has exactly one table in scope, including `INSERT … RETURNING`, where the
+ * `t` alias the SELECTs use does not exist.
+ */
+const TASK_IDENTITY = Prisma.sql`jsonb_build_object(
+  'extension', chapter->>'extensionName',
+  'mangaName', chapter->>'mangaName',
+  'mdMangaId', chapter->>'mdMangaId',
+  'mdChapterId', chapter->>'mdChapterId',
+  'chapterNumber', chapter->>'chapterNumber',
+  'chapterVolume', chapter->>'chapterVolume',
+  'chapterTitle', chapter->>'chapterTitle',
+  'chapterLanguage', chapter->>'chapterLanguage'
+) AS identity`;
+
+/**
  * Filter predicates, parameterised. The enum comparisons keep the enum type
  * (via text[] -> enum[]) rather than casting the column to text, so the
  * (state, not_before) index stays usable.
@@ -579,8 +828,35 @@ function taskWhere(filter: UploadTaskFilter): Prisma.Sql[] {
   // Parameterised, so a `%` an operator types is a wildcard they meant and a
   // quote is data either way.
   if (filter.dedupeKey) parts.push(Prisma.sql`t.dedupe_key ILIKE ${`%${filter.dedupeKey}%`}`);
+  if (filter.q) {
+    const needle = `%${filter.q}%`;
+    // Both MangaDex ids are in here as well as the human-readable fields: for
+    // EDIT, DELETE and UNAVAILABLE the dedupe key IS the chapter id, so an
+    // operator pasting a uuid from a MangaDex link or a webhook has nowhere
+    // else to put it, and `dedupeKey` would only answer for one of the two.
+    parts.push(Prisma.sql`(
+      t.chapter ->> 'mangaName' ILIKE ${needle}
+      OR t.chapter ->> 'chapterTitle' ILIKE ${needle}
+      OR t.chapter ->> 'chapterNumber' ILIKE ${needle}
+      OR t.chapter ->> 'mdMangaId' ILIKE ${needle}
+      OR t.chapter ->> 'mdChapterId' ILIKE ${needle}
+    )`);
+  }
   if (filter.attemptMin !== undefined) parts.push(Prisma.sql`t.attempt >= ${filter.attemptMin}`);
   if (filter.attemptMax !== undefined) parts.push(Prisma.sql`t.attempt <= ${filter.attemptMax}`);
+  // Payload predicates. These read `chapter` rather than a column, so they are
+  // unindexed and scan; that is accounted for. They exist to be ANDed with the
+  // indexed kind/state predicates above, they are only ever reached from an
+  // operator action on a paged view, and `upload_tasks` keeps its DONE rows
+  // forever (they are half of the double-upload guard), so the alternative —
+  // expression indexes — would be permanent write cost and Prisma schema drift
+  // for a query a human runs by hand.
+  if (filter.extension) {
+    parts.push(Prisma.sql`t.chapter->>'extensionName' = ${filter.extension}`);
+  }
+  if (filter.language) {
+    parts.push(Prisma.sql`t.chapter->>'chapterLanguage' = ${filter.language}`);
+  }
   return parts;
 }
 

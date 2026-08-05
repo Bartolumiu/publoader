@@ -121,7 +121,7 @@ and one for the worker (`docker/worker/Dockerfile`).
 
 | Service | Entry point | Loop | Interval | Needs MD creds? | Replicas |
 | --- | --- | --- | --- | --- | --- |
-| `core-api` | `src/services/api.ts` | none — Fastify listener | — | optional (only so operator title approvals can run synchronously) | 1+ |
+| `core-api` | `src/services/api.ts` | none — Fastify listener | — | optional, and **reads only**: operator title approvals run synchronously, and the chapter views show the live MangaDex state and preview the unavailable card. Chapter changes are queued for the uploader | 1+ |
 | `core-scheduler` | `src/services/scheduler.ts` | `scheduler.tick()` | `SCHEDULER_INTERVAL_SECONDS`, 30 s | no | **exactly 1** by convention; racing is harmless |
 | `core-processor` | `src/services/processor.ts` | `processor.tick()` | 15 s (`INTERVAL_SECONDS`, a module constant) | yes — reads MangaDex | 1; several are safe |
 | `core-uploader` | `src/services/uploader.ts` | drain queues + `titles.tick()` | event-driven, 5 s idle sleep | **yes — write credentials** | **exactly 1** (MangaDex sessions are per-account) |

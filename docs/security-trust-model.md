@@ -51,11 +51,11 @@ not how much you personally trust the person running it.
 
 | | |
 |---|---|
-| **Assets** | Every control operation: trigger runs, publish bundles, pause, drain/revoke workers, mint enroll tokens, change removal mode, edit the tracked-manga mapping and extension override options (the config authority), and approve untracked series into new MangaDex titles. |
+| **Assets** | Every control operation: trigger runs, publish bundles, pause, drain/revoke workers, mint enroll tokens, change removal mode, edit the tracked-manga mapping and extension override options (the config authority), approve untracked series into new MangaDex titles, and queue edits, takedowns or deletions of chapters already published. |
 | **Trust level** | Operator-only. Effectively equivalent to shell access to the control plane. |
 | **Authn/authz** | Single bearer token. `X-Actor` header is **attribution, not authentication** — it is attacker-controlled and only meaningful because possession of the token is already proven. |
 | **Network exposure** | Through the tunnel, same as everything else. |
-| **Hardening** | Every mutating route writes an `AuditEvent` with actor, action, subject and detail. Extension names are regex-validated (`^[a-z0-9_]+$`) at the route before reaching any store. Removal mode is enum-validated. Rate limited. |
+| **Hardening** | Every mutating route writes an `AuditEvent` with actor, action, subject and detail. Extension names are regex-validated (`^[a-z0-9_]+$`) at the route before reaching any store. Removal mode is enum-validated. Rate limited. **Nothing here writes to MangaDex.** When the API is configured with MangaDex credentials it uses them for reads only — showing an operator the live title or chapter they are about to change, and rendering the unavailable-card preview — while every change is queued as an `UploadTask` for core-uploader. That is what keeps "exactly one writer" true no matter how many API replicas run, and it means an API-side bug can enqueue a wrong task (visible, cancellable while `PENDING`) but cannot itself publish, edit or delete anything. |
 | **Residual risks** | No scopes and no per-client tokens: the Discord bot holds the same credential you do, so a compromised bot can publish a bundle, repoint a tracked-manga mapping, or approve a title into existence. No overlap window on rotation — changing the token breaks every client at once. `bundle publish` accepts any zip that passes manifest validation, so admin-token compromise is code execution on every worker. Repointing a `tracked_manga` mapping is the quietest destructive action available: it makes future chapters upload to the *wrong MangaDex title*, with nothing in the upload path to notice. |
 
 ### 1.3a Operator dashboard — `/`, `/dash`, and the session/account endpoints
@@ -385,6 +385,15 @@ above hold:
   attack the account table offline and authenticate to MangaDex as the operator.
   It therefore sits at the account-administration bar and not at `settings:write`
   — which the Discord bot holds so it can pause the platform.
+- A second, lower bar uses the same shape for the two operations that change a
+  **public** MangaDex entry: applying an untracked row's corrections to a title
+  (`/untracked/:id/apply-to-mangadex`) and editing, hiding or deleting a
+  published chapter (`/chapters/:id*`). Both need the scope **and** the ADMIN
+  role, and both refuse `pa_…` tokens outright — an api token is assigned
+  `adminRole = "ADMIN"` by `adminAuthHook`, which means "not owner-equivalent",
+  not "vetted human", so judging these on the role alone would let any token
+  holding the area scope mutate the public catalogue under the shared MangaDex
+  account. These changes are attributable to a signed-in operator or nothing.
 - **The scope alone is never the gate; `requireOwner` is.** An OWNER may mint a
   `pa_…` token with `["*"]`, and wildcard satisfies every scope check — so a
   route guarded only by `requireScope("users:admin")` is reachable by a client

@@ -220,6 +220,160 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
     ).toBe(400);
   });
 
+  /**
+   * A queue row has to name the chapter it is about.
+   *
+   * `taskDedupeKey` returns the bare MangaDex chapter UUID for EDIT, DELETE and
+   * UNAVAILABLE, so before `identity` the only column identifying those rows was
+   * an opaque id — "what is scheduled to be marked unavailable?" could not be
+   * answered from the list at all, only by opening rows one at a time. The
+   * payload itself must still stay server-side, which is the pair of properties
+   * asserted here.
+   */
+  it("names the chapter on every listed row without shipping the payload", async () => {
+    await task({
+      kind: "UNAVAILABLE",
+      dedupeKey: "8f14e45f-ce49-4f7a-9f11-000000000001",
+      chapter: {
+        mdChapterId: "8f14e45f-ce49-4f7a-9f11-000000000001",
+        mdMangaId: "9a1b1c1d-0000-4000-8000-000000000000",
+        mangaName: "Blue Lock",
+        chapterNumber: "12",
+        chapterVolume: "3",
+        chapterTitle: "The Awakening",
+        chapterLanguage: "en",
+        extensionName: "mangaplus",
+        // A sidecar the uploader reads and the list must not leak.
+        unavailableAt: "2026-08-05T00:00:00.000Z",
+      },
+    });
+
+    const res = await app.inject({ method: "GET", url: "/api/v1/admin/queues/tasks", headers: root });
+    expect(res.statusCode).toBe(200);
+    const [row] = res.json().tasks;
+    expect(row.identity).toEqual({
+      extension: "mangaplus",
+      mangaName: "Blue Lock",
+      mdMangaId: "9a1b1c1d-0000-4000-8000-000000000000",
+      mdChapterId: "8f14e45f-ce49-4f7a-9f11-000000000001",
+      chapterNumber: "12",
+      chapterVolume: "3",
+      chapterTitle: "The Awakening",
+      chapterLanguage: "en",
+    });
+    expect(row.chapter).toBeUndefined();
+    expect(JSON.stringify(row)).not.toContain("unavailableAt");
+  });
+
+  /** A payload with none of the identity keys must not break the projection. */
+  it("returns a null-valued identity rather than failing on a bare payload", async () => {
+    await task({ chapter: {} });
+    const res = await app.inject({ method: "GET", url: "/api/v1/admin/queues/tasks", headers: root });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().tasks[0].identity).toEqual({
+      extension: null,
+      mangaName: null,
+      mdMangaId: null,
+      mdChapterId: null,
+      chapterNumber: null,
+      chapterVolume: null,
+      chapterTitle: null,
+      chapterLanguage: null,
+    });
+  });
+
+  it("filters by extension, language and a chapter substring", async () => {
+    const target = await task({
+      kind: "UNAVAILABLE",
+      dedupeKey: "aaaaaaaa-0000-4000-8000-000000000001",
+      chapter: {
+        mdChapterId: "aaaaaaaa-0000-4000-8000-000000000001",
+        mangaName: "Blue Lock",
+        chapterTitle: "The Awakening",
+        chapterNumber: "12",
+        chapterLanguage: "en",
+        extensionName: "mangaplus",
+      },
+    });
+    await task({
+      kind: "UNAVAILABLE",
+      dedupeKey: "bbbbbbbb-0000-4000-8000-000000000002",
+      chapter: {
+        mdChapterId: "bbbbbbbb-0000-4000-8000-000000000002",
+        mangaName: "Other Series",
+        chapterNumber: "3",
+        chapterLanguage: "es",
+        extensionName: "comikey",
+      },
+    });
+
+    const only = async (query: string) => {
+      const res = await app.inject({
+        method: "GET",
+        url: `/api/v1/admin/queues/tasks?${query}`,
+        headers: root,
+      });
+      expect(res.statusCode).toBe(200);
+      return res.json();
+    };
+
+    expect((await only("extension=mangaplus")).total).toBe(1);
+    expect((await only("extension=mangaplus")).tasks[0].id).toBe(target.id);
+    // Exact, not a prefix: a substring match here would make "mangaplus" also
+    // select a hypothetical "mangaplus-jp" and quietly widen a bulk verb.
+    expect((await only("extension=manga")).total).toBe(0);
+    expect((await only("language=es")).total).toBe(1);
+
+    // One substring box over series, title, number and both MangaDex ids.
+    expect((await only("q=blue%20lock")).tasks[0].id).toBe(target.id);
+    expect((await only("q=awakening")).tasks[0].id).toBe(target.id);
+    expect((await only("q=aaaaaaaa")).tasks[0].id).toBe(target.id);
+    expect((await only("q=nothing-matches-this")).total).toBe(0);
+
+    // Payload predicates AND with the column ones rather than replacing them.
+    expect((await only("extension=mangaplus&state=FAILED")).total).toBe(0);
+  });
+
+  /**
+   * The filters must narrow the destructive verbs too, not just the read.
+   *
+   * They live in `FilterShape`, which every bulk endpoint spreads, so "purge the
+   * failed mangaplus rows" is one call. If that composition ever broke, the
+   * failure mode is a purge that deletes another extension's queue.
+   */
+  it("narrows a purge by payload, and audits the filter that was used", async () => {
+    for (const ext of ["mangaplus", "comikey"]) {
+      await task({
+        state: "FAILED",
+        dedupeKey: `${ext}-fail`,
+        chapter: { mangaName: "Blue Lock", extensionName: ext, chapterLanguage: "en" },
+      });
+    }
+
+    const purge = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/purge",
+      headers: root,
+      payload: { extension: "mangaplus", dryRun: false, confirm: true },
+    });
+    expect(purge.statusCode).toBe(200);
+    expect(purge.json().deleted).toBe(1);
+
+    const left = await prisma.uploadTask.findMany({ select: { dedupeKey: true } });
+    expect(left.map((r) => r.dedupeKey)).toEqual(["comikey-fail"]);
+
+    // The audit row is the only surviving record of a purge, so it has to carry
+    // the narrowing keys — logging just {kind, state} would describe a far wider
+    // deletion than the one that ran.
+    const event = await prisma.auditEvent.findFirstOrThrow({
+      where: { action: "queue.purge" },
+      orderBy: { createdAt: "desc" },
+    });
+    expect((event.detail as { filter: Record<string, unknown> }).filter).toEqual({
+      extension: "mangaplus",
+    });
+  });
+
   it("pages with a cursor, and refuses a cursor it did not issue", async () => {
     for (let i = 0; i < 5; i++) await task({ notBefore: new Date(Date.now() - (10 - i) * 1000) });
 

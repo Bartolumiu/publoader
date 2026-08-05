@@ -3,6 +3,7 @@ import type { Config } from "../../config.js";
 import type { Logger } from "../../logging.js";
 import { metrics } from "../../metrics.js";
 import { generateChapterCard } from "./card.js";
+import { unavailableCardOptions } from "./unavailableCard.js";
 import { chapterFromJson, chapterToColumns, uploadedChapterColumns } from "./chapterRows.js";
 import type { MdChapterDetail, MdExtendedApi } from "./client.js";
 import type { DiscordEmbedInput, DiscordNotifier } from "./webhook.js";
@@ -394,6 +395,18 @@ export class UploadTaskWorkers {
    * unavailable.py: fetch the chapter, render the card, open an *edit* upload
    * session for that chapter, attach the card as its only page, then repoint the
    * publisher link away from the dead URL via PUT /chapter.
+   *
+   * Two sidecars on the task payload, both only ever set by an operator action
+   * (routes/chapters.ts); the processor never sets either:
+   *
+   *  - `force` re-renders the card for a chapter that has ALREADY been marked
+   *    unavailable. Without it the "no externalUrl left" branch below archives
+   *    and returns, which is right for the automated pass — the work is done —
+   *    but makes the card unfixable once posted. A card carrying a wrong series
+   *    title, or one rendered before the layout was corrected, is a page on a
+   *    public catalogue, so there has to be a way to replace it.
+   *  - `footerNote` overrides the explanatory paragraph on the card, for the
+   *    takedowns whose reason is not "the publisher removed it".
    */
   private async runUnavailable(
     chapter: Chapter,
@@ -403,6 +416,8 @@ export class UploadTaskWorkers {
     const { md } = this.deps;
     const mdChapterId = chapter.mdChapterId;
     if (!mdChapterId) throw new TaskError("unavailable task has no mdChapterId");
+    const force = raw["force"] === true;
+    const footerNote = readString(raw, "footerNote");
 
     let detail: MdChapterDetail | null;
     try {
@@ -423,7 +438,7 @@ export class UploadTaskWorkers {
     }
 
     const attrs = detail.attributes;
-    if (!attrs.externalUrl) {
+    if (!attrs.externalUrl && !force) {
       log.info({ mdChapterId }, "chapter already has no externalUrl, archiving");
       await this.archiveUnavailable(mdChapterId, chapter, null);
       metrics.uploadsTotal.inc({ outcome: "unavailable_already_done" });
@@ -436,16 +451,14 @@ export class UploadTaskWorkers {
       .map((rel) => rel.id);
 
     try {
-      const card = await generateChapterCard({
-        mangaName: resolveMangaName(detail, chapter),
-        chapterNumber: attrs.chapter ?? chapter.chapterNumber,
-        chapterTitle: attrs.title ?? chapter.chapterTitle,
-        extensionName: chapter.extensionName ?? "Unknown",
-        chapterLanguage: attrs.translatedLanguage || chapter.chapterLanguage,
-        chapterUrl: attrs.externalUrl ?? chapter.chapterUrl,
-        availableFrom: chapter.chapterTimestamp,
-        availableTo: readString(raw, "unavailableAt") ?? chapter.chapterExpire,
-      });
+      const card = await generateChapterCard(
+        unavailableCardOptions({
+          chapter,
+          detail,
+          unavailableAt: readString(raw, "unavailableAt"),
+          footerNote,
+        }),
+      );
 
       const session = await md.beginEditSession(mdChapterId, attrs.version);
       try {
@@ -485,8 +498,8 @@ export class UploadTaskWorkers {
           throw new TaskError(`couldn't repoint externalUrl for chapter ${mdChapterId}`);
         }
         log.info(
-          { mdChapterId, replacementUrl: replacementUrl ?? "cleared" },
-          "chapter marked unavailable",
+          { mdChapterId, replacementUrl: replacementUrl ?? "cleared", force },
+          force ? "unavailable card regenerated" : "chapter marked unavailable",
         );
       } catch (err) {
         await this.safeDeleteSession(session.id, log);
@@ -622,47 +635,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function readString(source: Record<string, unknown>, key: string): string | null {
   const value = source[key];
   return typeof value === "string" && value !== "" ? value : null;
-}
-
-/**
- * Series title for the card. Prefer the manga relationship MangaDex returned
- * (via includes[]=manga) over whatever the queue row carried — the queued name
- * is often absent, which is what used to render cards as "Untitled".
- */
-function resolveMangaName(detail: MdChapterDetail, chapter: Chapter): string {
-  const manga = detail.relationships.find((rel) => rel.type === "manga");
-  const attrs = manga?.attributes;
-  if (attrs) {
-    const title = asRecord(attrs.title) ?? {};
-    const altTitles = Array.isArray(attrs.altTitles) ? attrs.altTitles : [];
-    const alt: Record<string, unknown> = {};
-    for (const entry of altTitles) {
-      const record = asRecord(entry);
-      if (!record) continue;
-      for (const [lang, value] of Object.entries(record)) {
-        if (!(lang in alt)) alt[lang] = value;
-      }
-    }
-    const pick = (lang: string): string | null => {
-      const value = title[lang] ?? alt[lang];
-      return typeof value === "string" && value !== "" ? value : null;
-    };
-    const originalLanguage = typeof attrs.originalLanguage === "string" ? attrs.originalLanguage : null;
-    const resolved =
-      pick("en") ??
-      (originalLanguage ? (pick(`${originalLanguage}-ro`) ?? pick(originalLanguage)) : null) ??
-      firstString(title) ??
-      firstString(alt);
-    if (resolved) return resolved;
-  }
-  return chapter.mangaName ?? "Untitled";
-}
-
-function firstString(source: Record<string, unknown>): string | null {
-  for (const value of Object.values(source)) {
-    if (typeof value === "string" && value !== "") return value;
-  }
-  return null;
 }
 
 function isHttpUrl(url: string | null | undefined): boolean {

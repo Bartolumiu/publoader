@@ -825,7 +825,53 @@ curl -fsS "$API/api/v1/admin/queues/tasks?state=FAILED&state=DEAD_LETTER" -H "$A
 
 # one series' worth: dedupeKey is a case-insensitive substring
 curl -fsS "$API/api/v1/admin/queues/tasks?dedupeKey=1234%7C&attemptMin=3" -H "$AUTH"
+
+# the same queue read as CHAPTERS, numbered in claim order — which series,
+# which chapter, and what an EDIT is going to change
+curl -fsS "$API/api/v1/admin/queues/chapters?limit=50" -H "$AUTH"
+
+# ...searched by series name rather than by dedupe key
+curl -fsS "$API/api/v1/admin/queues/chapters?q=sakamoto" -H "$AUTH"
+
+# what is scheduled to be taken down, and for which publisher
+curl -fsS "$API/api/v1/admin/queues/tasks?kind=UNAVAILABLE&extension=mangaplus" -H "$AUTH"
+
+# find a chapter by series, title, number or either MangaDex id
+curl -fsS "$API/api/v1/admin/queues/tasks?q=blue%20lock&language=en" -H "$AUTH"
 ```
+
+`GET /queues/chapters` is the same rows and the same ordering as
+`/queues/tasks`, projected through the chapter payload. Reach for it when the
+question is *what is about to be published* — a dedupe key of `1015117|142|en`
+identifies a chapter only to someone willing to decode it — and for
+`/queues/tasks` when the question is *what is stuck and why*. It defaults to
+`PENDING`, and its `position` is the place in the whole filtered claim order, so
+"14th" survives paging.
+
+`/queues/tasks` is readable as chapters too: every row carries an `identity`
+object (series, both MangaDex ids, number, volume, title, language, extension)
+built in the same statement, so the incident view names what it contains without
+a fetch per row.
+
+### Filtering a queue by the chapter rather than the row
+
+`dedupeKey` only reads a row's identity for `UPLOAD` tasks; for `EDIT`, `DELETE`
+and `UNAVAILABLE` the dedupe key *is* the MangaDex chapter id, so searching it
+means already knowing the UUID. Three filters read the queued payload instead,
+and they are what make those kinds findable:
+
+| Filter | Match | Reads |
+|---|---|---|
+| `q` | case-insensitive substring | series name, chapter title, chapter number, and both MangaDex ids |
+| `extension` | exact | the payload's `extensionName` |
+| `language` | exact | the payload's `chapterLanguage` |
+
+All three are part of the shared filter shape, so they narrow the bulk verbs
+exactly as they narrow a list: `{"filter": {"kind": "UNAVAILABLE", "extension":
+"mangaplus"}}` on `retry`, `remove` or `purge` acts on that set and no other.
+They read JSONB rather than an indexed column, so they scan; that is fine for an
+operator query on a paged view and is the reason they are not offered as an
+uncapped export.
 
 This list is ordered by `notBefore` — the same ordering `core-uploader` claims
 in — so it answers *what runs next*. `GET /api/v1/admin/upload-tasks` (the older
@@ -1061,6 +1107,163 @@ superseded and is not going away:
 | Abandon a chapter, keeping its dedupe slot | `POST /admin/upload-tasks/<id>/cancel` |
 | Reclaim expired leases now | `POST /admin/upload-tasks/requeue-stale` |
 | Everything else on this page | `/admin/queues/*` |
+| What is about to be published, as chapters | `GET /admin/queues/chapters` |
+| What a run actually found | `GET /admin/runs/<id>/chapters` |
+| What is on MangaDex now, and its history | `GET /admin/chapters` |
+
+---
+
+## Fix a chapter that is already published
+
+The queue endpoints above act on *work that has not run yet*. This section is the
+other case: the chapter is on MangaDex, and it is wrong.
+
+Everything here goes through `/api/v1/admin/chapters/*` (Chapters in the
+dashboard), and every action **queues an upload task** rather than calling
+MangaDex — `core-uploader` remains the only process with write credentials, so
+the response is `202` with a task id and the change lands within seconds. Watch
+it under Queues, filtered to that chapter id.
+
+Two guards apply to all three actions: the **ADMIN** role on top of
+`chapters:write`, and no api tokens at all. Use the dashboard, or the break-glass
+`ADMIN_TOKEN`.
+
+### Find the chapter
+
+```bash
+# by anything: series name, chapter title, or any of the four ids
+curl -s -H "authorization: Bearer $ADMIN_TOKEN" \
+  "$API/api/v1/admin/chapters?search=$(printf %s 'Series Name' | jq -sRr @uri)" | jq '.chapters[]'
+
+# everything one extension has up
+curl -s -H "authorization: Bearer $ADMIN_TOKEN" \
+  "$API/api/v1/admin/chapters?extension=mangaplus&limit=200" | jq '.total'
+```
+
+`?archive=unavailable|deleted|edited` reads the three history tables with the
+same filters. Paging is by the `nextCursor` the response hands back, never an
+offset — the table grows while it is being read.
+
+Then open one chapter, which is the read worth doing before any change: it shows
+our row, **what MangaDex says right now**, and anything already queued against it.
+
+```bash
+curl -s -H "authorization: Bearer $ADMIN_TOKEN" \
+  "$API/api/v1/admin/chapters/$MD_CHAPTER_ID" | jq '{chapter, mangadex, mangadexError, tasks, archives}'
+```
+
+### Correct its metadata
+
+The body uses MangaDex's field names; `null` clears a field and an omitted field
+is left alone. The uploader lays this over MangaDex's current resource when it
+runs, because `PUT /chapter` replaces rather than patches and needs the version
+current at that moment.
+
+```bash
+curl -s -X PATCH -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"chapter":"12.1","title":"The right title"}' \
+  "$API/api/v1/admin/chapters/$MD_CHAPTER_ID"
+```
+
+### Replace it with an unavailable card
+
+The chapter keeps its place on MangaDex; its page becomes the card and the
+publisher link is repointed away from the dead URL. Preview the exact image
+first — the endpoint renders it with the same code the uploader posts:
+
+```bash
+curl -s -H "authorization: Bearer $ADMIN_TOKEN" \
+  "$API/api/v1/admin/chapters/$MD_CHAPTER_ID/card.png" > /tmp/card.png
+
+curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"footerNote":"Removed at the publisher'"'"'s request."}' \
+  "$API/api/v1/admin/chapters/$MD_CHAPTER_ID/unavailable"
+```
+
+**Regenerating a card that is already posted needs `force: true`.** Without it
+the uploader sees a chapter with nothing left to take down and correctly does
+nothing, which is right for the automated pass and useless when the card on a
+public page says the wrong thing. Asking without the flag is a `409` that says
+so, rather than a silent no-op.
+
+```bash
+curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"force":true,"footerNote":"Corrected wording."}' \
+  "$API/api/v1/admin/chapters/$MD_CHAPTER_ID/unavailable"
+```
+
+### Delete it
+
+The one irreversible action. `confirm: true` is required, the reason goes into
+the audit trail, and the whole row is copied into that audit entry — after the
+uploader runs, it and `deleted_chapters` are the only records the chapter
+existed. Prefer the unavailable card unless the chapter should never have been
+published at all (a duplicate, a wrong series).
+
+```bash
+curl -s -X DELETE -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"confirm":true,"reason":"duplicate of ch. 12"}' \
+  "$API/api/v1/admin/chapters/$MD_CHAPTER_ID"
+```
+
+### Do it to a whole set
+
+The same three actions take a set of chapters — either a list of ids, or a
+filter (`?archive=`, `extension`, `language`, `mdMangaId`, `chapterNumber`,
+`search`, `since`, `until`). The realistic cases are "this series was licensed,
+take the lot down" and "that run uploaded fifty chapters under the wrong volume".
+
+**Every bulk call is a dry run unless you say otherwise.** With no flags it
+writes nothing, queues nothing, audits nothing, and returns a per-chapter
+prediction — including the chapters it would refuse and why. Read that list;
+it is the last chance anyone gets.
+
+```bash
+# what would happen (this is inert)
+curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"filter":{"mdMangaId":"'"$MD_MANGA_ID"'"}}' \
+  "$API/api/v1/admin/chapters/bulk/unavailable" | jq '{matched, wouldQueue, blocked, capped, results}'
+
+# then, and only then
+curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"filter":{"mdMangaId":"'"$MD_MANGA_ID"'"},"dryRun":false,"confirm":true,
+       "footerNote":"Licensed; removed at the publisher'"'"'s request."}' \
+  "$API/api/v1/admin/chapters/bulk/unavailable" | jq '{queued, refused, results}'
+```
+
+A bulk **edit** only takes the fields a set of chapters can legitimately share —
+`volume`, `translatedLanguage`, `groups`. A title, a chapter number or a source
+URL belongs to one chapter, so those stay on the single-chapter route rather than
+being available to apply two hundred times by accident.
+
+```bash
+curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"filter":{"mdMangaId":"'"$MD_MANGA_ID"'"},"changes":{"volume":"3"},"dryRun":false,"confirm":true}' \
+  "$API/api/v1/admin/chapters/bulk/edit"
+```
+
+**200 chapters per call.** A wider filter answers `capped: true`; run it again
+for the rest. The response is a `200` with `queued`, `refused` and a result per
+chapter — a batch is routinely a success and a partial failure at once, and the
+per-chapter rows are the part to act on. Each queued chapter also gets its own
+audit event, correlated by a shared `bulk` id, so the history of one chapter
+still explains itself.
+
+In the dashboard this is the tick-boxes on the Chapters list plus the bar above
+it; the **whole filter** toggle switches the buttons from the ticked rows to
+everything the current filter matches. Each button opens a dialog that previews
+first and only then offers to queue.
+
+### When it refuses
+
+| Answer | Meaning |
+|---|---|
+| `409 already_queued` | A task of that kind for this chapter is queued and has not run. Look at it under Queues — edit or remove it there rather than stacking a second one. |
+| `409 leased` | An uploader is executing that action right now. Wait for it and read the result before deciding again. |
+| `409 already_unavailable` | The card is already posted; pass `force: true` to replace it. |
+| `409` naming a deletion | The chapter is recorded as deleted, so there is nothing left to change. If MangaDex still has it, the archive row is stale — queue the task by hand from `/admin/queues/tasks`. |
+| `403` closed to api tokens | Use the dashboard as a signed-in admin, or the break-glass admin token. |
+| `superseded: true` in a `202` | Normal. A completed task for this chapter was reset in place, because nothing deletes `DONE` rows and the slot is one per (kind, chapter). |
 
 ---
 

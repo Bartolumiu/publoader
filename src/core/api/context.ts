@@ -7,9 +7,12 @@ import { BundleStore } from "../store/bundles.js";
 import { ArtifactStore } from "../store/artifacts.js";
 import { SettingsStore, AuditLog } from "../store/settings.js";
 import { UploadTaskStore } from "../store/uploadTasks.js";
+import { ChapterStore } from "../store/chapters.js";
+import { RunChapterStore } from "../store/runChapters.js";
 import { IngestService } from "../ingest/ingest.js";
 import { SchedulerService } from "../scheduler/service.js";
 import type { TitleService } from "../md/titleService.js";
+import type { MdExtendedApi } from "../md/client.js";
 import type { RepoArchiveFetcher } from "../webhooks/repoArchive.js";
 import type { GithubContentsClient } from "../webhooks/repoContents.js";
 import { ApiTokenStore } from "../store/apiTokens.js";
@@ -32,6 +35,10 @@ export interface AppContext {
   artifacts: ArtifactStore;
   settings: SettingsStore;
   uploadTasks: UploadTaskStore;
+  /** The four chapter history tables, read-only. */
+  chapters: ChapterStore;
+  /** What each run reported, read back out of the stored result envelopes. */
+  runChapters: RunChapterStore;
   audit: AuditLog;
   /** Scoped per-client `pa_…` credentials. */
   apiTokens: ApiTokenStore;
@@ -42,6 +49,15 @@ export interface AppContext {
   scheduler: SchedulerService;
   /** Present when this instance holds MangaDex credentials (api + uploader). */
   titleService?: TitleService;
+  /**
+   * A MangaDex client, when this instance has credentials. READ-ONLY by
+   * convention on the API side: the chapter views use it to show what MangaDex
+   * currently says and to render a card preview, and every change is queued as
+   * an UploadTask instead. core-uploader remains the only process that writes
+   * to MangaDex, which is what keeps "exactly one writer" true — an API replica
+   * behind a load balancer must not be able to open an upload session.
+   */
+  md?: MdExtendedApi;
   /**
    * Test seam for the GitHub webhook's archive download. Injected here rather
    * than as a route option so `buildServer` can register the webhook routes
@@ -90,6 +106,8 @@ export function buildContext(prisma: PrismaClient, config: Config, log: Logger):
     artifacts: new ArtifactStore(prisma),
     settings: new SettingsStore(prisma),
     uploadTasks: new UploadTaskStore(prisma),
+    chapters: new ChapterStore(prisma),
+    runChapters: new RunChapterStore(prisma),
     audit: new AuditLog(prisma),
     apiTokens: new ApiTokenStore(prisma),
     trackedManga: new TrackedMangaStore(prisma),

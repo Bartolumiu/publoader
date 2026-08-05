@@ -160,6 +160,45 @@ a {
   margin: 8px 0 0;
 }
 
+/*
+ * A caveat that has to be read but is not a failure — "3 of 4 segments have
+ * reported, so this list is partial". `.error` would be wrong (nothing broke)
+ * and `.dim` would be worse: this is the line that decides whether the numbers
+ * above it can be trusted, and dimming it hides exactly that.
+ */
+.warn-text {
+  color: var(--warn);
+  margin: 8px 0 0;
+}
+
+/*
+ * Collapsible detail inside a card (per-segment and per-series breakdowns).
+ * Closed by default so the panel it sits in stays scannable; the marker and
+ * padding exist because the browser default reads as an unstyled escapee among
+ * the cards.
+ */
+.card details {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin: 10px 0 0;
+  padding: 0 10px;
+}
+
+.card details[open] {
+  padding-bottom: 10px;
+}
+
+.card details > summary {
+  cursor: pointer;
+  padding: 8px 0;
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.card details > summary:hover {
+  color: var(--text);
+}
+
 .ok-text {
   color: var(--ok);
   margin: 8px 0 0;
@@ -2145,6 +2184,30 @@ dialog::backdrop {
   font-family: var(--mono);
 }
 
+/* ---- chapter card preview ------------------------------------------------ */
+
+/* The unavailable card is a square 2000x2000 PNG. Constrained by width AND by
+   viewport height so the dialog's buttons stay reachable on a laptop — a
+   preview you have to scroll past to approve is one nobody looks at. */
+.card-preview {
+  display: block;
+  width: 100%;
+  max-width: 420px;
+  max-height: 50vh;
+  object-fit: contain;
+  margin: 10px auto 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+/* The footer-note box is prose, not the JSON payloads every other textarea in
+   this page holds, so it opts out of the mono/180px default. */
+#chapter-note {
+  font-family: inherit;
+  font-size: 13px;
+  min-height: 72px;
+}
 /* ==========================================================================
    Class contract
 
@@ -2165,8 +2228,8 @@ dialog::backdrop {
    feedback   toast toasts live skeleton skeleton-line retry-row error ok-text
               errors modal-head
    views      assign-list assign-row relation relation-list relation-row
-              bulk-bar pager doc-layout doc-sidebar doc-index doc-contents
-              doc-link doc-main doc-body doc-meta markdown md-table
-              md-left md-center md-right
+              bulk-bar pager card-preview doc-layout doc-sidebar doc-index
+              doc-contents doc-link doc-main doc-body doc-meta markdown
+              md-table md-left md-center md-right
    modifiers  dim dimmer small grow tight end wide inline over quiet active
    ========================================================================== */

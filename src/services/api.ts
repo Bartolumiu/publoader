@@ -22,6 +22,10 @@ if (config.mdUsername && config.mdPassword) {
   const md = new MdClient(config, prisma, log);
   const notifier = DiscordNotifier.fromConfig(config, log);
   ctx.titleService = new TitleService(prisma, md, notifier, log);
+  // Read-only from here: the chapter views show what MangaDex currently holds
+  // and preview the unavailable card. Every write is still queued for
+  // core-uploader, which stays the only process that publishes.
+  ctx.md = md;
 }
 const server = buildServer(ctx);
 

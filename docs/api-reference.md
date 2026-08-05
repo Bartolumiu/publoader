@@ -257,11 +257,12 @@ route writes an audit event naming the acting principal.
 
 ### Scopes
 
-The nineteen valid scopes (`api/scopes.ts:20-45`):
+The twenty-one valid scopes (`api/scopes.ts:20-52`):
 
 | Area | Scopes |
 | --- | --- |
 | runs | `runs:read` `runs:write` |
+| published chapters | `chapters:read` `chapters:write` |
 | workers | `workers:read` `workers:write` `enroll:write` |
 | extensions | `extensions:read` `extensions:write` |
 | series map | `tracked:read` `tracked:append` `tracked:write` |
@@ -274,6 +275,13 @@ The nineteen valid scopes (`api/scopes.ts:20-45`):
 **Implication** (`scopes.ts:91-101`): `write` implies `append` implies `read`,
 within one area only. Nothing else implies anything, so `users:admin` grants only
 itself and a token scoped for account management cannot quietly publish bundles.
+
+`chapters:*` is separate from `runs:*` on purpose. `runs:*` is about scraping and
+the queue that drains from it; `chapters:write` queues an edit, a takedown or a
+delete against a live public catalogue entry. A credential that may trigger a run
+does not thereby get to unpublish chapters — and `chapters:write` is not enough
+on its own either: every mutating chapter route also requires the ADMIN role and
+refuses api tokens outright (see *Published chapters* below).
 
 `tracked:*` is deliberately split three ways, and the middle one is the point.
 `tracked:append` can create mappings that do not exist yet — the worst case is a
@@ -321,14 +329,22 @@ served to workers, not to admin clients.
 | Method | Path | Scope | Notes |
 | --- | --- | --- | --- |
 | `POST` | `/runs` | `runs:write` | `{extension, kind?, idempotencyKey?}`. `kind` defaults to `FORCE`. `201` created / `200` already existed → `{runId, created, segments}`. **`409` platform is paused**; `404` no bundle published for that extension |
-| `GET` | `/runs` | `runs:read` | `?limit=1..200` (25), `?extension=` |
+| `GET` | `/runs` | `runs:read` | `?limit=1..200` (25), `?extension=`. Each row carries `chaptersFound` (new or changed) and `chaptersSeen` (catalogue snapshot), aggregated over the page in one statement. **Both are `null` when no segment has committed an envelope yet** — which is not the same as a run that found nothing |
 | `GET` | `/runs/:id` | `runs:read` | Run plus all its jobs; `404` unknown |
+| `GET` | `/runs/:id/chapters` | `runs:read` | What the run's extension reported, read back out of the stored envelopes. `?set=updated\|all` (updated), `?q=`, `?mdMangaId=`, `?language=`, `?segmentIndex=`, `?limit=1..500` (100), `?offset=`. Ordered `segmentIndex, position` — the extension's own order. Offset paging is safe here because a committed envelope never changes |
+| `GET` | `/runs/:id/chapters/summary` | `runs:read` | Per-segment coverage and a per-series breakdown. A segment with no committed envelope reports `updated: null`, **not `0`**, and `complete` says whether the chapter list can be read as the whole run |
 | `POST` | `/jobs/:id/cancel` | `runs:write` | → `{ok, result: "cancelled"\|"flagged"}`. `PENDING` cancels immediately; a live lease is flagged and the worker aborts on its next renew. **`409`** if the job is in neither state |
 | `POST` | `/jobs/:id/retry` | `runs:write` | Replay a dead letter with a fresh attempt budget. **`409` job is not dead-lettered** |
 | `GET` | `/dead-letter` | `runs:read` | Up to 100 `DEAD_LETTER` jobs, newest first |
 | `GET` | `/quarantine` | `runs:read` | Up to 100 quarantined submissions — id, jobId, workerId, rejectReason, createdAt. **The envelope body is not returned** |
 
-`routes/admin.ts:100-187`. There is no run-level cancel; cancel the jobs.
+`routes/admin.ts:100-187`; the two chapter endpoints are `routes/chapters.ts`,
+backed by `store/runChapters.ts`. There is no run-level cancel; cancel the jobs.
+
+The chapters a run found are **not** copied into a table on ingest: they are
+unnested from `result_submissions.envelope` on demand
+(`jsonb_array_elements … WITH ORDINALITY`), so the envelope stays the single
+source of truth and paging happens in Postgres rather than in the API process.
 
 ### Pause gate
 
@@ -458,7 +474,75 @@ is logged even if the publish then fails for another reason).
 | `POST` | `/upload-tasks/:id/cancel` | `runs:write` | `PENDING`/`FAILED`/`DEAD_LETTER` → `DONE` with the reason in `lastError`. **`409` for a `LEASED` task** — an uploader owns it mid-flight and forcing it would race into a duplicate upload or a lost result |
 | `POST` | `/upload-tasks/requeue-stale` | `runs:write` | Manual lease sweep → `{ok, requeued}` |
 
-`routes/ops.ts:103-217`, tested at `test/integration/ops.test.ts`.
+| `GET` | `/queues/chapters` | `runs:read` | The queue read as chapters rather than as rows: series, number, volume, title, language, and an EDIT task's `editPayload`. `?kind=`, `?state=` (**defaults to `PENDING`**), `?q=` (searches the payload's series name, title, number and both MangaDex ids — not the dedupe key), `?extension=` and `?language=` (exact, the same two facets `/queues/tasks` takes), `?dedupeKey=`, `?limit=1..500` (100), `?cursor=`. `position` is the place in the claim order across **everything matching the filter**, not within the page |
+
+`routes/ops.ts:103-217`, tested at `test/integration/ops.test.ts`;
+`/queues/chapters` is `routes/chapters.ts`, tested at
+`test/integration/runQueueChapters.test.ts`.
+
+### Published chapters
+
+What the platform has put on MangaDex, and the three things an operator can do to
+a chapter afterwards. **Nothing here writes to MangaDex.** Every action queues an
+`UploadTask` and answers **`202`** with the task — `core-uploader` is the only
+process holding write credentials, and a `200` here would be claiming a change
+that has not happened yet.
+
+| Method | Path | Scope | Notes |
+| --- | --- | --- | --- |
+| `GET` | `/chapters` | `chapters:read` | `?archive=uploaded\|unavailable\|deleted\|edited` (default `uploaded`), `?extension=`, `?language=`, `?mdMangaId=`, `?mdChapterId=`, `?chapterId=`, `?chapterNumber=`, `?search=`, `?since=`, `?until=`, `?limit=1..200` (50), `?cursor=` → `{archive, chapters, total, nextCursor, order, totals, archives}`. Newest first, **keyset** paged: the table grows while it is read, so an offset page would repeat rows. `search` covers the series name, the chapter title and all four ids. `totals` is global, so a narrow filter cannot hide an archive that is filling up |
+| `GET` | `/chapters/extensions` | `chapters:read` | `?archive=` → `{extensions: [{extension, count}]}` — what the filter picker offers |
+| `GET` | `/chapters/:mdChapterId` | `chapters:read` | The row from whichever archives hold it, `archives` (when each recorded it), `edits`, `tasks` (queue rows keyed on this chapter), `links`, and **`mangadex`**: what MangaDex says right now, when this instance has credentials. A MangaDex outage degrades to `mangadex: null` + `mangadexError` and never makes the row unreadable. `actionsBlockedReason` is why a mutating call would be refused, so a UI can disable a control *with the reason* |
+| `GET` | `/chapters/:mdChapterId/card.png` | `chapters:read` | `?footerNote=`, `?unavailableAt=` → **`image/png`**. The unavailable card as it would be posted, rendered by the same function the uploader calls (`md/unavailableCard.ts`). Writes and queues nothing |
+| `PATCH` | `/chapters/:mdChapterId` | `chapters:write` + ADMIN | `{volume?, chapter?, title?, translatedLanguage?, groups?, externalUrl?}` — MangaDex's own field names, `null` clears, omitted leaves alone. Queues an `EDIT` carrying `payload` and `oldInfo`. The merge onto MangaDex's current resource happens at execution time, because `PUT /chapter` replaces rather than patches and needs the `version` current when the write lands. `400` unknown field / bad language / bad URL |
+| `POST` | `/chapters/:mdChapterId/unavailable` | `chapters:write` + ADMIN | `{force?, footerNote?}`. Queues an `UNAVAILABLE`: render the card, attach it as the chapter's only page, repoint `externalUrl`, archive the row. **`409` when the chapter is already marked unavailable unless `force: true`** — without the flag the uploader treats it as done and changes nothing, which would make a wrong card unfixable |
+| `DELETE` | `/chapters/:mdChapterId` | `chapters:write` + ADMIN | `{confirm: true, reason?}`. Queues a `DELETE`. **`400` without `confirm`**, and the refusal names the unavailable route as the reversible alternative. The whole row goes into the audit detail, because afterwards `deleted_chapters` and that entry are the only records the chapter existed |
+
+The same three actions over a set of chapters:
+
+| Method | Path | Scope | Notes |
+| --- | --- | --- | --- |
+| `POST` | `/chapters/bulk/edit` | `chapters:write` + ADMIN | `{ids?, filter?, changes: {volume?, translatedLanguage?, groups?}, dryRun?, confirm?}`. **The fields are a subset of the single-chapter edit on purpose**: a title, a chapter number and an external URL are one chapter's identity, so they are not expressible here. `oldInfo` is taken from our own rows rather than 200 live MangaDex reads; the uploader still merges against the live resource when it runs |
+| `POST` | `/chapters/bulk/unavailable` | `chapters:write` + ADMIN | `{ids?, filter?, force?, footerNote?, dryRun?, confirm?}`. Cards are rendered per chapter from that chapter's own details |
+| `POST` | `/chapters/bulk/delete` | `chapters:write` + ADMIN | `{ids?, filter?, reason?, dryRun?, confirm?}`. The whole row goes into each chapter's audit entry |
+
+Three rules hold across all three:
+
+- **Exactly one of `ids` or `filter`.** `filter` takes the list's own fields plus
+  `archive` (default `uploaded`); `ids` is capped at 200 by the schema.
+- **`dryRun` defaults to `true`.** The first call anyone makes — including a
+  client that forgot the field — writes nothing, queues nothing, audits nothing,
+  and returns a per-chapter prediction: `would_queue`, or the same refusal the
+  live call would give (`not_found`, `deleted`, `needs_force`, `already_queued`,
+  `leased`). A live run needs `dryRun: false` **and** `confirm: true`. It is a
+  preview of the operation, not an estimate of it.
+- **200 chapters per call**, lower than the 1000 of `/queues/*` because this cap
+  bounds a change to public pages rather than to queue rows. A truncated set
+  answers `capped: true` and the operator calls again.
+
+A live bulk call answers **`200`** (not `202`) with `{queued, refused, results}` —
+a batch where eight chapters queued and two were refused is a success and a
+partial failure at once, and only the per-chapter results say which is which.
+Each queued chapter gets **its own audit event** (subject = the chapter id,
+detail carrying a shared `bulk` id) plus one `<action>.bulk` summary row, so
+"why was this chapter deleted?" stays answerable by subject.
+
+Two refusals are worth knowing about:
+
+- **`409` `already_queued` / `leased`.** One queue slot per (kind, chapter): a
+  `PENDING` task is not silently rewritten, and a `LEASED` one belongs to a live
+  uploader. A task that has *finished* is superseded in place and the response
+  says `superseded: true` — without that a chapter could be edited exactly once,
+  ever, since nothing deletes `DONE` rows.
+- **`403` for api tokens.** Changing a public catalogue entry under the shared
+  MangaDex account is attributable to a signed-in operator or nothing, so these
+  routes are closed to `pa_…` credentials however broadly they are scoped —
+  every api token carries `adminRole = "ADMIN"`, which means "not
+  owner-equivalent", not "vetted human". The break-glass `ADMIN_TOKEN` is a
+  `root` principal and still works.
+
+`routes/chapters.ts`, `store/chapters.ts`, tested at
+`test/integration/chapters.test.ts`.
 
 ### MangaDex session
 
