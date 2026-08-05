@@ -286,12 +286,20 @@ describe("dashboard chapter views", () => {
     // non-zero even though the assertions below pass. Stubbing the two methods
     // to the `open` attribute they set is enough for the tests here, which read
     // a dialog's rendered content rather than its modality.
-    const dialogs = win.HTMLDialogElement?.prototype;
+    // Typed structurally rather than as HTMLDialogElement: this tsconfig's lib
+    // is ES2023 with no DOM, which is why `win` above is `any` too.
+    interface DialogLike {
+      showModal?: () => void;
+      close?: () => void;
+      setAttribute: (name: string, value: string) => void;
+      removeAttribute: (name: string) => void;
+    }
+    const dialogs = win.HTMLDialogElement?.prototype as DialogLike | undefined;
     if (dialogs && typeof dialogs.showModal !== "function") {
-      dialogs.showModal = function showModal(this: HTMLDialogElement): void {
+      dialogs.showModal = function showModal(this: DialogLike): void {
         this.setAttribute("open", "");
       };
-      dialogs.close = function close(this: HTMLDialogElement): void {
+      dialogs.close = function close(this: DialogLike): void {
         this.removeAttribute("open");
       };
     }
