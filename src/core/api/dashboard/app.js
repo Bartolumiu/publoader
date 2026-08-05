@@ -67,6 +67,16 @@ const store = {
     queueAttemptMax: "",
     /** Keyset cursors already walked, so "Back" does not need a second scheme. */
     queueCursors: [],
+    chapterExtension: "",
+    chapterLanguage: "",
+    chapterNumber: "",
+    chapterSearch: "",
+    /**
+     * Cursors per archive, not one list: a cursor minted while reading
+     * `uploaded` names a row `deleted` has never seen, so one shared list would
+     * page the wrong table the moment a tab changed.
+     */
+    chapterCursors: {},
     untrackedState: "NEW",
     activitySeverity: "all",
     activityHours: 72,
@@ -372,6 +382,7 @@ const ICONS = {
   activity: "M3 12h4l3 8 4-16 3 8h4",
   errors: "M12 4l9 16H3l9-16Zm0 5v6m0 3v.5",
   extensions: "M4 4h7v7H4V4Zm9 0h7v7h-7V4ZM4 13h7v7H4v-7Zm12.5 0v7m-3.5-3.5h7",
+  chapters: "M6 3h8l4 4v14H6V3Zm8 0v4h4M9 12h6m-6 3.5h6",
   tracked: "M6 4h12v16l-6-4-6 4V4Z",
   untracked: "M12 3l9 5v8l-9 5-9-5V8l9-5Zm0 6v4m0 3v.5",
   workers: "M4 17h16M6 17V9l6-4 6 4v8M10 17v-4h4v4",
@@ -940,6 +951,21 @@ const NAV = [
       ["versions", "Versions"],
     ],
     blurb: "Published bundles, and everything about one extension.",
+  },
+  {
+    id: "chapters",
+    label: "Chapters",
+    group: "Catalogue",
+    icon: "chapters",
+    scope: "chapters:read",
+    param: true,
+    tabs: [
+      ["uploaded", "On MangaDex"],
+      ["unavailable", "Unavailable"],
+      ["deleted", "Deleted"],
+      ["edited", "Edited"],
+    ],
+    blurb: "Every chapter this platform has published, and what has happened to it since.",
   },
   {
     id: "tracked",
@@ -3079,6 +3105,644 @@ function toLocalInput(value) {
     `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
     `T${pad(d.getHours())}:${pad(d.getMinutes())}`
   );
+}
+
+// ------------------------------------------------------------------- chapters
+
+/**
+ * What this platform has on MangaDex, and the three things that can be done to
+ * a chapter after it is published.
+ *
+ * Nothing here talks to MangaDex. Every action queues an UploadTask and the
+ * page says so — core-uploader is the only process with write credentials, and
+ * a dashboard that claimed "deleted" the moment the request returned would be
+ * describing something that has not happened yet. The buttons therefore report
+ * "queued", link to the queue row, and the detail view shows what MangaDex
+ * currently says next to what our own tables think.
+ */
+const CHAPTER_ARCHIVE_LABELS = {
+  uploaded: "Uploaded",
+  unavailable: "Unavailable since",
+  deleted: "Deleted",
+  edited: "Last edited",
+};
+
+VIEWS.chapters = (route) => {
+  if (route.param) return chapterDetail(route.param);
+  const archive = route.tab ?? "uploaded";
+  const f = () => store.filters;
+  const cursors = () => f().chapterCursors[archive] ?? [];
+
+  const queryString = () => {
+    const q = new URLSearchParams({ archive, limit: "50" });
+    if (f().chapterExtension) q.set("extension", f().chapterExtension);
+    if (f().chapterLanguage) q.set("language", f().chapterLanguage);
+    if (f().chapterNumber) q.set("chapterNumber", f().chapterNumber);
+    if (f().chapterSearch) q.set("search", f().chapterSearch);
+    const walked = cursors();
+    if (walked.length) q.set("cursor", walked[walked.length - 1]);
+    return q;
+  };
+
+  const chapters = new Resource(`chapters:${archive}`, () => api(`/chapters?${queryString()}`));
+  const extensions = new Resource(`chapter-extensions:${archive}`, () =>
+    api(`/chapters/extensions?archive=${archive}`),
+  );
+
+  const reload = () => void chapters.load({ force: true });
+  const resetPaging = () => {
+    setFilter({ chapterCursors: { ...f().chapterCursors, [archive]: [] } });
+    reload();
+  };
+  const page = (walked) => {
+    setFilter({ chapterCursors: { ...f().chapterCursors, [archive]: walked } });
+    reload();
+  };
+
+  return el(
+    "div",
+    {},
+    chapterFilterCard(extensions, resetPaging),
+    card(
+      null,
+      live(
+        [chapters],
+        (data) =>
+          el(
+            "div",
+            {},
+            chapterTable(data.chapters ?? [], archive),
+            chapterPager(data, cursors(), page),
+          ),
+        { reserve: 320, skeleton: () => skeletonTable(8, 6) },
+      ),
+    ),
+  );
+};
+
+function chapterFilterCard(extensions, onChange) {
+  const text = (id, label, key, placeholder) =>
+    el(
+      "span",
+      { class: "row tight" },
+      el("label", { class: "inline", for: id, text: label }),
+      el("input", {
+        id,
+        type: "text",
+        value: store.filters[key],
+        placeholder,
+        onchange: (event) => {
+          setFilter({ [key]: event.target.value });
+          onChange();
+        },
+      }),
+    );
+
+  return card(
+    "Filter",
+    row(
+      // The extension list is a resource of its own so the picker offers what
+      // this archive actually holds, with counts — an extension that has never
+      // published is not a useful filter option.
+      live(
+        [extensions],
+        (data) =>
+          el(
+            "span",
+            { class: "row tight" },
+            el("label", { class: "inline", for: "chapter-extension", text: "Extension" }),
+            el(
+              "select",
+              {
+                id: "chapter-extension",
+                onchange: (event) => {
+                  setFilter({ chapterExtension: event.target.value });
+                  onChange();
+                },
+              },
+              el("option", {
+                value: "",
+                text: "all",
+                selected: store.filters.chapterExtension === "",
+              }),
+              (data.extensions ?? []).map((entry) =>
+                el("option", {
+                  value: entry.extension,
+                  text: `${entry.extension || "(unattributed)"} · ${entry.count}`,
+                  selected: entry.extension === store.filters.chapterExtension,
+                }),
+              ),
+            ),
+          ),
+        { reserve: 32, skeleton: () => el("span", { class: "dim small", text: "extensions…" }) },
+      ),
+      text("chapter-search", "Search", "chapterSearch", "title, name, or any id"),
+      text("chapter-number", "Chapter", "chapterNumber", "exact, e.g. 12.5"),
+      text("chapter-language", "Language", "chapterLanguage", "e.g. en"),
+      el("button", {
+        type: "button",
+        text: "Clear",
+        onclick: () => {
+          setFilter({
+            chapterExtension: "",
+            chapterLanguage: "",
+            chapterNumber: "",
+            chapterSearch: "",
+          });
+          onChange();
+        },
+      }),
+    ),
+    el("p", {
+      class: "dim small",
+      text:
+        "Search matches the series name, the chapter title and any of the four ids, so a chapter id " +
+        "pasted from a MangaDex URL or a Discord embed finds its row.",
+    }),
+  );
+}
+
+function chapterTable(rows, archive) {
+  return table(
+    ["Series", "Chapter", "Language", "Extension", CHAPTER_ARCHIVE_LABELS[archive] ?? "When", ""],
+    rows.map((entry) => [
+      routeLink(routeTo("chapters", entry.mdChapterId, null), truncate(entry.mangaName || "—", 48)),
+      chapterLabel(entry),
+      entry.chapterLanguage || "—",
+      entry.extension || "—",
+      fmtTime(entry.at),
+      [
+        el("a", {
+          class: "button-link inline",
+          href: `https://mangadex.org/chapter/${encodeURIComponent(entry.mdChapterId)}`,
+          target: "_blank",
+          rel: "noreferrer noopener",
+          text: "MangaDex",
+        }),
+        entry.editCount > 0 ? el("span", { class: "dim small", text: `${entry.editCount} edit(s)` }) : null,
+      ],
+    ]),
+    {
+      empty:
+        archive === "uploaded"
+          ? "No chapter has been published yet, or none matches this filter."
+          : "Nothing in this archive matches.",
+    },
+  );
+}
+
+/** "Vol. 2 Ch. 12.5 — Title", degrading to whichever parts exist. */
+function chapterLabel(entry) {
+  const number = entry.chapterNumber ? `Ch. ${entry.chapterNumber}` : "Oneshot";
+  const volume = entry.chapterVolume ? `Vol. ${entry.chapterVolume} ` : "";
+  return truncate(`${volume}${number}${entry.chapterTitle ? ` — ${entry.chapterTitle}` : ""}`, 72);
+}
+
+function chapterPager(data, walked, go) {
+  return el(
+    "div",
+    { class: "row pager" },
+    el("span", {
+      class: "dim small",
+      text: `${data.chapters?.length ?? 0} shown of ${data.total ?? 0} matching · ${data.order ?? ""}`,
+    }),
+    el("span", { class: "grow" }),
+    el("button", {
+      type: "button",
+      text: "← Back",
+      disabled: walked.length === 0,
+      onclick: () => go(walked.slice(0, -1)),
+    }),
+    el("button", {
+      type: "button",
+      text: "Next →",
+      disabled: !data.nextCursor,
+      onclick: () => go([...walked, data.nextCursor]),
+    }),
+  );
+}
+
+/**
+ * One chapter: our record of it, what MangaDex says about it right now, what is
+ * already queued against it, and its edit history.
+ *
+ * The live column is the one that decides anything. Our row is a mirror written
+ * when the chapter was published and may be days stale, while the operator is
+ * about to change a public catalogue entry — so where the two disagree, the
+ * page shows both rather than picking one.
+ */
+function chapterDetail(mdChapterId) {
+  const detail = new Resource(`chapter:${mdChapterId}`, () =>
+    api(`/chapters/${encodeURIComponent(mdChapterId)}`),
+  );
+
+  return live(
+    [detail],
+    (data) => {
+      const chapter = data.chapter ?? {};
+      const archives = data.archives ?? {};
+      return el(
+        "div",
+        {},
+        card(
+          null,
+          row(
+            archives.deleted ? chip("DELETED") : null,
+            archives.unavailable ? chip("UNAVAILABLE") : null,
+            archives.uploaded ? chip("UPLOADED") : null,
+            archives.edited ? chip("EDITED") : null,
+            el("span", {
+              class: "dim",
+              text: `${chapter.extension || "unattributed"} · ${chapterLabel(chapter)}`,
+            }),
+          ),
+          defs([
+            ["Series", chapter.mangaName || "—"],
+            ["MangaDex chapter", el("code", { text: mdChapterId })],
+            ["MangaDex title", chapter.mdMangaId ? mdTitleLink(chapter.mdMangaId, chapter.mdMangaId) : "—"],
+            ["Group", chapter.mdGroupId ? el("code", { text: chapter.mdGroupId }) : "—"],
+            ["Language", chapter.chapterLanguage || "—"],
+            ["Source chapter id", chapter.chapterId ? el("code", { text: chapter.chapterId }) : "—"],
+            ["Source URL", chapter.chapterUrl || "—"],
+            ["Published by the source", fmtTime(chapter.chapterTimestamp)],
+            ["Source expiry", fmtTime(chapter.chapterExpire)],
+            ["Uploaded", fmtTime(archives.uploaded)],
+            ["Marked unavailable", fmtTime(archives.unavailable)],
+            ["Deleted", fmtTime(archives.deleted)],
+          ]),
+          row(
+            el("a", {
+              class: "button-link inline",
+              href: data.links?.chapter ?? `https://mangadex.org/chapter/${encodeURIComponent(mdChapterId)}`,
+              target: "_blank",
+              rel: "noreferrer noopener",
+              text: "Open on MangaDex",
+            }),
+            chapter.chapterUrl
+              ? el("a", {
+                  class: "button-link inline",
+                  href: chapter.chapterUrl,
+                  target: "_blank",
+                  rel: "noreferrer noopener",
+                  text: "Open the source",
+                })
+              : null,
+            copyLinkButton(routeTo("chapters", mdChapterId, null)),
+          ),
+        ),
+        chapterActionsCard(data, detail),
+        chapterMangadexCard(data),
+        chapterTasksCard(data),
+        chapterEditsCard(data),
+      );
+    },
+    { reserve: 420, skeleton: () => el("div", {}, skeletonTable(10, 2), skeletonTable(4, 4)) },
+  );
+}
+
+/**
+ * The three verbs, with the reason they are unavailable rather than a button
+ * that 403s. `actionsBlockedReason` comes from the server, so the page and the
+ * endpoint cannot disagree about who may do this.
+ */
+function chapterActionsCard(data, detail) {
+  const blocked = data.actionsBlockedReason;
+  const already = Boolean(data.archives?.unavailable);
+
+  return card(
+    "Change this chapter on MangaDex",
+    el("p", {
+      class: "dim small",
+      text:
+        "Each of these queues one upload task. core-uploader — the only process holding MangaDex " +
+        "credentials — picks it up within a few seconds and the result appears under Queues.",
+    }),
+    blocked ? el("p", { class: "error", text: blocked }) : null,
+    row(
+      gatedButton("chapters:write", {
+        text: "Edit metadata…",
+        disabled: Boolean(blocked),
+        onclick: () => chapterEditDialog(data, detail),
+      }),
+      gatedButton("chapters:write", {
+        text: already ? "Regenerate the unavailable card…" : "Mark unavailable…",
+        disabled: Boolean(blocked),
+        title: already
+          ? "Renders a fresh card and posts it over the one already on this chapter"
+          : "Replaces the chapter's page with a card explaining the publisher removed it",
+        onclick: () => chapterUnavailableDialog(data, detail, already),
+      }),
+      gatedButton("chapters:write", {
+        class: "danger",
+        text: "Delete from MangaDex…",
+        disabled: Boolean(blocked),
+        onclick: () => chapterDeleteDialog(data, detail),
+      }),
+    ),
+  );
+}
+
+function chapterMangadexCard(data) {
+  const md = data.mangadex;
+  if (!md) {
+    return card(
+      "On MangaDex now",
+      el("p", { class: "error", text: data.mangadexError ?? "MangaDex could not be read." }),
+      el("p", {
+        class: "dim small",
+        text:
+          "Actions still work: they are queued for the uploader, which reads MangaDex itself when it " +
+          "runs them.",
+      }),
+    );
+  }
+  return card(
+    "On MangaDex now",
+    defs([
+      ["Volume", md.volume || "—"],
+      ["Chapter", md.chapter || "—"],
+      ["Title", md.title || "—"],
+      ["Language", md.translatedLanguage || "—"],
+      ["External URL", md.externalUrl || "— (none: this chapter has pages)"],
+      ["Groups", (md.groups ?? []).join(", ") || "—"],
+      ["Version", String(md.version ?? "—")],
+      ["Created", fmtTime(md.createdAt)],
+    ]),
+  );
+}
+
+function chapterTasksCard(data) {
+  const tasks = data.tasks ?? [];
+  return card(
+    "Queued against this chapter",
+    table(
+      ["Kind", "State", "Attempts", "Due", "Last error"],
+      tasks.map((task) => [
+        task.kind,
+        chip(task.state),
+        `${task.attempt}/${task.maxAttempts}`,
+        fmtTime(task.notBefore),
+        truncate(task.lastError, 160),
+      ]),
+      { empty: "Nothing is queued for this chapter." },
+    ),
+    tasks.length
+      ? routeLink(routeTo("queues", null, "tasks"), "Open the queue", { class: "button-link inline" })
+      : null,
+  );
+}
+
+function chapterEditsCard(data) {
+  const edits = data.edits ?? [];
+  if (!edits.length) return null;
+  return card(
+    "Edit history",
+    table(
+      ["When", "Changed to", "From"],
+      edits
+        .slice()
+        .reverse()
+        .map((edit) => [
+          fmtTime(edit.editedAt),
+          truncate(JSON.stringify(edit.new ?? {}), 160),
+          truncate(JSON.stringify(edit.old ?? {}), 160),
+        ]),
+      { empty: "No edits recorded." },
+    ),
+  );
+}
+
+/**
+ * Queue an edit of the chapter's MangaDex metadata.
+ *
+ * Prefilled from what MangaDex currently holds, falling back to our row when it
+ * could not be read — and only the fields the operator actually changed are
+ * sent, so an unrelated value cannot be pinned to a stale prefill.
+ */
+function chapterEditDialog(data, detail) {
+  const md = data.mangadex ?? {};
+  const stored = data.chapter ?? {};
+  const initial = {
+    volume: md.volume ?? stored.chapterVolume ?? "",
+    chapter: md.chapter ?? stored.chapterNumber ?? "",
+    title: md.title ?? stored.chapterTitle ?? "",
+    translatedLanguage: md.translatedLanguage ?? stored.chapterLanguage ?? "",
+    externalUrl: md.externalUrl ?? stored.chapterUrl ?? "",
+    groups: (md.groups ?? (stored.mdGroupId ? [stored.mdGroupId] : [])).join(", "),
+  };
+
+  const inputs = {};
+  const field = (key, label, hint) => {
+    const id = `chapter-edit-${key}`;
+    inputs[key] = el("input", { id, type: "text", value: initial[key] });
+    return [
+      el("label", { for: id, text: label }),
+      inputs[key],
+      hint ? el("p", { class: "dim small", text: hint }) : null,
+    ];
+  };
+
+  const body = el(
+    "div",
+    {},
+    el("p", {
+      class: "dim small",
+      text:
+        "Only the fields you change are sent. The uploader lays them over whatever MangaDex holds at " +
+        "the moment it runs, because PUT /chapter replaces the whole resource and needs the current " +
+        "version.",
+    }),
+    field("chapter", "Chapter number", "Blank clears it — a oneshot has no number."),
+    field("volume", "Volume", ""),
+    field("title", "Title", ""),
+    field("translatedLanguage", "Language", "A MangaDex language code, e.g. en, ja, pt-br."),
+    field("externalUrl", "External URL", "The publisher link readers are sent to."),
+    field("groups", "Groups", "Comma-separated MangaDex group ids."),
+    el(
+      "div",
+      { class: "row end" },
+      el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+      gatedButton("chapters:write", {
+        class: "primary",
+        text: "Queue the edit",
+        onclick: async (event) => {
+          const payload = {};
+          for (const key of ["chapter", "volume", "title", "translatedLanguage", "externalUrl"]) {
+            const value = inputs[key].value.trim();
+            if (value === String(initial[key] ?? "").trim()) continue;
+            // An emptied field is a deliberate clear, which MangaDex expresses
+            // as null. Language is the exception: a chapter always has one, so
+            // blanking it means "leave it alone" rather than "remove it".
+            if (value === "") {
+              if (key === "translatedLanguage") continue;
+              payload[key] = null;
+            } else {
+              payload[key] = value;
+            }
+          }
+          const groups = inputs.groups.value
+            .split(",")
+            .map((id) => id.trim())
+            .filter(Boolean);
+          if (groups.join(", ") !== initial.groups) payload.groups = groups;
+
+          if (Object.keys(payload).length === 0) {
+            toast("nothing changed", false);
+            return;
+          }
+          const result = await act(
+            "chapter.edit",
+            () =>
+              api(`/chapters/${encodeURIComponent(data.mdChapterId)}`, {
+                method: "PATCH",
+                body: payload,
+              }),
+            { button: event.currentTarget, refresh: [detail, summary] },
+          );
+          if (result) {
+            reportChapterQueued(result);
+            closeModal();
+          }
+        },
+      }),
+    ),
+  );
+
+  openModal("Edit chapter metadata", body);
+}
+
+/**
+ * Queue "replace this chapter with an unavailable card", with the card itself
+ * on screen first.
+ *
+ * The preview is rendered by the server from the same function the uploader
+ * uses, so what is approved here is what gets posted. It is an `<img>` rather
+ * than a fetch because the endpoint answers PNG bytes and the session cookie
+ * carries it; the CSP allows `img-src 'self'`.
+ */
+function chapterUnavailableDialog(data, detail, already) {
+  const note = el("textarea", {
+    id: "chapter-note",
+    rows: "3",
+    maxlength: "600",
+    placeholder: "Leave blank for the standard wording.",
+  });
+
+  const preview = el("img", {
+    class: "card-preview",
+    alt: "Preview of the card that will be posted as this chapter's only page",
+    src: previewSrc(data.mdChapterId, ""),
+  });
+
+  const refresh = () => {
+    preview.src = previewSrc(data.mdChapterId, note.value.trim());
+  };
+
+  const body = el(
+    "div",
+    {},
+    el("p", {
+      text: already
+        ? "This chapter already carries an unavailable card. Queueing this renders a fresh one and " +
+          "posts it over the old page."
+        : "The chapter keeps its place on MangaDex. Its page becomes the card below, and the " +
+          "publisher link is repointed away from the dead chapter URL.",
+    }),
+    el("label", { for: "chapter-note", text: "Footer note" }),
+    note,
+    row(el("button", { type: "button", text: "Refresh the preview", onclick: refresh })),
+    preview,
+    el(
+      "div",
+      { class: "row end" },
+      el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+      gatedButton("chapters:write", {
+        class: "primary",
+        text: already ? "Queue a fresh card" : "Queue it",
+        onclick: async (event) => {
+          const result = await act(
+            "chapter.unavailable",
+            () =>
+              api(`/chapters/${encodeURIComponent(data.mdChapterId)}/unavailable`, {
+                method: "POST",
+                // `force` is what makes this repeatable: without it the uploader
+                // treats an already-archived chapter as done and changes nothing.
+                body: { force: already, ...(note.value.trim() ? { footerNote: note.value.trim() } : {}) },
+              }),
+            { button: event.currentTarget, refresh: [detail, summary] },
+          );
+          if (result) {
+            reportChapterQueued(result);
+            closeModal();
+          }
+        },
+      }),
+    ),
+  );
+
+  openModal(already ? "Regenerate the unavailable card" : "Mark this chapter unavailable", body);
+}
+
+function previewSrc(mdChapterId, note) {
+  const q = new URLSearchParams();
+  if (note) q.set("footerNote", note);
+  // Cache-busting is belt-and-braces — the endpoint sends no-store — but an
+  // `<img>` whose src did not change is not re-fetched at all.
+  q.set("t", String(Date.now()));
+  return `${API}/chapters/${encodeURIComponent(mdChapterId)}/card.png?${q}`;
+}
+
+function chapterDeleteDialog(data, detail) {
+  const reason = el("input", { id: "chapter-reason", type: "text", maxlength: "500" });
+  const body = el(
+    "div",
+    {},
+    el("p", {
+      text:
+        "Deleting removes the chapter from MangaDex outright. Readers lose it, and nothing here can " +
+        "bring it back — the archive row records what was removed, not the pages.",
+    }),
+    el("ul", { class: "errors" }, [
+      el("li", { text: "Marking it unavailable keeps the entry and explains the takedown instead." }),
+      el("li", { text: "The change is queued; the uploader performs it within seconds." }),
+    ]),
+    el("label", { for: "chapter-reason", text: "Reason (recorded in the audit trail)" }),
+    reason,
+    el(
+      "div",
+      { class: "row end" },
+      el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+      gatedButton("chapters:write", {
+        class: "danger",
+        text: "Queue the delete",
+        onclick: async (event) => {
+          const result = await act(
+            "chapter.delete",
+            () =>
+              api(`/chapters/${encodeURIComponent(data.mdChapterId)}`, {
+                method: "DELETE",
+                body: { confirm: true, ...(reason.value.trim() ? { reason: reason.value.trim() } : {}) },
+              }),
+            { button: event.currentTarget, refresh: [detail, summary] },
+          );
+          if (result) {
+            reportChapterQueued(result);
+            closeModal();
+          }
+        },
+      }),
+    ),
+  );
+
+  openModal("Delete this chapter from MangaDex", body);
+}
+
+/** Say what was queued — including that a completed task was reset in place. */
+function reportChapterQueued(result) {
+  const parts = [`${result.action} queued`];
+  if (result.superseded) parts.push("a previously completed task for this chapter was reused");
+  for (const warning of result.warnings ?? []) parts.push(warning);
+  toast(parts.join(" · "));
 }
 
 // ------------------------------------------------------------------- activity

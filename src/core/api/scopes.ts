@@ -20,6 +20,13 @@
 export const SCOPES = [
   "runs:read",
   "runs:write",
+  // The chapter history tables: what this platform has published on MangaDex.
+  // Deliberately NOT part of runs:*, which is about scraping and the queue that
+  // drains from it. `chapters:write` queues an edit, a takedown or a delete
+  // against a live public catalogue entry, so a credential that may trigger a
+  // run does not thereby get to unpublish chapters.
+  "chapters:read",
+  "chapters:write",
   "workers:read",
   "workers:write",
   "enroll:write",

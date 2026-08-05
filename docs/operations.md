@@ -1021,6 +1021,112 @@ superseded and is not going away:
 
 ---
 
+## Fix a chapter that is already published
+
+The queue endpoints above act on *work that has not run yet*. This section is the
+other case: the chapter is on MangaDex, and it is wrong.
+
+Everything here goes through `/api/v1/admin/chapters/*` (Chapters in the
+dashboard), and every action **queues an upload task** rather than calling
+MangaDex — `core-uploader` remains the only process with write credentials, so
+the response is `202` with a task id and the change lands within seconds. Watch
+it under Queues, filtered to that chapter id.
+
+Two guards apply to all three actions: the **ADMIN** role on top of
+`chapters:write`, and no api tokens at all. Use the dashboard, or the break-glass
+`ADMIN_TOKEN`.
+
+### Find the chapter
+
+```bash
+# by anything: series name, chapter title, or any of the four ids
+curl -s -H "authorization: Bearer $ADMIN_TOKEN" \
+  "$API/api/v1/admin/chapters?search=$(printf %s 'Series Name' | jq -sRr @uri)" | jq '.chapters[]'
+
+# everything one extension has up
+curl -s -H "authorization: Bearer $ADMIN_TOKEN" \
+  "$API/api/v1/admin/chapters?extension=mangaplus&limit=200" | jq '.total'
+```
+
+`?archive=unavailable|deleted|edited` reads the three history tables with the
+same filters. Paging is by the `nextCursor` the response hands back, never an
+offset — the table grows while it is being read.
+
+Then open one chapter, which is the read worth doing before any change: it shows
+our row, **what MangaDex says right now**, and anything already queued against it.
+
+```bash
+curl -s -H "authorization: Bearer $ADMIN_TOKEN" \
+  "$API/api/v1/admin/chapters/$MD_CHAPTER_ID" | jq '{chapter, mangadex, mangadexError, tasks, archives}'
+```
+
+### Correct its metadata
+
+The body uses MangaDex's field names; `null` clears a field and an omitted field
+is left alone. The uploader lays this over MangaDex's current resource when it
+runs, because `PUT /chapter` replaces rather than patches and needs the version
+current at that moment.
+
+```bash
+curl -s -X PATCH -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"chapter":"12.1","title":"The right title"}' \
+  "$API/api/v1/admin/chapters/$MD_CHAPTER_ID"
+```
+
+### Replace it with an unavailable card
+
+The chapter keeps its place on MangaDex; its page becomes the card and the
+publisher link is repointed away from the dead URL. Preview the exact image
+first — the endpoint renders it with the same code the uploader posts:
+
+```bash
+curl -s -H "authorization: Bearer $ADMIN_TOKEN" \
+  "$API/api/v1/admin/chapters/$MD_CHAPTER_ID/card.png" > /tmp/card.png
+
+curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"footerNote":"Removed at the publisher'"'"'s request."}' \
+  "$API/api/v1/admin/chapters/$MD_CHAPTER_ID/unavailable"
+```
+
+**Regenerating a card that is already posted needs `force: true`.** Without it
+the uploader sees a chapter with nothing left to take down and correctly does
+nothing, which is right for the automated pass and useless when the card on a
+public page says the wrong thing. Asking without the flag is a `409` that says
+so, rather than a silent no-op.
+
+```bash
+curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"force":true,"footerNote":"Corrected wording."}' \
+  "$API/api/v1/admin/chapters/$MD_CHAPTER_ID/unavailable"
+```
+
+### Delete it
+
+The one irreversible action. `confirm: true` is required, the reason goes into
+the audit trail, and the whole row is copied into that audit entry — after the
+uploader runs, it and `deleted_chapters` are the only records the chapter
+existed. Prefer the unavailable card unless the chapter should never have been
+published at all (a duplicate, a wrong series).
+
+```bash
+curl -s -X DELETE -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"confirm":true,"reason":"duplicate of ch. 12"}' \
+  "$API/api/v1/admin/chapters/$MD_CHAPTER_ID"
+```
+
+### When it refuses
+
+| Answer | Meaning |
+|---|---|
+| `409 already_queued` | A task of that kind for this chapter is queued and has not run. Look at it under Queues — edit or remove it there rather than stacking a second one. |
+| `409 leased` | An uploader is executing that action right now. Wait for it and read the result before deciding again. |
+| `409 already_unavailable` | The card is already posted; pass `force: true` to replace it. |
+| `409` naming a deletion | The chapter is recorded as deleted, so there is nothing left to change. If MangaDex still has it, the archive row is stale — queue the task by hand from `/admin/queues/tasks`. |
+| `403` closed to api tokens | Use the dashboard as a signed-in admin, or the break-glass admin token. |
+| `superseded: true` in a `202` | Normal. A completed task for this chapter was reset in place, because nothing deletes `DONE` rows and the slot is one per (kind, chapter). |
+
+---
+
 ## Clear a bad MangaDex session
 
 The MangaDex token pair lives in the `settings` table (`mdauth_access` /

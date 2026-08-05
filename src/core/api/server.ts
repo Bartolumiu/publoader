@@ -6,6 +6,7 @@ import { registerAdminRoutes } from "./routes/admin.js";
 import { registerTokenRoutes } from "./routes/tokens.js";
 import { registerOpsRoutes } from "./routes/ops.js";
 import { registerQueueRoutes } from "./routes/queues.js";
+import { registerChapterRoutes } from "./routes/chapters.js";
 import { registerSysopsRoutes } from "./routes/sysops.js";
 import { registerWebhookRoutes } from "./routes/webhooks.js";
 import { registerSessionRoutes } from "./session.js";
@@ -103,6 +104,7 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   registerTokenRoutes(app, ctx);
   registerOpsRoutes(app, ctx);
   registerQueueRoutes(app, ctx);
+  registerChapterRoutes(app, ctx);
   registerSysopsRoutes(app, ctx);
   // Unauthenticated on purpose: the GitHub HMAC signature is the credential,
   // so this must NOT sit inside the admin scope.
