@@ -499,12 +499,12 @@ that has not happened yet.
 | `DELETE` | `/chapters/:mdChapterId` | `chapters:write` + ADMIN | `{confirm: true, reason?}`. Queues a `DELETE`. **`400` without `confirm`**, and the refusal names the unavailable route as the reversible alternative. The whole row goes into the audit detail, because afterwards `deleted_chapters` and that entry are the only records the chapter existed |
 
 And the one chapter route that writes directly instead of queueing, because it
-changes nothing on MangaDex — it corrects our record of what MangaDex already
+changes nothing on MangaDex; it corrects our record of what MangaDex already
 did:
 
 | Method | Path | Scope | Notes |
 | --- | --- | --- | --- |
-| `POST` | `/chapters/reconcile` | `chapters:read`, **plus ADMIN and no api tokens when `dryRun: false`** | `{dryRun?, extensions?, skipDeleted?}`, `dryRun` defaulting to **true**. Archives the chapters already carrying an unavailable card (`externalUrl` set **and** `pages > 0` — an external chapter with no pages is live) and the ones MangaDex 404s. Seeds archive rows for chapters with no `uploaded_chapters` row at all — the usual case, and the reason a sweep of our own table finds nothing. `hiddenOnMangadex` lists uncarded chapters MangaDex will not serve; those are reported and never written. Idempotent: an already-archived id keeps its original timestamp. See docs/operations.md §"Reconcile the archives with MangaDex" |
+| `POST` | `/chapters/reconcile` | `chapters:read`, **plus ADMIN and no api tokens when `dryRun: false`** | `{dryRun?, extensions?, skipDeleted?}`, `dryRun` defaulting to **true**. Archives the chapters already carrying an unavailable card (`externalUrl` set **and** `pages > 0`; an external chapter with no pages is live) and the ones MangaDex 404s. Seeds archive rows for chapters with no `uploaded_chapters` row at all: the usual case, and the reason a sweep of our own table finds nothing. `hiddenOnMangadex` lists uncarded chapters MangaDex will not serve; those are reported and never written. Idempotent: an already-archived id keeps its original timestamp. See docs/operations.md §"Reconcile the archives with MangaDex" |
 
 The same three actions over a set of chapters:
 
@@ -567,8 +567,8 @@ Two refusals are worth knowing about:
 | --- | --- | --- | --- |
 | `GET` | `/stats` | `stats:read` | `{jobs: {state: n}, uploadTasks: [{kind, state, count}], workers: {status: n}, quarantined, errorsOutstanding: {total, jobs, uploadTasks, submissions}, paused}`. `quarantined` is a state count; `errorsOutstanding` excludes failures an operator has cleared and is what the dashboard badge uses |
 | `GET` | `/errors` | `runs:read` | `?limit=1..200` (50), `?cleared=without\|with\|only` (`without`). One time-ordered feed merging dead-lettered jobs, failed/dead-lettered upload tasks, and quarantined submissions → `{errors: [{at, kind, source, subject, message, id, cleared?}], clearedHidden}`. Each source is queried at the full limit before merging, so a burst in one cannot be hidden behind old rows from another. Cleared entries are omitted by default and counted in `clearedHidden`, so an empty feed never reads as "nothing ever failed" |
-| `POST` | `/errors/clear` | `runs:write` | `{refs?: [{source, id}], ids?: [id], all?: true, note?}` — acknowledge failures that have been read and dealt with, so they leave the feed. `ids` accept a full id or a leading prefix (≥4 chars) and are resolved across all three sources; ambiguous prefixes are refused, not guessed. Entries that are not currently failing come back in `skipped` with a reason (404 if nothing matched at all), because acknowledging a healthy row would hide its NEXT failure. Hides only — no row changes state, and anything that fails again reappears. One audit event per entry |
-| `POST` | `/errors/restore` | `runs:write` | `{refs?, ids?, all?: true}` — un-clear, putting entries back in the feed → `{restored}`. The undo for a mis-clicked "clear all" |
+| `POST` | `/errors/clear` | `runs:write` | `{refs?: [{source, id}], ids?: [id], all?: true, note?}`: acknowledge failures that have been read and dealt with, so they leave the feed. `ids` accept a full id or a leading prefix (≥4 chars) and are resolved across all three sources; ambiguous prefixes are refused, not guessed. Entries that are not currently failing come back in `skipped` with a reason (404 if nothing matched at all), because acknowledging a healthy row would hide its NEXT failure. Hides only; no row changes state, and anything that fails again reappears. One audit event per entry |
+| `POST` | `/errors/restore` | `runs:write` | `{refs?, ids?, all?: true}`: un-clear, putting entries back in the feed → `{restored}`. The undo for a mis-clicked "clear all" |
 | `GET` | `/audit` | `audit:read` | `?limit=1..500` (100) → `{events}` |
 
 `routes/admin.ts:432-453`, `routes/ops.ts:274-338`.

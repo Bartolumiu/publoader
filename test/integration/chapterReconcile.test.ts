@@ -14,7 +14,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  * unique constraints and the move-between-tables transaction are the system
  * under test:
  *
- *  - "marked unavailable" is `externalUrl && pages > 0` — an external chapter
+ *  - "marked unavailable" is `externalUrl && pages > 0`, an external chapter
  *    carrying our card. Both halves are load-bearing: pages alone would sweep
  *    in natively hosted chapters, and externalUrl alone describes every chapter
  *    we have ever published, live ones included;
@@ -23,7 +23,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  *    younger than the catalogue the overlap is zero, so a sweep of our own
  *    table finds nothing at all;
  *  - a live external chapter (no pages) is left alone however MangaDex is
- *    behaving, including when MangaDex has stopped serving it — that is
+ *    behaving, including when MangaDex has stopped serving it; that is
  *    MangaDex hiding a chapter rather than us having marked one, so it is
  *    reported and never archived;
  *  - deletion rests on a 404 and never on absence from a list, because it is
@@ -64,7 +64,7 @@ describe.skipIf(!dbReady())("chapter reconciliation", () => {
 
   /**
    * The same chapter after being marked unavailable: the card is its one page,
-   * and the link has been repointed at the series root rather than cleared —
+   * and the link has been repointed at the series root rather than cleared,
    * which is exactly why the page count, not the URL, is the signal.
    */
   const carded = (id: string, attributes: Record<string, unknown> = {}): MdEntity =>
@@ -163,7 +163,7 @@ describe.skipIf(!dbReady())("chapter reconciliation", () => {
     const md = fakeMd({
       all: [
         entity(chapterId(1)),
-        // Still readable at the publisher — pages 0.
+        // Still readable at the publisher: pages 0.
         entity(liveExternal),
         // Pages, but no publisher link: a natively hosted chapter, not our card.
         entity(nativeWithPages, { externalUrl: null, pages: 12 }),
@@ -274,7 +274,7 @@ describe.skipIf(!dbReady())("chapter reconciliation", () => {
     const second = await reconciler.run({ dryRun: false, actor: "tester" });
     const after = await prisma.unavailableChapter.findUnique({ where: { mdChapterId: orphan } });
 
-    // Still found, but not recorded again — and the timestamp is untouched.
+    // Still found, but not recorded again, and the timestamp is untouched.
     expect(second.unavailableFound).toBe(1);
     expect(second.unavailableRecorded).toBe(0);
     expect(after?.unavailableAt.toISOString()).toBe(first?.unavailableAt.toISOString());

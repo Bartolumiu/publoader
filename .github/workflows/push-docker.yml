@@ -13,7 +13,7 @@ on:
   push:
     branches: [master]
     # Both spellings, because the repo has used both. Tag `2.1.6` was pushed
-    # against a `v*`-only filter and silently published nothing — no run, no
+    # against a `v*`-only filter and silently published nothing: no run, no
     # failure, just a version that existed in git and never on Docker Hub.
     # `+` here is a filter-pattern quantifier, not a literal.
     tags: ["v*", "[0-9]+.[0-9]+.[0-9]+"]
@@ -61,7 +61,7 @@ jobs:
             version="$REF_NAME"
           fi
           # A leading `v` is a git-tag convention, not part of the version. It
-          # comes off whichever way the version arrived — a `v2.1.7` tag and a
+          # comes off whichever way the version arrived: a `v2.1.7` tag and a
           # `v2.1.7` typed into the manual run both publish `:2.1.7`, so the
           # image tags stay bare numbers and never fork into two spellings.
           version="${version#v}"

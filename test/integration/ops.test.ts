@@ -544,7 +544,7 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ ok: true, cleared: 1, skipped: [] });
 
-    // Gone from the default feed, which is a to-do list — but counted, so an
+    // Gone from the default feed, which is a to-do list, but counted, so an
     // empty list can never be mistaken for "nothing ever failed".
     const outstanding = await feed();
     expect(outstanding.errors.map((e) => e.id).sort()).toEqual([failed.id, submission.id].sort());

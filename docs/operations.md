@@ -756,7 +756,7 @@ padmin errors restore 3f9a1c2b           # it was not actually fixed
 Clearing hides, it never deletes: the job, upload task or submission keeps its
 state, `padmin dead-letter` and the Activity feed still show the failure, and the
 `errorsOutstanding` count that drives the dashboard badge is what drops. Anything
-that fails *again* comes back on its own — the acknowledgement is recorded against
+that fails *again* comes back on its own; the acknowledgement is recorded against
 that failure's timestamp, so a cleared-then-retried-then-failed job returns as new
 work rather than staying silenced. The same operation is on the dashboard's Errors
 view, `/errors clear` in Discord, and `POST /api/v1/admin/errors/clear`.
@@ -1291,34 +1291,34 @@ first and only then offers to queue.
 `unavailable_chapters` and `deleted_chapters` are written by the upload-task
 workers at the moment those workers act. That makes them a log of actions rather
 than a description of the catalogue, and the two come apart whenever the log is
-incomplete — a database restored without them, a migration, work done before the
+incomplete: a database restored without them, a migration, work done before the
 tables existed. MangaDex still carries the evidence; nothing was reading it back.
 
-**What "marked unavailable" looks like on MangaDex.** An external chapter — the
-only kind this platform publishes — normally has no pages: the reader follows
+**What "marked unavailable" looks like on MangaDex.** An external chapter, the
+only kind this platform publishes, normally has no pages: the reader follows
 `externalUrl` to the publisher. Marking one unavailable replaces that with a
 card, and the card is a page. So:
 
 | MangaDex record | Meaning |
 |---|---|
-| `externalUrl` set, `pages > 0` | carries our card — **marked unavailable** |
+| `externalUrl` set, `pages > 0` | carries our card: **marked unavailable** |
 | `externalUrl` set, `pages == 0` | live; the reader clicks through |
 
 On the live group that separates without a single ambiguous case: 112 carded
 chapters, every one with exactly one page, against 6108 live ones with none. The
-`externalUrl` of a carded chapter is no help on its own — the card flow repoints
-it at the series or domain root rather than clearing it — which is why the page
+`externalUrl` of a carded chapter is no help on its own; the card flow repoints
+it at the series or domain root rather than clearing it, which is why the page
 count is the signal and the URL is not.
 
 `padmin chapters reconcile` rebuilds the archives from that. Two passes, and
 they are not variations of one thing:
 
-- **discover** — walk our groups' chapters on MangaDex and archive the carded
+- **discover**: walk our groups' chapters on MangaDex and archive the carded
   ones. This deliberately does not start from `uploaded_chapters`: on a database
   whose upload history is younger than the catalogue, the carded chapters have
   no row there. Measured on the live deployment, the overlap was zero. The
   archive row is seeded from the MangaDex record itself.
-- **reconcile** — sweep `uploaded_chapters` for rows MangaDex no longer has, and
+- **reconcile**: sweep `uploaded_chapters` for rows MangaDex no longer has, and
   archive those as deleted. Deletions can only be found in this direction: a
   chapter that is gone cannot be enumerated, so our own memory of uploading it
   is the only evidence there was one.
@@ -1331,15 +1331,15 @@ padmin chapters reconcile
 #   mangaplus   4f1de6a2   6220      112   112          24
 #   scanned 155 uploaded row(s)
 #   would record 112 unavailable and 0 deleted (found 112 / 0; the rest were
-#   already archived) — re-run with --apply to write
+#   already archived); re-run with --apply to write
 ```
 
-Read it before applying it. `deleted` is the row that matters — it claims a
+Read it before applying it. `deleted` is the row that matters: it claims a
 chapter is gone forever, so it is only ever recorded on a 404 from the chapter's
 own endpoint and never on a chapter merely missing from a list response.
 
 **MD-HIDDEN is a different thing and is never archived.** Those are chapters
-carrying no card of ours that MangaDex itself refuses to serve — MangaDex hiding
+carrying no card of ours that MangaDex itself refuses to serve; MangaDex hiding
 a chapter rather than us having marked one. They are arguably chapters that
 *want* an `UNAVAILABLE` task, which is an operator's call, so the command lists
 them and stops there.
@@ -1352,7 +1352,7 @@ Applying mirrors what the workers do: upsert the archive row, keep the MangaDex
 snapshot under `extra.mdAttributes`, then drop any `uploaded_chapters` row so a
 chapter lives in exactly one table. Where a chapter still has our row, the
 publisher-side identifiers come from it rather than from MangaDex, which has
-never known about them. It is safe to re-run — an id already archived keeps its
+never known about them. It is safe to re-run: an id already archived keeps its
 original timestamp, because that instant is when the change was first seen and a
 later sweep does not know better. A chapter already recorded as deleted is never
 resurrected as merely unavailable.
@@ -1361,10 +1361,10 @@ resurrected as merely unavailable.
 |---|---|
 | `--apply` | Write. Without it nothing is written. |
 | `--extension <name...>` | Only these extensions. |
-| `--skip-deleted` | Skip the `uploaded_chapters` sweep — the slow half on a large table, and the only pass that can find deletions. |
+| `--skip-deleted` | Skip the `uploaded_chapters` sweep: the slow half on a large table, and the only pass that can find deletions. |
 
-**Who can run it.** The dry run needs `chapters:read`, so any scoped token —
-including the bot's — can ask. `/reconcile` in Discord reports the same counts.
+**Who can run it.** The dry run needs `chapters:read`, so any scoped token,
+including the bot's, can ask. `/reconcile` in Discord reports the same counts.
 Applying takes the same guard as every other mutating chapter route: ADMIN or
 above, and closed to api tokens, so it is the dashboard (Chapters → the
 unavailable or deleted archive → **Reconcile with MangaDex**) or the break-glass
@@ -1372,7 +1372,7 @@ unavailable or deleted archive → **Reconcile with MangaDex**) or the break-gla
 
 **Why this one writes directly** instead of queueing an upload task like every
 other action on a published chapter: it changes nothing on MangaDex. Queueing
-would be actively wrong — every chapter it finds is already carded or already
+would be actively wrong: every chapter it finds is already carded or already
 gone, so running the workers over them would re-upload cards and re-issue
 deletes for work that is already done.
 

@@ -837,7 +837,7 @@ describe("/errors", () => {
     const quiet = fakeApi({ errors: vi.fn().mockResolvedValue({ errors: [], clearedHidden: 0 }) });
     expect((await invoke("errors", quiet, {}, "list")).text).toContain("Nothing has failed recently");
 
-    // Same empty list, but four failures were dealt with — an operator deciding
+    // Same empty list, but four failures were dealt with; an operator deciding
     // whether to dig further needs that difference.
     const handled = fakeApi({ errors: vi.fn().mockResolvedValue({ errors: [], clearedHidden: 4 }) });
     const reply = await invoke("errors", handled, {}, "list");

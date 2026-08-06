@@ -830,7 +830,7 @@ const commands: BotCommand[] = [
     // `clear` is what makes the list usable from Discord over time. Without it
     // the same handled failure is at the top of every `/errors` for weeks and
     // people stop reading it; with it, `/errors` answers "what still needs me?".
-    // Clearing hides an entry and nothing more — the rows are untouched, a repeat
+    // Clearing hides an entry and nothing more; the rows are untouched, a repeat
     // failure comes back on its own, and `restore` is a full undo.
     name: "errors",
     description: "Recent failures, and clearing the ones you have dealt with.",
@@ -866,7 +866,7 @@ const commands: BotCommand[] = [
           )
           .addBooleanOption((o) => o.setName("all").setDescription("Clear every outstanding failure."))
           .addStringOption((o) =>
-            o.setName("note").setDescription("Why it is fine — shown to whoever reviews cleared entries."),
+            o.setName("note").setDescription("Why it is fine; shown to whoever reviews cleared entries."),
           ),
       )
       .addSubcommand((s) =>
@@ -891,7 +891,7 @@ const commands: BotCommand[] = [
 
         if (sub === "restore") {
           const { restored } = await ctx.api.restoreErrors(ctx.actor, all ? { all: true } : { ids: [id!] });
-          if (restored === 0) return { text: ":person_shrugging: Nothing matched — nothing was cleared under that id." };
+          if (restored === 0) return { text: ":person_shrugging: Nothing matched; nothing was cleared under that id." };
           return {
             text: `:leftwards_arrow_with_hook: ${restored} entr${restored === 1 ? "y" : "ies"} back in \`/errors list\`.`,
           };
@@ -902,7 +902,7 @@ const commands: BotCommand[] = [
           ...(all ? { all: true } : { ids: [id!] }),
           ...(note ? { note } : {}),
         });
-        const skipped = (result.skipped ?? []).map((s) => `• \`${s.id.slice(0, 12)}\` — ${s.reason}`);
+        const skipped = (result.skipped ?? []).map((s) => `• \`${s.id.slice(0, 12)}\`: ${s.reason}`);
         if (result.cleared === 0) {
           return { text: lines([":person_shrugging: Nothing was cleared.", ...skipped]) };
         }
@@ -930,7 +930,7 @@ const commands: BotCommand[] = [
         return {
           text:
             clearedHidden > 0
-              ? `:green_circle: Nothing outstanding. ${clearedHidden} cleared entr${clearedHidden === 1 ? "y is" : "ies are"} hidden — \`/errors list show:cleared only\` to review.`
+              ? `:green_circle: Nothing outstanding. ${clearedHidden} cleared entr${clearedHidden === 1 ? "y is" : "ies are"} hidden; \`/errors list show:cleared only\` to review.`
               : ":green_circle: Nothing has failed recently.",
         };
       }
@@ -1139,7 +1139,7 @@ const commands: BotCommand[] = [
     description: "Check which chapters are marked unavailable or deleted on MangaDex.",
     // "read" although it walks the whole catalogue: it reports and never
     // writes. Applying is closed to api tokens at the endpoint, so this command
-    // could not write the rows even if it asked to — `padmin chapters
+    // could not write the rows even if it asked to; `padmin chapters
     // reconcile --apply` or the dashboard does that.
     sensitivity: "read",
     ephemeral: true,
@@ -1159,7 +1159,7 @@ const commands: BotCommand[] = [
       if (report.unavailableRecorded === 0 && report.deletedRecorded === 0) {
         return {
           text:
-            ":white_check_mark: Nothing to record — the archives already match MangaDex " +
+            ":white_check_mark: Nothing to record; the archives already match MangaDex " +
             `(${report.unavailableFound} unavailable and ${report.deletedFound} deleted, all known).`,
         };
       }
@@ -1167,7 +1167,7 @@ const commands: BotCommand[] = [
         .filter((group) => group.carded > 0 || group.hiddenOnMangadex > 0)
         .map(
           (group) =>
-            `• **${group.extension}** — ${group.carded} of ${group.total} already carded, ` +
+            `• **${group.extension}**: ${group.carded} of ${group.total} already carded, ` +
             `${group.recorded} not yet archived` +
             (group.hiddenOnMangadex > 0
               ? `, ${group.hiddenOnMangadex} live but unserved by MangaDex`
@@ -1180,7 +1180,7 @@ const commands: BotCommand[] = [
           (lines.length > 0 ? `${lines.join("\n")}\n` : "") +
           (report.hiddenOnMangadex.length > 0
             ? `${report.hiddenOnMangadex.length} chapter(s) carry no card but MangaDex will not ` +
-              "serve them — never archived; queue them unavailable if that is what you want.\n"
+              "serve them, never archived; queue them unavailable if that is what you want.\n"
             : "") +
           "Nothing has been written. Run `padmin chapters reconcile --apply` to record them.",
       };

@@ -1001,7 +1001,7 @@ tasks, and quarantined submissions into one time-ordered feed, so triage starts 
 the dashboard rather than in `docker logs` (`routes/ops.ts:262-338`). The feed is a
 to-do list rather than a history: `POST /admin/errors/clear` records that a failure
 has been dealt with in `cleared_errors` and it drops out, which is what keeps an
-empty feed meaningful. It hides only — no row changes state, the acknowledgement is
+empty feed meaningful. It hides only; no row changes state, the acknowledgement is
 recorded against the failure's timestamp so a repeat failure reappears on its own,
 and `/errors/restore` is a complete undo (`observability/errorFeed.ts`). The
 through-line for the whole ops API is that an operator should never need a shell

@@ -316,7 +316,7 @@ been read and dealt with and drops it from the list; the row itself is untouched
 so Activity and the run views still show it, "Show → cleared" reviews what was
 acknowledged and by whom, and **Restore** undoes it. A failure that happens again
 reappears by itself, because the acknowledgement is recorded against the
-failure's timestamp — clearing acknowledges one failure, never a row
+failure's timestamp; clearing acknowledges one failure, never a row
 (`src/core/observability/errorFeed.ts`).
 
 ### 2. The CLI

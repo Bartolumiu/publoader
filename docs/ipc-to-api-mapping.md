@@ -59,7 +59,7 @@ Base path for every endpoint below is `/api/v1/admin`. "CLI" is the
 | `pause` | `POST /pause` | `pause [--minutes]` | Overview → Pause | Body `{minutes?}`; omit for indefinite. Unlike the legacy version the pause is authoritative in Postgres, so it is honoured by every replica immediately rather than by one process's global. |
 | `resume` | `POST /resume` | `resume` | Overview → Resume | |
 | `status` | `GET /stats` + `GET /workers` | `stats`, `workers list` | Overview + Workers | Split in two. `pid` and the in-process `schedule` job list have no equivalent; see below. |
-| `queue_peek` | `GET /stats` (depths only) | `stats` | Overview → Upload queue, outstanding (depths only) | **Partial.** Depths are covered; per-row sampling is not; see gaps. The card shows outstanding states only; DONE totals sit behind its “Completed” disclosure. |
+| `queue_peek` | `GET /stats` (depths only) | `stats` | Overview → Upload queue: outstanding (depths only) | **Partial.** Depths are covered; per-row sampling is not; see gaps. The card shows outstanding states only; DONE totals sit behind its “Completed” disclosure. |
 
 ### New capabilities with no legacy counterpart
 

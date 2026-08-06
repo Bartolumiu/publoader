@@ -553,16 +553,16 @@ everything that ever broke.
 
 | Column | Meaning |
 | --- | --- |
-| `source` | `JOB`, `UPLOAD_TASK` or `SUBMISSION` — which of the feed's three tables `subject_id` names. |
-| `subject_id` | The job / upload task / result submission id. **Not a foreign key:** one column cannot reference three tables, and an acknowledgement that outlives its row is harmless — it matches nothing and `pruneClearedErrors` sweeps it on the next clear. |
+| `source` | `JOB`, `UPLOAD_TASK` or `SUBMISSION`: which of the feed's three tables `subject_id` names. |
+| `subject_id` | The job / upload task / result submission id. **Not a foreign key:** one column cannot reference three tables, and an acknowledgement that outlives its row is harmless; it matches nothing and `pruneClearedErrors` sweeps it on the next clear. |
 | `error_at` | The timestamp the feed showed for the entry when it was cleared. This is what makes clearing acknowledge **one failure** rather than muting a row: anything that fails again moves its own `updated_at` past this value and reappears as new work. Without it, a cleared job that was retried and dead-lettered again would never be seen. |
 | `cleared_at`, `cleared_by` | When, and by whom (same actor shape as `audit_events.actor`). Shown in the dashboard's cleared view. |
-| `note` | Optional operator note — "upstream 503s, extension fixed in 1.4.2". |
+| `note` | Optional operator note: "upstream 503s, extension fixed in 1.4.2". |
 
 Why a side table rather than columns on the three sources: those rows carry
 `updated_at` maintained by Prisma's `@updatedAt`, so a write recording the
 acknowledgement would move the very timestamp the acknowledgement is measured
-against — and this is operator bookkeeping, not execution state a claim statement
+against, and this is operator bookkeeping, not execution state a claim statement
 reads.
 
 Indexes: `(source, subject_id)` **unique** is both the feed's exclusion lookup and

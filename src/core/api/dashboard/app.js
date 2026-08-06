@@ -104,7 +104,7 @@ const store = {
     activityQuery: "",
     activityExtension: "",
     activityLimit: 100,
-    /** Errors view: "without" | "with" | "only" — cleared entries hidden by default. */
+    /** Errors view: "without" | "with" | "only"; cleared entries hidden by default. */
     errorsCleared: "without",
     auditQuery: "",
     auditActor: "",
@@ -1965,8 +1965,8 @@ async function boot() {
 
 /**
  * Job states that still owe something, worst first. Anything not on this list
- * (SUCCEEDED, CANCELLED, and any state added later) is settled and folds away
- * — listing the open ones rather than excluding the closed ones means a state
+ * (SUCCEEDED, CANCELLED, and any state added later) is settled and folds away;
+ * listing the open ones rather than excluding the closed ones means a state
  * this dashboard has never heard of surfaces instead of vanishing.
  */
 const OUTSTANDING_JOB_STATES = ["DEAD_LETTER", "RUNNING", "LEASED", "PENDING"];
@@ -2006,7 +2006,7 @@ function outstandingJobsCard(jobs) {
                   ),
                 ),
               )
-            : emptyState("Nothing outstanding — every job has finished."),
+            : emptyState("Nothing outstanding; every job has finished."),
           settled.length
             ? el(
                 "details",
@@ -2140,10 +2140,10 @@ VIEWS.overview = (route) => {
           outstandingJobsCard(data.jobs || {}),
           counts("Workers by status", Object.entries(data.workers || {}), "No worker has ever enrolled."),
           card(
-            "Upload queue — outstanding",
+            "Upload queue: outstanding",
             (data.uploadTasks || []).length
               ? outstandingTasks(data.uploadTasks, {
-                  emptyText: "Nothing outstanding — every queued upload has been published.",
+                  emptyText: "Nothing outstanding; every queued upload has been published.",
                 })
               : emptyState("Nothing has ever been queued for upload."),
           ),
@@ -2783,7 +2783,7 @@ VIEWS.queues = (route) => {
  *
  * Attention before motion before waiting: DEAD_LETTER and FAILED are the two
  * that will not move again without an operator, so they lead. DONE is not on
- * this list at all — see `outstandingTasks`.
+ * this list at all; see `outstandingTasks`.
  */
 const OUTSTANDING_TASK_STATES = ["DEAD_LETTER", "FAILED", "LEASED", "PENDING"];
 
@@ -2804,7 +2804,7 @@ function outstandingDepths(counts) {
  * A real anchor so middle-click and "copy link" still work; the filter is set
  * on the way through because the hash carries a section and tab, not a filter.
  * Opening it in a new tab therefore lands on the unfiltered Tasks list, which
- * is the honest degradation — a wrong filter would be worse than none.
+ * is the honest degradation: a wrong filter would be worse than none.
  */
 function queueDepthTile(entry) {
   return el(
@@ -2821,13 +2821,13 @@ function queueDepthTile(entry) {
 }
 
 /**
- * What the queue still owes, and — folded away — what it has already settled.
+ * What the queue still owes, and (folded away) what it has already settled.
  *
  * DONE is deliberately not a tile. It is both the largest number here and the
  * only one nobody can act on, so a queue that has published forty thousand
  * chapters and has three stuck ones read as a wall of completed work with the
  * problem buried in it. The completed count is still available, one disclosure
- * down, because "did that kind ever go through at all" is a real question — it
+ * down, because "did that kind ever go through at all" is a real question; it
  * is just never the first one.
  */
 function outstandingTasks(counts, { emptyText }) {
@@ -2870,7 +2870,7 @@ function queueDepthPanel() {
         const counts = data.summary ?? [];
         return counts.length
           ? outstandingTasks(counts, {
-              emptyText: "Nothing outstanding — every queued upload has been published.",
+              emptyText: "Nothing outstanding; every queued upload has been published.",
             })
           : emptyState("No upload task has ever been queued.");
       },
@@ -4088,12 +4088,12 @@ VIEWS.chapters = (route) => {
  * Bring the archives back in line with what MangaDex actually holds.
  *
  * Only on the two archives it can write, because offering it while reading
- * `uploaded` or `edited` would imply it reconciles those, and it does not — it
+ * `uploaded` or `edited` would imply it reconciles those, and it does not; it
  * moves rows *into* unavailable and deleted.
  *
  * Check first, then apply, and never the other way round: the check is the only
  * thing that says how many rows are about to move, and unlike the bulk actions
- * above this one cannot be previewed row by row afterwards — an archived row
+ * above this one cannot be previewed row by row afterwards; an archived row
  * has left `uploaded_chapters`.
  */
 function reconcileCard(archive, reload) {
@@ -4124,7 +4124,7 @@ function reconcileCard(archive, reload) {
           ? el("div", {
               text:
                 `${report.hiddenOnMangadex.length} chapter(s) carry no card but MangaDex will not ` +
-                "serve them — never archived. Queue them unavailable if that is what you want.",
+                "serve them; never archived. Queue them unavailable if that is what you want.",
             })
           : el("span", {}),
       ]),
@@ -4140,8 +4140,8 @@ function reconcileCard(archive, reload) {
         class: "dim small",
         text:
           "These archives record what the workers did as they did it. This rebuilds them from " +
-          "MangaDex itself — the chapters already carrying an unavailable card, and the ones " +
-          "that are gone — so history the tables never captured is recorded too.",
+          "MangaDex itself: the chapters already carrying an unavailable card, and the ones " +
+          "that are gone, so history the tables never captured is recorded too.",
       }),
       el(
         "div",
@@ -4163,7 +4163,7 @@ function reconcileCard(archive, reload) {
           onclick: async (event) => {
             const button = event.currentTarget;
             if (!checked) {
-              toast("Check first — nothing should be written before you have seen the count.", false);
+              toast("Check first; nothing should be written before you have seen the count.", false);
               return;
             }
             const total = checked.unavailableRecorded + checked.deletedRecorded;
@@ -4172,7 +4172,7 @@ function reconcileCard(archive, reload) {
                 title: "Record what MangaDex changed",
                 lead: `${total} chapter(s) will move into the unavailable and deleted archives.`,
                 points: [
-                  "Nothing is sent to MangaDex — this only corrects our record of it.",
+                  "Nothing is sent to MangaDex; this only corrects our record of it.",
                   "Rows that move leave uploaded_chapters, so a chapter lives in exactly one table.",
                   "Chapters already archived keep the date they were first recorded.",
                 ],
@@ -5259,7 +5259,7 @@ function activityActions(entry) {
  *
  * This view is a to-do list rather than a log: an operator who has read a
  * failure and dealt with it clears the entry and it stops being shown, so what
- * remains is what still needs attention. Nothing is deleted — the row itself is
+ * remains is what still needs attention. Nothing is deleted; the row itself is
  * untouched, "Cleared" lists what was acknowledged and by whom, and Restore puts
  * an entry back. A failure that happens AGAIN reappears on its own, because the
  * acknowledgement is recorded against the failure's timestamp (see
@@ -5309,7 +5309,7 @@ VIEWS.errors = (route) => {
         class: "dim small",
         text:
           "Dead-lettered jobs, failed upload tasks and quarantined submissions in one time-ordered list, so " +
-          "triage starts here instead of in docker logs. Clearing an entry hides it from this list only — the " +
+          "triage starts here instead of in docker logs. Clearing an entry hides it from this list only; the " +
           "job, task or submission is untouched, and anything that fails again comes back.",
       }),
       row(
@@ -5402,7 +5402,7 @@ VIEWS.errors = (route) => {
                         class: "dim small",
                         text:
                           `cleared by ${entry.cleared.by} ${ago(entry.cleared.at)}` +
-                          (entry.cleared.note ? ` — ${entry.cleared.note}` : ""),
+                          (entry.cleared.note ? `: ${entry.cleared.note}` : ""),
                       })
                     : null,
                 ),

@@ -31,7 +31,7 @@ const TOKEN_SKEW_SECONDS = 60;
  *
  * Without it MangaDex silently omits the chapters it will not serve, so a
  * lookup of "what does MangaDex have for this series" quietly under-reports and
- * the caller concludes a chapter is missing when it is merely unreadable — for
+ * the caller concludes a chapter is missing when it is merely unreadable; for
  * the processor, that is the difference between leaving a chapter alone and
  * uploading a second copy of it.
  *
@@ -73,7 +73,7 @@ export interface MdEntity {
  * A group's chapters, split by whether MangaDex will serve them.
  *
  * `all` carries the raw entity rather than a mapped `MdChapter` because the
- * caller archives the MangaDex record as it stood — the attributes it needs
+ * caller archives the MangaDex record as it stood: the attributes it needs
  * (`pages`, `readableAt`, `isUnavailable`) are exactly the ones the mapping
  * drops, and once MangaDex stops serving a chapter this snapshot is the only
  * remaining answer to what it looked like.

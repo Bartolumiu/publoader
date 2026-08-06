@@ -905,7 +905,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
          * Failures nobody has dealt with yet, across all three error sources.
          *
          * `quarantined` above is a state count and stays one; this is the triage
-         * number, and the difference is acknowledgements — an operator who has
+         * number, and the difference is acknowledgements; an operator who has
          * cleared the feed sees 0 here while `quarantined` still reports the rows
          * that are, in fact, still quarantined. The dashboard badge uses this one:
          * a badge that kept counting handled failures teaches people to ignore

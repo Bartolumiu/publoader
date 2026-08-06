@@ -260,7 +260,7 @@ as the legacy `force_login` without a chat command that handles a password.
 | `/tracked list <extension>` | read | `extensions:read` | The external-id → MangaDex-id mapping. |
 | `/tracked set <extension> <manga-id> <md-manga-id>` | mutate | `extensions:write` | Add or repoint a mapping. |
 | `/tracked remove <extension> <manga-id>` | mutate | `extensions:write` | Stop tracking. Does not touch MangaDex. |
-| `/reconcile [extension]` | read | `chapters:read` | How many chapters are already marked unavailable on MangaDex, or deleted, that the archives do not know about. **Reports only** — applying is closed to api tokens, so recording them is `padmin chapters reconcile --apply` or the dashboard. |
+| `/reconcile [extension]` | read | `chapters:read` | How many chapters are already marked unavailable on MangaDex, or deleted, that the archives do not know about. **Reports only**; applying is closed to api tokens, so recording them is `padmin chapters reconcile --apply` or the dashboard. |
 
 `/extensions list` shows **published bundles**, not files on disk. An extension
 in the repo that was never published does not appear; that is intended.

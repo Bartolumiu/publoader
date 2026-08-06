@@ -486,7 +486,7 @@ export class AdminApiClient {
    * Dry run only, and not because the bot is untrusted in general: applying is
    * closed to api tokens at the endpoint (routes/chapters.ts), so a bot token
    * could not write these rows even if this asked it to. Reporting is the
-   * useful half here anyway — the answer is a number somebody needs to see
+   * useful half here anyway: the answer is a number somebody needs to see
    * before deciding to act on it.
    */
   reconcileChapters(actor: string, extensions: string[]): Promise<ChapterReconcileReport> {

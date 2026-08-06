@@ -12,15 +12,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * that fixed it: completed counts never occupy a tile, they live behind a
  * disclosure, and the tiles that remain are the way into the rows they count.
  *
- * Driven the same way as dashboardChapters.test.ts — the real app.js evaluated
+ * Driven the same way as dashboardChapters.test.ts: the real app.js evaluated
  * under jsdom against a stubbed API. See that file's header for why app.js is a
  * classic script and how it is mounted.
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any --
    The DOM lib is deliberately kept out of this program (see the same note in
-   dashboardModules.test.ts), so the jsdom globals — and every node read back
-   out of them below — are loosely typed in this file only. Not re-enabled: the
+   dashboardModules.test.ts), so the jsdom globals, and every node read back
+   out of them below, are loosely typed in this file only. Not re-enabled: the
    element helpers further down are the same globals by another name. */
 const doc: any = (globalThis as any).document;
 const win: any = globalThis;
@@ -32,7 +32,7 @@ const INDEX_HTML = join(DASHBOARD, "index.html");
 /**
  * A live instance in its normal state: a mountain of completed work, and a
  * handful of rows that still owe something. The numbers are lopsided on
- * purpose — that ratio is the whole reason these views were changed.
+ * purpose; that ratio is the whole reason these views were changed.
  */
 const UPLOAD_DEPTHS = [
   { kind: "UPLOAD", state: "DONE", count: 40_120 },
@@ -139,7 +139,7 @@ describe("dashboard shows what is left, not what is done", () => {
 
   it("gives the overview's upload card tiles for outstanding work only", async () => {
     await goto("#/overview");
-    const card = cardByTitle("Upload queue — outstanding");
+    const card = cardByTitle("Upload queue: outstanding");
     expect(card).toBeTruthy();
 
     // Worst first, and DONE is not among them.
@@ -149,7 +149,7 @@ describe("dashboard shows what is left, not what is done", () => {
 
   it("folds the completed upload total into a disclosure, summed across kinds", async () => {
     await goto("#/overview");
-    const details = cardByTitle("Upload queue — outstanding")?.querySelector("details");
+    const details = cardByTitle("Upload queue: outstanding")?.querySelector("details");
     expect(details).toBeTruthy();
     // Closed by default: the operator opens it, it does not open on them.
     expect(details.hasAttribute("open")).toBe(false);
@@ -158,10 +158,10 @@ describe("dashboard shows what is left, not what is done", () => {
 
   it("drops a kind whose only counts are zero", async () => {
     await goto("#/overview");
-    const details = cardByTitle("Upload queue — outstanding")?.querySelector("details");
-    // DELETE is DONE=0 — neither a tile nor a completed row.
+    const details = cardByTitle("Upload queue: outstanding")?.querySelector("details");
+    // DELETE is DONE=0; neither a tile nor a completed row.
     expect(details.textContent).not.toContain("DELETE");
-    expect(cardByTitle("Upload queue — outstanding").querySelector(".grid.tight").textContent).not.toContain("DELETE");
+    expect(cardByTitle("Upload queue: outstanding").querySelector(".grid.tight").textContent).not.toContain("DELETE");
   });
 
   it("shows jobs the same way: open states as tiles, SUCCEEDED behind Settled", async () => {
@@ -171,7 +171,7 @@ describe("dashboard shows what is left, not what is done", () => {
     expect(tileStates(card)).toEqual(["DEAD_LETTER", "PENDING"]);
 
     const summary = card.querySelector("details > summary");
-    // SUCCEEDED 4021 + CANCELLED 2 — both settled, neither actionable.
+    // SUCCEEDED 4021 + CANCELLED 2; both settled, neither actionable.
     expect(summary.textContent).toBe(`Settled (${(4023).toLocaleString()})`);
   });
 
@@ -200,7 +200,7 @@ describe("dashboard shows what is left, not what is done", () => {
     // again on the one jsdom window, so each earlier instance still holds a
     // hashchange listener and refetches with its own (unfiltered) store. The
     // instance under test is the last to render and the last to ask, so the
-    // assertion is that the filtered request was made — not that it was first.
+    // assertion is that the filtered request was made, not that it was first.
     const asked = requested.filter((p) => p.includes("/queues/tasks"));
     expect(asked.some((p) => p.includes("kind=EDIT") && p.includes("state=DEAD_LETTER"))).toBe(true);
   });

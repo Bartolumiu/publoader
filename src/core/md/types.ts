@@ -50,8 +50,8 @@ export interface MdChapter {
      */
     createdAt: string;
     /**
-     * How many pages MangaDex is hosting for this chapter, and — for the
-     * external chapters this platform publishes — the thing that says whether
+     * How many pages MangaDex is hosting for this chapter, and, for the
+     * external chapters this platform publishes, the thing that says whether
      * it has been marked unavailable.
      *
      * An external chapter normally has NO pages: the reader follows

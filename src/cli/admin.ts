@@ -634,7 +634,7 @@ chapters
       // card of ours, so they are candidates for an UNAVAILABLE task rather
       // than chapters we have already marked.
       console.error(
-        `  ${res.hiddenOnMangadex.length} live chapter(s) MangaDex will not serve — ` +
+        `  ${res.hiddenOnMangadex.length} live chapter(s) MangaDex will not serve: ` +
           "not archived; queue them unavailable if that is what you want:",
       );
       for (const id of res.hiddenOnMangadex.slice(0, 20)) console.error(`    ${id}`);
@@ -646,7 +646,7 @@ chapters
       `${res.dryRun ? "would record" : "recorded"} ` +
         `${res.unavailableRecorded} unavailable and ${res.deletedRecorded} deleted ` +
         `(found ${res.unavailableFound} / ${res.deletedFound}; the rest were already archived)` +
-        (res.dryRun ? " — re-run with --apply to write" : ""),
+        (res.dryRun ? "; re-run with --apply to write" : ""),
     );
   });
 
@@ -1143,7 +1143,7 @@ errorFeed
   .description("mark failures as read and dealt with, so they drop out of the feed")
   .argument("[id...]", "entry ids, or the leading characters of one (as printed by `padmin errors`)")
   .option("--all", "clear every outstanding failure")
-  .option("--note <text>", "why it is fine — shown to whoever reviews cleared entries")
+  .option("--note <text>", "why it is fine; shown to whoever reviews cleared entries")
   .action(async (ids: string[], opts: { all?: boolean; note?: string }) => {
     // Both at once is a contradiction worth rejecting rather than resolving: it
     // reads as "clear these" and would clear everything.
@@ -1164,7 +1164,7 @@ errorFeed
 
     for (const skip of res.skipped ?? []) console.log(`skipped ${skip.id}: ${skip.reason}`);
     ok(
-      `${res.cleared} failure(s) cleared — hidden from the feed. Nothing else changed: ` +
+      `${res.cleared} failure(s) cleared; hidden from the feed. Nothing else changed: ` +
         "the jobs, tasks and submissions keep their state, anything that fails again reappears, " +
         "and `errors restore` undoes this.",
     );

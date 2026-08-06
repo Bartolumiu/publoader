@@ -604,7 +604,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
      * Acknowledge failures: "read this, dealt with it, stop showing it to me".
      *
      * `runs:write` rather than `runs:read` because it changes what the next
-     * operator sees — the same reason retry and cancel are writes — but it is not
+     * operator sees (the same reason retry and cancel are writes), but it is not
      * destructive: nothing about the job, task or submission changes, and
      * `/errors/restore` is a complete undo.
      *
@@ -655,7 +655,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
       );
 
       // Nothing matched and the caller named specific entries: that is a failed
-      // request, not an empty success — a stale id typed from an old table
+      // request, not an empty success; a stale id typed from an old table
       // should say so.
       if (result.cleared.length === 0 && result.skipped.length > 0) {
         return reply.code(404).send({ ok: false, cleared: 0, skipped: result.skipped });
@@ -664,7 +664,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
     });
 
     /**
-     * Put cleared entries back in the feed — the undo for a mis-click, and the
+     * Put cleared entries back in the feed: the undo for a mis-click, and the
      * way to re-open something that turned out not to be fixed.
      *
      * No state check on the subject: deleting an acknowledgement is safe whatever
