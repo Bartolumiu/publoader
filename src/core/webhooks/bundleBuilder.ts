@@ -91,11 +91,11 @@ const ZIP_EPOCH = new Date("2020-01-01T00:00:00Z");
  * checkout, which is why the webhook path is limited to dependency-free
  * extensions (see docs/webhooks.md).
  *
- * The build runs in a SUBPROCESS with a timeout, a heap ceiling and no inherited
+ * The build runs in a subprocess with a timeout, a heap ceiling and no inherited
  * environment (core/sysops/buildSandbox.ts). `root` holds source that arrived
- * from a repository or an upload, and it used to be handed to esbuild in this
- * process, holding every credential the service has; including in the one case
- * where esbuild will read a file the sources point it at (`tsconfig.json` with
+ * from a repository or an upload, so running esbuild in this process would give
+ * that source every credential the service holds, including in the one case
+ * where esbuild reads a file the sources point it at (`tsconfig.json` with
  * absolute `compilerOptions.paths`). See that module for the details.
  *
  * absWorkingDir + a relative entry point keeps the output free of absolute

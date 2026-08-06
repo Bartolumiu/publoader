@@ -6,11 +6,10 @@ import { renderMetrics } from "../../metrics.js";
  * The metrics/health listener for the worker-style core services
  * (core-scheduler, core-processor, core-uploader).
  *
- * WHY this exists: prom-client's registry is per-process. Every metric those
- * three services record, scheduler ticks, dead-letter depth, upload queue
- * depth, used to live in a registry no one could reach, because only core-api
- * had a socket. The numbers were computed and then thrown away, so a wedged
- * scheduler or a stalled upload queue was undetectable from outside.
+ * prom-client's registry is per-process, so without a socket of their own the
+ * metrics these three record (scheduler ticks, dead-letter depth, upload queue
+ * depth) would be computed and thrown away, leaving a wedged scheduler or a
+ * stalled upload queue undetectable from outside.
  *
  * One implementation, three services, identical route semantics to core-api
  * (src/core/api/server.ts) so an operator does not have to remember which

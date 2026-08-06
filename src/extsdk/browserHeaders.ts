@@ -1,13 +1,11 @@
 /**
  * Realistic browser headers, applied to every request an extension makes.
  *
- * This used to live inside individual extensions, alpha_manga and viz each
- * carried their own copy, which meant every new extension either reimplemented
- * it or went out with a bare `undici` fingerprint. Publishers block on exactly
- * that, so the default belongs in the platform: an extension gets plausible
- * headers without asking, and anything it sets explicitly still wins.
+ * The default belongs in the platform rather than in each extension: publishers
+ * block on a bare `undici` fingerprint, so an extension gets plausible headers
+ * without asking, and anything it sets explicitly still wins.
  *
- * A profile is chosen **per request**, not per process. A worker that pins one
+ * A profile is chosen per request, not per process. A worker that pins one
  * User-Agent for its whole lifetime is as fingerprintable as one that sends
  * none, just more slowly; and the header set has to stay internally consistent
  * (the `Sec-CH-UA` client hints must agree with the `User-Agent`), which is why

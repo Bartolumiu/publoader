@@ -2311,8 +2311,8 @@ const RUN_CHAPTER_PAGE = 100;
  * The chapters an extension reported on one run.
  *
  * This is the envelope the worker submitted, read back; not a copy of it. The
- * run/job/segment model above says whether the scrape WORKED; this says what it
- * FOUND, which is the question that used to require a `jsonb` path in psql.
+ * run/job/segment model above says whether the scrape worked; this says what it
+ * found.
  *
  * Two sets, because an envelope carries two different things and conflating
  * them would misreport both. `updated` is what the extension flagged as new or
@@ -4816,11 +4816,9 @@ const ACTIVITY_WINDOWS = [
  * (including the last error of a job that is still retrying), upload tasks,
  * quarantined submissions, and the audit trail.
  *
- * This is the answer to "what has been happening?" that used to require
- * `docker logs`, and it is worth being precise about what it does and does not
- * replace. Everything here is a durable row, which is why it can be filtered,
- * linked to, and read months later. Process stdout is NOT here, a stack trace
- * from a crash loop, a prisma connection warning, because nothing writes it to
+ * Everything here is a durable row, which is why it can be filtered, linked to,
+ * and read months later. Process stdout is not here, a stack trace from a crash
+ * loop or a prisma connection warning, because nothing writes it to
  * the database. That still lives in `docker logs` on the host.
  */
 VIEWS.activity = () => {
@@ -5791,10 +5789,9 @@ function relationRow(spec, initial, onRemove) {
 /**
  * An editable list for one of the three typed relations.
  *
- * These used to be three keys inside a JSON textarea. They are separate tables
- * with separate constraints, an alias has exactly one master, a language code
- * must be one MangaDex accepts, and a free-text blob could express none of
- * that, so a typo was only discovered when the server rejected the save.
+ * Each is a separate table with its own constraints: an alias has exactly one
+ * master, and a language code must be one MangaDex accepts. A free-text blob
+ * could express neither, so a typo only surfaced when the server rejected it.
  */
 function relationList(spec, initialRows) {
   const rows = [];
@@ -7731,11 +7728,9 @@ function auditSearch() {
 /**
  * One audit event, by id.
  *
- * This is what a copied permalink resolves to. It used to filter the recent page
- * client-side, which could not find an event that had since been pushed off it;
- * and the id was not a searchable field at all, so the answer was always "no
- * matching events". `GET /audit?id=` looks it up by primary key instead, so the
- * age of the event stops mattering.
+ * What a copied permalink resolves to. `GET /audit?id=` looks the event up by
+ * primary key, so its age does not matter and it cannot be pushed off the end
+ * of a page.
  */
 function auditDetail(id) {
   const event = new Resource(`audit:${id}`, async () => {

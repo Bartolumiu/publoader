@@ -137,7 +137,7 @@ export class PubloaderBot {
       // during it.
       this.log.error(
         { err, coreUrl: this.api.baseUrl },
-        "startup self-check could not reach the admin API; starting anyway; commands will report the failure",
+        "startup self-check could not reach the admin API, starting anyway; commands will report the failure",
       );
     }
   }

@@ -26,11 +26,10 @@ const extensions = (process.env["WORKER_EXTENSIONS"] ?? "")
  * while a job runs, so between them the loop is covered in both states. If the
  * loop stops turning, both stop and the file goes stale.
  *
- * /api/v1/worker/heartbeat is deliberately EXCLUDED. It is a setInterval that
+ * /api/v1/worker/heartbeat is deliberately excluded. It is a setInterval that
  * keeps firing regardless of what the lease loop is doing, so counting it would
- * make this probe unable to fail; which is exactly the defect this replaces
- * (the old HEALTHCHECK stat'd a file nothing ever wrote and treated missing as
- * healthy, so a wedged worker reported healthy forever).
+ * make this probe unable to fail, and a wedged worker would report healthy
+ * forever.
  */
 const upstreamFetch = globalThis.fetch;
 globalThis.fetch = async (input, init) => {

@@ -165,8 +165,8 @@ const LinkRedeem = z.object({ token: z.string().min(1).max(512) });
 
 /** Why a redemption failed, in words an operator can act on. */
 const REDEEM_MESSAGE: Record<string, string> = {
-  unknown: "this sign-in link is not valid, request a new one",
-  used: "this sign-in link has already been used, request a new one",
+  unknown: "this sign-in link is not valid; request a new one",
+  used: "this sign-in link has already been used; request a new one",
   expired: "this sign-in link has expired; request a new one",
   revoked: "this sign-in link was replaced by a newer one",
   unapproved: "your account is awaiting approval",

@@ -175,8 +175,8 @@ async function statusReply(ctx: HandlerContext): Promise<BotReply> {
   parts.push(`**Workers**: ${counts(stats.workers)}`);
   parts.push(
     stats.quarantined > 0
-      ? `**Quarantined results**, ${stats.quarantined} :warning: (see \`/quarantine\`)`
-      : "**Quarantined results**, 0",
+      ? `**Quarantined results**: ${stats.quarantined} :warning: (see \`/quarantine\`)`
+      : "**Quarantined results**: 0",
   );
 
   // The legacy /status also listed workers by name with per-worker queue depth.

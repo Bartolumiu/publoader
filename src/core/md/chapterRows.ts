@@ -6,11 +6,10 @@ import type { Chapter } from "./types.js";
  * typed columns of the four chapter tables (uploaded / deleted / unavailable /
  * edited_chapters).
  *
- * Those tables used to hold the whole chapter as an opaque JSONB document. The
- * shape is fixed and known, so the document bought nothing and cost type
- * enforcement, indexability and `chapter->>'x'` in every query. The columns are
- * identical across all four tables and every writer goes through this module,
- * which is what stops the four from drifting apart.
+ * The chapter shape is fixed and known, so it is stored as typed columns rather
+ * than an opaque JSONB document, which costs type enforcement, indexability and
+ * a `chapter->>'x'` in every query. The columns are identical across all four
+ * tables and every writer goes through this module, which stops them drifting.
  *
  * `extra` is the escape hatch and it is deliberately narrow: page-artifact ids,
  * the MangaDex attribute snapshot the unavailable flow keeps, and any key a

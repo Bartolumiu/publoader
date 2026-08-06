@@ -85,7 +85,7 @@ async function publishDepths(): Promise<void> {
 
 // Before the loop, so a port clash fails the deploy instead of leaving the
 // service unmonitored. This endpoint is where `publoader_upload_tasks` becomes
-// scrapeable; a stalled upload queue was previously invisible.
+// scrapeable.
 const metricsServer = await startMetricsServer({
   service: "core-uploader",
   log,

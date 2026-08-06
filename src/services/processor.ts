@@ -40,8 +40,8 @@ process.on("SIGTERM", stop);
 process.on("SIGINT", stop);
 
 // Before the loop, so a port clash fails the deploy instead of leaving the
-// service unmonitored. Serves this process's registry; the upload-task depths
-// published below were previously recorded into a registry nothing could read.
+// service unmonitored. Serves this process's registry, including the
+// upload-task depths published below.
 const metricsServer = await startMetricsServer({
   service: "core-processor",
   log,
