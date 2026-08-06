@@ -29,6 +29,21 @@ const IMAGE_BATCH_SIZE = 10;
 /** Refresh this far ahead of `exp` so a token can't expire mid-flight. */
 const TOKEN_SKEW_SECONDS = 60;
 /** MangaDex rejects offsets past this; misc.py walks around it with a cursor. */
+/**
+ * Sent on every chapter *collection* read.
+ *
+ * Without it MangaDex silently omits the chapters it will not serve, so a
+ * lookup of "what does MangaDex have for this series" quietly under-reports and
+ * the caller concludes a chapter is missing when it is merely unreadable — for
+ * the processor, that is the difference between leaving a chapter alone and
+ * uploading a second copy of it.
+ *
+ * Its similarly-named siblings are NOT toggles and are deliberately never sent:
+ * `includeExternalUrl`, `includeEmptyPages` and `includeFuturePublishAt` are
+ * exclusive filters on this endpoint, and `includeExternalUrl=1` returns *only*
+ * external chapters. Adding them to "include more" removes nearly everything.
+ */
+const INCLUDE_UNAVAILABLE = { includeUnavailable: "1" } as const;
 const MAX_OFFSET = 10000;
 /** Safety valve: a createdAt cursor that stops advancing must not loop forever. */
 const MAX_PAGES = 500;
@@ -50,11 +65,27 @@ export class MdRequestError extends Error {
 }
 
 /** Generic MangaDex entity as it comes off the wire. */
-interface MdEntity {
+export interface MdEntity {
   id: string;
   type?: string;
   attributes?: Record<string, unknown>;
   relationships?: MdRelationship[];
+}
+
+/**
+ * A group's chapters, split by whether MangaDex will serve them.
+ *
+ * `all` carries the raw entity rather than a mapped `MdChapter` because the
+ * caller archives the MangaDex record as it stood — the attributes it needs
+ * (`pages`, `readableAt`, `isUnavailable`) are exactly the ones the mapping
+ * drops, and once MangaDex stops serving a chapter this snapshot is the only
+ * remaining answer to what it looked like.
+ */
+export interface MdGroupAvailability {
+  /** Every chapter id the group has, including the unserved ones. */
+  all: Map<string, MdEntity>;
+  /** The subset MangaDex returns without being asked for the rest. */
+  served: Set<string>;
 }
 
 export interface MdRelationship {
@@ -89,6 +120,7 @@ export interface MdUploadedImage {
  */
 export interface MdExtendedApi extends MdApi {
   chapterById(chapterId: string, includes?: string[]): Promise<MdChapterDetail | null>;
+  chapterAvailabilityForGroup(groupId: string): Promise<MdGroupAvailability>;
   beginEditSession(chapterId: string, version: number | null): Promise<{ id: string }>;
   uploadImages(
     sessionId: string,
@@ -588,6 +620,7 @@ export class MdClient implements MdExtendedApi {
       manga: mangaId,
       "groups[]": [groupId],
       "order[createdAt]": "desc",
+      ...INCLUDE_UNAVAILABLE,
     });
     return entities.map(MdClient.toChapter);
   }
@@ -598,10 +631,38 @@ export class MdClient implements MdExtendedApi {
       const entities = await this.paginate("chapter", {
         "ids[]": batch,
         "order[createdAt]": "desc",
+        ...INCLUDE_UNAVAILABLE,
       });
       out.push(...entities.map(MdClient.toChapter));
     }
     return out;
+  }
+
+  /**
+   * Which of a group's chapters MangaDex holds, and which it is willing to
+   * serve. The set difference is the group's unavailable chapters.
+   *
+   * It has to be measured as a difference. `isUnavailable` looks like the
+   * direct answer and is not: the attribute is absent entirely from chapters
+   * whose records predate the field, and on a real group every unavailable
+   * chapter came back with no attribute at all, so a test on the flag finds
+   * none of them. What MangaDex *does* do reliably is drop them from
+   * collection responses unless `includeUnavailable` is set, and that is what
+   * this compares. Both passes are otherwise identical so the difference
+   * between them can only mean the one thing.
+   */
+  async chapterAvailabilityForGroup(groupId: string): Promise<MdGroupAvailability> {
+    const page = async (includeUnavailable: boolean): Promise<MdEntity[]> =>
+      this.paginate("chapter", {
+        "groups[]": [groupId],
+        "order[createdAt]": "asc",
+        ...(includeUnavailable ? INCLUDE_UNAVAILABLE : {}),
+      });
+
+    const all = new Map<string, MdEntity>();
+    for (const entity of await page(true)) all.set(entity.id, entity);
+    const served = new Set((await page(false)).map((entity) => entity.id));
+    return { all, served };
   }
 
   async mangaByIds(ids: string[]): Promise<MdManga[]> {

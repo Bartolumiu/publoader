@@ -17,6 +17,13 @@ import { EXTENSION_NAME_RE, Manifest, hostAllowed } from "../../../contracts/man
 import { normaliseMangadexLanguage } from "../../../contracts/languages.js";
 import { UPLOAD_TASK_KINDS, UPLOAD_TASK_STATES } from "../../store/uploadTasks.js";
 import { mangaEditPayload } from "../../md/titleService.js";
+import {
+  ERROR_FEED_SOURCES,
+  MAX_CLEAR_ALL,
+  clearErrors,
+  listErrors,
+  restoreErrors,
+} from "../../observability/errorFeed.js";
 
 /**
  * Operational visibility and triage that the legacy Discord IPC commands used
@@ -729,78 +736,129 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
     /**
      * One time-ordered list of everything that failed, so triage starts in the
-     * dashboard instead of in `docker logs`. Every source is queried at the full
-     * `limit` before merging: splitting the budget between them would hide a
-     * burst in one source behind old rows from another.
+     * dashboard instead of in `docker logs`.
      *
-     * `FAILED` exists on upload tasks but not on jobs (a job that exhausts its
-     * attempts goes straight to `DEAD_LETTER`), which is why the two halves
-     * filter on different state sets.
+     * By default this is a to-do list, not a history: entries an operator has
+     * cleared are omitted, and `clearedHidden` says how many, so "nothing is
+     * outstanding" cannot be confused with "nothing ever failed". `?cleared=`
+     * switches to including them (`with`) or to only them (`only`), which is the
+     * review view — what did we decide was handled, by whom, and why.
+     *
+     * The merge, the per-source `limit` and the acknowledgement rules all live in
+     * core/observability/errorFeed.ts, shared with the bot, the CLI and the
+     * dashboard.
      */
     scope.get("/api/v1/admin/errors", { preHandler: requireScope("runs:read") }, async (req) => {
       const query = parseOrThrow(
-        z.object({ limit: z.coerce.number().int().min(1).max(200).default(50) }),
+        z.object({
+          limit: z.coerce.number().int().min(1).max(200).default(50),
+          cleared: z.enum(["without", "with", "only"]).default("without"),
+        }),
         req.query ?? {},
       );
 
-      const [jobs, tasks, submissions] = await Promise.all([
-        ctx.prisma.job.findMany({
-          where: { state: "DEAD_LETTER" },
-          orderBy: { updatedAt: "desc" },
-          take: query.limit,
-          select: {
-            id: true,
-            runId: true,
-            extension: true,
-            state: true,
-            segmentIndex: true,
-            segmentTotal: true,
-            errorClass: true,
-            lastError: true,
-            updatedAt: true,
-          },
-        }),
-        ctx.prisma.uploadTask.findMany({
-          where: { state: { in: ["FAILED", "DEAD_LETTER"] } },
-          orderBy: { updatedAt: "desc" },
-          take: query.limit,
-          select: { id: true, kind: true, state: true, dedupeKey: true, lastError: true, updatedAt: true },
-        }),
-        ctx.prisma.resultSubmission.findMany({
-          where: { state: "QUARANTINED" },
-          orderBy: { createdAt: "desc" },
-          take: query.limit,
-          select: { id: true, jobId: true, workerId: true, rejectReason: true, createdAt: true },
-        }),
-      ]);
+      return listErrors(ctx.prisma, {
+        limit: query.limit,
+        includeCleared: query.cleared === "with",
+        clearedOnly: query.cleared === "only",
+      });
+    });
 
-      const errors = [
-        ...jobs.map((job) => ({
-          at: job.updatedAt,
-          kind: `job:${job.state}`,
-          subject: `${job.extension} · segment ${job.segmentIndex + 1}/${job.segmentTotal}`,
-          message: job.errorClass ? `[${job.errorClass}] ${job.lastError ?? ""}` : (job.lastError ?? ""),
-          id: job.id,
-        })),
-        ...tasks.map((task) => ({
-          at: task.updatedAt,
-          kind: `upload-task:${task.state}`,
-          subject: `${task.kind} · ${task.dedupeKey}`,
-          message: task.lastError ?? "",
-          id: task.id,
-        })),
-        ...submissions.map((submission) => ({
-          at: submission.createdAt,
-          kind: "submission:QUARANTINED",
-          subject: `worker ${submission.workerId.slice(0, 8)} · job ${submission.jobId}`,
-          message: submission.rejectReason ?? "",
-          id: submission.id,
-        })),
-      ]
-        .sort((a, b) => b.at.getTime() - a.at.getTime())
-        .slice(0, query.limit);
+    /**
+     * Acknowledge failures: "read this, dealt with it, stop showing it to me".
+     *
+     * `runs:write` rather than `runs:read` because it changes what the next
+     * operator sees — the same reason retry and cancel are writes — but it is not
+     * destructive: nothing about the job, task or submission changes, and
+     * `/errors/restore` is a complete undo.
+     *
+     * Three ways to name entries, because the four surfaces reach for different
+     * ones: `refs` ({source, id}) is what the dashboard sends for a row it is
+     * already rendering, `ids` is what a human types from a table, and
+     * `all: true` is the "I have been through the list" button. Entries that are
+     * not currently failing come back in `skipped` with a reason rather than
+     * being silently written, since acknowledging a healthy row would hide its
+     * NEXT failure.
+     */
+    scope.post("/api/v1/admin/errors/clear", { preHandler: requireScope("runs:write") }, async (req, reply) => {
+      const body = parseOrThrow(
+        z
+          .object({
+            refs: z
+              .array(z.object({ source: z.enum(ERROR_FEED_SOURCES), id: z.string().min(1).max(128) }))
+              .max(MAX_CLEAR_ALL)
+              .optional(),
+            ids: z.array(z.string().min(1).max(128)).max(MAX_CLEAR_ALL).optional(),
+            all: z.boolean().optional(),
+            note: z.string().max(1000).optional(),
+          })
+          .refine((b) => b.all === true || (b.refs?.length ?? 0) > 0 || (b.ids?.length ?? 0) > 0, {
+            message: "pass refs, ids, or all: true",
+          }),
+        (req.body as unknown) ?? {},
+      );
 
-      return { errors };
+      const result = await clearErrors(ctx.prisma, {
+        actor: actor(req),
+        refs: body.refs,
+        ids: body.ids,
+        all: body.all,
+        note: body.note ?? null,
+      });
+
+      // One audit row per acknowledgement: "who decided this failure was fine"
+      // is exactly the question the audit trail gets asked later, and a single
+      // summary row makes it unanswerable by subject lookup.
+      await ctx.audit.recordMany(
+        result.cleared.map((ref) => ({
+          actor: actor(req),
+          action: "errors.clear",
+          subject: `${ref.source}:${ref.id}`,
+          detail: body.note ? { note: body.note } : undefined,
+        })),
+      );
+
+      // Nothing matched and the caller named specific entries: that is a failed
+      // request, not an empty success — a stale id typed from an old table
+      // should say so.
+      if (result.cleared.length === 0 && result.skipped.length > 0) {
+        return reply.code(404).send({ ok: false, cleared: 0, skipped: result.skipped });
+      }
+      return { ok: true, cleared: result.cleared.length, entries: result.cleared, skipped: result.skipped };
+    });
+
+    /**
+     * Put cleared entries back in the feed — the undo for a mis-click, and the
+     * way to re-open something that turned out not to be fixed.
+     *
+     * No state check on the subject: deleting an acknowledgement is safe whatever
+     * the row is doing now, and refusing would leave rows that can never be
+     * un-cleared.
+     */
+    scope.post("/api/v1/admin/errors/restore", { preHandler: requireScope("runs:write") }, async (req) => {
+      const body = parseOrThrow(
+        z
+          .object({
+            refs: z
+              .array(z.object({ source: z.enum(ERROR_FEED_SOURCES), id: z.string().min(1).max(128) }))
+              .max(MAX_CLEAR_ALL)
+              .optional(),
+            ids: z.array(z.string().min(1).max(128)).max(MAX_CLEAR_ALL).optional(),
+            all: z.boolean().optional(),
+          })
+          .refine((b) => b.all === true || (b.refs?.length ?? 0) > 0 || (b.ids?.length ?? 0) > 0, {
+            message: "pass refs, ids, or all: true",
+          }),
+        (req.body as unknown) ?? {},
+      );
+
+      const { restored } = await restoreErrors(ctx.prisma, {
+        refs: body.refs,
+        ids: body.ids,
+        all: body.all,
+      });
+      await ctx.audit.record(actor(req), "errors.restore", body.all ? "all" : undefined, { restored });
+      return { ok: true, restored };
     });
 
     // ---- unified activity feed ----

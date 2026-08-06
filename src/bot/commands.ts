@@ -20,6 +20,7 @@ import {
   AdminApiError,
   describeApiError,
   type AdminApiClient,
+  type ErrorClearedFilter,
   type RemovalMode,
   type RunKind,
   type UntrackedState,
@@ -825,25 +826,129 @@ const commands: BotCommand[] = [
   {
     // The closest thing to legacy `logs`: everything that failed, in one list,
     // without needing a shell on the core host.
+    //
+    // `clear` is what makes the list usable from Discord over time. Without it
+    // the same handled failure is at the top of every `/errors` for weeks and
+    // people stop reading it; with it, `/errors` answers "what still needs me?".
+    // Clearing hides an entry and nothing more — the rows are untouched, a repeat
+    // failure comes back on its own, and `restore` is a full undo.
     name: "errors",
-    description: "Everything that recently failed: dead-lettered jobs, failed uploads, quarantines.",
-    sensitivity: "read",
+    description: "Recent failures, and clearing the ones you have dealt with.",
+    sensitivity: { list: "read", clear: "mutate", restore: "mutate" },
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("errors")
-      .setDescription("Everything that recently failed: dead-lettered jobs, failed uploads, quarantines.")
-      .addIntegerOption((o) =>
-        o.setName("limit").setDescription("How many entries (1-30, default 10).").setMinValue(1).setMaxValue(30),
+      .setDescription("Recent failures, and clearing the ones you have dealt with.")
+      .addSubcommand((s) =>
+        s
+          .setName("list")
+          .setDescription("Dead-lettered jobs, failed uploads and quarantines, newest first.")
+          .addIntegerOption((o) =>
+            o.setName("limit").setDescription("How many entries (1-30, default 10).").setMinValue(1).setMaxValue(30),
+          )
+          .addStringOption((o) =>
+            o
+              .setName("show")
+              .setDescription("Which entries to list (default: outstanding only).")
+              .addChoices(
+                { name: "outstanding only", value: "without" },
+                { name: "outstanding and cleared", value: "with" },
+                { name: "cleared only", value: "only" },
+              ),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("clear")
+          .setDescription("Mark failures as read and dealt with, so they leave the list.")
+          .addStringOption((o) =>
+            o.setName("id").setDescription("Entry id, or the first few characters of one."),
+          )
+          .addBooleanOption((o) => o.setName("all").setDescription("Clear every outstanding failure."))
+          .addStringOption((o) =>
+            o.setName("note").setDescription("Why it is fine — shown to whoever reviews cleared entries."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("restore")
+          .setDescription("Put cleared entries back in the list.")
+          .addStringOption((o) =>
+            o.setName("id").setDescription("Entry id, or the first few characters of one."),
+          )
+          .addBooleanOption((o) => o.setName("all").setDescription("Restore everything that was cleared.")),
       ),
     async run(ctx) {
-      const { errors } = await ctx.api.errors(ctx.actor, ctx.options.integer("limit") ?? 10);
-      if (errors.length === 0) return { text: ":green_circle: Nothing has failed recently." };
+      const sub = ctx.options.subcommand();
+
+      if (sub === "clear" || sub === "restore") {
+        const id = ctx.options.string("id")?.trim() || null;
+        const all = ctx.options.boolean("all") === true;
+        // Requiring exactly one is the point: `id` with `all` reads as "clear
+        // this one" but would clear everything, and neither reads as a no-op.
+        if (id && all) throw new UserError("Pass `id` or `all`, not both.");
+        if (!id && !all) throw new UserError("Pass an `id` (full or a leading prefix), or `all: true`.");
+
+        if (sub === "restore") {
+          const { restored } = await ctx.api.restoreErrors(ctx.actor, all ? { all: true } : { ids: [id!] });
+          if (restored === 0) return { text: ":person_shrugging: Nothing matched — nothing was cleared under that id." };
+          return {
+            text: `:leftwards_arrow_with_hook: ${restored} entr${restored === 1 ? "y" : "ies"} back in \`/errors list\`.`,
+          };
+        }
+
+        const note = ctx.options.string("note")?.trim() || undefined;
+        const result = await ctx.api.clearErrors(ctx.actor, {
+          ...(all ? { all: true } : { ids: [id!] }),
+          ...(note ? { note } : {}),
+        });
+        const skipped = (result.skipped ?? []).map((s) => `• \`${s.id.slice(0, 12)}\` — ${s.reason}`);
+        if (result.cleared === 0) {
+          return { text: lines([":person_shrugging: Nothing was cleared.", ...skipped]) };
+        }
+        return {
+          text: lines([
+            `:white_check_mark: ${result.cleared} failure(s) cleared. They are hidden from \`/errors list\`; ` +
+              "the jobs, tasks and submissions are unchanged, and anything that fails again comes back.",
+            ...skipped,
+          ]),
+        };
+      }
+
+      const show = ctx.options.string("show");
+      const cleared: ErrorClearedFilter = show === "with" || show === "only" ? show : "without";
+      const { errors, clearedHidden } = await ctx.api.errors(
+        ctx.actor,
+        ctx.options.integer("limit") ?? 10,
+        cleared,
+      );
+
+      if (errors.length === 0) {
+        if (cleared === "only") return { text: ":person_shrugging: Nothing has been cleared." };
+        // "Nothing outstanding" and "nothing ever failed" are different answers
+        // and an operator deciding whether to dig further needs the difference.
+        return {
+          text:
+            clearedHidden > 0
+              ? `:green_circle: Nothing outstanding. ${clearedHidden} cleared entr${clearedHidden === 1 ? "y is" : "ies are"} hidden — \`/errors list show:cleared only\` to review.`
+              : ":green_circle: Nothing has failed recently.",
+        };
+      }
+
+      // The short id is here so the next command can be typed from this message:
+      // `clear` takes a prefix, and eight characters is unambiguous in practice.
       const rendered = errors.map(
         (e) =>
-          `• \`${shortTime(e.at)}\` **${e.kind}** ${e.subject}` +
+          `• \`${shortTime(e.at)}\` **${e.kind}** \`${e.id.slice(0, 8)}\` ${e.subject}` +
+          (e.cleared ? ` _(cleared by ${e.cleared.by}${e.cleared.note ? `: ${e.cleared.note}` : ""})_` : "") +
           (e.message ? `\n   \`${e.message.slice(0, 160)}\`` : ""),
       );
-      return { text: lines([`**${errors.length} recent failure(s)**`, ...rendered]) };
+      const header =
+        cleared === "only"
+          ? `**${errors.length} cleared entr${errors.length === 1 ? "y" : "ies"}**`
+          : `**${errors.length} failure(s)**` +
+            (clearedHidden > 0 && cleared === "without" ? ` · ${clearedHidden} cleared and hidden` : "");
+      return { text: lines([header, ...rendered, "", "_Dealt with one? `/errors clear id:<first 8 chars>`._"]) };
     },
   },
   {
@@ -1026,6 +1131,58 @@ const commands: BotCommand[] = [
       const result = await ctx.api.approveUntracked(ctx.actor, id);
       return {
         text: `:white_check_mark: Title created and tracked${result.mdMangaId ? ` — MangaDex id \`${result.mdMangaId}\`` : ""}.`,
+      };
+    },
+  },
+  {
+    name: "reconcile",
+    description: "Check which chapters are marked unavailable or deleted on MangaDex.",
+    // "read" although it walks the whole catalogue: it reports and never
+    // writes. Applying is closed to api tokens at the endpoint, so this command
+    // could not write the rows even if it asked to — `padmin chapters
+    // reconcile --apply` or the dashboard does that.
+    sensitivity: "read",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("reconcile")
+      .setDescription("Check which chapters are marked unavailable or deleted on MangaDex.")
+      .addStringOption((o) =>
+        o
+          .setName("extension")
+          .setDescription("Only this extension. Omit for every group we have uploaded to.")
+          .setAutocomplete(true),
+      ),
+    async run(ctx) {
+      const extension = ctx.options.string("extension");
+      const report = await ctx.api.reconcileChapters(ctx.actor, extension ? [extension] : []);
+
+      if (report.unavailableRecorded === 0 && report.deletedRecorded === 0) {
+        return {
+          text:
+            ":white_check_mark: Nothing to record — the archives already match MangaDex " +
+            `(${report.unavailableFound} unavailable and ${report.deletedFound} deleted, all known).`,
+        };
+      }
+      const lines = report.groups
+        .filter((group) => group.carded > 0 || group.hiddenOnMangadex > 0)
+        .map(
+          (group) =>
+            `• **${group.extension}** — ${group.carded} of ${group.total} already carded, ` +
+            `${group.recorded} not yet archived` +
+            (group.hiddenOnMangadex > 0
+              ? `, ${group.hiddenOnMangadex} live but unserved by MangaDex`
+              : ""),
+        );
+      return {
+        text:
+          `:mag: **${report.unavailableRecorded}** unavailable and **${report.deletedRecorded}** ` +
+          `deleted chapter(s) are missing from the archives.\n` +
+          (lines.length > 0 ? `${lines.join("\n")}\n` : "") +
+          (report.hiddenOnMangadex.length > 0
+            ? `${report.hiddenOnMangadex.length} chapter(s) carry no card but MangaDex will not ` +
+              "serve them — never archived; queue them unavailable if that is what you want.\n"
+            : "") +
+          "Nothing has been written. Run `padmin chapters reconcile --apply` to record them.",
       };
     },
   },
@@ -1331,7 +1488,7 @@ export const RETIRED_COMMANDS: RetiredCommand[] = [
   {
     name: "logs",
     replacement:
-      "There is no log API — work runs on machines the core cannot read. For failures use `/errors`, which merges dead-lettered jobs, failed uploads and quarantines into one list. For process output, `docker compose logs -f core-api` on the core host.",
+      "There is no log API — work runs on machines the core cannot read. For failures use `/errors list`, which merges dead-lettered jobs, failed uploads and quarantines into one list, and `/errors clear` once you have dealt with one. For process output, `docker compose logs -f core-api` on the core host.",
   },
   {
     name: "kill",

@@ -67,6 +67,15 @@ enum ResultState {
   SUPERSEDED
 }
 
+/// Which table an entry in the merged error feed came from. Only the three
+/// sources that feed `/errors` are listed: a run's failure is already visible
+/// through its jobs, and the feed does not repeat it.
+enum ErrorSource {
+  JOB
+  UPLOAD_TASK
+  SUBMISSION
+}
+
 enum UploadTaskKind {
   UPLOAD
   EDIT
@@ -743,4 +752,45 @@ model AuditEvent {
   @@index([createdAt])
   @@index([action])
   @@map("audit_events")
+}
+
+/// One acknowledgement: an operator read this failure and dealt with it, so the
+/// error feed stops showing it.
+///
+/// It is a separate table rather than a column on jobs, upload tasks and result
+/// submissions for two reasons. Those rows carry `updated_at @updatedAt`, so a
+/// Prisma write recording the acknowledgement would move the very timestamp the
+/// acknowledgement is measured against; and the acknowledgement is operator
+/// bookkeeping, not part of the execution state a claim statement reads.
+///
+/// The feed stays the source of truth for what failed — clearing hides an entry
+/// from the triage list, it does not edit history. The Activity feed and the
+/// per-run views still show the failure, which is what keeps "we cleared it and
+/// then forgot" recoverable.
+model ClearedError {
+  id        String      @id @default(uuid())
+  source    ErrorSource
+  /// The id of the job / upload task / result submission. Not a foreign key on
+  /// purpose: one column cannot reference three tables, and an acknowledgement
+  /// that outlives its row is harmless — it matches nothing and is swept by
+  /// `pruneClearedErrors`.
+  subjectId String      @map("subject_id")
+  /// The timestamp the feed showed for this entry when it was cleared.
+  ///
+  /// This is what makes clearing acknowledge ONE failure rather than silencing
+  /// the row forever: a job that is retried and dead-letters again gets a newer
+  /// `updated_at`, which is past `error_at`, so it comes back. Without this a
+  /// cleared-then-retried-then-failed-again job would never be seen again.
+  errorAt   DateTime    @map("error_at")
+  clearedAt DateTime    @default(now()) @map("cleared_at")
+  /// Actor string from the request, same shape as `audit_events.actor`.
+  clearedBy String      @map("cleared_by")
+  /// Optional operator note — "upstream 503s, extension fixed in 1.4.2".
+  note      String?
+
+  /// One acknowledgement per row: clearing twice updates the timestamp rather
+  /// than accumulating rows, which is also what makes `clear` idempotent.
+  @@unique([source, subjectId])
+  @@index([clearedAt])
+  @@map("cleared_errors")
 }

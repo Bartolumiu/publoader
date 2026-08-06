@@ -59,7 +59,7 @@ Base path for every endpoint below is `/api/v1/admin`. "CLI" is the
 | `pause` | `POST /pause` | `pause [--minutes]` | Overview → Pause | Body `{minutes?}`; omit for indefinite. Unlike the legacy version the pause is authoritative in Postgres, so it is honoured by every replica immediately rather than by one process's global. |
 | `resume` | `POST /resume` | `resume` | Overview → Resume | |
 | `status` | `GET /stats` + `GET /workers` | `stats`, `workers list` | Overview + Workers | Split in two. `pid` and the in-process `schedule` job list have no equivalent — see below. |
-| `queue_peek` | `GET /stats` (depths only) | `stats` | Overview → Upload tasks (depths only) | **Partial.** Depths are covered; per-row sampling is not — see gaps. |
+| `queue_peek` | `GET /stats` (depths only) | `stats` | Overview → Upload queue — outstanding (depths only) | **Partial.** Depths are covered; per-row sampling is not — see gaps. The card shows outstanding states only; DONE totals sit behind its “Completed” disclosure. |
 
 ### New capabilities with no legacy counterpart
 
@@ -215,13 +215,13 @@ and a slash command). The new bot is slash-only.
 | `mdauth_status` | `/mdauth status` | Restored by `routes/ops.ts` (`GET /mangadex/auth`). Reports whether tokens are stored and when the access token goes stale; never returns the tokens. |
 | `logout` | `/mdauth clear confirm:true` | Restored as "forget the stored session", which is what the legacy command actually did. It does not revoke anything MangaDex-side. |
 | `force_login` | `/mdauth clear confirm:true` | No direct equivalent, and none is wanted: clearing the session makes the next MangaDex call authenticate from the configured credentials, which is the same outcome without a chat command that handles a password. |
-| `logs` | `/errors [limit]` (partial) | `GET /admin/errors` merges dead-lettered jobs, failed upload tasks and quarantined submissions into one time-ordered feed — the triage half of what `logs` was used for. Process output stays in `docker compose logs`. |
+| `logs` | `/errors list [limit]` (partial) | `GET /admin/errors` merges dead-lettered jobs, failed upload tasks and quarantined submissions into one time-ordered feed — the triage half of what `logs` was used for. `/errors clear` acknowledges a failure so the feed stays a to-do list rather than growing forever. Process output stays in `docker compose logs`. |
 | `kill`, `workers restart`, `config show`, `config set`, `pull`, `reload`, `restart`, `refresh`, `start`, `shutdown` | *(retired)* | See the table below. |
 
 ### New commands with no legacy counterpart
 
 `/runs show <id>`, `/jobs cancel <id>`, `/jobs retry <id>`, `/dead-letter`,
-`/quarantine`, `/errors`, `/workers list|drain|activate|revoke`, `/enroll`,
+`/quarantine`, `/errors list|clear|restore`, `/workers list|drain|activate|revoke`, `/enroll`,
 `/untracked list|approve|skip`, `/tracked list|set|remove`,
 `/queue retry|cancel|requeue-stale`, `/audit`, `/whoami` — the endpoints listed
 under "New capabilities" above plus those in `routes/ops.ts`, now reachable from
@@ -239,7 +239,7 @@ anyone with the old commands in muscle memory.
 
 | Legacy command | The bot's reply points at |
 |---|---|
-| `/logs` | `/errors` for failures; `docker compose logs -f core-api` for process output. |
+| `/logs` | `/errors list` for failures; `docker compose logs -f core-api` for process output. |
 | `/kill` | `/jobs cancel <id>` for scrape jobs, `/queue cancel <id>` for uploads, or `/pause` to stop new work. |
 | `/restart-workers` | `docker compose restart core-uploader` for upload workers; `/workers drain` → restart the agent → `/workers activate` for remote ones. |
 | `/config` | `docker compose config` on the host. Secrets are deliberately not exposed over the API. |

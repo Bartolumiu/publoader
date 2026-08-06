@@ -263,13 +263,42 @@ export interface MdAuthState {
 export interface ErrorEntry {
   at: string;
   kind: string;
+  /** Which table it came from, and what `clear`/`restore` take as `source`. */
+  source: "job" | "upload-task" | "submission";
   subject: string;
   message: string;
   id: string;
+  /** Set only on entries an operator has already dealt with. */
+  cleared?: { at: string; by: string; note: string | null };
 }
+
+/** Which acknowledged entries a feed read should include. */
+export type ErrorClearedFilter = "without" | "with" | "only";
 
 export type UploadTaskKind = "UPLOAD" | "EDIT" | "DELETE" | "UNAVAILABLE";
 export type UploadTaskState = "PENDING" | "LEASED" | "DONE" | "FAILED" | "DEAD_LETTER";
+
+/**
+ * What a reconcile pass found. Mirrors ReconcileReport in
+ * core/md/chapterReconcile.ts, narrowed to the fields the bot renders.
+ */
+export interface ChapterReconcileReport {
+  dryRun: boolean;
+  groups: {
+    extension: string;
+    groupId: string;
+    total: number;
+    carded: number;
+    recorded: number;
+    hiddenOnMangadex: number;
+  }[];
+  unavailableFound: number;
+  unavailableRecorded: number;
+  scanned: number;
+  deletedFound: number;
+  deletedRecorded: number;
+  hiddenOnMangadex: string[];
+}
 
 /**
  * What the bot can say about its own credential. `scopes` is populated only if
@@ -477,6 +506,25 @@ export class AdminApiClient {
       if (err instanceof AdminApiError && [403, 404, 405].includes(err.status)) return null;
       throw err;
     }
+  }
+
+  /**
+   * Ask what MangaDex has stopped serving or has deleted.
+   *
+   * Dry run only, and not because the bot is untrusted in general: applying is
+   * closed to api tokens at the endpoint (routes/chapters.ts), so a bot token
+   * could not write these rows even if this asked it to. Reporting is the
+   * useful half here anyway — the answer is a number somebody needs to see
+   * before deciding to act on it.
+   */
+  reconcileChapters(actor: string, extensions: string[]): Promise<ChapterReconcileReport> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/chapters/reconcile",
+      scope: "chapters:read",
+      actor,
+      json: { dryRun: true, extensions },
+    });
   }
 
   // ---- permission tuning ----
@@ -704,14 +752,57 @@ export class AdminApiClient {
     });
   }
 
-  /** The merged failure feed: dead-lettered jobs, failed tasks, quarantines. */
-  errors(actor: string, limit: number): Promise<{ errors: ErrorEntry[] }> {
+  /**
+   * The merged failure feed: dead-lettered jobs, failed tasks, quarantines.
+   *
+   * Acknowledged entries are omitted by default and counted in `clearedHidden`,
+   * so a quiet feed can be reported as "nothing outstanding" without implying
+   * nothing ever failed.
+   */
+  errors(
+    actor: string,
+    limit: number,
+    cleared: ErrorClearedFilter = "without",
+  ): Promise<{ errors: ErrorEntry[]; clearedHidden: number }> {
     return this.request({
       method: "GET",
       path: "/api/v1/admin/errors",
       scope: "runs:read",
       actor,
-      query: { limit },
+      query: { limit, cleared },
+    });
+  }
+
+  /**
+   * Mark failures as read and dealt with, by id (a full id or a leading prefix)
+   * or all at once. Hides them from the feed; changes nothing about the rows.
+   */
+  clearErrors(
+    actor: string,
+    body: { ids?: string[]; all?: boolean; note?: string },
+  ): Promise<{
+    ok: boolean;
+    cleared: number;
+    entries?: { source: string; id: string }[];
+    skipped?: { source: string | null; id: string; reason: string }[];
+  }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/errors/clear",
+      scope: "runs:write",
+      actor,
+      json: body,
+    });
+  }
+
+  /** Undo clearing: put acknowledged entries back in the feed. */
+  restoreErrors(actor: string, body: { ids?: string[]; all?: boolean }): Promise<{ ok: boolean; restored: number }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/errors/restore",
+      scope: "runs:write",
+      actor,
+      json: body,
     });
   }
 
