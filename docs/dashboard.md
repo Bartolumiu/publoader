@@ -106,6 +106,39 @@ enforced per endpoint, not by hiding buttons.
 Roles are enforced server-side on every request. The UI hiding a section is a
 convenience so nobody clicks into a wall of 403s — never the control itself.
 
+### Tuning what a role means
+
+The table above is the **shipped default**, not a fixed law. **Admin →
+Permissions** redefines what `ADMIN` and `CONTRIBUTOR` may do here: tick the
+scopes, save, and every account in that role holds exactly those. **Reset to
+shipped default** puts a role back on the default and back to tracking it as
+future releases change it.
+
+`OWNER` is not editable. It holds the wildcard — including scopes that do not
+exist yet — and it is the role that edits permissions at all, so leaving it
+narrowable would let one mistake lock the deployment out of its own control
+plane. The break-glass `ADMIN_TOKEN` is the only thing behind it.
+
+### Tuning one account
+
+**Users → Permissions** on an account row grants scopes on top of its role and
+denies scopes despite it. This is for the case a role cannot express: "an ADMIN,
+except they must not publish bundles" should not require inventing a fourth
+role for one person.
+
+Denials are applied last and win. They also close upward — denying `runs:read`
+denies `runs:write` too, since a write would imply the read straight back —
+while denying a write leaves the read alone, which is how you get "watch but do
+not touch". The dialog previews the effective set as you tick.
+
+An account that is not simply its role is marked **tuned** in the accounts
+table, so the person whose access nobody remembers granting is visible at a
+glance. Owners cannot be tuned: they hold everything regardless, and promoting
+an account to `OWNER` clears its tuning rather than parking it.
+
+Both kinds of change reach sessions that are **already open**, within a few
+seconds. Nobody has to sign out and back in.
+
 ---
 
 ## Navigation
@@ -121,7 +154,7 @@ you are doing rather than by which endpoint serves them:
 | **Work** | Runs, Queues, Activity, Errors |
 | **Catalogue** | Extensions, Chapters, Tracked, Untracked |
 | **Fleet** | Workers |
-| **Admin** | Users, Tokens, Audit, System, Maintenance, Docs |
+| **Admin** | Users, Tokens, Permissions, Audit, System, Maintenance, Docs |
 
 Each entry declares the scope its view needs and is simply absent without it —
 a contributor's sidebar is Overview, Extensions, Tracked, Untracked and Docs. The

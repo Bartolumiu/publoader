@@ -311,6 +311,34 @@ export interface TokenIdentity {
   note?: string | null;
 }
 
+export interface RoleBaseline {
+  role: string;
+  scopes: string[];
+  defaults: string[];
+  custom: boolean;
+  tunable: boolean;
+  updatedBy: string | null;
+  updatedAt: string | null;
+}
+
+export interface PermissionCatalogue {
+  scopes: { name: string; description: string }[];
+  presets: Record<string, string[]>;
+  tunableRoles: string[];
+  roles: RoleBaseline[];
+}
+
+export interface UserPermissions {
+  userId: string;
+  email: string;
+  role: string;
+  baseline: string[];
+  extraScopes: string[];
+  deniedScopes: string[];
+  effective: string[];
+  tunable: boolean;
+}
+
 export type UntrackedState = "NEW" | "CREATING" | "CREATED" | "TRACKED" | "FAILED" | "SKIPPED";
 export type RunKind = "UPDATE" | "CLEAN" | "FORCE";
 export type RemovalMode = "unavailable" | "delete";
@@ -496,6 +524,69 @@ export class AdminApiClient {
       scope: "chapters:read",
       actor,
       json: { dryRun: true, extensions },
+    });
+  }
+
+  // ---- permission tuning ----
+
+  /**
+   * What the roles mean on this deployment.
+   *
+   * Reachable with `users:admin` alone, unlike everything below it — which is
+   * the whole reason the bot has a permissions command at all. The writes are
+   * OWNER-gated server-side and a `pa_…` token is never OWNER, so they answer
+   * 403 unless the bot was (unwisely) given the root ADMIN_TOKEN. That refusal
+   * is the honest outcome and the handler renders it rather than hiding the
+   * subcommand: "you cannot do this from here" beats a missing feature.
+   */
+  permissions(actor: string): Promise<PermissionCatalogue> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/permissions",
+      scope: "users:admin",
+      actor,
+    });
+  }
+
+  setRolePermissions(actor: string, role: string, scopes: string[]): Promise<{ role: string; scopes: string[] }> {
+    return this.request({
+      method: "PUT",
+      path: `/api/v1/admin/permissions/roles/${encodeURIComponent(role)}`,
+      scope: "users:admin",
+      actor,
+      json: { scopes },
+    });
+  }
+
+  resetRolePermissions(actor: string, role: string): Promise<{ role: string; scopes: string[] }> {
+    return this.request({
+      method: "DELETE",
+      path: `/api/v1/admin/permissions/roles/${encodeURIComponent(role)}`,
+      scope: "users:admin",
+      actor,
+    });
+  }
+
+  userPermissions(actor: string, userId: string): Promise<UserPermissions> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/admin/users/${encodeURIComponent(userId)}/permissions`,
+      scope: "users:admin",
+      actor,
+    });
+  }
+
+  setUserPermissions(
+    actor: string,
+    userId: string,
+    tuning: { extraScopes: string[]; deniedScopes: string[] },
+  ): Promise<{ extraScopes: string[]; deniedScopes: string[]; effective: string[] }> {
+    return this.request({
+      method: "PUT",
+      path: `/api/v1/admin/users/${encodeURIComponent(userId)}/permissions`,
+      scope: "users:admin",
+      actor,
+      json: tuning,
     });
   }
 

@@ -13,6 +13,7 @@ import { registerSessionRoutes } from "./session.js";
 import { registerMagicLinkRoutes } from "./magicLink.js";
 import { registerOAuthRoutes } from "./oauth.js";
 import { registerUserRoutes } from "./routes/users.js";
+import { registerPermissionRoutes } from "./routes/permissions.js";
 import { registerDashboardRoutes } from "./dashboard.js";
 
 /**
@@ -112,6 +113,7 @@ export function buildServer(ctx: AppContext): FastifyInstance {
   // so this must NOT sit inside the admin scope.
   registerWebhookRoutes(app, ctx);
   registerUserRoutes(app, ctx);
+  registerPermissionRoutes(app, ctx);
   registerDashboardRoutes(app);
 
   app.setErrorHandler((err: FastifyError, req, reply) => {

@@ -614,6 +614,51 @@ from inheriting it by accident (`routes/users.ts:34-37`).
 `routes/users.ts:41-143`, tested at
 `test/integration/dashboard.test.ts:184`.
 
+### Permissions
+
+What a role means on this deployment, and what one account may do beyond — or
+short of — its role.
+
+Every **change** needs `OWNER` + `users:admin`, the same double gate as account
+administration: widening a role is granting authority, and an API token is never
+`OWNER`, so no token can widen the role its own holder sits in. Reading the
+taxonomy and the role baselines needs only `users:admin`, because it names no
+account and grants nothing — that is what keeps the Discord bot, which can never
+be `OWNER`, able to answer "what does CONTRIBUTOR mean here?".
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/permissions` | `{scopes: [{name, description}], presets, tunableRoles, roles}`. Each role reports `scopes`, the shipped `defaults`, `custom`, `tunable`, and who last changed it. `users:admin` only |
+| `PUT` | `/permissions/roles/:role` | `{scopes}` — replaces the baseline wholesale. **`400`** for `OWNER` or an unknown role, **`400`** `{error, invalid}` on an unknown scope |
+| `DELETE` | `/permissions/roles/:role` | Drop the override and track the shipped default again. **`409`** already on the default |
+| `GET` | `/users/:id/permissions` | `{role, baseline, extraScopes, deniedScopes, effective, tunable}` — the parts the answer was built from, so "why can they do that?" needs no mental arithmetic. **`404`** unknown |
+| `PUT` | `/users/:id/permissions` | `{extraScopes, deniedScopes}`, both replaced wholesale. **`409`** for an `OWNER` (they hold everything regardless), **`400`** on an unknown scope or on a scope that is both granted and denied |
+
+**The algebra** (`scopes.ts`, `effectiveScopes`): effective = role baseline ∪
+grants, minus denials. With nothing denied the wildcard survives intact, so an
+`OWNER` keeps holding scopes that future releases add. The moment anything is
+denied the set is materialised into a fixed list, which is the only honest
+reading of "everything except X".
+
+Grants close **downward** — `runs:write` carries `runs:read` — and denials close
+**upward**: denying `runs:read` also denies `runs:write`, because a write would
+imply the read straight back. Denying `runs:write` leaves `runs:read` alone,
+which is what makes "watch but do not touch" expressible.
+
+Two things are deliberately impossible. `OWNER`'s baseline cannot be edited, and
+an `OWNER` account cannot be individually tuned — it is the role that reaches
+these routes at all, so a narrowing mistake there would leave a deployment
+unable to undo it. Promoting an account to `OWNER` clears its tuning outright,
+so a later demotion cannot resurrect a forgotten denial.
+
+Changes reach sessions that are **already open**, within a few seconds: scopes
+are recomputed per request from the session's account row rather than frozen at
+login. Nobody has to sign in again, and a revoked permission is never left
+outstanding.
+
+`routes/permissions.ts`, `store/permissions.ts`, tested at
+`test/integration/permissions.test.ts` and `test/unit/permissionTuning.test.ts`.
+
 ---
 
 ## Session and OAuth

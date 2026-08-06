@@ -596,6 +596,24 @@ enum AdminRole {
   CONTRIBUTOR
 }
 
+/**
+ * Per-role scope baseline, when a deployment wants one other than the shipped
+ * default. Absent row means "use the code default" — this table is an override
+ * list, not the source of truth, so a deployment that never touches it keeps
+ * getting the defaults as they evolve across releases.
+ *
+ * OWNER is deliberately not storable here: it is the wildcard by construction
+ * and the way back in when the permission tables are the problem.
+ */
+model RolePermission {
+  role      AdminRole @id
+  scopes    String[]
+  updatedBy String?   @map("updated_by")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  @@map("role_permissions")
+}
+
 // Dashboard operator accounts. ALL auth state lives in Postgres: accounts,
 // Discord linkage, and revocable sessions. The bearer ADMIN_TOKEN remains the
 // break-glass path and the bot/CLI credential.
@@ -604,6 +622,14 @@ model AdminUser {
   email           String         @unique
   displayName     String?        @map("display_name")
   role            AdminRole      @default(ADMIN)
+  /**
+   * Per-account tuning on top of the role baseline: scopes this account holds
+   * beyond its role, and scopes it is refused despite its role. Denials are
+   * applied last and win, which is what makes "an ADMIN, but not bundles"
+   * expressible without inventing a role for one person.
+   */
+  extraScopes     String[]       @map("extra_scopes")
+  deniedScopes    String[]       @map("denied_scopes")
   /**
    * Signups (when enabled) create unapproved accounts; an OWNER approves.
    */

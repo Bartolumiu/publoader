@@ -467,6 +467,7 @@ none of it needs a shell on a container:
 | Clearing failures that were dealt with | `cleared_errors` | Errors → Clear / Restore | `padmin errors clear` / `restore` |
 | Saved MangaDex session | `settings.mdauth_*` | Overview → MangaDex session | `padmin mangadex auth` / `clear-auth` |
 | Client credentials | `api_tokens` | Tokens (OWNER only) | `padmin tokens` |
+| Role and account permissions | `role_permissions`, `admin_users.extra_scopes` / `denied_scopes` | Permissions, and Users → Permissions (OWNER only) | `padmin permissions` |
 | Worker fleet | `workers` | Workers | `padmin workers` |
 
 The environment supplies only identity and connectivity — `DATABASE_URL`,

@@ -80,7 +80,16 @@ The preset above covers every read plus the two write areas you want day to day
 | `workers:write` | `/workers drain`/`activate`/`revoke` |
 | `enroll:write` | `/enroll` |
 | `bundles:write` | nothing — **the bot has no publish command; never grant it** |
-| `users:admin` | nothing — **never grant it** |
+| `users:admin` | `/permissions roles` only, and only the *reading* of it. **Still not worth granting** |
+
+`/permissions` is the one command whose write half the bot cannot reach however
+it is scoped. Changing a role or an account's scopes needs the `OWNER` role, and
+a `pa_…` token is never `OWNER` — so `/permissions set-role`, `reset-role` and
+`set-user` answer 403 unless the bot was given the platform's root
+`ADMIN_TOKEN`, which is exactly the arrangement `/whoami` warns about. The
+subcommands exist rather than being hidden, because a refusal that says "you
+cannot do this from here" beats a feature that appears not to exist; do the
+change from the dashboard or `publoader-admin permissions`.
 
 Note that reading the removal mode needs `settings:write`, not a read scope:
 `GET /removal-mode` is guarded by `settings:write` server-side. Most deployments
@@ -282,6 +291,20 @@ in the repo that was never published does not appear — that is intended.
 | `/workers activate <id>` | mutate | `workers:write` | Return a drained worker to service. |
 | `/workers revoke <id> confirm:true` | destructive | `workers:write` | Kill its credential permanently. The host must re-enroll. |
 | `/enroll [trust] [note] [ttl-hours]` | destructive | `enroll:write` | Mint a single-use worker enrollment token, **DM'd to you**. |
+
+### Permissions
+
+| Command | Class | Scope | What it does |
+|---|---|---|---|
+| `/permissions roles` | read | `users:admin` | The scope baseline behind each role on this deployment, and whether it is the shipped default or a local choice. |
+| `/permissions user <id>` | read | `users:admin` + **OWNER** | One account's role baseline, grants, denials and effective scopes. |
+| `/permissions set-role <role> <scopes> confirm:true` | destructive | `users:admin` + **OWNER** | Redefine what `ADMIN` or `CONTRIBUTOR` may do. Replaces the whole list. |
+| `/permissions reset-role <role> confirm:true` | destructive | `users:admin` + **OWNER** | Back to the shipped default. |
+| `/permissions set-user <id> [grant] [deny] confirm:true` | destructive | `users:admin` + **OWNER** | Grant and deny scopes for one account. An omitted list is left as it is; pass both empty to clear all tuning. |
+
+Everything marked **OWNER** needs the owner *role*, which a scoped `pa_…` token
+never has — see [§2](#which-scope-unlocks-which-command). Changes take effect on
+sessions that are already open, within a few seconds.
 
 ### Audit
 
