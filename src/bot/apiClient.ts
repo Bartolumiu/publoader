@@ -277,13 +277,20 @@ export type UploadTaskState = "PENDING" | "LEASED" | "DONE" | "FAILED" | "DEAD_L
  */
 export interface ChapterReconcileReport {
   dryRun: boolean;
-  groups: { extension: string; groupId: string; total: number; unavailable: number; recorded: number }[];
+  groups: {
+    extension: string;
+    groupId: string;
+    total: number;
+    carded: number;
+    recorded: number;
+    hiddenOnMangadex: number;
+  }[];
   unavailableFound: number;
   unavailableRecorded: number;
   scanned: number;
   deletedFound: number;
   deletedRecorded: number;
-  hidden: string[];
+  hiddenOnMangadex: string[];
 }
 
 /**

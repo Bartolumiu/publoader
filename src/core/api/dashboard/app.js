@@ -3953,7 +3953,7 @@ function reconcileCard(archive, reload) {
 
   const render = (report) => {
     checked = report;
-    const groups = (report.groups ?? []).filter((g) => g.unavailable > 0);
+    const groups = (report.groups ?? []).filter((g) => g.carded > 0 || g.hiddenOnMangadex > 0);
     setChildren(
       output,
       el("div", {}, [
@@ -3965,14 +3965,16 @@ function reconcileCard(archive, reload) {
         }),
         ...groups.map((g) =>
           el("div", {
-            text: `${g.extension}: ${g.unavailable} of ${g.total} unavailable on MangaDex, ${g.recorded} new`,
+            text:
+              `${g.extension}: ${g.carded} of ${g.total} already carded on MangaDex, ${g.recorded} new` +
+              (g.hiddenOnMangadex > 0 ? `, ${g.hiddenOnMangadex} live but unserved` : ""),
           }),
         ),
-        report.hidden?.length
+        report.hiddenOnMangadex?.length
           ? el("div", {
               text:
-                `${report.hidden.length} chapter(s) are hidden for a reason that is not ` +
-                "unavailability — those are never archived.",
+                `${report.hiddenOnMangadex.length} chapter(s) carry no card but MangaDex will not ` +
+                "serve them — never archived. Queue them unavailable if that is what you want.",
             })
           : el("span", {}),
       ]),
@@ -3987,8 +3989,9 @@ function reconcileCard(archive, reload) {
       el("p", {
         class: "dim small",
         text:
-          "These archives record what this platform did. This finds what MangaDex did on its " +
-          "own — chapters it has stopped serving, and chapters that are gone — and records those too.",
+          "These archives record what the workers did as they did it. This rebuilds them from " +
+          "MangaDex itself — the chapters already carrying an unavailable card, and the ones " +
+          "that are gone — so history the tables never captured is recorded too.",
       }),
       el(
         "div",

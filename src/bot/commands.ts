@@ -1031,7 +1031,7 @@ const commands: BotCommand[] = [
   },
   {
     name: "reconcile",
-    description: "Check which chapters MangaDex has stopped serving or deleted.",
+    description: "Check which chapters are marked unavailable or deleted on MangaDex.",
     // "read" although it walks the whole catalogue: it reports and never
     // writes. Applying is closed to api tokens at the endpoint, so this command
     // could not write the rows even if it asked to — `padmin chapters
@@ -1040,7 +1040,7 @@ const commands: BotCommand[] = [
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("reconcile")
-      .setDescription("Check which chapters MangaDex has stopped serving or deleted.")
+      .setDescription("Check which chapters are marked unavailable or deleted on MangaDex.")
       .addStringOption((o) =>
         o
           .setName("extension")
@@ -1059,19 +1059,23 @@ const commands: BotCommand[] = [
         };
       }
       const lines = report.groups
-        .filter((group) => group.unavailable > 0)
+        .filter((group) => group.carded > 0 || group.hiddenOnMangadex > 0)
         .map(
           (group) =>
-            `• **${group.extension}** — ${group.unavailable} of ${group.total} unavailable, ` +
-            `${group.recorded} not yet archived`,
+            `• **${group.extension}** — ${group.carded} of ${group.total} already carded, ` +
+            `${group.recorded} not yet archived` +
+            (group.hiddenOnMangadex > 0
+              ? `, ${group.hiddenOnMangadex} live but unserved by MangaDex`
+              : ""),
         );
       return {
         text:
           `:mag: **${report.unavailableRecorded}** unavailable and **${report.deletedRecorded}** ` +
           `deleted chapter(s) are missing from the archives.\n` +
           (lines.length > 0 ? `${lines.join("\n")}\n` : "") +
-          (report.hidden.length > 0
-            ? `${report.hidden.length} hidden for an unknown reason — not archived.\n`
+          (report.hiddenOnMangadex.length > 0
+            ? `${report.hiddenOnMangadex.length} chapter(s) carry no card but MangaDex will not ` +
+              "serve them — never archived; queue them unavailable if that is what you want.\n"
             : "") +
           "Nothing has been written. Run `padmin chapters reconcile --apply` to record them.",
       };

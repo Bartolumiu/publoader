@@ -7,24 +7,27 @@ import type { AuditLog } from "../../src/core/store/settings.js";
 import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
 
 /**
- * Recording what MangaDex did to our chapters.
+ * Rebuilding the chapter archives from what MangaDex holds.
  *
  * The properties worth proving are the ones that cost real data when they
  * regress, and each needs a live postgres because the archives' `md_chapter_id`
  * unique constraints and the move-between-tables transaction are the system
  * under test:
  *
- *  - a chapter MangaDex will not serve is archived even when it has NO
- *    uploaded_chapters row. This is the case the obvious implementation gets
- *    wrong: on a database younger than the catalogue, the overlap between
- *    "unavailable on MangaDex" and "in uploaded_chapters" is zero, so a sweep
- *    of our own table finds nothing at all;
- *  - unavailability is decided by the collection differential, NOT by the
- *    `isUnavailable` attribute, which is absent on every older chapter;
+ *  - "marked unavailable" is `externalUrl && pages > 0` — an external chapter
+ *    carrying our card. Both halves are load-bearing: pages alone would sweep
+ *    in natively hosted chapters, and externalUrl alone describes every chapter
+ *    we have ever published, live ones included;
+ *  - a carded chapter is archived even when it has NO uploaded_chapters row.
+ *    This is the case the obvious implementation gets wrong: on a database
+ *    younger than the catalogue the overlap is zero, so a sweep of our own
+ *    table finds nothing at all;
+ *  - a live external chapter (no pages) is left alone however MangaDex is
+ *    behaving, including when MangaDex has stopped serving it — that is
+ *    MangaDex hiding a chapter rather than us having marked one, so it is
+ *    reported and never archived;
  *  - deletion rests on a 404 and never on absence from a list, because it is
  *    the irreversible direction;
- *  - a chapter that is merely hidden (fetchable by id, absent from the
- *    collection) is reported and never written;
  *  - re-running keeps the instant already recorded, so a sweep cannot rewrite
  *    the history it is meant to preserve.
  */
@@ -44,45 +47,45 @@ describe.skipIf(!dbReady())("chapter reconciliation", () => {
   const chapterId = (n: number): string =>
     `aaaaaaaa-0000-4000-8000-${String(n).padStart(12, "0")}`;
 
+  /** A live external chapter: publisher link, no pages of its own. */
   const entity = (id: string, attributes: Record<string, unknown> = {}): MdEntity => ({
     id,
     type: "chapter",
-    attributes: { chapter: "7", title: "Seven", translatedLanguage: "en", ...attributes },
+    attributes: {
+      chapter: "7",
+      title: "Seven",
+      translatedLanguage: "en",
+      externalUrl: "https://publisher.example/ch/7",
+      pages: 0,
+      ...attributes,
+    },
     relationships: [{ id: MANGA, type: "manga" }],
   });
 
   /**
+   * The same chapter after being marked unavailable: the card is its one page,
+   * and the link has been repointed at the series root rather than cleared —
+   * which is exactly why the page count, not the URL, is the signal.
+   */
+  const carded = (id: string, attributes: Record<string, unknown> = {}): MdEntity =>
+    entity(id, { externalUrl: "https://publisher.example/", pages: 1, ...attributes });
+
+  /**
    * A MangaDex that holds `all` for the group, serves `served`, and 404s
-   * anything in `gone`. The shape mirrors the real client's contract: the
-   * availability call is the only thing that can see an unavailable chapter.
+   * anything in `gone`. `byId` overrides what the single-chapter endpoint says,
+   * which is the only thing the uploaded-row sweep consults.
    */
   function fakeMd(opts: {
     all: MdEntity[];
     served: string[];
     gone?: string[];
-    byId?: Record<string, Partial<MdChapterDetail["attributes"]>>;
+    byId?: Record<string, Record<string, unknown>>;
   }): MdExtendedApi {
     return {
       chapterAvailabilityForGroup: async () => ({
         all: new Map(opts.all.map((e) => [e.id, e])),
         served: new Set(opts.served),
       }),
-      chaptersByIds: async (ids: string[]) =>
-        ids
-          .filter((id) => !(opts.gone ?? []).includes(id) && opts.served.includes(id))
-          .map((id) => ({
-            id,
-            attributes: {
-              volume: null,
-              chapter: "7",
-              title: null,
-              translatedLanguage: "en",
-              externalUrl: null,
-              version: 1,
-              createdAt: "",
-            },
-            relationships: [],
-          })),
       chapterById: async (id: string) => {
         if ((opts.gone ?? []).includes(id)) return null;
         return {
@@ -92,13 +95,14 @@ describe.skipIf(!dbReady())("chapter reconciliation", () => {
             chapter: "7",
             title: null,
             translatedLanguage: "en",
-            externalUrl: null,
+            externalUrl: "https://publisher.example/ch/7",
+            pages: 0,
             version: 1,
             createdAt: "",
             ...(opts.byId?.[id] ?? {}),
           },
           relationships: [],
-        } as MdChapterDetail;
+        } as unknown as MdChapterDetail;
       },
     } as unknown as MdExtendedApi;
   }
@@ -124,15 +128,15 @@ describe.skipIf(!dbReady())("chapter reconciliation", () => {
     await closeDb();
   });
 
-  it("archives a chapter with no uploaded row, found only by the differential", async () => {
-    // One uploaded row exists purely so the group is discoverable; the
-    // unavailable chapter itself is NOT in uploaded_chapters, which is the
-    // real-world case a sweep of our own table cannot see.
+  it("archives a carded chapter that has no uploaded_chapters row", async () => {
+    // One uploaded row exists purely so the group is discoverable; the carded
+    // chapter itself is NOT in uploaded_chapters, which is the real-world case
+    // a sweep of our own table cannot see.
     await seedUploaded(chapterId(1));
     const orphan = chapterId(99);
     const md = fakeMd({
-      all: [entity(chapterId(1)), entity(orphan, { externalUrl: "https://pub.example/v/9" })],
-      served: [chapterId(1)],
+      all: [entity(chapterId(1)), carded(orphan)],
+      served: [chapterId(1), orphan],
     });
 
     const report = await new ChapterReconciler({ prisma, md, log, audit }).run({
@@ -149,18 +153,39 @@ describe.skipIf(!dbReady())("chapter reconciliation", () => {
     expect(row?.extension).toBe("mangaplus");
     // The MangaDex record is the only description of a chapter we never had a
     // row for, so it has to survive on the archive row.
-    expect((row?.extra as Record<string, unknown>)["mdAttributes"]).toMatchObject({
-      externalUrl: "https://pub.example/v/9",
-    });
+    expect((row?.extra as Record<string, unknown>)["mdAttributes"]).toMatchObject({ pages: 1 });
   });
 
-  it("does not depend on the isUnavailable attribute, which older chapters lack", async () => {
+  it("needs both halves of the signature: pages alone and a link alone are not enough", async () => {
     await seedUploaded(chapterId(1));
-    const orphan = chapterId(98);
+    const liveExternal = chapterId(90);
+    const nativeWithPages = chapterId(91);
     const md = fakeMd({
-      // No isUnavailable key anywhere — exactly what MangaDex returns for the
-      // chapters it has been refusing to serve the longest.
-      all: [entity(chapterId(1)), entity(orphan)],
+      all: [
+        entity(chapterId(1)),
+        // Still readable at the publisher — pages 0.
+        entity(liveExternal),
+        // Pages, but no publisher link: a natively hosted chapter, not our card.
+        entity(nativeWithPages, { externalUrl: null, pages: 12 }),
+      ],
+      served: [chapterId(1), liveExternal, nativeWithPages],
+    });
+
+    const report = await new ChapterReconciler({ prisma, md, log, audit }).run({
+      dryRun: false,
+      actor: "tester",
+    });
+
+    expect(report.unavailableFound).toBe(0);
+    expect(await prisma.unavailableChapter.count()).toBe(0);
+  });
+
+  it("reports a live chapter MangaDex has stopped serving without archiving it", async () => {
+    await seedUploaded(chapterId(1));
+    const hidden = chapterId(89);
+    const md = fakeMd({
+      // Uncarded and unserved: MangaDex is hiding it, we have not marked it.
+      all: [entity(chapterId(1)), entity(hidden)],
       served: [chapterId(1)],
     });
 
@@ -169,13 +194,18 @@ describe.skipIf(!dbReady())("chapter reconciliation", () => {
       actor: "tester",
     });
 
-    expect(report.unavailableRecorded).toBe(1);
-    expect(await prisma.unavailableChapter.count()).toBe(1);
+    expect(report.hiddenOnMangadex).toEqual([hidden]);
+    expect(report.unavailableRecorded).toBe(0);
+    expect(await prisma.unavailableChapter.count()).toBe(0);
+    expect(report.groups[0]?.hiddenOnMangadex).toBe(1);
   });
 
   it("writes nothing on a dry run but reports the same counts", async () => {
     await seedUploaded(chapterId(1));
-    const md = fakeMd({ all: [entity(chapterId(1)), entity(chapterId(97))], served: [chapterId(1)] });
+    const md = fakeMd({
+      all: [entity(chapterId(1)), carded(chapterId(97))],
+      served: [chapterId(1), chapterId(97)],
+    });
 
     const report = await new ChapterReconciler({ prisma, md, log, audit }).run({
       dryRun: true,
@@ -187,6 +217,29 @@ describe.skipIf(!dbReady())("chapter reconciliation", () => {
     expect(await prisma.uploadedChapter.count()).toBe(1);
     // A dry run is not an event.
     expect(audited).toHaveLength(0);
+  });
+
+  it("archives a carded chapter found through its uploaded row", async () => {
+    const known = chapterId(5);
+    await seedUploaded(known);
+    const md = fakeMd({
+      all: [],
+      served: [],
+      byId: { [known]: { externalUrl: "https://publisher.example/", pages: 1 } },
+    });
+
+    const report = await new ChapterReconciler({ prisma, md, log, audit }).run({
+      dryRun: false,
+      actor: "tester",
+    });
+
+    expect(report.unavailableRecorded).toBe(1);
+    // The publisher-side identifiers come from our row, not from MangaDex,
+    // which has never known about them.
+    const row = await prisma.unavailableChapter.findUnique({ where: { mdChapterId: known } });
+    expect(row?.chapterId).toBe("src-7");
+    expect(row?.chapterUrl).toBe("https://publisher.example/ch/7");
+    expect(await prisma.uploadedChapter.count()).toBe(0);
   });
 
   it("archives a deletion only on a 404, and moves the row out of uploaded", async () => {
@@ -206,29 +259,13 @@ describe.skipIf(!dbReady())("chapter reconciliation", () => {
     expect(await prisma.uploadedChapter.findUnique({ where: { mdChapterId: gone } })).toBeNull();
   });
 
-  it("reports a merely hidden chapter without writing it anywhere", async () => {
-    const hidden = chapterId(3);
-    await seedUploaded(hidden);
-    // Absent from the collection, but its own endpoint answers and it does not
-    // claim to be unavailable — a future publishAt looks exactly like this.
-    const md = fakeMd({ all: [], served: [] });
-
-    const report = await new ChapterReconciler({ prisma, md, log, audit }).run({
-      dryRun: false,
-      actor: "tester",
-    });
-
-    expect(report.hidden).toEqual([hidden]);
-    expect(report.deletedRecorded).toBe(0);
-    expect(await prisma.deletedChapter.count()).toBe(0);
-    expect(await prisma.unavailableChapter.count()).toBe(0);
-    expect(await prisma.uploadedChapter.count()).toBe(1);
-  });
-
   it("keeps the instant it first recorded when run again", async () => {
     await seedUploaded(chapterId(1));
     const orphan = chapterId(96);
-    const md = fakeMd({ all: [entity(chapterId(1)), entity(orphan)], served: [chapterId(1)] });
+    const md = fakeMd({
+      all: [entity(chapterId(1)), carded(orphan)],
+      served: [chapterId(1), orphan],
+    });
     const reconciler = new ChapterReconciler({ prisma, md, log, audit });
 
     await reconciler.run({ dryRun: false, actor: "tester" });
@@ -247,7 +284,10 @@ describe.skipIf(!dbReady())("chapter reconciliation", () => {
     const gone = chapterId(4);
     await prisma.deletedChapter.create({ data: { mdChapterId: gone, extension: "mangaplus" } });
     await seedUploaded(chapterId(1));
-    const md = fakeMd({ all: [entity(chapterId(1)), entity(gone)], served: [chapterId(1)] });
+    const md = fakeMd({
+      all: [entity(chapterId(1)), carded(gone)],
+      served: [chapterId(1), gone],
+    });
 
     const report = await new ChapterReconciler({ prisma, md, log, audit }).run({
       dryRun: false,

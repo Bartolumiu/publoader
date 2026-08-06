@@ -50,15 +50,29 @@ export interface MdChapter {
      */
     createdAt: string;
     /**
-     * MangaDex's own "I will not serve this" flag.
+     * How many pages MangaDex is hosting for this chapter, and — for the
+     * external chapters this platform publishes — the thing that says whether
+     * it has been marked unavailable.
+     *
+     * An external chapter normally has NO pages: the reader follows
+     * `externalUrl` to the publisher. Marking one unavailable replaces that
+     * with a card, which is a page. So `externalUrl && pages > 0` is a chapter
+     * carrying our card, and `externalUrl && pages === 0` is a live one. On the
+     * live group this separates cleanly: every carded chapter has exactly one
+     * page, and every live one has none.
+     */
+    pages?: number;
+    /**
+     * MangaDex's own "I will not serve this" flag. Distinct from the above:
+     * this is MangaDex hiding a chapter, not us having carded it.
      *
      * Optional because it is genuinely absent, not merely sometimes false:
      * chapters whose records predate the field carry no such key even while
      * MangaDex is refusing to serve them. So `isUnavailable !== true` does not
-     * mean available, and unavailability is established by asking whether the
-     * chapter is dropped from a collection read without `includeUnavailable`
-     * (see MdClient.chapterAvailabilityForGroup). Trust this flag only when it
-     * is `true`.
+     * mean available, and MangaDex-side hiding is established by asking whether
+     * the chapter is dropped from a collection read without
+     * `includeUnavailable` (see MdClient.chapterAvailabilityForGroup). Trust
+     * this flag only when it is `true`.
      */
     isUnavailable?: boolean;
   };

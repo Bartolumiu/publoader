@@ -504,7 +504,7 @@ did:
 
 | Method | Path | Scope | Notes |
 | --- | --- | --- | --- |
-| `POST` | `/chapters/reconcile` | `chapters:read`, **plus ADMIN and no api tokens when `dryRun: false`** | `{dryRun?, extensions?, skipDeleted?}`, `dryRun` defaulting to **true**. Finds the chapters MangaDex has stopped serving (measured as the difference between two collection reads, since `isUnavailable` is absent on older records) and the ones it 404s, and archives them. Seeds archive rows for chapters with no `uploaded_chapters` row at all — the usual case, and the reason a sweep of our own table finds nothing. Idempotent: an already-archived id keeps its original timestamp. See docs/operations.md §"Reconcile the archives with MangaDex" |
+| `POST` | `/chapters/reconcile` | `chapters:read`, **plus ADMIN and no api tokens when `dryRun: false`** | `{dryRun?, extensions?, skipDeleted?}`, `dryRun` defaulting to **true**. Archives the chapters already carrying an unavailable card (`externalUrl` set **and** `pages > 0` — an external chapter with no pages is live) and the ones MangaDex 404s. Seeds archive rows for chapters with no `uploaded_chapters` row at all — the usual case, and the reason a sweep of our own table finds nothing. `hiddenOnMangadex` lists uncarded chapters MangaDex will not serve; those are reported and never written. Idempotent: an already-archived id keeps its original timestamp. See docs/operations.md §"Reconcile the archives with MangaDex" |
 
 The same three actions over a set of chapters:
 

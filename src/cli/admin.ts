@@ -589,20 +589,27 @@ const chapters = program
 
 chapters
   .command("reconcile")
-  .description("record the chapters MangaDex has stopped serving or has deleted")
+  .description("record the chapters already marked unavailable on MangaDex, and the deleted ones")
   .option("--apply", "write the archive rows (default is a dry run that writes nothing)")
   .option("--extension <name...>", "only these extensions (default: every group we have uploaded to)")
   .option("--skip-deleted", "skip the uploaded_chapters sweep, which is the only pass that finds deletions")
   .action(async (opts: { apply?: boolean; extension?: string[]; skipDeleted?: boolean }) => {
     const res = await api<{
       dryRun: boolean;
-      groups: { extension: string; groupId: string; total: number; unavailable: number; recorded: number }[];
+      groups: {
+        extension: string;
+        groupId: string;
+        total: number;
+        carded: number;
+        recorded: number;
+        hiddenOnMangadex: number;
+      }[];
       unavailableFound: number;
       unavailableRecorded: number;
       scanned: number;
       deletedFound: number;
       deletedRecorded: number;
-      hidden: string[];
+      hiddenOnMangadex: string[];
     }>("/api/v1/admin/chapters/reconcile", {
       method: "POST",
       json: {
@@ -616,17 +623,24 @@ chapters
       { header: "EXTENSION", get: (g) => g["extension"] },
       { header: "GROUP", get: (g) => String(g["groupId"]).slice(0, 8) },
       { header: "ON MD", get: (g) => g["total"] },
-      { header: "UNAVAILABLE", get: (g) => g["unavailable"] },
+      { header: "CARDED", get: (g) => g["carded"] },
       { header: "NEW", get: (g) => g["recorded"] },
+      { header: "MD-HIDDEN", get: (g) => g["hiddenOnMangadex"] },
     ], "no extension has uploaded anything, so there are no groups to ask about");
 
     console.error(`  scanned ${res.scanned} uploaded row(s)`);
-    if (res.hidden.length > 0) {
-      // Deliberately not archived: on MangaDex, fetchable by id, but absent
-      // from the collection for a reason that is not unavailability.
-      console.error(`  ${res.hidden.length} hidden, cause unknown — not archived:`);
-      for (const id of res.hidden.slice(0, 20)) console.error(`    ${id}`);
-      if (res.hidden.length > 20) console.error(`    … and ${res.hidden.length - 20} more`);
+    if (res.hiddenOnMangadex.length > 0) {
+      // Never archived: MangaDex is refusing to serve these, but they carry no
+      // card of ours, so they are candidates for an UNAVAILABLE task rather
+      // than chapters we have already marked.
+      console.error(
+        `  ${res.hiddenOnMangadex.length} live chapter(s) MangaDex will not serve — ` +
+          "not archived; queue them unavailable if that is what you want:",
+      );
+      for (const id of res.hiddenOnMangadex.slice(0, 20)) console.error(`    ${id}`);
+      if (res.hiddenOnMangadex.length > 20) {
+        console.error(`    … and ${res.hiddenOnMangadex.length - 20} more`);
+      }
     }
     ok(
       `${res.dryRun ? "would record" : "recorded"} ` +
