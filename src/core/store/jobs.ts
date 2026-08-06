@@ -67,7 +67,7 @@ export function backoffSeconds(attempt: number, policy: RetryPolicy): number {
 const FAIRNESS_ALIVE_SECONDS = 120;
 
 /**
- * How long after claiming a worker is asked to stand aside. Short on purpose -
+ * How long after claiming a worker is asked to stand aside. Short on purpose;
  * it bounds what a heartbeating-but-wedged peer can cost the queue, since after
  * this the previous claimer is eligible again regardless.
  */
@@ -531,8 +531,8 @@ export class JobStore {
    * The parent run must be revived too. `advanceRuns` only ever moves a run out
    * of PENDING/EXECUTING, so a run that already reached DEAD_LETTER is
    * terminal: replaying its job alone made the job succeed and then sit there,
-   * with the run never advancing to INGESTING and the chapters never uploaded -
-   * while the API answered `{ok: true}` and the job disappeared from the
+   * with the run never advancing to INGESTING and the chapters never uploaded;
+ * while the API answered `{ok: true}` and the job disappeared from the
    * dead-letter list. The retry looked like it worked and silently did nothing,
    * which is worse than refusing. Both are reset in one transaction.
    */

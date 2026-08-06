@@ -53,7 +53,7 @@ PORT="${PORT}" HOST=127.0.0.1 \
   LOG_LEVEL=warn \
   npx tsx src/services/api.ts &
 API_PID=$!
-# Always reap the API and the scratch database, including on a failed assertion -
+# Always reap the API and the scratch database, including on a failed assertion;
 # otherwise a red run leaves a port bound and the next one fails for the wrong
 # reason.
 cleanup() {

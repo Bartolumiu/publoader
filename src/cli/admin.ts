@@ -649,8 +649,8 @@ extConfig
       method: "PUT",
       json: { overrideOptions },
     });
-    // A rejected row is not a failed command; the rest of the document landed -
-    // but it must be visible, because a dropped `custom_language` row silently
+    // A rejected row is not a failed command, the rest of the document landed,
+ // but it must be visible, because a dropped `custom_language` row silently
     // stops protecting a language from the chapter-removal pass.
     for (const row of res.rejected) {
       console.error(

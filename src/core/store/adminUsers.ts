@@ -147,8 +147,8 @@ export class AdminUserStore {
   }
 
   /**
-   * Demotion and deletion both have to leave at least one OWNER standing -
-   * otherwise the only way back in is the break-glass admin token.
+   * Demotion and deletion both have to leave at least one OWNER standing;
+ * otherwise the only way back in is the break-glass admin token.
    */
   async setRole(id: string, role: AdminRole): Promise<"ok" | "unknown" | "last-owner"> {
     const user = await this.byId(id);

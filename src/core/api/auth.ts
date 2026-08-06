@@ -191,7 +191,7 @@ export function requireScope(required: Scope) {
 }
 
 /**
- * Second-stage guard for the operations that manage *who else* has access -
+ * Second-stage guard for the operations that manage *who else* has access;
  * accounts, roles, the signup gate, and force-logout. Register it after
  * `adminAuthHook`, which is what populates `adminRole`.
  */

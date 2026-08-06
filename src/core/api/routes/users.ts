@@ -115,8 +115,8 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
 
     /**
      * Re-send a sign-in link. The invite mail is the part most likely to go
-     * missing; spam folders, typo'd addresses, expiry over a long weekend -
-     * so recovering from that must not require an owner to invent a password
+     * missing, spam folders, typo'd addresses, expiry over a long weekend,
+ * so recovering from that must not require an owner to invent a password
      * for somebody else and send it over some other channel.
      */
     scope.post("/api/v1/admin/users/:id/magic-link", owner, async (req, reply) => {
@@ -157,8 +157,8 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
     });
 
     /**
-     * Set a password. Self-service; which is what an account that got in with
-     * an emailed link does first; or an owner setting one for somebody else,
+     * Set a password. Self-service, which is what an account that got in with
+     * an emailed link does first, or an owner setting one for somebody else,
      * which is also how the seeded owner gets its first password after logging
      * in with the break-glass token.
      */

@@ -116,8 +116,8 @@ describe("scheduler tick timestamp", () => {
 
   it("no longer exports the lag gauge that could not report a stall", async () => {
     // The old gauge read 0 both when healthy and when wedged, because only the
-    // code that had stopped running could have raised it. It is gone entirely -
-    // not shimmed; so neither the metric nor a call site for it exists.
+    // code that had stopped running could have raised it. It is gone entirely,
+ // not shimmed, so neither the metric nor a call site for it exists.
     expect("schedulerLagSeconds" in metrics).toBe(false);
     const body = await registry.metrics();
     expect(body).not.toContain("publoader_scheduler_lag_seconds");

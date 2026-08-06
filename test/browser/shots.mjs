@@ -1,5 +1,5 @@
 /*
- * Screenshot every destination of the live dashboard. Not an assertion suite -
+ * Screenshot every destination of the live dashboard. Not an assertion suite;
  * a design review tool. Run it the same way as the others:
  *
  *   ./test/browser/run.sh shots.mjs
@@ -68,7 +68,7 @@ await page.settle(300);
 await shot("15-profile-menu");
 await page.eval(`document.getElementById("profile-toggle").click(); return true;`);
 
-// Phone width, where tables restack as cards and the rail becomes a drawer -
+// Phone width, where tables restack as cards and the rail becomes a drawer;
 // the layout that desktop screenshots say nothing about.
 await page.send("Emulation.setDeviceMetricsOverride", {
   width: 390,

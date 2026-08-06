@@ -311,8 +311,8 @@ describe("TitleService.applyToMangaDex", () => {
     expect(audits[0]).toMatchObject({ actor: "user:ardax", action: "untracked.mangadex_apply" });
     // A row that has just been reconciled has no outstanding MangaDex error,
     // and records WHEN and BY WHOM it was applied. Those two columns are what
-    // `GET /untracked/:id` reads back, so they are the point of this write -
-    // deriving the same fact by scanning the audit log made a routine read
+    // `GET /untracked/:id` reads back, so they are the point of this write;
+ // deriving the same fact by scanning the audit log made a routine read
     // depend on how long logs are kept.
     expect(saved).toHaveLength(1);
     expect(saved[0]).toMatchObject({ lastError: null, mdAppliedBy: "user:ardax" });

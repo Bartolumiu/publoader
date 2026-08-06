@@ -123,8 +123,8 @@ export class MagicLinkService {
 /**
  * What a "email me a sign-in link" request for `email` should do.
  *
- * Pulled out as a pure decision with injected side effects; same shape as
- * `matchDiscordIdentity`: because this is the policy that matters and it must
+ * Pulled out as a pure decision with injected side effects, same shape as
+ * `matchDiscordIdentity`, because this is the policy that matters and it must
  * be assertable without a database, a mailer or an HTTP server.
  *
  * The caller answers 202 for every outcome including "ignore": the endpoint is
@@ -165,15 +165,15 @@ const LinkRedeem = z.object({ token: z.string().min(1).max(512) });
 
 /** Why a redemption failed, in words an operator can act on. */
 const REDEEM_MESSAGE: Record<string, string> = {
-  unknown: "this sign-in link is not valid; request a new one",
-  used: "this sign-in link has already been used; request a new one",
+  unknown: "this sign-in link is not valid, request a new one",
+  used: "this sign-in link has already been used, request a new one",
   expired: "this sign-in link has expired; request a new one",
   revoked: "this sign-in link was replaced by a newer one",
   unapproved: "your account is awaiting approval",
 };
 
 /**
- * Unauthenticated by construction; redeeming a link *is* the authentication -
+ * Unauthenticated by construction, redeeming a link *is* the authentication,
  * so these register outside the admin scope and carry their own limiters.
  */
 export function registerMagicLinkRoutes(app: FastifyInstance, ctx: AppContext): void {

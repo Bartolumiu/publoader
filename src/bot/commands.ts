@@ -175,8 +175,8 @@ async function statusReply(ctx: HandlerContext): Promise<BotReply> {
   parts.push(`**Workers**: ${counts(stats.workers)}`);
   parts.push(
     stats.quarantined > 0
-      ? `**Quarantined results**: ${stats.quarantined} :warning: (see \`/quarantine\`)`
-      : "**Quarantined results**: 0",
+      ? `**Quarantined results**, ${stats.quarantined} :warning: (see \`/quarantine\`)`
+      : "**Quarantined results**, 0",
   );
 
   // The legacy /status also listed workers by name with per-worker queue depth.
@@ -433,7 +433,7 @@ const commands: BotCommand[] = [
           const base = defaults[name];
           const effective = override ?? base;
           const at = effective ? formatSchedule(effective) : "-";
-          return `• \`${name}\`: ${at}${override ? " *(override)*" : base ? " (manifest default)" : ""}`;
+          return `• \`${name}\`, ${at}${override ? " *(override)*" : base ? " (manifest default)" : ""}`;
         });
         return {
           text: lines([
@@ -534,13 +534,13 @@ const commands: BotCommand[] = [
         const rendered = runs.map(
           (r) =>
             `${runIcon(r.state)} \`${r.id.slice(0, 8)}\` **${r.extension}** [${r.kind}] ${r.state} ` +
-            `- ${shortTime(r.createdAt)} by ${r.triggeredBy ?? "schedule"}`,
+            `: ${shortTime(r.createdAt)} by ${r.triggeredBy ?? "schedule"}`,
         );
         return { text: lines([`**${runs.length} recent run(s)**`, ...rendered]) };
       }
       const { run } = await ctx.api.getRun(ctx.actor, requireString(ctx.options, "id"));
       const header = [
-        `${runIcon(run.state)} **${run.extension}** [${run.kind}]: **${run.state}**`,
+        `${runIcon(run.state)} **${run.extension}** [${run.kind}]; **${run.state}**`,
         `run \`${run.id}\``,
         `created ${shortTime(run.createdAt)}, finished ${shortTime(run.finishedAt)}`,
         `triggered by ${run.triggeredBy ?? "schedule"}`,
@@ -1002,7 +1002,7 @@ const commands: BotCommand[] = [
         if (untracked.length === 0) return { text: "Nothing untracked." };
         const rendered = untracked.map(
           (u) =>
-            `• \`${u.id}\` **${u.extension}** ${u.state}: ${u.title ?? u.mangaId} (${shortTime(u.createdAt)})`,
+            `• \`${u.id}\` **${u.extension}** ${u.state}; ${u.title ?? u.mangaId} (${shortTime(u.createdAt)})`,
         );
         return {
           text: lines([
@@ -1107,7 +1107,7 @@ const commands: BotCommand[] = [
       const { events } = await ctx.api.audit(ctx.actor, ctx.options.integer("limit") ?? 20);
       if (events.length === 0) return { text: "No audit events recorded." };
       const rendered = events.map(
-        (e) => `• \`${shortTime(e.createdAt)}\` **${e.action}** ${e.target ? `\`${e.target}\` ` : ""}- ${e.actor}`,
+        (e) => `• \`${shortTime(e.createdAt)}\` **${e.action}** ${e.target ? `\`${e.target}\` ` : ""}; ${e.actor}`,
       );
       return { text: lines([`**${events.length} audit event(s)**`, ...rendered]) };
     },
@@ -1248,7 +1248,7 @@ export const RETIRED_COMMANDS: RetiredCommand[] = [
 ];
 
 function retiredCommand(retired: RetiredCommand): BotCommand {
-  const description = `Retired legacy command: tells you what replaced it.`;
+  const description = `Retired legacy command; tells you what replaced it.`;
   return {
     name: retired.name,
     description,

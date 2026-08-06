@@ -36,8 +36,8 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
 
   /**
    * A MangaDex stand-in for the untracked-series routes. Not the dev mock over
-   * HTTP: these tests are about what the API does with what MangaDex says -
-   * including saying nothing, or refusing an edit as stale; and driving those
+   * HTTP: these tests are about what the API does with what MangaDex says,
+ * including saying nothing, or refusing an edit as stale, and driving those
    * answers is exactly what a stub is for. The mock at docker/dev/mock-md covers
    * the wire format for the e2e stack.
    */

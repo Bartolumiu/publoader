@@ -12,8 +12,8 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  *
  *   - `cancel_requested` blocks a re-claim, so an abandoned job cannot be picked
  *     up again after the lease sweeper requeues it;
- *   - the run goes to CANCELLED directly, so `advanceRuns`: which only moves
- *     PENDING/EXECUTING runs; can never carry it into processing.
+ *   - the run goes to CANCELLED directly, so `advanceRuns`, which only moves
+ *     PENDING/EXECUTING runs, can never carry it into processing.
  */
 describe.skipIf(!dbReady())("cancelling a run", () => {
   const prisma = testPrisma();

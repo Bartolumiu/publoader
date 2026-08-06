@@ -14,7 +14,7 @@ import sharp from "sharp";
  * for wrapping decisions and, crucially, identical on every host.
  *
  * Output is a pure function of the options: no timestamps, no randomness. It is
- * byte-identical across runs on a given image, given the same installed fonts -
+ * byte-identical across runs on a given image, given the same installed fonts;
  * the one environmental input, which is why the family list below is pinned to
  * fonts the core image ships rather than a bare `sans-serif`.
  */

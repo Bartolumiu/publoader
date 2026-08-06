@@ -242,8 +242,8 @@ export class ChapterStore {
 
   /**
    * Per-extension counts for one archive, for the filter picker, for the "what
-   * does this extension have up?" question the Extensions view asks, and; with
-   * a filter; for the breakdown a bulk dry run reports, which is how an
+   * does this extension have up?" question the Extensions view asks, and, with
+   * a filter, for the breakdown a bulk dry run reports, which is how an
    * operator recognises the set they are about to act on.
    */
   async byExtension(

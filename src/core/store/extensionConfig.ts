@@ -14,8 +14,8 @@ import type { OverrideOptionsLike } from "../processor/dedupe.js";
  *                                                   and it must be a real one)
  *
  * Everything else in the dict is extension-private (mangaplus's title regexes,
- * `num2words`, `no_chapters`, …) and stays in `extension_configs.override_options`
- *; see the model comment in schema.prisma.
+ * `num2words`, `no_chapters`, …) and stays in `extension_configs.override_options`:
+ * see the model comment in schema.prisma.
  *
  * This store is the single call site for all of it: `load` returns the exact
  * `OverrideOptionsLike` shape core/processor/dedupe.ts already consumes, so the

@@ -212,8 +212,8 @@ describe("node runner", () => {
 describe("large envelopes", () => {
   /**
    * The runner writes its envelope to stdout and then calls `process.exit()`.
-   * stdout to a pipe; which is always the case, because the agent captures it -
-   * is asynchronous: past the pipe buffer (~64 KiB) `write()` queues the rest and
+   * stdout to a pipe, which is always the case, because the agent captures it,
+ * is asynchronous: past the pipe buffer (~64 KiB) `write()` queues the rest and
    * returns false, and `process.exit()` discards whatever is still queued.
    *
    * The result was a runner that exited 0 having printed a truncated line the

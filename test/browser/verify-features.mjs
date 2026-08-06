@@ -191,8 +191,8 @@ if (rowOpened === "clicked") {
 
   ok("the edit dialog loads the real chapter payload", (form.json || "").includes("Seeded chapter"), form.json.slice(0, 60));
   ok("chapter number is editable as its own field", form.number !== null, `number=${form.number}`);
-  ok("volume is editable; the split-chapter case", form.volume === true);
-  ok("chapter title is editable; the regex case", form.title !== null, `title=${form.title}`);
+  ok("volume is editable, the split-chapter case", form.volume === true);
+  ok("chapter title is editable, the regex case", form.title !== null, `title=${form.title}`);
   ok("language is editable", form.language !== null, `language=${form.language}`);
 
   // The two editors are one source of truth: typing in a field must reach the

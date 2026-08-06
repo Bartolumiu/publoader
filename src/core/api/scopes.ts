@@ -7,9 +7,9 @@
  * the verbs it needs, so an exposed credential is confined to its area.
  *
  * Three principal kinds resolve to scope sets (see `auth.ts`):
- *   - root     ; the env ADMIN_TOKEN break-glass credential: ["*"]
- *   - api-token; a `pa_…` row in `api_tokens`: exactly its stored scopes
- *   - session  ; a dashboard login: OWNER gets ["*"], ADMIN everything but
+ *   - root      - the env ADMIN_TOKEN break-glass credential: ["*"]
+ *   - api-token, a `pa_…` row in `api_tokens`: exactly its stored scopes
+ *   - session   - a dashboard login: OWNER gets ["*"], ADMIN everything but
  *                 `users:admin` (an admin cannot promote themselves)
  *
  * Convention: `<area>:read` / `<area>:write`, and write implies read for the
@@ -35,8 +35,8 @@ export const SCOPES = [
   // Series-map curation, deliberately separate from extensions:write (which can
   // pause an extension, rewrite its config and trigger clean runs).
   "tracked:read",
-  // Append-only: create mappings that do not exist yet. Safe to hand out -
-  // the worst case is a wrong new mapping, which is visible and reversible.
+  // Append-only: create mappings that do not exist yet. Safe to hand out;
+ // the worst case is a wrong new mapping, which is visible and reversible.
   "tracked:append",
   // Modify and delete existing mappings. Un-tracking a series silently stops
   // its uploads, so this stays with operators.

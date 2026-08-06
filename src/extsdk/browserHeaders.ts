@@ -1,8 +1,8 @@
 /**
  * Realistic browser headers, applied to every request an extension makes.
  *
- * This used to live inside individual extensions; alpha_manga and viz each
- * carried their own copy; which meant every new extension either reimplemented
+ * This used to live inside individual extensions, alpha_manga and viz each
+ * carried their own copy, which meant every new extension either reimplemented
  * it or went out with a bare `undici` fingerprint. Publishers block on exactly
  * that, so the default belongs in the platform: an extension gets plausible
  * headers without asking, and anything it sets explicitly still wins.

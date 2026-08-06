@@ -502,8 +502,8 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     expect(byId["goner"]).toBe("removed");
     expect(body).toMatchObject({ added: 1, updated: 1, removed: 1 });
 
-    // Nothing moved. Not the row it would add, and; the part that bites -
-    // not the mapping it would repoint: a preview that repoints for real has
+    // Nothing moved. Not the row it would add, and, the part that bites,
+ // not the mapping it would repoint: a preview that repoints for real has
     // silently sent this series' uploads to a different MangaDex title.
     const after = await prisma.trackedManga.findMany({ orderBy: { mangaId: "asc" } });
     expect(after).toEqual(before);

@@ -264,8 +264,8 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  *
  *   {mdMangaId: [externalId, …]}          mangaplus; many external ids per
  *                                         title, one per language edition
- *   {externalId: mdMangaId}               alpha_manga; the forward direction
- *   {namespace: {externalId: mdMangaId}}  viz; TWO catalogues (`shonenjump`,
+ *   {externalId: mdMangaId}               alpha_manga, the forward direction
+ *   {namespace: {externalId: mdMangaId}}  viz, TWO catalogues (`shonenjump`,
  *                                         `vizmanga`) in one extension, where
  *                                         the same numeric id under each is a
  *                                         different series

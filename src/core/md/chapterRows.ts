@@ -205,8 +205,8 @@ export function chapterFromJson(raw: Record<string, unknown>): Chapter {
  * every other key carried through verbatim.
  *
  * Carrying the residue is the point. Task payloads are NOT the canonical
- * chapter shape; EDIT rows need `payload` (the literal MangaDex PUT body) and
- * `oldInfo`, UNAVAILABLE rows need `unavailableAt`: and they are read
+ * chapter shape, EDIT rows need `payload` (the literal MangaDex PUT body) and
+ * `oldInfo`, UNAVAILABLE rows need `unavailableAt`, and they are read
  * tolerantly by `chapterFromJson` plus a direct lookup for those sidecars, not
  * validated against ChapterRecord. Projecting a document down to the chapter
  * keys silently strips the sidecars, which makes an EDIT task unexecutable

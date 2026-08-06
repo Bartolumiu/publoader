@@ -49,8 +49,8 @@ export type RepoArchiveFetcher = (req: ArchiveRequest) => Promise<Buffer>;
  * reason: GitHub answers the zipball endpoint with a 302 to codeload.github.com
  * carrying its own short-lived credential in the URL. Letting fetch follow it
  * automatically would either drop our Authorization header (per the fetch spec,
- * cross-origin) and 404 on the private repo, or; worse, on an implementation
- * that does not drop it; hand our GitHub token to a different host. Following
+ * cross-origin) and 404 on the private repo, or, worse, on an implementation
+ * that does not drop it, hand our GitHub token to a different host. Following
  * it explicitly and *without* the header is both correct and the narrower
  * disclosure.
  */

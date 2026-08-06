@@ -195,8 +195,8 @@ export class SchedulerService {
     // CLEAN runs are all-or-nothing over the full catalogue; never partition
     // them; a missing segment must not read as "chapters were removed".
     if (manifest.partition && opts.kind !== "CLEAN") {
-      // The DB (TrackedManga) is the source of truth for the tracked catalogue
-      //; bundle data files only seed it at publish time.
+      // The DB (TrackedManga) is the source of truth for the tracked catalogue;
+ // bundle data files only seed it at publish time.
       const tracked = await this.prisma.trackedManga.findMany({
         where: { extension: manifest.name },
         select: { namespace: true, mangaId: true },

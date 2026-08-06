@@ -164,8 +164,8 @@ export class MapSyncService {
    *
    * On the very first call nothing is synced: the timestamp is seeded and the
    * first automatic write happens one interval later. Deploying a release must
-   * not push commits to the extensions repos within thirty seconds of starting -
-   * an operator who wants it now has `publoader-admin maps sync`, which is a
+   * not push commits to the extensions repos within thirty seconds of starting;
+ * an operator who wants it now has `publoader-admin maps sync`, which is a
    * deliberate act with a `--dry-run` in front of it.
    *
    * Claiming the slot is a compare-and-set on the stored timestamp, so two

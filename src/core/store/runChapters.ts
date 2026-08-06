@@ -16,7 +16,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
  * envelope stays the single source of truth and paging happens in the database
  * rather than in the API process.
  *
- * `updatedChapters` is what the extension reported as new or changed this run -
+ * `updatedChapters` is what the extension reported as new or changed this run;
  * the set the processor turns into upload and edit tasks. `allChapters` is the
  * optional full catalogue snapshot an extension may also send (it is what drives
  * removal detection), and it is null for extensions that do not send one, which
@@ -187,8 +187,8 @@ export class RunChapterStore {
    * Per-title breakdown of one run: how many chapters were found for each
    * series, newest reported first.
    *
-   * This is the shape an operator actually reads a run in; "mangaplus found 41
-   * chapters across 9 titles"; and it is cheap enough to compute on demand
+   * This is the shape an operator actually reads a run in, "mangaplus found 41
+   * chapters across 9 titles", and it is cheap enough to compute on demand
    * because the grouping happens in Postgres over the same unnest the list uses.
    */
   async byManga(

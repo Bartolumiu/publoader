@@ -134,8 +134,8 @@ export type ApplyResult =
  * Automated untracked-series pipeline:
  *   1. the processor persists untracked manga reported by extensions into
  *      `untracked_manga` (state NEW);
- *   2. this service; running in the core uploader (the MD-credential holder)
- *     ; creates + commits a MangaDex title for each NEW row when the
+ *   2. this service, running in the core uploader (the MD-credential holder)
+ *      - creates + commits a MangaDex title for each NEW row when the
  *      extension's manifest opts in (`auto_create_titles`), or when an
  *      operator approves it via the admin API;
  *   3. the new mapping lands in `tracked_manga` (the DB-authoritative manga
@@ -291,8 +291,8 @@ export class TitleService {
       };
     }
 
-    // The row carries the CURRENT fact; "this was applied, when, by whom" -
-    // while the audit log keeps the history of each application. Deriving the
+    // The row carries the CURRENT fact, "this was applied, when, by whom",
+ // while the audit log keeps the history of each application. Deriving the
     // fact by scanning the log worked, but it made a routine read depend on log
     // retention, and current state belongs on the row.
     await this.prisma.untrackedManga.update({

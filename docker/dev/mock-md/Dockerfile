@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.7
 #
 # Mock MangaDex API for the local e2e stack. One file, no dependencies, no
-# install step — copy and run. Build context is this directory.
+# install step; copy and run. Build context is this directory.
 #
 # Same base digest as the real images so the dev stack pulls no extra base
-# layer (see docker/core/Dockerfile for the refresh instructions — this digest
+# layer (see docker/core/Dockerfile for the refresh instructions; this digest
 # must be updated together with the other two).
 ARG NODE_IMAGE=node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
 FROM ${NODE_IMAGE}

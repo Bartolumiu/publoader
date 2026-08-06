@@ -15,7 +15,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * The host below deliberately mirrors `moduleHost()` in app.js EXACTLY, including
  * what it leaves out. `confirm` is the one that matters: app.js does not pass it,
  * because these views call it synchronously (`if (!confirm(msg)) return;`) while
- * the shell's own `confirmDialog` returns a promise, which is always truthy -
+ * the shell's own `confirmDialog` returns a promise, which is always truthy;
  * passing it would turn every confirmation in these views into a no-op that
  * always proceeds. So the omission is load-bearing, and a test that helpfully
  * supplied `confirm` would be testing a host that does not exist.
@@ -25,8 +25,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * DOM access goes through these locals rather than through ambient globals.
  *
  * The `jsdom` environment supplies the real globals at runtime; the reason not to
- * *type* them is that the only ways to do so; adding "dom" to tsconfig's `lib`,
- * or a `/// <reference lib="dom" />` here; apply to the whole program, and the
+ * *type* them is that the only ways to do so, adding "dom" to tsconfig's `lib`,
+ * or a `/// <reference lib="dom" />` here, apply to the whole program, and the
  * DOM's `fetch` signature then conflicts with Node's in `src/cli/admin.ts`.
  * Worse, it would stop the server-side sources failing to compile when they reach
  * for a browser global by mistake, which is a check worth keeping. So the DOM is

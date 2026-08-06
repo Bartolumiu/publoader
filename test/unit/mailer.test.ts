@@ -16,8 +16,8 @@ import {
  * makes easy to get wrong: **an API error is a resolved promise carrying
  * `error`, not a rejection**. A mailer that only handled thrown errors would
  * report every rejected send as a success, and an owner would be told an invite
- * went out when it did not. Everything else here; payload shape, idempotency
- * key, reply-to; is checked because the whole message is a credential in
+ * went out when it did not. Everything else here, payload shape, idempotency
+ * key, reply-to, is checked because the whole message is a credential in
  * transit and it has to arrive intact.
  */
 

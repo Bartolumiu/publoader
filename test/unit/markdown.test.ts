@@ -7,8 +7,8 @@ import { fileURLToPath } from "node:url";
  * The dashboard's markdown renderer.
  *
  * The escaping tests are the point of this file. Everything else here could be
- * wrong and the result would be an ugly page; if escaping is wrong, a document -
- * or, later, anything else someone decides to render through this; becomes
+ * wrong and the result would be an ugly page; if escaping is wrong, a document,
+ * or, later, anything else someone decides to render through this, becomes
  * script execution inside the operator's authenticated session, which is the
  * whole dashboard.
  *

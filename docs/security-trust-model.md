@@ -11,7 +11,7 @@ The answer is a split of authority, not a sandbox:
 
 - Workers **execute** extensions and **propose** results.
 - The core **validates** every proposal against a manifest it holds itself, and
-  is the only thing that can **act** — the only process that writes to Postgres
+  is the only thing that can **act**: the only process that writes to Postgres
   and the only process that writes to MangaDex.
 
 A worker's maximum achievable outcome is therefore "submit a plausible lie that
@@ -25,16 +25,16 @@ either enforcing that ceiling or lowering it.
 One section per component. "Trust level" is what the system assumes about it,
 not how much you personally trust the person running it.
 
-### 1.1 Public edge — `publoader.ardax.dev` / cloudflared
+### 1.1 Public edge; `publoader.ardax.dev` / cloudflared
 
 | | |
 |---|---|
 | **Assets** | The DNS name and TLS termination; the tunnel token, which *is* the identity that serves that hostname. |
 | **Trust level** | Untrusted network position, trusted software. It is internet-facing by definition and gets exactly one hop. |
 | **Authn/authz** | None of its own. It authenticates nothing and authorises nothing; it forwards to `core-api`, which does both. The tunnel token authenticates the tunnel *to Cloudflare*. |
-| **Network exposure** | The only ingress path into the whole system. Nothing else is published on the host — no `ports:` on any core service. |
+| **Network exposure** | The only ingress path into the whole system. Nothing else is published on the host; no `ports:` on any core service. |
 | **Hardening** | `read_only`, `cap_drop: ALL`, `no-new-privileges`, 256 MB cap, attached only to the `edge` network so it has **no route to Postgres**. Cloudflare-side WAF rules are load-bearing, not optional: block `/metrics`, `/healthz`, `/readyz` from the internet; hard rate limit `/api/v1/worker/enroll`; allow only `/api/v1/worker/*` and `/api/v1/admin/*`. |
-| **Residual risks** | Cloudflare is a trusted third party with plaintext visibility — the worker and admin bearer tokens transit it. A stolen `TUNNEL_TOKEN` lets an attacker serve the hostname (phish workers into enrolling against a fake core, harvest worker tokens). Image tracks `latest`, so it changes without review. |
+| **Residual risks** | Cloudflare is a trusted third party with plaintext visibility; the worker and admin bearer tokens transit it. A stolen `TUNNEL_TOKEN` lets an attacker serve the hostname (phish workers into enrolling against a fake core, harvest worker tokens). Image tracks `latest`, so it changes without review. |
 
 ### 1.2 core-api
 
@@ -43,47 +43,47 @@ not how much you personally trust the person running it.
 | **Assets** | `ADMIN_TOKEN` (in memory); the database connection; every worker token hash; every result envelope before validation. |
 | **Trust level** | Fully trusted. It is the policy decision point. |
 | **Authn/authz** | Two strictly separated bearer audiences (`src/core/api/auth.ts`): `pw_…` worker tokens authorise **only** `/api/v1/worker/*`; the admin token authorises **only** `/api/v1/admin/*`. There is no shared session and no token that does both. Comparison is `timingSafeEqual`, with a burned comparison on length mismatch so length is the only observable difference. Worker tokens are sha256-hashed at rest and looked up by hash; the admin token is compared directly. |
-| **Network exposure** | `expose: 8100` only — reachable from the compose network (i.e. from cloudflared) and nowhere else. |
+| **Network exposure** | `expose: 8100` only; reachable from the compose network (i.e. from cloudflared) and nowhere else. |
 | **Hardening** | `read_only` + noexec/nosuid tmpfs, `cap_drop: ALL`, `no-new-privileges`, non-root uid 10001, 768 MB cap. Per-IP rate limiter on enrol, per-worker limiter on the worker scope, per-IP limiter on admin. Body size caps on envelopes, artifacts, and bundles (64 MB). Fastify JSON Schema on transport, strict zod on payloads. Fails **closed**: no `ADMIN_TOKEN` → the admin API answers 503, not 200. |
-| **Residual risks** | Single admin token, unscoped — it grants bundle publishing as well as pause/resume, and the bot holds it while every dashboard operator types it. A bug in envelope handling is reachable pre-validation by any enrolled worker. `/metrics` is unauthenticated and relies on the edge to block it; if the WAF rule is missing, fleet and queue topology leak. |
+| **Residual risks** | Single admin token, unscoped; it grants bundle publishing as well as pause/resume, and the bot holds it while every dashboard operator types it. A bug in envelope handling is reachable pre-validation by any enrolled worker. `/metrics` is unauthenticated and relies on the edge to block it; if the WAF rule is missing, fleet and queue topology leak. |
 
-### 1.3 Admin surface — `/api/v1/admin/*`
+### 1.3 Admin surface; `/api/v1/admin/*`
 
 | | |
 |---|---|
 | **Assets** | Every control operation: trigger runs, publish bundles, pause, drain/revoke workers, mint enroll tokens, change removal mode, edit the tracked-manga mapping and extension override options (the config authority), approve untracked series into new MangaDex titles, and queue edits, takedowns or deletions of chapters already published. |
 | **Trust level** | Operator-only. Effectively equivalent to shell access to the control plane. |
-| **Authn/authz** | Single bearer token. `X-Actor` header is **attribution, not authentication** — it is attacker-controlled and only meaningful because possession of the token is already proven. |
+| **Authn/authz** | Single bearer token. `X-Actor` header is **attribution, not authentication**: it is attacker-controlled and only meaningful because possession of the token is already proven. |
 | **Network exposure** | Through the tunnel, same as everything else. |
-| **Hardening** | Every mutating route writes an `AuditEvent` with actor, action, subject and detail. Extension names are regex-validated (`^[a-z0-9_]+$`) at the route before reaching any store. Removal mode is enum-validated. Rate limited. **Nothing here writes to MangaDex.** When the API is configured with MangaDex credentials it uses them for reads only — showing an operator the live title or chapter they are about to change, and rendering the unavailable-card preview — while every change is queued as an `UploadTask` for core-uploader. That is what keeps "exactly one writer" true no matter how many API replicas run, and it means an API-side bug can enqueue a wrong task (visible, cancellable while `PENDING`) but cannot itself publish, edit or delete anything. |
-| **Residual risks** | No scopes and no per-client tokens: the Discord bot holds the same credential you do, so a compromised bot can publish a bundle, repoint a tracked-manga mapping, or approve a title into existence. No overlap window on rotation — changing the token breaks every client at once. `bundle publish` accepts any zip that passes manifest validation, so admin-token compromise is code execution on every worker. Repointing a `tracked_manga` mapping is the quietest destructive action available: it makes future chapters upload to the *wrong MangaDex title*, with nothing in the upload path to notice. |
+| **Hardening** | Every mutating route writes an `AuditEvent` with actor, action, subject and detail. Extension names are regex-validated (`^[a-z0-9_]+$`) at the route before reaching any store. Removal mode is enum-validated. Rate limited. **Nothing here writes to MangaDex.** When the API is configured with MangaDex credentials it uses them for reads only, showing an operator the live title or chapter they are about to change, and rendering the unavailable-card preview, while every change is queued as an `UploadTask` for core-uploader. That is what keeps "exactly one writer" true no matter how many API replicas run, and it means an API-side bug can enqueue a wrong task (visible, cancellable while `PENDING`) but cannot itself publish, edit or delete anything. |
+| **Residual risks** | No scopes and no per-client tokens: the Discord bot holds the same credential you do, so a compromised bot can publish a bundle, repoint a tracked-manga mapping, or approve a title into existence. No overlap window on rotation; changing the token breaks every client at once. `bundle publish` accepts any zip that passes manifest validation, so admin-token compromise is code execution on every worker. Repointing a `tracked_manga` mapping is the quietest destructive action available: it makes future chapters upload to the *wrong MangaDex title*, with nothing in the upload path to notice. |
 
-### 1.3a Operator dashboard — `/`, `/dash`, and the session/account endpoints
+### 1.3a Operator dashboard; `/`, `/dash`, and the session/account endpoints
 
 | | |
 |---|---|
 | **Assets** | Operator accounts (`admin_users`) with scrypt password hashes and Discord linkage; live sessions (`admin_sessions`); outstanding emailed sign-in links (`login_tokens`); the admin token in transit during break-glass login; every read the admin API exposes, rendered in a browser. |
 | **Trust level** | Operator-only. An `ADMIN` account is §1.3 authority; an `OWNER` additionally controls who else has it. |
-| **Authn/authz** | Four ways in, all issuing the same kind of session: (a) `ADMIN_TOKEN`, constant-time compared, bound to the seeded owner account — break-glass, and owner-equivalent by definition; (b) email + password, scrypt N=16384 r=8 p=1, `timingSafeEqual`, with one error message for "no such account" and "wrong password" alike; (c) a single-use emailed sign-in link; (d) Discord OAuth. Unapproved accounts are refused at login regardless of credential. Roles are attached by `adminAuthHook` and `requireOwner` gates account management, the signup toggle, and force-logout. |
-| **Emailed sign-in links** | The credential for an account with no password — which is every invited or freshly approved one, and the reason those accounts are reachable at all. Rows in `login_tokens`, sha256 like sessions, so the table is not a credential store. Single use is enforced by a conditional `UPDATE … WHERE consumed_at IS NULL`, not by a read-then-write, so two concurrent clicks cannot both redeem. Issuing retires the previous link, redeeming retires the rest, and setting a password retires all of them. The secret rides in the URL **fragment**, so it never reaches a server log, a proxy log or a `Referer` — and a mail-scanner prefetch cannot burn it. The request endpoint answers one 202 for every outcome, so it is not an account-enumeration oracle, and creating an account from a bare address stays behind the same self-signup gate as Discord, always unapproved. |
-| **Sessions** | Postgres rows, not self-contained tokens. Cookie is `${sessionId}.${secret}`; only sha256(secret) is stored, so the table is not a credential store and a session id in a log or an admin list view is not a credential. HttpOnly, `SameSite=Strict`, `Secure` when the proxy reports https. **Individually revocable** — logout, `DELETE /sessions/:id`, or deleting the account (cascade). Expiry is checked on every request, so shortening `SESSION_TTL_MINUTES` does not require a restart to matter. |
-| **CSRF** | Two independent controls: `SameSite=Strict` (the cookie is not sent on any cross-site navigation), and a required `x-requested-with: publoader-dash` header on every cookie-authenticated non-safe method — a value no HTML form, image, or link can produce. Bearer-authenticated writes are exempt: a header the attacker must add is not attached automatically. |
-| **Discord OAuth** | `identify email` only; no bot, no gateway, no library — two fetches. CSRF on the callback is a signed, 10-minute, `SameSite=Lax` state cookie (Lax because a Strict cookie would not survive Discord's cross-site redirect back). Matching order is linked `discordId` → **verified** email → gated signup; an *unverified* Discord email can never claim an existing account, which is what stops account takeover by setting an email on a throwaway account. Self-signup is off by default and always produces an unapproved, non-privileged row. Nothing is persisted beyond id, username, email; the code and access token are never logged. |
-| **Discord linking** | An identity can also be attached to a *signed-in* account (`/oauth/discord/link`), which is the only route when the Discord and operator addresses differ. The session is the authorisation, so the two addresses need not match — and because that is a strictly stronger claim than the email match, the state cookie carries the intent under the same HMAC as the nonce: a login round-trip cannot be finished as a link, nor the reverse. The callback re-checks the live session and requires it to be the account named in the state, so a signed-out or switched browser cannot complete someone else's linking. `discord_id` is unique, so an identity already on another account is refused (409) rather than silently moved. Unlinking is refused when it would leave the account with no password and no mailer — removing the last credential is deletion with extra steps. |
-| **Assets/CSP** | Three static files read once at boot, served at exactly `/`, `/dash`, `/dash/*` — no root-level wildcard, so an unknown top-level path 404s and the dashboard cannot shadow `/metrics`, `/healthz`, `/readyz` or the API namespaces. Sub-paths index a fixed in-memory map by basename; the handler never touches the filesystem, so path traversal has nothing to traverse. `default-src 'self'`, no `'unsafe-inline'`, `connect-src 'self'`, `frame-ancestors 'none'` + `X-Frame-Options: DENY`, `base-uri`/`object-src`/`form-action` `'none'`. The client renders every server value with `textContent` and attaches handlers with `addEventListener`; there is no `innerHTML` and no inline handler, both enforced by an integration test. |
+| **Authn/authz** | Four ways in, all issuing the same kind of session: (a) `ADMIN_TOKEN`, constant-time compared, bound to the seeded owner account; break-glass, and owner-equivalent by definition; (b) email + password, scrypt N=16384 r=8 p=1, `timingSafeEqual`, with one error message for "no such account" and "wrong password" alike; (c) a single-use emailed sign-in link; (d) Discord OAuth. Unapproved accounts are refused at login regardless of credential. Roles are attached by `adminAuthHook` and `requireOwner` gates account management, the signup toggle, and force-logout. |
+| **Emailed sign-in links** | The credential for an account with no password, which is every invited or freshly approved one, and the reason those accounts are reachable at all. Rows in `login_tokens`, sha256 like sessions, so the table is not a credential store. Single use is enforced by a conditional `UPDATE … WHERE consumed_at IS NULL`, not by a read-then-write, so two concurrent clicks cannot both redeem. Issuing retires the previous link, redeeming retires the rest, and setting a password retires all of them. The secret rides in the URL **fragment**, so it never reaches a server log, a proxy log or a `Referer`, and a mail-scanner prefetch cannot burn it. The request endpoint answers one 202 for every outcome, so it is not an account-enumeration oracle, and creating an account from a bare address stays behind the same self-signup gate as Discord, always unapproved. |
+| **Sessions** | Postgres rows, not self-contained tokens. Cookie is `${sessionId}.${secret}`; only sha256(secret) is stored, so the table is not a credential store and a session id in a log or an admin list view is not a credential. HttpOnly, `SameSite=Strict`, `Secure` when the proxy reports https. **Individually revocable**: logout, `DELETE /sessions/:id`, or deleting the account (cascade). Expiry is checked on every request, so shortening `SESSION_TTL_MINUTES` does not require a restart to matter. |
+| **CSRF** | Two independent controls: `SameSite=Strict` (the cookie is not sent on any cross-site navigation), and a required `x-requested-with: publoader-dash` header on every cookie-authenticated non-safe method; a value no HTML form, image, or link can produce. Bearer-authenticated writes are exempt: a header the attacker must add is not attached automatically. |
+| **Discord OAuth** | `identify email` only; no bot, no gateway, no library; two fetches. CSRF on the callback is a signed, 10-minute, `SameSite=Lax` state cookie (Lax because a Strict cookie would not survive Discord's cross-site redirect back). Matching order is linked `discordId` → **verified** email → gated signup; an *unverified* Discord email can never claim an existing account, which is what stops account takeover by setting an email on a throwaway account. Self-signup is off by default and always produces an unapproved, non-privileged row. Nothing is persisted beyond id, username, email; the code and access token are never logged. |
+| **Discord linking** | An identity can also be attached to a *signed-in* account (`/oauth/discord/link`), which is the only route when the Discord and operator addresses differ. The session is the authorisation, so the two addresses need not match, and because that is a strictly stronger claim than the email match, the state cookie carries the intent under the same HMAC as the nonce: a login round-trip cannot be finished as a link, nor the reverse. The callback re-checks the live session and requires it to be the account named in the state, so a signed-out or switched browser cannot complete someone else's linking. `discord_id` is unique, so an identity already on another account is refused (409) rather than silently moved. Unlinking is refused when it would leave the account with no password and no mailer, removing the last credential is deletion with extra steps. |
+| **Assets/CSP** | Three static files read once at boot, served at exactly `/`, `/dash`, `/dash/*`: no root-level wildcard, so an unknown top-level path 404s and the dashboard cannot shadow `/metrics`, `/healthz`, `/readyz` or the API namespaces. Sub-paths index a fixed in-memory map by basename; the handler never touches the filesystem, so path traversal has nothing to traverse. `default-src 'self'`, no `'unsafe-inline'`, `connect-src 'self'`, `frame-ancestors 'none'` + `X-Frame-Options: DENY`, `base-uri`/`object-src`/`form-action` `'none'`. The client renders every server value with `textContent` and attaches handlers with `addEventListener`; there is no `innerHTML` and no inline handler, both enforced by an integration test. |
 | **Network exposure** | The domain root, through the tunnel. Allow `/` and `/dash` in the WAF allowlist or the page is blocked; gate with Cloudflare Access so a stolen password alone is not enough (`docs/deployment.md` → "Dashboard"). |
-| **Hardening** | Login is rate limited per IP (5/min) *before* any comparison, so neither the token nor the password path is a cheap oracle. Emailed links get a tighter budget on two keys — per IP (5 burst, 1/2min) and per **address** (3 burst, 1/5min), because the per-IP bucket alone lets a distributed caller mailbomb one inbox. Every rejection is audited (`session.login.rejected`, `session.login.unapproved`, `session.signup.rejected`, `session.magic_link.rejected`), as is every account change, link sent and Discord link/unlink. Password hashes never appear in an API response. The last `OWNER` cannot be demoted or deleted. Login fails **closed** when `ADMIN_TOKEN` is unset (503), the link endpoints fail closed (503) when no mailer is configured, and the seeded owner has no credentials until an operator sets them. |
-| **Residual risks** | The seeded owner starts with **no password**, so until someone sets one the only way in is `ADMIN_TOKEN` or an emailed link — and an attacker who has that token can set the owner's password and gain a durable, less-noticeable credential. Rotating `ADMIN_TOKEN` does not revoke sessions it created; revoke those explicitly. Sessions are bound to nothing — not IP, not user agent — so a stolen cookie replays from anywhere until revoked or expired (12h default). `ADMIN` is not a meaningful containment boundary: it still reaches `bundle publish`, i.e. code execution on every worker. **A mailbox is now a full authentication path**: whoever reads mail at an operator's address can sign in, so the control plane is only as strong as the weakest linked inbox and its provider's account recovery — the same is true of a linked Discord account. Resend is consequently in the trust boundary twice over: it sees every sign-in link in transit, a compromised or misdirected `MAIL_FROM` domain hands out sessions, and the `resend` SDK is a code dependency sitting on the path that issues them — pin it and watch it like the auth-adjacent dependency it is. Links are single-use and short-lived, which bounds that window but does not close it. A mail gateway that rewrites links and drops URL fragments makes them undeliverable in practice; the fallback is an owner setting a password directly. Password reset is still not self-service in the classic sense — the emailed link is the recovery path, so losing every owner credential *and* the mailer means falling back to `ADMIN_TOKEN`, and losing that too means editing the database by hand. Without Cloudflare Access the dashboard makes the admin token, operator passwords and sign-in links phishable in a way a CLI-only surface was not. |
+| **Hardening** | Login is rate limited per IP (5/min) *before* any comparison, so neither the token nor the password path is a cheap oracle. Emailed links get a tighter budget on two keys; per IP (5 burst, 1/2min) and per **address** (3 burst, 1/5min), because the per-IP bucket alone lets a distributed caller mailbomb one inbox. Every rejection is audited (`session.login.rejected`, `session.login.unapproved`, `session.signup.rejected`, `session.magic_link.rejected`), as is every account change, link sent and Discord link/unlink. Password hashes never appear in an API response. The last `OWNER` cannot be demoted or deleted. Login fails **closed** when `ADMIN_TOKEN` is unset (503), the link endpoints fail closed (503) when no mailer is configured, and the seeded owner has no credentials until an operator sets them. |
+| **Residual risks** | The seeded owner starts with **no password**, so until someone sets one the only way in is `ADMIN_TOKEN` or an emailed link, and an attacker who has that token can set the owner's password and gain a durable, less-noticeable credential. Rotating `ADMIN_TOKEN` does not revoke sessions it created; revoke those explicitly. Sessions are bound to nothing, not IP, not user agent, so a stolen cookie replays from anywhere until revoked or expired (12h default). `ADMIN` is not a meaningful containment boundary: it still reaches `bundle publish`, i.e. code execution on every worker. **A mailbox is now a full authentication path**: whoever reads mail at an operator's address can sign in, so the control plane is only as strong as the weakest linked inbox and its provider's account recovery, the same is true of a linked Discord account. Resend is consequently in the trust boundary twice over: it sees every sign-in link in transit, a compromised or misdirected `MAIL_FROM` domain hands out sessions, and the `resend` SDK is a code dependency sitting on the path that issues them, pin it and watch it like the auth-adjacent dependency it is. Links are single-use and short-lived, which bounds that window but does not close it. A mail gateway that rewrites links and drops URL fragments makes them undeliverable in practice; the fallback is an owner setting a password directly. Password reset is still not self-service in the classic sense, the emailed link is the recovery path, so losing every owner credential *and* the mailer means falling back to `ADMIN_TOKEN`, and losing that too means editing the database by hand. Without Cloudflare Access the dashboard makes the admin token, operator passwords and sign-in links phishable in a way a CLI-only surface was not. |
 
 ### 1.4 core-scheduler
 
 | | |
 |---|---|
 | **Assets** | Database write access to runs, jobs, and leases. |
-| **Trust level** | Fully trusted. No external input at all — it reads the database and the clock. |
+| **Trust level** | Fully trusted. No external input at all; it reads the database and the clock. |
 | **Authn/authz** | None needed; it has no listener. |
 | **Network exposure** | `data` network only. No egress, no ingress. |
-| **Hardening** | Same baseline as core-api. Exactly one replica — duplicate schedulers would race on slot creation (though idempotency keys make that safe, it is wasted work). Healthcheck disabled deliberately: a hung loop is detected out-of-band via `publoader_scheduler_lag_seconds`, rather than by mounting `docker.sock` for an autoheal container. That trade is explicit — the socket mount is a larger risk than the failure mode it fixes. |
+| **Hardening** | Same baseline as core-api. Exactly one replica, duplicate schedulers would race on slot creation (though idempotency keys make that safe, it is wasted work). Healthcheck disabled deliberately: a hung loop is detected out-of-band via `publoader_scheduler_lag_seconds`, rather than by mounting `docker.sock` for an autoheal container. That trade is explicit, the socket mount is a larger risk than the failure mode it fixes. |
 | **Residual risks** | Single point of liveness: if it wedges, nothing is scheduled and no expired lease is swept. Detection is metric-based, so it depends on someone actually alerting on the lag gauge. |
 
 ### 1.5 core-processor
@@ -95,18 +95,18 @@ not how much you personally trust the person running it.
 | **Authn/authz** | MangaDex OAuth for reads. |
 | **Network exposure** | `data` + `edge`, with public DNS (the LAN resolver sinkholes `mangadex.org`). |
 | **Hardening** | Same baseline; 1 GB cap. Consumes only **already-committed** envelopes, so everything it sees has passed schema and policy validation. |
-| **Residual risks** | It holds MangaDex credentials that are technically write-capable at the account level — the restriction to reads is code discipline, not an API-enforced scope. A bug here cannot upload, but it can enqueue a wrong `DELETE`/`UNAVAILABLE` task, which the uploader will then act on. That is the most damaging realistic bug in the system, because deletion is not reversible. |
+| **Residual risks** | It holds MangaDex credentials that are technically write-capable at the account level; the restriction to reads is code discipline, not an API-enforced scope. A bug here cannot upload, but it can enqueue a wrong `DELETE`/`UNAVAILABLE` task, which the uploader will then act on. That is the most damaging realistic bug in the system, because deletion is not reversible. |
 
-### 1.6 core-uploader — the MangaDex credential holder
+### 1.6 core-uploader; the MangaDex credential holder
 
 | | |
 |---|---|
 | **Assets** | The MangaDex account: username, password, client id, client secret, and the live session. This is the crown jewel. Also hosts the **title service**, which creates MangaDex titles for untracked series. |
 | **Trust level** | Fully trusted and maximally isolated. |
-| **Authn/authz** | MangaDex OAuth. It is the **only** process in the entire system permitted to write to MangaDex — chapter uploads and **title creation** alike. |
+| **Authn/authz** | MangaDex OAuth. It is the **only** process in the entire system permitted to write to MangaDex; chapter uploads and **title creation** alike. |
 | **Network exposure** | `data` + `edge`. No listener. |
-| **Hardening** | Same baseline; 1.5 GB cap and a larger 1 GB tmpfs for image work; `stop_grace_period: 120s` so an in-flight chapter commit finishes rather than leaving a half-uploaded session. Exactly one replica — the MD upload session is per-account state and two uploaders would clobber each other. Every commit attempt is recorded in `upload_log` before and after, closing the legacy crash window between "MD commit succeeded" and "queue row removed". |
-| **Residual risks** | Compromise here is total with respect to MangaDex — it can post, edit, delete, and now *create titles* with anything the account can do. Credentials are long-lived; rotation is manual. There is no second-person approval on destructive operations, so a `DELETE` task that reached the queue *will* be executed. With `auto_create_titles: true`, title creation is likewise unattended — see §2a. |
+| **Hardening** | Same baseline; 1.5 GB cap and a larger 1 GB tmpfs for image work; `stop_grace_period: 120s` so an in-flight chapter commit finishes rather than leaving a half-uploaded session. Exactly one replica; the MD upload session is per-account state and two uploaders would clobber each other. Every commit attempt is recorded in `upload_log` before and after, closing the legacy crash window between "MD commit succeeded" and "queue row removed". |
+| **Residual risks** | Compromise here is total with respect to MangaDex, it can post, edit, delete, and now *create titles* with anything the account can do. Credentials are long-lived; rotation is manual. There is no second-person approval on destructive operations, so a `DELETE` task that reached the queue *will* be executed. With `auto_create_titles: true`, title creation is likewise unattended, see §2a. |
 
 ### 1.7 postgres
 
@@ -115,9 +115,9 @@ not how much you personally trust the person running it.
 | **Assets** | Everything durable: chapter history, queues, leases, result envelopes, artifacts, bundle zips, worker token hashes, audit trail. |
 | **Trust level** | Fully trusted; the single source of truth. Losing it loses the system. |
 | **Authn/authz** | Password auth, one application role. |
-| **Network exposure** | `data` network with `internal: true` — **no default gateway**, so it has no route to the internet and no route from the tunnel. No published host port. `docker compose exec` is the access path, deliberately not a port. |
+| **Network exposure** | `data` network with `internal: true`: **no default gateway**, so it has no route to the internet and no route from the tunnel. No published host port. `docker compose exec` is the access path, deliberately not a port. |
 | **Hardening** | `no-new-privileges`, 2 GB cap, pinned to a minor tag (`16.9-bookworm`) so a rebuild cannot jump a minor unnoticed, `--locale=C` so a glibc upgrade cannot silently reorder text indexes. Health-gated: `migrate` and every service wait on `pg_isready`. |
-| **Residual risks** | One role for all four services — `core-api` has the same grants as `core-uploader`; per-service roles with narrower grants are not implemented. No encryption at rest beyond whatever the host provides. The `pgdata` volume is the entire blast radius of `docker compose down -v`. |
+| **Residual risks** | One role for all four services; `core-api` has the same grants as `core-uploader`; per-service roles with narrower grants are not implemented. No encryption at rest beyond whatever the host provides. The `pgdata` volume is the entire blast radius of `docker compose down -v`. |
 
 ### 1.8 Bundles pipeline
 
@@ -125,10 +125,10 @@ not how much you personally trust the person running it.
 |---|---|
 | **Assets** | The extension code that every worker executes. This is the supply chain. |
 | **Trust level** | Trusted at publish time, verified at execution time. |
-| **Authn/authz** | Admin token to publish. Content-addressed by sha256 thereafter — no name-based resolution at execution. |
+| **Authn/authz** | Admin token to publish. Content-addressed by sha256 thereafter; no name-based resolution at execution. |
 | **Network exposure** | Published via the admin API; served to workers over the worker API, keyed by sha256. |
-| **Hardening** | `manifest.json` is required and validated with strict zod at publish (name regex, uuid group id, non-empty `allowed_hosts` and `languages`, entrypoint path shape). `runtime: "python"` bundles are **rejected**; republishing one needs an explicit `x-allow-legacy-runtime: true` header, which is audit-logged on its own before the publish is even attempted. Node bundles must carry an entrypoint that exists in the zip, is non-empty, and has a default export. Extensions are built to a single self-contained ESM file by esbuild **at publish time on the operator's machine**, with dependencies inlined — so the sha256 pins the complete program. Jobs pin `bundleSha256`; a worker that cannot obtain exactly that bundle fails the job with a `POLICY` error rather than running something else. `sourceCommit` is recorded, and publishing is audited. Bundles are immutable and `yanked` rather than mutated. |
-| **Residual risks** | **No signing.** sha256 pinning proves the worker ran what the core stored; it does not prove the core stored what the maintainer wrote. Anyone with the admin token can publish arbitrary code to the whole fleet. Sigstore signing is an explicit v2 item. Inlining dependencies at publish removes the old "compromised PyPI package reaches every worker via the image" path, but moves it: whatever npm resolved on the publishing machine is now baked into the artefact, unverified. The gain is that it is *pinned and auditable* — the same sha256 everywhere, reviewable after the fact — rather than re-resolved per image build. |
+| **Hardening** | `manifest.json` is required and validated with strict zod at publish (name regex, uuid group id, non-empty `allowed_hosts` and `languages`, entrypoint path shape). `runtime: "python"` bundles are **rejected**; republishing one needs an explicit `x-allow-legacy-runtime: true` header, which is audit-logged on its own before the publish is even attempted. Node bundles must carry an entrypoint that exists in the zip, is non-empty, and has a default export. Extensions are built to a single self-contained ESM file by esbuild **at publish time on the operator's machine**, with dependencies inlined; so the sha256 pins the complete program. Jobs pin `bundleSha256`; a worker that cannot obtain exactly that bundle fails the job with a `POLICY` error rather than running something else. `sourceCommit` is recorded, and publishing is audited. Bundles are immutable and `yanked` rather than mutated. |
+| **Residual risks** | **No signing.** sha256 pinning proves the worker ran what the core stored; it does not prove the core stored what the maintainer wrote. Anyone with the admin token can publish arbitrary code to the whole fleet. Sigstore signing is an explicit v2 item. Inlining dependencies at publish removes the old "compromised PyPI package reaches every worker via the image" path, but moves it: whatever npm resolved on the publishing machine is now baked into the artefact, unverified. The gain is that it is *pinned and auditable*, the same sha256 everywhere, reviewable after the fact, rather than re-resolved per image build. |
 
 ### 1.9 Worker agent
 
@@ -136,26 +136,26 @@ not how much you personally trust the person running it.
 |---|---|
 | **Assets** | One worker token, scoped to `/api/v1/worker/*` on one deployment. Bundle cache. Job inputs. |
 | **Trust level** | **Untrusted.** Assume the host operator is hostile and the extension code is buggy. |
-| **Authn/authz** | Bearer `pw_…` token obtained by exchanging a single-use, expiring enroll token. Only the sha256 hash is stored server-side. Individually revocable. Self-rotatable (`POST /api/v1/worker/token/rotate`, atomic swap). Lease operations additionally require the matching `leaseId` — an expired lease cannot renew, complete, or overwrite its successor. |
+| **Authn/authz** | Bearer `pw_…` token obtained by exchanging a single-use, expiring enroll token. Only the sha256 hash is stored server-side. Individually revocable. Self-rotatable (`POST /api/v1/worker/token/rotate`, atomic swap). Lease operations additionally require the matching `leaseId`: an expired lease cannot renew, complete, or overwrite its successor. |
 | **Network exposure** | **Outbound only.** No `ports:`, no `expose:`. Works behind NAT, on a laptop, on a home connection, with no firewall exception and no inbound attack surface. |
-| **Hardening** | `read_only` root fs; `/tmp` as `rw,noexec,nosuid,nodev,size=2g` (noexec blocks executing a downloaded payload); `cap_drop: ALL` — a scraper needs no kernel capability; `no-new-privileges`; `mem_limit` = `memswap_limit` so an over-memory extension is OOM-killed promptly instead of thrashing the host disk; `cpus`; `pids_limit: 512` as a fork-bomb ceiling; `nofile` ulimits. `stop_grace_period: 60s`, after which the core's lease sweeper reclaims the job — an abrupt kill loses time, not work. |
-| **Residual risks** | The container boundary is the whole isolation story: a container escape is a host compromise on the worker's own host (not the operator's). A hostile worker can fabricate results — see §2. It can also selectively **withhold** results, which is harder to detect than fabricating them. |
+| **Hardening** | `read_only` root fs; `/tmp` as `rw,noexec,nosuid,nodev,size=2g` (noexec blocks executing a downloaded payload); `cap_drop: ALL`, a scraper needs no kernel capability; `no-new-privileges`; `mem_limit` = `memswap_limit` so an over-memory extension is OOM-killed promptly instead of thrashing the host disk; `cpus`; `pids_limit: 512` as a fork-bomb ceiling; `nofile` ulimits. `stop_grace_period: 60s`, after which the core's lease sweeper reclaims the job, an abrupt kill loses time, not work. |
+| **Residual risks** | The container boundary is the whole isolation story: a container escape is a host compromise on the worker's own host (not the operator's). A hostile worker can fabricate results; see §2. It can also selectively **withhold** results, which is harder to detect than fabricating them. |
 
 ### 1.10 Node runner / extension code
 
 | | |
 |---|---|
-| **Assets** | Nothing of the operator's. It receives the job spec, the pinned bundle, and the extension's data files — that is all. |
+| **Assets** | Nothing of the operator's. It receives the job spec, the pinned bundle, and the extension's data files; that is all. |
 | **Trust level** | **Untrusted code, running on an untrusted host.** The worst position in the system, which is why it holds nothing. |
 | **Authn/authz** | None. It has no credential and no API access; it communicates by printing one JSON envelope as the last line of stdout. `process.stdout` and `console.*` are redirected to stderr before any bundle code runs, so an extension cannot forge or corrupt that channel by printing. |
 | **Network exposure** | Outbound to the manifest's `allowed_hosts` only, via `ctx.fetch`. |
-| **Hardening** | Subprocess with a wall-clock timeout (`timeout_seconds`, 60s–6h, default 1h), spawned into its own process group so a timeout kills grandchildren too. **Node permission model** (verified on Node 24): `--permission` with `--allow-fs-read` scoped to the bundle dir, the runner dir and the job workdir, and `--allow-fs-write` scoped to the output dir and workdir — the extension cannot read the worker token, the bundle cache, or anything else on the host, and cannot write outside its own scratch. The same flag denies **`child_process` and `worker_threads`**, closing the "shell out to curl" and "spawn a thread with unguarded fetch" escapes that the Python allowlist could not. `--disallow-code-generation-from-strings` makes `eval`/`new Function` throw, so a bundle cannot fetch code and run it. **Guarded fetch** (`ctx.fetch`) enforces `allowed_hosts` before connecting and re-checks **every redirect hop** (`redirect: "manual"`), so an allowlisted origin cannot launder a request off-allowlist; it also applies a per-host politeness delay, a per-request timeout, bounded retries, and honours `Retry-After`. For partitioned runs the runner filters returned chapters to the segment's manga ids **regardless of what the extension returns**, so overlapping segment output is impossible by construction rather than by extension cooperation. Chapters whose external manga id has no tracked mapping are dropped. Inherits every container control in §1.9. |
-| **Residual risks** | **`--permission` has no network component**: it restricts the filesystem and process spawning, not sockets. An extension that opens a raw `net.Socket` or builds its own HTTP request bypasses `ctx.fetch` and its allowlist entirely. Egress control is therefore still a guardrail against accident and casual misbehaviour, not a containment boundary — but the escapes that *were* trivial in the Python design (subprocess, thread, `eval`ed payload, arbitrary file read) are now blocked, and what remains is mitigated by the fact that the extension has nothing worth stealing, holds no ambient credential, and cannot act on its own output: every result passes core-side schema and policy validation, tracked-id filtering, and MD-side dedup before anything is uploaded. Per-extension micro-VM or gVisor isolation remains the documented v2 item. |
+| **Hardening** | Subprocess with a wall-clock timeout (`timeout_seconds`, 60s–6h, default 1h), spawned into its own process group so a timeout kills grandchildren too. **Node permission model** (verified on Node 24): `--permission` with `--allow-fs-read` scoped to the bundle dir, the runner dir and the job workdir, and `--allow-fs-write` scoped to the output dir and workdir; the extension cannot read the worker token, the bundle cache, or anything else on the host, and cannot write outside its own scratch. The same flag denies **`child_process` and `worker_threads`**, closing the "shell out to curl" and "spawn a thread with unguarded fetch" escapes that the Python allowlist could not. `--disallow-code-generation-from-strings` makes `eval`/`new Function` throw, so a bundle cannot fetch code and run it. **Guarded fetch** (`ctx.fetch`) enforces `allowed_hosts` before connecting and re-checks **every redirect hop** (`redirect: "manual"`), so an allowlisted origin cannot launder a request off-allowlist; it also applies a per-host politeness delay, a per-request timeout, bounded retries, and honours `Retry-After`. For partitioned runs the runner filters returned chapters to the segment's manga ids **regardless of what the extension returns**, so overlapping segment output is impossible by construction rather than by extension cooperation. Chapters whose external manga id has no tracked mapping are dropped. Inherits every container control in §1.9. |
+| **Residual risks** | **`--permission` has no network component**: it restricts the filesystem and process spawning, not sockets. An extension that opens a raw `net.Socket` or builds its own HTTP request bypasses `ctx.fetch` and its allowlist entirely. Egress control is therefore still a guardrail against accident and casual misbehaviour, not a containment boundary; but the escapes that *were* trivial in the Python design (subprocess, thread, `eval`ed payload, arbitrary file read) are now blocked, and what remains is mitigated by the fact that the extension has nothing worth stealing, holds no ambient credential, and cannot act on its own output: every result passes core-side schema and policy validation, tracked-id filtering, and MD-side dedup before anything is uploaded. Per-extension micro-VM or gVisor isolation remains the documented v2 item. |
 
 ### 1.11 Discord bot (API client)
 
 The dashboard is no longer a separate client holding its own copy of the admin
-token — it is served by core-api and authenticates per-operator (§1.3a). This
+token; it is served by core-api and authenticates per-operator (§1.3a). This
 row is now about the bot alone.
 
 | | |
@@ -175,11 +175,11 @@ row is now about the bot alone.
 nothing), and submits a result envelope of its choosing. It can:
 
 1. Fabricate chapters that do not exist on the publisher's site.
-2. Alter real chapters — wrong title, wrong number, wrong language, wrong manga.
+2. Alter real chapters; wrong title, wrong number, wrong language, wrong manga.
 3. Point `chapterUrl` at content it controls.
 4. Omit chapters that do exist (withholding).
 5. On a `CLEAN` run, report an empty chapter list, implying everything was
-   removed — the most damaging variant, because removal is not reversible.
+   removed; the most damaging variant, because removal is not reversible.
 6. Replay or delay a stale envelope to overwrite a newer result.
 
 **What actually happens to a fabricated envelope**, in order:
@@ -190,7 +190,7 @@ complete or overwrite the successor; its late submission is recorded as
 `SUPERSEDED`. It cannot submit for a job it was never leased.
 
 **b. Schema validation.** Strict zod, unknown fields rejected, size-capped.
-`ChapterRecord` is closed — there is no passthrough field to smuggle data
+`ChapterRecord` is closed; there is no passthrough field to smuggle data
 through. Malformed input never reaches business logic.
 
 **c. Policy validation against the core's own manifest copy.** This is the
@@ -198,7 +198,7 @@ important one: the core validates against **its** stored manifest, not against
 anything the worker sends. Enforced:
 
 - Every chapter and manga URL host must match `allowed_hosts` (exact or
-  subdomain). This defeats threat 3 outright — a worker cannot point a chapter
+  subdomain). This defeats threat 3 outright; a worker cannot point a chapter
   at a domain the maintainer did not declare.
 - Languages must be a subset of the manifest's `languages`.
 - `mangadexGroupId` must equal the manifest's. A worker cannot upload under a
@@ -213,7 +213,7 @@ deliberately.
 segment's manga ids, and the core knows which ids a segment covers. A worker
 returning chapters for manga outside its segment is visible.
 
-**e. Commit marker.** A partial unique index — one `COMMITTED` row per job —
+**e. Commit marker.** A partial unique index, one `COMMITTED` row per job,
 makes duplicate and out-of-order deliveries structurally unable to double-ingest.
 Losers become `SUPERSEDED`. This closes threat 6.
 
@@ -243,9 +243,9 @@ wrong reaches MangaDex, the worker that proposed it is identifiable, and
 - **`CLEAN`-run removal is the highest-severity path.** The mitigation shipped
   is structural: a `CLEAN` run is **never processed from partial segments**
   (`requireAllSegments`), because absence of data must never be read as
-  deletion. Combined with the default `removal_mode: unavailable` — which marks
+  deletion. Combined with the default `removal_mode: unavailable`: which marks
   a chapter unavailable rather than deleting it, preserving the card on
-  MangaDex — the realistic worst case from a hostile worker is chapters marked
+  MangaDex; the realistic worst case from a hostile worker is chapters marked
   unavailable, which is recoverable. **Operators running `removal_mode: delete`
   with `COMMUNITY` workers are accepting an unrecoverable-loss risk.** Set
   `min_trust: TRUSTED` on extensions where you run delete mode.
@@ -266,8 +266,8 @@ array → the processor persists `untracked_manga` rows → the title service
 `tracked_manga` → a Discord embed announces it.
 
 **Where the authority sits.** Workers **propose candidates; they never create
-titles.** `untrackedManga` entries are `MangaRecord`s — id, name, language, url
-— and go through the same pipeline as everything else: strict schema
+titles.** `untrackedManga` entries are `MangaRecord`s, id, name, language, url,
+ and go through the same pipeline as everything else: strict schema
 validation, host allowlist on `mangaUrl`, language ⊆ manifest languages, counts
 within caps. A violation quarantines the **whole envelope**, so a worker cannot
 smuggle a bogus title candidate past validation by attaching it to an otherwise
@@ -275,8 +275,8 @@ valid result. Persistence is idempotent on `(extension, mangaId, mangaLanguage)`
 so replaying a result cannot enqueue the same candidate twice, and creation is
 a CAS claim (`NEW → CREATING`) so two uploader instances cannot double-create.
 
-**What a hostile worker can achieve.** With `auto_create_titles: false` — the
-default — **nothing without a human**. The row sits at `NEW` until an operator
+**What a hostile worker can achieve.** With `auto_create_titles: false`, the
+default, **nothing without a human**. The row sits at `NEW` until an operator
 runs `untracked approve`. This is the recommended posture for any extension
 that community workers execute.
 
@@ -290,14 +290,14 @@ audit + Discord announcement making every creation immediately visible.
 
 **The honest residual risk:** `auto_create_titles: true` plus `COMMUNITY`
 workers means unattended title creation driven by untrusted input. Titles are
-not silently destructive the way chapter deletion is — they are visible,
-attributable, and removable — but cleaning up a few hundred junk titles is slow
+not silently destructive the way chapter deletion is, they are visible,
+attributable, and removable, but cleaning up a few hundred junk titles is slow
 manual work. **Pair `auto_create_titles: true` with `min_trust: TRUSTED`**, and
 leave it off for anything a community worker executes.
 
 There is also a non-adversarial failure with the same blast radius, and it is
 the more likely one: if `tracked_manga` is empty or wrong (a config seed that
-did not land — see `docs/migration-guide.md` stage 3a), every series looks
+did not land; see `docs/migration-guide.md` stage 3a), every series looks
 untracked and the pipeline will duplicate the entire catalogue. The operational
 guard is watching `untracked list` volume, documented as a runbook in
 `docs/operations.md`.
@@ -314,16 +314,16 @@ Recommended before enabling `auto_create_titles` on anything busy.
 | Secret | Held by | Where it lives | Rotation |
 |---|---|---|---|
 | `POSTGRES_PASSWORD` | postgres; all four core services via `DATABASE_URL` | `.env` or Docker secret; never leaves the `data` network | `ALTER USER` + `docker compose up -d`. See `docs/operations.md` → "Database password". |
-| `ADMIN_TOKEN` | core-api; operator CLI; Discord bot; dashboard operators at login | `.env` / `ADMIN_TOKEN_FILE`; in memory in core-api | `openssl rand -base64 48`, update `.env`, `up -d core-api`, then update every client. **No overlap window** — clients break until updated. Also signs out every dashboard session if `SESSION_SECRET` is unset. |
+| `ADMIN_TOKEN` | core-api; operator CLI; Discord bot; dashboard operators at login | `.env` / `ADMIN_TOKEN_FILE`; in memory in core-api | `openssl rand -base64 48`, update `.env`, `up -d core-api`, then update every client. **No overlap window**: clients break until updated. Also signs out every dashboard session if `SESSION_SECRET` is unset. |
 | `SESSION_SECRET` | core-api only | `.env` / `SESSION_SECRET_FILE`; in memory in core-api | `openssl rand -base64 48`, update `.env`, `up -d core-api`. Signs the short-lived OAuth state cookie only; rotating it breaks in-flight Discord logins and nothing else. Optional: HKDF-derived from `ADMIN_TOKEN` when unset, with a boot warning. |
-| Operator passwords | The operator; core-api verifies | scrypt `salt:hash` in `admin_users.password_hash`; never returned by any endpoint | The operator sets their own from **Your account**, reaching it with an emailed sign-in link if they cannot log in; an OWNER can also set one from the Users view (`POST /users/:id/password`, min 12 chars). Setting one retires every outstanding sign-in link and mails a notice. Revoke the operator's live sessions afterwards — a password change does not invalidate them. |
+| Operator passwords | The operator; core-api verifies | scrypt `salt:hash` in `admin_users.password_hash`; never returned by any endpoint | The operator sets their own from **Your account**, reaching it with an emailed sign-in link if they cannot log in; an OWNER can also set one from the Users view (`POST /users/:id/password`, min 12 chars). Setting one retires every outstanding sign-in link and mails a notice. Revoke the operator's live sessions afterwards; a password change does not invalidate them. |
 | Dashboard session cookies | One browser each | sha256 of the secret in `admin_sessions.token_hash`; plaintext only in the operator's cookie jar | Individually revocable (`DELETE /sessions/:id`, logout, or deleting the account). Expire after `SESSION_TTL_MINUTES`. |
 | Emailed sign-in links | One recipient mailbox each | sha256 in `login_tokens.token_hash`; plaintext only in the URL fragment, in the operator's inbox | Single-use and short-lived (`MAGIC_LINK_TTL_MINUTES` / `INVITE_TTL_HOURS`). Retired by any newer link, by redemption, or by setting a password. To kill one early, set a password or issue another. |
-| `RESEND_API_KEY` | core-api only | `.env` / `_FILE`; in memory | Roll in the Resend dashboard, update `.env`, `up -d core-api`. Sending-only scope is enough. Its holder can send as `MAIL_FROM`, i.e. can phish operators with mail that passes SPF/DKIM — treat it as an authentication-adjacent secret, not a notification one. |
+| `RESEND_API_KEY` | core-api only | `.env` / `_FILE`; in memory | Roll in the Resend dashboard, update `.env`, `up -d core-api`. Sending-only scope is enough. Its holder can send as `MAIL_FROM`, i.e. can phish operators with mail that passes SPF/DKIM; treat it as an authentication-adjacent secret, not a notification one. |
 | `DISCORD_CLIENT_SECRET` | core-api only | `.env` / `_FILE`; in memory | Reset in the Discord developer portal, update `.env`, `up -d core-api`. Only used in the server-side token exchange; never sent to a browser. |
 | `MANGADEX_PASSWORD`, `MANGADEX_CLIENT_SECRET` | core-uploader, core-processor only | `.env` / `_FILE`; never in core-api, core-scheduler, or any worker | Pause, update `.env`, restart the two services, revoke the old client MangaDex-side. Revoke **first** if the credential leaked. |
-| MangaDex session/refresh token | core-uploader (in memory) | Not persisted to a shared file — unlike the legacy `mdauth.json` | Automatic refresh; forced by restarting core-uploader. |
-| `TUNNEL_TOKEN` | cloudflared | `.env` / Docker secret | Regenerate in the Cloudflare Zero Trust dashboard, update `.env`, restart cloudflared. Rotate on any suspicion — it is the hostname's identity. |
+| MangaDex session/refresh token | core-uploader (in memory) | Not persisted to a shared file; unlike the legacy `mdauth.json` | Automatic refresh; forced by restarting core-uploader. |
+| `TUNNEL_TOKEN` | cloudflared | `.env` / Docker secret | Regenerate in the Cloudflare Zero Trust dashboard, update `.env`, restart cloudflared. Rotate on any suspicion; it is the hostname's identity. |
 | `DISCORD_WEBHOOK_URLS` | core-processor, core-uploader | `.env` | Regenerate the webhook in Discord; update `.env`. |
 | Enroll token (`pe_…`) | Operator, then one worker, once | sha256 hash in `enroll_tokens`; plaintext shown once at mint | Single-use and TTL-bounded by construction. Lost token → mint another, let the first expire. |
 | Worker token (`pw_…`) | One worker | sha256 hash in `workers.token_hash`; plaintext only on the worker's state volume | Worker-initiated: `POST /api/v1/worker/token/rotate` (atomic). Operator-initiated: `workers revoke` + re-enrol. |
@@ -332,7 +332,7 @@ Recommended before enabling `auto_create_titles` on anything busy.
 
 **Convention.** `src/config.ts` honours `<VAR>_FILE` for **every**
 variable, so any secret can come from a Docker secret file instead of the
-environment — it then never appears in `docker inspect`, in shell history, or
+environment; it then never appears in `docker inspect`, in shell history, or
 in a compose file committed by accident. Prefer this for anything above.
 
 ---
@@ -340,16 +340,16 @@ in a compose file committed by accident. Prefer this for anything above.
 ## 3a. Credential inventory and blast radius
 
 §3 covers where each secret lives. This covers what an attacker gets by holding
-one — the question that decides which credential a given client should carry.
+one; the question that decides which credential a given client should carry.
 
 | Credential | Who should hold it | Authority | Blast radius if leaked | Containment |
 |---|---|---|---|---|
-| `ADMIN_TOKEN` (root, bearer) | **Nobody, routinely.** Vault-only break-glass. Its only standing use is the dashboard's token-login form when the accounts table is the problem. | `["*"]`, and owner-equivalent by construction — the one credential that reaches account administration and token minting. | Total control plane: mint credentials, delete operator accounts, revoke every worker, publish bundles, trigger destructive `CLEAN` runs. Not MangaDex write access (no MD credential) and not the database. | Not a scope problem — a storage problem. Keep it out of client configs, rotate per `docs/operations.md` → "Admin token", and give clients `pa_…` tokens instead. Rotation has **no overlap window**. |
+| `ADMIN_TOKEN` (root, bearer) | **Nobody, routinely.** Vault-only break-glass. Its only standing use is the dashboard's token-login form when the accounts table is the problem. | `["*"]`, and owner-equivalent by construction; the one credential that reaches account administration and token minting. | Total control plane: mint credentials, delete operator accounts, revoke every worker, publish bundles, trigger destructive `CLEAN` runs. Not MangaDex write access (no MD credential) and not the database. | Not a scope problem; a storage problem. Keep it out of client configs, rotate per `docs/operations.md` → "Admin token", and give clients `pa_…` tokens instead. Rotation has **no overlap window**. |
 | Dashboard session, `OWNER` | Named humans | `["*"]` | Everything `ADMIN_TOKEN` reaches, from one browser. | Individually revocable (`DELETE /sessions/:id`), TTL-bounded, HttpOnly + `SameSite=Strict`, and cookie-authed writes need `x-requested-with: publoader-dash`. |
 | Dashboard session, `ADMIN` | Named humans | Every scope **except** `users:admin` | Full operational authority: runs, workers, bundles, pause, settings, upload queues. Cannot see or change who else has access, and cannot mint a token. | Same revocation story, plus the role boundary: an ADMIN cannot promote themselves, invite anyone, or read the accounts list. |
 | `pa_…` client token | One machine client each | Exactly its stored scopes; never owner-equivalent whatever it holds | Confined to its areas. A `bundles:write` token publishes bundles and does nothing else; a `stats:read` token reads counters and 403s everywhere else. | Per-client naming (the audit log names the token), optional TTL, immediate revocation, `LAST USED` to spot dead credentials. Mint from `SCOPE_PRESETS`. |
-| `pw_…` worker token | One worker host each | `/api/v1/worker/*` only — lease, submit, upload artifacts, heartbeat, self-rotate | Its own job stream. Cannot reach `/api/v1/admin/*` **at all** — rejected by audience, before any permission check — and cannot write to MangaDex or the database. See §4. | Hashed at rest; worker-initiated atomic rotation; `workers drain` / `revoke`. Trust tier gates which bundles it can ever see. |
-| `pe_…` enroll token | The operator, then one host, once | Exchange for exactly one `pw_…` | One unauthorized worker joins the fleet at the tier the token was minted for. §2 is the analysis of what that worker can then do — lie within a schema, not act. | Single-use and TTL-bounded by construction. Mint `COMMUNITY` unless the host is yours. |
+| `pw_…` worker token | One worker host each | `/api/v1/worker/*` only; lease, submit, upload artifacts, heartbeat, self-rotate | Its own job stream. Cannot reach `/api/v1/admin/*` **at all**, rejected by audience, before any permission check, and cannot write to MangaDex or the database. See §4. | Hashed at rest; worker-initiated atomic rotation; `workers drain` / `revoke`. Trust tier gates which bundles it can ever see. |
+| `pe_…` enroll token | The operator, then one host, once | Exchange for exactly one `pw_…` | One unauthorized worker joins the fleet at the tier the token was minted for. §2 is the analysis of what that worker can then do; lie within a schema, not act. | Single-use and TTL-bounded by construction. Mint `COMMUNITY` unless the host is yours. |
 | Operator password | The operator | Authenticates to a session; the session's role is the authority | Whatever that account's role grants. | scrypt at rest, never returned by any endpoint, login rate-limited per IP (5/min), unapproved accounts refused even with the right password. |
 
 **Recommended scope sets** (`SCOPE_PRESETS` in
@@ -363,7 +363,7 @@ dashboard's mint form, so the easy path is the least-privilege one):
 | `monitoring` | `stats:read`, `audit:read` | A read-only probe. |
 | `worker-enroller` | `enroll:write`, `workers:read` | Automation that provisions worker hosts. |
 
-`<area>:write` implies `<area>:read` — a client that can trigger runs can
+`<area>:write` implies `<area>:read`: a client that can trigger runs can
 obviously look at them, and making callers list both halves invites
 over-granting by copy-paste. Nothing else implies anything.
 
@@ -383,19 +383,19 @@ above hold:
   a read: it contains every operator password hash, every token hash, and the
   saved MangaDex access and refresh tokens in plaintext, so whoever holds one can
   attack the account table offline and authenticate to MangaDex as the operator.
-  It therefore sits at the account-administration bar and not at `settings:write`
-  — which the Discord bot holds so it can pause the platform.
+  It therefore sits at the account-administration bar and not at `settings:write`:
+ which the Discord bot holds so it can pause the platform.
 - A second, lower bar uses the same shape for the two operations that change a
   **public** MangaDex entry: applying an untracked row's corrections to a title
   (`/untracked/:id/apply-to-mangadex`) and editing, hiding or deleting a
   published chapter (`/chapters/:id*`). Both need the scope **and** the ADMIN
-  role, and both refuse `pa_…` tokens outright — an api token is assigned
+  role, and both refuse `pa_…` tokens outright; an api token is assigned
   `adminRole = "ADMIN"` by `adminAuthHook`, which means "not owner-equivalent",
   not "vetted human", so judging these on the role alone would let any token
   holding the area scope mutate the public catalogue under the shared MangaDex
   account. These changes are attributable to a signed-in operator or nothing.
 - **The scope alone is never the gate; `requireOwner` is.** An OWNER may mint a
-  `pa_…` token with `["*"]`, and wildcard satisfies every scope check — so a
+  `pa_…` token with `["*"]`, and wildcard satisfies every scope check; so a
   route guarded only by `requireScope("users:admin")` is reachable by a client
   credential. The role is what excludes tokens, because `adminAuthHook` never
   assigns one the OWNER role. Any future route at this bar needs both.
@@ -427,7 +427,7 @@ operator asks and the one the design exists to answer.
 
 - Its own job specs: extension name, kind, segment index, and the list of
   external manga ids in its segment.
-- The pinned extension bundle and its data files — i.e. the extension's source
+- The pinned extension bundle and its data files; i.e. the extension's source
   code and its `manga_id_map`. For a private-repo extension this is the
   strongest disclosure in the system, which is why those default to
   `min_trust: TRUSTED`.
@@ -440,7 +440,7 @@ operator asks and the one the design exists to answer.
 
 - MangaDex credentials, session tokens, or any ability to authenticate as the
   operator's account.
-- The database — no connection string, no route (Postgres is on an `internal`
+- The database; no connection string, no route (Postgres is on an `internal`
   network with no gateway), no query endpoint.
 - Any other worker's token, jobs, or results.
 - The admin token, Discord webhooks, or the tunnel token.
@@ -458,11 +458,11 @@ operator asks and the one the design exists to answer.
   size-verified.
 - Fetch bundles by sha256 for jobs it holds.
 - Rotate its own token; heartbeat.
-- Fail, stall, or return nothing — losing time, not data.
+- Fail, stall, or return nothing; losing time, not data.
 
 **A worker CANNOT do:**
 
-- Write to MangaDex. Ever. Not once, not indirectly — chapters or titles.
+- Write to MangaDex. Ever. Not once, not indirectly; chapters or titles.
   `core-uploader` is the only process with that authority.
 - Write to Postgres directly.
 - Change any configuration. `tracked_manga` and `extension_configs` are the
@@ -475,7 +475,7 @@ operator asks and the one the design exists to answer.
   language, or reference a host outside `allowed_hosts`.
 - Return chapters for manga outside its segment (shim-side filtering).
 - Trigger runs, pause the platform, publish bundles, enrol other workers, or
-  reach any `/api/v1/admin/*` route — a `pw_…` token is rejected there by
+  reach any `/api/v1/admin/*` route; a `pw_…` token is rejected there by
   audience, not by permission check.
 - Reach the operator's host. It has no inbound ports and no route in.
 

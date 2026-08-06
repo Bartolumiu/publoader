@@ -224,7 +224,7 @@ async function connect(wsUrl, viewport) {
 let failures = 0;
 export function ok(label, cond, extra = "") {
   if (!cond) failures++;
-  console.log(`${cond ? "PASS" : "FAIL"}  ${label}${extra ? ` ; ${extra}` : ""}`);
+  console.log(`${cond ? "PASS" : "FAIL"}  ${label}${extra ? `  - ${extra}` : ""}`);
   return cond;
 }
 export const failureCount = () => failures;

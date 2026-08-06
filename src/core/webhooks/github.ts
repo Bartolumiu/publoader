@@ -2,8 +2,8 @@
  * Pure decision logic for GitHub push webhooks: is this delivery authentic,
  * does it concern a repo we track, and if so which extensions changed.
  *
- * Nothing here does I/O, so every branch; including every reason a delivery is
- * ignored; is directly testable. Ported from the legacy
+ * Nothing here does I/O, so every branch, including every reason a delivery is
+ * ignored, is directly testable. Ported from the legacy
  * publoader/github_webhook.py (`verify_signature` / `slot_for_push`), keeping
  * its rejection reasons: they are echoed back to GitHub so a delivery log entry
  * explains itself without anyone reading server logs.
@@ -165,8 +165,8 @@ const EXTENSION_PATH_RE = /^src\/([a-z0-9_]+)\//;
  * True when EVERY commit in the push is one the series-map sync made.
  *
  * Every, not any: a push that carries our map commit alongside a human's commit
- * still contains code that has to be published. Erring the other way; treating
- * a mixed push as ours; would silently drop a contributor's change, which is a
+ * still contains code that has to be published. Erring the other way, treating
+ * a mixed push as ours, would silently drop a contributor's change, which is a
  * far worse failure than one redundant republish.
  *
  * A push with no commit list at all is not ours: the fallback must be to

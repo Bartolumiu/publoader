@@ -10,7 +10,7 @@
  * generation from strings disabled), so anything it needed from `src/` would
  * either be outside the read allowlist or drag the whole dependency tree into
  * the sandbox. The guarded-fetch implementation below is therefore a hand-kept
- * duplicate of `platform/src/extsdk/guardedFetch.ts` — the two must stay
+ * duplicate of `platform/src/extsdk/guardedFetch.ts`: the two must stay
  * behaviourally identical; change one, change the other.
  *
  * Protocol (worker agent -> runner), `--job <file>`:
@@ -33,7 +33,7 @@
  *
  * Page images travel as files under `--output`, not inside the JSON; the agent
  * uploads each as a checksummed artifact and fills in `imageArtifacts` before
- * submitting. Exit status is 0 whenever an envelope was printed — a failed run
+ * submitting. Exit status is 0 whenever an envelope was printed; a failed run
  * is a result, not a crash.
  */
 
@@ -63,13 +63,13 @@ const BROWSER_PROFILES = [
     "Sec-CH-UA-Platform": '"macOS"',
   },
   {
-    // Firefox on Windows — no Sec-CH-UA at all, which is itself correct:
+    // Firefox on Windows; no Sec-CH-UA at all, which is itself correct:
     // Firefox does not send client hints, and sending them with a Firefox UA
     // is a contradiction a fingerprinter checks for.
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
   },
   {
-    // Safari on macOS — likewise no client hints.
+    // Safari on macOS; likewise no client hints.
     "User-Agent":
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 " +
       "(KHTML, like Gecko) Version/18.1 Safari/605.1.15",
@@ -186,7 +186,7 @@ function render(value) {
   }
 }
 
-/** Structured logging, JSON lines on stderr — never stdout. */
+/** Structured logging, JSON lines on stderr; never stdout. */
 function log(level, message, fields) {
   const line = {
     time: new Date().toISOString(),
@@ -603,7 +603,7 @@ async function writeImages(outputDir, listName, index, images) {
 
 /**
  * `chapters` are the extension's originals, index-aligned with the records
- * already placed in the envelope — the agent splices artifact ids back by that
+ * already placed in the envelope; the agent splices artifact ids back by that
  * same index, so the two lists must never be filtered apart.
  */
 async function collectImages(outputDir, listName, chapters) {
@@ -817,7 +817,7 @@ function durationS(startedAt) {
  * `process.stdout.write` to a pipe is asynchronous: past the pipe buffer
  * (~64 KiB on Linux) it queues the rest and returns false, and `process.exit()`
  * discards whatever is still queued. The agent captures stdout, so it is always
- * a pipe — and a CLEAN run returns the extension's whole catalogue, which for a
+ * a pipe; and a CLEAN run returns the extension's whole catalogue, which for a
  * thousand-series extension is far over that buffer.
  *
  * The result was a runner that exited 0 having printed nothing the agent could

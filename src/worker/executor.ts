@@ -308,8 +308,8 @@ export class JobExecutor {
    *   --allow-fs-write=<workdir>    scratch (outputDir lives under it)
    *
    * Directory grants ARE recursive, so nested data files resolve. Network is
-   * deliberately NOT restricted by the permission model; it has no network
-   * component; DNS and TLS work with no further grants, and egress control is
+   * deliberately NOT restricted by the permission model, it has no network
+   * component, DNS and TLS work with no further grants, and egress control is
    * the guarded fetch's job.
    */
   private async nodeRunnerArgv(opts: {

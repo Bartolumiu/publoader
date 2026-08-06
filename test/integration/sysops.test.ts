@@ -28,7 +28,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  * the docs.
  *
  * Three properties matter more than the happy paths, and each has its own group
- * below. (1) The GitHub check must never report "current" when it does not know -
+ * below. (1) The GitHub check must never report "current" when it does not know;
  * an unreachable API, a missing token and a bundle with no recorded commit are
  * each their own answer. (2) The restart endpoint must write its row and its
  * audit entry and NOT actually exit anything here, so `selfExit` is injected.

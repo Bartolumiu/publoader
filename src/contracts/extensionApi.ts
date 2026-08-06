@@ -9,7 +9,7 @@ import { z } from "zod";
  *    (tracked map, override options, schedule) come from the manifest and the
  *    database; the extension no longer duplicates them.
  *  - Extensions are pure data producers: they receive a sandboxed context and
- *    return chapters/manga. No filesystem, no process, no ambient network -
+ *    return chapters/manga. No filesystem, no process, no ambient network;
  *    `ctx.fetch` is the only sanctioned I/O and it enforces the manifest's
  *    allowed_hosts before any packet leaves.
  *  - Bundles ship a single self-contained ESM file (built with esbuild at

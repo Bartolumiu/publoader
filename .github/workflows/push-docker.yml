@@ -6,7 +6,7 @@ name: Publish images
 #
 # Multi-arch is the reason to do this in CI at all. These images were previously
 # built by hand on an arm64 laptop and pushed single-arch, so every x86_64 server
-# rejected them with `exec format error` — a message that names Prisma and has
+# rejected them with `exec format error`: a message that names Prisma and has
 # nothing to do with it. A runner builds both architectures every time.
 
 on:
@@ -42,7 +42,7 @@ jobs:
         id: meta
         # The inputs go through `env:` rather than being interpolated into the
         # script. `workflow_dispatch` needs write access to trigger, so this is
-        # not the usual untrusted-input case — but a value that reaches a shell
+        # not the usual untrusted-input case; but a value that reaches a shell
         # unquoted is worth never writing, and the tag is validated anyway:
         # anything that is not a plain version is dropped rather than pushed.
         env:

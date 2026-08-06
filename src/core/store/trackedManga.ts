@@ -170,12 +170,12 @@ export interface MangaIdMapPayload {
    * namespace column fixes:
    *
    *   flat        {mdMangaId: [externalId, …]}
-   *              ; every row is in the default id space. This is mangaplus's
+   *               - every row is in the default id space. This is mangaplus's
    *                 manga_id_map.json verbatim, so an unchanged runner and an
    *                 unchanged extension see exactly what they saw before.
    *
    *   namespaced  {namespace: {mdMangaId: [externalId, …]}}
-   *              ; at least one row names a catalogue. This mirrors viz's
+   *               - at least one row names a catalogue. This mirrors viz's
    *                 manga_id_map.json, which is `{namespace: {…}}`.
    *
    * The two are distinguishable without a flag (a flat map's values are arrays,
@@ -239,8 +239,8 @@ export class TrackedMangaStore {
    * reported) rather than silently applied or the whole batch refused.
    *
    * With `dryRun`, every row is judged exactly as it would be and nothing is
-   * written. The judgement above this line is already pure; it reads the
-   * current mappings and decides outcomes; so the preview is the real thing
+   * written. The judgement above this line is already pure, it reads the
+   * current mappings and decides outcomes, so the preview is the real thing
    * minus its last statement, not a second implementation that can drift.
    */
   async applyBatch(

@@ -41,8 +41,8 @@
    display: grid }` below therefore used to keep the sign-in card painted after
    a successful sign-in, with the app rendering underneath it: the reported "the
    login screen persists after signing in". `el.hidden` read `true` the whole
-   time, and jsdom agreed, because jsdom does not implement origin precedence -
-   only a real engine shows the defect.
+   time, and jsdom agreed, because jsdom does not implement origin precedence;
+ only a real engine shows the defect.
 
    One `!important` rule at author origin fixes the whole class of bug, so
    `hidden` can be trusted anywhere in this file. Keep it first, and keep the
@@ -893,8 +893,8 @@ button.ghost:hover:not(:disabled) {
   height: 16px;
 }
 
-/* A control that is running. The label is kept; swapping it for "…" loses the
-   only clue about what is in flight; and a spinner is added beside it. */
+/* A control that is running. The label is kept, swapping it for "…" loses the
+   only clue about what is in flight, and a spinner is added beside it. */
 button[data-pending="true"] {
   color: var(--dim);
   cursor: progress;
@@ -1398,8 +1398,8 @@ pre code {
 }
 
 /* ---- messages -------------------------------------------------------------
-   An alarm line. Full-width, square, and marked at the left edge in its tone -
-   the same gutter the table rows use, so "something is being said about this"
+   An alarm line. Full-width, square, and marked at the left edge in its tone;
+ the same gutter the table rows use, so "something is being said about this"
    is one shape across the console. */
 
 .banner {
@@ -2221,7 +2221,7 @@ dialog::backdrop {
               topbar-end profile profile-name menu menu-detail menu-item
               content page-head crumb blurb tabs skip-link noscript
    panels     card grid row stat (.n .k) defs scroll banner empty dropzone
-   status     pill chip badge ; tones: ok bad warn busy, plus info/quiet on
+   status     pill chip badge  - tones: ok bad warn busy, plus info/quiet on
               .banner and owner/contributor on .badge
    controls   primary danger ghost icon-button linkish button-link field-error
               actions stack

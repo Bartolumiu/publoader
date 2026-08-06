@@ -11,7 +11,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  * Full operator control of the upload queues.
  *
  * The properties worth proving here are the ones that cost real damage when
- * they regress, and none of them can be checked without a live postgres -
+ * they regress, and none of them can be checked without a live postgres;
  * SKIP LOCKED claims, a unique (kind, dedupe_key) constraint and guarded
  * single-statement updates are the system under test:
  *

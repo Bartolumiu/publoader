@@ -49,8 +49,8 @@ Three properties make this harder than a cron job.
 The answer is a split: **untrusted, distributed, credential-free workers do the
 scraping; one trusted control plane makes every decision and holds every
 credential.** Workers never write to the database and never talk to MangaDex.
-They produce one document — a [result envelope](#5-ingest-validates-the-envelope)
-— and the control plane decides what it means.
+They produce one document, a [result envelope](#5-ingest-validates-the-envelope),
+ and the control plane decides what it means.
 
 ---
 
@@ -92,17 +92,17 @@ They produce one document — a [result envelope](#5-ingest-validates-the-envelo
 └──────────────────────────────┘ └──────────────────────────────┘
 ```
 
-**Control plane** — `core-api`, `core-scheduler`, `core-processor`,
+**Control plane**: `core-api`, `core-scheduler`, `core-processor`,
 `core-uploader`, and Postgres. Runs on the operator's host. Holds the MangaDex
 account, the database, the Discord webhooks, and the admin token. It is the only
 thing that decides anything.
 
-**Data plane** — worker agents. Lease a job, fetch and verify the pinned bundle,
+**Data plane**: worker agents. Lease a job, fetch and verify the pinned bundle,
 run the extension, submit an envelope. A worker's entire blast radius is its own
 token and whatever bundle it was handed
 (`docker/worker/Dockerfile:3-13`).
 
-**Extension runtime** — the sandbox inside a worker: a separate Node process
+**Extension runtime**: the sandbox inside a worker: a separate Node process
 launched with the permission model on, executing `runner-node/runner.mjs`, which
 imports the bundle's entrypoint and calls one method. This is the boundary
 between "code the operator reviewed" and "code that scrapes a website".
@@ -121,17 +121,17 @@ and one for the worker (`docker/worker/Dockerfile`).
 
 | Service | Entry point | Loop | Interval | Needs MD creds? | Replicas |
 | --- | --- | --- | --- | --- | --- |
-| `core-api` | `src/services/api.ts` | none — Fastify listener | — | optional, and **reads only**: operator title approvals run synchronously, and the chapter views show the live MangaDex state and preview the unavailable card. Chapter changes are queued for the uploader | 1+ |
+| `core-api` | `src/services/api.ts` | none; Fastify listener |; | optional, and **reads only**: operator title approvals run synchronously, and the chapter views show the live MangaDex state and preview the unavailable card. Chapter changes are queued for the uploader | 1+ |
 | `core-scheduler` | `src/services/scheduler.ts` | `scheduler.tick()` | `SCHEDULER_INTERVAL_SECONDS`, 30 s | no | **exactly 1** by convention; racing is harmless |
-| `core-processor` | `src/services/processor.ts` | `processor.tick()` | 15 s (`INTERVAL_SECONDS`, a module constant) | yes — reads MangaDex | 1; several are safe |
-| `core-uploader` | `src/services/uploader.ts` | drain queues + `titles.tick()` | event-driven, 5 s idle sleep | **yes — write credentials** | **exactly 1** (MangaDex sessions are per-account) |
-| `publoader-bot` | `src/services/bot.ts` | Discord gateway | — | no | 1 |
+| `core-processor` | `src/services/processor.ts` | `processor.tick()` | 15 s (`INTERVAL_SECONDS`, a module constant) | yes; reads MangaDex | 1; several are safe |
+| `core-uploader` | `src/services/uploader.ts` | drain queues + `titles.tick()` | event-driven, 5 s idle sleep | **yes; write credentials** | **exactly 1** (MangaDex sessions are per-account) |
+| `publoader-bot` | `src/services/bot.ts` | Discord gateway |; | no | 1 |
 | worker agent | `src/services/worker.ts` | long-poll lease | 25 s poll | no | many |
 
 Two of those constraints are load-bearing rather than advisory.
 `core-uploader` must be single because MangaDex allows one open upload session per
 account and two uploaders would clobber each other's. `core-scheduler` *may* be
-replicated safely — every action it takes is idempotent or a compare-and-set — but
+replicated safely, every action it takes is idempotent or a compare-and-set, but
 there is no throughput reason to, because workers are the throughput.
 
 ---
@@ -186,7 +186,7 @@ sequenceDiagram
 
 `scheduler.tick()` (`src/core/scheduler/service.ts:39-72`) runs every 30 s. It
 reads the persisted `scheduler_last_tick` setting, so a scheduler that was down
-resumes exactly where it left off rather than storming through history — and on
+resumes exactly where it left off rather than storming through history; and on
 first boot it looks back one minute only (`service.ts:75-77`).
 
 Effective schedules are the manifest's `schedule` overridden by
@@ -237,7 +237,7 @@ RETURNING …
 Four things are worth noticing.
 
 - `FOR UPDATE SKIP LOCKED` is why two concurrent claimers can never select the
-  same row. Not a mutex, not application logic — the row lock.
+  same row. Not a mutex, not application logic; the row lock.
 - `attempt` increments on **claim**, not on failure. A worker that dies without
   reporting has still spent an attempt.
 - The trust filter is *in the query*. A `COMMUNITY` worker cannot lease a
@@ -254,8 +254,8 @@ shape so the runner's compatibility layer needs no translation.
 
 ### 3. The worker fetches and verifies the bundle
 
-`BundleCache.ensure()` (`worker/bundleCache.ts:51-87`). Bundles are immutable —
-the directory name *is* the sha256 — so a cache hit needs no revalidation and
+`BundleCache.ensure()` (`worker/bundleCache.ts:51-87`). Bundles are immutable,
+the directory name *is* the sha256, so a cache hit needs no revalidation and
 concurrent agents on one host share the tree safely.
 
 On a miss it downloads and **re-hashes the body**, throwing
@@ -264,7 +264,7 @@ entry-by-entry with an explicit containment check, because adm-zip's bulk
 extractor has historically followed `../` entries out of the target directory and
 a worker must not depend on the publish pipeline being uncompromised
 (`bundleCache.ts:90-113`). The tree is published by an atomic `rename`, with a
-completion marker written last — losing the race to another agent is not an error,
+completion marker written last; losing the race to another agent is not an error,
 because the content is identical by construction.
 
 ### 4. The runner executes the extension under the permission model
@@ -293,13 +293,13 @@ What each flag buys, and what it does not:
   `child_process` and `worker_threads` outright**, which is most of the reason to
   use it: an extension cannot shell out or spawn a thread to escape the guarded
   fetch.
-- Network is deliberately *not* restricted by the permission model — it has no
+- Network is deliberately *not* restricted by the permission model; it has no
   network component. Egress control is the guarded fetch's job.
 - Every path gets its own flag. Node 24 no longer accepts a comma-separated list;
   it warns and honours only the first (`executor.ts:290-293`).
 
-The environment is minimal on purpose — `PATH`, `HOME`, `TMPDIR`, `LANG` and
-nothing else — so the extension cannot read the worker token or the core URL
+The environment is minimal on purpose, `PATH`, `HOME`, `TMPDIR`, `LANG` and
+nothing else, so the extension cannot read the worker token or the core URL
 (`executor.ts:363-368`, `394-396`). The child is `detached`, so a timeout kills
 the whole process group and not just the direct child (`executor.ts:399`,
 `428-445`).
@@ -324,7 +324,7 @@ Inside the sandbox, `runner.mjs` (`runner-node/runner.mjs`):
 
 Error classification happens here and matters downstream. A bundle that will not
 import, a factory that will not construct, or a result of the wrong shape are all
-properties of the pinned bundle, so they are `PERMANENT` — a retry cannot help. A
+properties of the pinned bundle, so they are `PERMANENT`: a retry cannot help. A
 throw from inside `collect()` is usually the upstream site, so it is `TRANSIENT`
 (`runner.mjs:566-599`, `754`).
 
@@ -332,7 +332,7 @@ The guarded fetch (`src/extsdk/guardedFetch.ts`, duplicated inline in
 `runner.mjs:112-272`) is the only network primitive the extension gets. It:
 
 - checks `allowed_hosts` before the first packet **and again on every redirect
-  hop** — a 302 to an unlisted host is the obvious way to turn an allowlisted
+  hop**: a 302 to an unlisted host is the obvious way to turn an allowlisted
   request into an arbitrary one (`guardedFetch.ts:195-214`);
 - imposes a per-host minimum interval, so politeness is enforced rather than
   hoped for;
@@ -340,7 +340,7 @@ The guarded fetch (`src/extsdk/guardedFetch.ts`, duplicated inline in
 - retries 5xx and transport errors a bounded number of times, and **obeys**
   `Retry-After` on a 429 rather than retrying blindly, with a ceiling.
 
-> The runner cannot import from the platform tree — it executes under a read
+> The runner cannot import from the platform tree; it executes under a read
 > allowlist that does not cover `dist/`. So the guarded fetch exists twice and the
 > two copies must stay behaviourally identical by hand. Change one, change the
 > other (`guardedFetch.ts:21-25`, `runner.mjs:8-14`).
@@ -356,54 +356,54 @@ with reason `cancelled`, which *is* submitted, as a `TRANSIENT` error.
 (`src/core/ingest/ingest.ts:35-118`). Five gates, in this order, and the order is
 the design:
 
-**Gate 0 — schema.** `ResultEnvelope.safeParse`. The schema is `.strict()`, so an
+**Gate 0; schema.** `ResultEnvelope.safeParse`. The schema is `.strict()`, so an
 unknown field is a rejection rather than a silently dropped key. A failure here
 is a 422 and never reaches the database, because there is no job it can be
 reliably attributed to (`ingest.ts:35-41`).
 
-**Gate 1 — record before judging.** The submission is inserted idempotently under
+**Gate 1; record before judging.** The submission is inserted idempotently under
 `res:<jobId>:<attempt>`. If it is a duplicate that was already judged, the prior
 verdict is returned unchanged (`ingest.ts:49-53`). This is what turns
 at-least-once *delivery* into exactly-once *effect*: a worker whose network
 dropped after the server committed can retry safely and gets `committed` back.
 
-**Gate 2 — lease validity.** The envelope's `leaseId` must match the job's, the
+**Gate 2; lease validity.** The envelope's `leaseId` must match the job's, the
 `workerId` must match the lease holder, and the job must still be `LEASED` or
 `RUNNING` (`ingest.ts:55-66`). Anything else is `SUPERSEDED`. This is the gate
 that makes a late submission from a worker declared dead into a recorded no-op
 rather than data.
 
-**Gate 3 — worker-reported failure.** `status: "error"` routes through the retry
+**Gate 3; worker-reported failure.** `status: "error"` routes through the retry
 policy: `TRANSIENT` requeues with backoff, `PERMANENT` dead-letters
 (`ingest.ts:68-81`).
 
-**Gate 4 — policy.** The manifest and the database are enforced *as policy on the
-data*, using **the core's copy of the manifest for the job's pinned bundle** — a
+**Gate 4, policy.** The manifest and the database are enforced *as policy on the
+data*, using **the core's copy of the manifest for the job's pinned bundle**, a
 worker cannot vouch for itself (`ingest.ts:83-94`, `validatePolicy` at
 `ingest.ts:135-231`).
 
 The rule the function exists to uphold: **every field the downstream pipeline
 trusts must be checked here**, because this is the only gate between an untrusted
-worker and canonical state. That is easy to get subtly wrong, and it *was* wrong —
+worker and canonical state. That is easy to get subtly wrong, and it *was* wrong;
 an earlier version validated three fields while the processor went on to consume a
 dozen, and the gap was exploitable. A worker holding one legitimate lease could
 name any MangaDex title in `mdMangaId`, send `allChapters: []`, and have the
 processor conclude that every chapter the group owns on that title had vanished
-upstream — and queue it for deletion (`ingest.ts:117-134`).
+upstream; and queue it for deletion (`ingest.ts:117-134`).
 
 So the checks are deliberately exhaustive over the envelope:
 
 | Checked | Against | Why it matters |
 | --- | --- | --- |
 | `bundleSha256` | the job's pin | a worker must not run a different bundle than the one it was given |
-| `extension` | the manifest's `name` | — |
+| `extension` | the manifest's `name` |; |
 | `mangadexGroupId` | the manifest's `mangadex_group_id` | uploads are attributed to a scanlation group |
 | `extensionLanguages`, every `chapterLanguage` | the manifest's `languages` **only** | `custom_language` arrives *in the envelope*, so unioning it in here would have let the envelope widen the very allowlist meant to constrain it |
 | every `chapterUrl`, `mangaUrl`, and untracked `mangaUrl` | the manifest's `allowed_hosts` | untracked URLs become MangaDex titles and Discord links, so they are attacker-controlled text if unchecked |
 | every chapter's `mdMangaId` | `tracked_manga` for this extension | the grouping key for every downstream decision, including removal |
 | every `trackedMangadexIds` entry | `tracked_manga` | the processor consumes it as the candidate set for "tracked but gone upstream", i.e. as a removal list |
-| every chapter's `extensionName` | the job's extension | a chapter claiming another extension's name would file its bookkeeping — and its uploads — under that extension |
-| every untracked `mangaLanguage` | the manifest's `languages` | — |
+| every chapter's `extensionName` | the job's extension | a chapter claiming another extension's name would file its bookkeeping, and its uploads, under that extension |
+| every untracked `mangaLanguage` | the manifest's `languages` |; |
 
 Anything the processor reads that is *not* checked here is instead re-derived from
 the database rather than trusted (see step 7).
@@ -413,19 +413,19 @@ is failed with class `POLICY`. Nothing from a quarantined envelope reaches
 MangaDex.
 
 Note that `POLICY` **retries** rather than dead-lettering on first sight
-(`store/jobs.ts:246-268`). The original reasoning — a rejected envelope will be
-rejected again — was wrong in an important way: the envelope is produced by a
+(`store/jobs.ts:246-268`). The original reasoning, a rejected envelope will be
+rejected again, was wrong in an important way: the envelope is produced by a
 *worker*, and a hostile or broken one can fail policy on demand. That handed any
 single worker the ability to dead-letter every job it could lease, and
 `advanceRuns` then killed those runs along with their healthy segments. Retrying
 costs one attempt and, because the next attempt is very likely leased elsewhere,
-routes around the bad worker. A genuinely bad *bundle* still dead-letters — it
+routes around the bad worker. A genuinely bad *bundle* still dead-letters; it
 just takes `maxAttempts` to get there.
 
-**Gate 5 — the commit.** `ResultStore.commit()` (`store/results.ts:70-97`) does
+**Gate 5; the commit.** `ResultStore.commit()` (`store/results.ts:70-97`) does
 two things in one transaction: flip the submission to `COMMITTED`, and mark the
 job `SUCCEEDED` gated on the lease id. Either both happen or neither. It returns
-false — not an exception — when another submission already committed or the lease
+false, not an exception, when another submission already committed or the lease
 is no longer current, and the caller records `SUPERSEDED`.
 
 Only after a successful commit are referenced artifacts pinned, clearing their
@@ -444,14 +444,14 @@ however many segments a run has and however they interleave.
 
 `RunProcessor.tick()` (`src/core/processor/processor.ts:89-107`) claims the
 least-recently-touched `INGESTING` run with `SKIP LOCKED` and a bumped
-`updated_at` — a *soft* claim rather than a lease, which is safe precisely because
+`updated_at`: a *soft* claim rather than a lease, which is safe precisely because
 processing is idempotent (`core/processor/processor.ts:116-132`).
 
 `processRun` (`core/processor/processor.ts:135-286`) then:
 
 1. Loads the committed envelope for every job in the run and merges them
    (`mergeEnvelopes`, `core/processor/processor.ts:629-672`). Segments cover disjoint manga, so
-   chapter lists concatenate — **except `allChapters`**, which means "this is
+   chapter lists concatenate; **except `allChapters`**, which means "this is
    everything the publisher has". A single segment that declined to answer makes
    the merged view incomplete, so **any null collapses the whole thing to null**.
    Getting this wrong would turn the removal passes into mass deletions.
@@ -468,7 +468,7 @@ processing is idempotent (`core/processor/processor.ts:116-132`).
 4. Persists untracked manga for the [title pipeline](#the-untracked-title-pipeline).
 5. For each MangaDex series, reads the **live** MangaDex chapter list and
    aggregate, backfills missing volumes from the aggregate, and calls
-   `decideForManga` (`processor/dedupe.ts:477-525`) — pure, I/O-free, and
+   `decideForManga` (`processor/dedupe.ts:477-525`): pure, I/O-free, and
    therefore exhaustively unit-testable (`test/unit/dedupe.test.ts`).
 
    `decideForManga` sorts every reported chapter into four buckets:
@@ -482,7 +482,7 @@ processing is idempotent (`core/processor/processor.ts:116-132`).
    | `toRemove` | on MangaDex under our group but in a disallowed language, or no longer among the publisher's chapters → removal queue |
 
    Removal is decided from the *untouched* MangaDex listing, before any dedupe,
-   and only when the extension supplied a full listing — `allMangaChapters: null`
+   and only when the extension supplied a full listing; `allMangaChapters: null`
    disables the pass entirely, while an empty array does not (that legitimately
    means "the publisher has nothing here any more")
    (`dedupe.ts:46-63`, `334-349`, `484`).
@@ -502,14 +502,14 @@ segment could make a perfectly tracked series look orphaned
 
 `core-uploader` (`src/services/uploader.ts`) is the only process with MangaDex
 write credentials. It sweeps stale leases, then drains the queues in a fixed
-order — `DELETE, EDIT, UPLOAD, UNAVAILABLE` — so a chapter removed upstream never
+order, `DELETE, EDIT, UPLOAD, UNAVAILABLE`, so a chapter removed upstream never
 races the re-upload of its replacement (`uploader.ts:28`).
 
 The `UPLOAD` path (`core/md/taskWorkers.ts:88-168`) is the one that must survive a
 crash mid-flight, so it is bracketed by `upload_logs` rows: `COMMITTING` before
 the session opens, `COMMITTED` with the resulting chapter id after. On retry, a
 prior `COMMITTED` row makes the uploader **verify the chapter still exists on
-MangaDex** before skipping — a recorded id MangaDex never indexed must re-upload,
+MangaDex** before skipping; a recorded id MangaDex never indexed must re-upload,
 not silently vanish (`taskWorkers.ts:95-113`).
 
 Then: close any stale session (MangaDex allows one per account), open a session,
@@ -518,13 +518,13 @@ MangaDex did not acknowledge, commit, record `uploaded_chapters` and
 `uploaded_ids`, delete the artifacts, and queue a Discord embed.
 
 If pages fail, the chapter is still committed as an external-only entry rather
-than lost entirely (`taskWorkers.ts:132-135`) — the same choice the Python
+than lost entirely (`taskWorkers.ts:132-135`): the same choice the Python
 uploader made.
 
 `UNAVAILABLE` is the interesting one: fetch the live chapter, render an info card
 (`core/md/card.ts` → a deterministic 2000×2000 PNG via sharp), open an *edit*
 session on that chapter, attach the card as its only page, commit, then `PUT` the
-chapter to repoint `externalUrl` away from the dead link — preferring the
+chapter to repoint `externalUrl` away from the dead link; preferring the
 publisher's series page, else the site root, else nothing
 (`taskWorkers.ts:364-471`, `692-705`).
 
@@ -590,7 +590,7 @@ lease.
 
 **Replaying a dead letter revives the run too** (`jobs.ts:374-398`, one
 transaction). Previously it reset the job and left the run terminal, so the run
-never advanced again — the retry reported success and silently did nothing.
+never advanced again; the retry reported success and silently did nothing.
 
 Two properties hold across the whole table.
 
@@ -620,7 +620,7 @@ one and what specifically breaks without it.
 
 *Remove it:* a scheduler that restarts inside a slot creates the run again. Two
 runs, two sets of jobs, two workers scraping, two independent sets of upload
-tasks — and because their dedupe keys are identical the second set is mostly
+tasks; and because their dedupe keys are identical the second set is mostly
 absorbed, so the damage is subtler than a clean duplicate: wasted scraping, and
 races between two processors reading the same MangaDex state.
 
@@ -629,7 +629,7 @@ races between two processors reading the same MangaDex state.
 `store/jobs.ts:153-164`.
 
 *Remove it:* two workers lease the same job. Both scrape, both submit. Layers 3
-and 4 still stop the second from committing, so correctness survives — but you
+and 4 still stop the second from committing, so correctness survives; but you
 have doubled the load on the publisher's site, which is the resource the whole
 partitioning design exists to conserve. Tested at
 `test/integration/lease.test.ts:41`.
@@ -641,7 +641,7 @@ Every worker-driven transition names `lease_id` (see the table above).
 *Remove it* (gate on worker id, or on state alone): the classic distributed-systems
 bug. Worker A is running long; its lease expires; the sweeper requeues the job;
 worker B claims it and finishes. Then A wakes up and completes "its" job. Without
-the lease-id guard, A's completion is accepted — writing a result derived from a
+the lease-id guard, A's completion is accepted; writing a result derived from a
 scrape that the system had already declared abandoned, and overwriting B's. Tested
 at `lease.test.ts:55` and `lease.test.ts:69`.
 
@@ -658,14 +658,14 @@ CREATE UNIQUE INDEX result_committed_one_per_job
 any code being right. Layers 2 and 3 are enforced by queries the application
 writes; this one is enforced by the database against every writer, including a
 future refactor that forgets a guard. Without it, "one committed result per job"
-is a property of application logic rather than of the schema — and the scenario in
+is a property of application logic rather than of the schema; and the scenario in
 layer 3 becomes a double upload rather than a `SUPERSEDED` row. Tested directly
 against a real Postgres at `lease.test.ts:142`, which is why the integration suite
 refuses to run against a mock.
 
 Note also that the commit is *atomic with* the job transition
 (`store/results.ts:72-88`). Splitting them would leave a window where a
-submission is `COMMITTED` but the job is not `SUCCEEDED` — so `advanceRuns` would
+submission is `COMMITTED` but the job is not `SUCCEEDED`: so `advanceRuns` would
 not advance, the sweeper would eventually requeue the job, and the run would be
 processed with a duplicate committed envelope.
 
@@ -678,7 +678,7 @@ processed with a duplicate committed envelope.
 8 times with backoff (`worker/coreApi.ts:330-342`), which is correct only because
 a redelivery of the same envelope collides on this key and is answered with the
 prior verdict (`ingest.ts:49-53`). Without it, a submission whose response was
-lost in transit would be re-judged from scratch — and since the first one already
+lost in transit would be re-judged from scratch; and since the first one already
 committed and marked the job `SUCCEEDED`, the second would find a stale lease and
 be superseded. Recoverable, but the worker would now log a failure for a job that
 succeeded, and every network blip would produce a phantom error.
@@ -689,8 +689,8 @@ succeeded, and every network blip would produce a phantom error.
 (`store/uploadTasks.ts:32`).
 
 *Remove the constraint:* the processor's idempotency evaporates. `processRun` is
-explicitly designed to be re-runnable — a crash mid-run leaves the run in
-`INGESTING` and the next tick retries it (`core/processor/processor.ts:100-104`) — and what makes
+explicitly designed to be re-runnable, a crash mid-run leaves the run in
+`INGESTING` and the next tick retries it (`core/processor/processor.ts:100-104`), and what makes
 that safe is that re-enqueueing is a no-op. Without the constraint, one
 interrupted run means every chapter it had already queued gets queued a second
 time, and the uploader uploads each twice.
@@ -739,8 +739,8 @@ segmentKey = sha256(extension|runKey|i|total|ids.join(","))[0..16]
 Consequences that matter:
 
 - **Segments cannot overlap.** They are contiguous slices of a sorted,
-  de-duplicated list, so each id belongs to exactly one segment by construction —
-  not by a check that could be wrong. Tested at
+  de-duplicated list, so each id belongs to exactly one segment by construction;
+ not by a check that could be wrong. Tested at
   `test/unit/slots.test.ts:66` ("segments are non-overlapping and cover
   every id exactly once").
 - **Keys are deterministic**, so a retry or a replay addresses the same segments
@@ -750,7 +750,7 @@ Consequences that matter:
   the function returns an empty list and the run gets one whole-extension job
   (`slots.ts:89-91`, `slots.test.ts:79`).
 - **`total` is renumbered** if trailing chunks came out empty (`slots.ts:104`), so
-  `segmentTotal` always matches the number of jobs that actually exist — which is
+  `segmentTotal` always matches the number of jobs that actually exist; which is
   what `advanceRuns` relies on.
 
 Overlap would be a correctness bug, not an efficiency one: two segments reporting
@@ -791,7 +791,7 @@ is the mechanism.
 Worker tokens (`pw_…`) reach `/api/v1/worker/*` and nothing else; admin
 credentials reach `/api/v1/admin/*` and nothing else
 (`api/auth.ts:17-25`). A presented bearer token is judged on its own merits and
-**never falls through to the cookie** — doing so would let a stale CLI credential
+**never falls through to the cookie**: doing so would let a stale CLI credential
 ride a browser session it never authenticated (`auth.ts:107-109`).
 
 All comparisons are constant-time, and length is the only observable difference:
@@ -801,7 +801,7 @@ the mismatch path still burns a comparison (`auth.ts:33-42`).
 
 Worker tokens, enroll tokens, API tokens, session secrets: sha256 at rest.
 Passwords: scrypt with N=16384. Every plaintext is shown exactly once and is
-unrecoverable afterwards — which is why rotation is always "mint new, revoke old"
+unrecoverable afterwards; which is why rotation is always "mint new, revoke old"
 rather than "reveal existing" (`store/apiTokens.ts:9-13`).
 
 ### Trust is assigned, not claimed
@@ -821,7 +821,7 @@ scoped for account management cannot quietly publish bundles
 
 The three-verb split exists for exactly one area, the series map, and it is what
 lets the platform delegate curation without delegating control.
-`tracked:append` can create a mapping that does not exist — the worst case is a
+`tracked:append` can create a mapping that does not exist; the worst case is a
 wrong *new* mapping, which is visible and reversible. Repointing or deleting an
 existing one needs `tracked:write`, because un-tracking a series silently stops its
 uploads. The single-row `PUT` enforces the distinction at the route: it accepts
@@ -835,7 +835,7 @@ a caller inventing a scope a future release might define as something powerful.
 
 Every admin route declares its scope in a `preHandler`. A 403 names the missing
 scope on purpose: the caller already proved it holds a valid credential, and
-"which scope do I need?" is the only useful next question — leaving them to guess
+"which scope do I need?" is the only useful next question; leaving them to guess
 is how over-granted tokens happen (`auth.ts:169-191`).
 
 ### The privilege boundary
@@ -844,7 +844,7 @@ There is exactly one, and it is credential minting. Token management requires bo
 `users:admin` **and** the `OWNER` role (`routes/tokens.ts:24-29`). Because API
 tokens are assigned role `ADMIN` regardless of their scopes
 (`auth.ts:128-131`), **no token can mint or widen another token, however broadly
-it is scoped** — including one holding `*`. Tested at
+it is scoped**: including one holding `*`. Tested at
 `test/integration/tokens.test.ts:129`.
 
 Above that sits the break-glass `ADMIN_TOKEN`, which resolves to `["*"]` and
@@ -856,7 +856,7 @@ which is how a fresh deployment sets its first password.
 
 It holds no database URL (`db.ts:5-8` refuses an empty one for core services and
 workers never call it), no MangaDex credential, no Discord webhook. It cannot
-write a row — the envelope is the only path in, and it is validated against the
+write a row; the envelope is the only path in, and it is validated against the
 core's own copy of the manifest. It cannot make the processor trust its
 configuration, because the processor replaces `overrideOptions` and unions
 `trackedMangadexIds` with the database's view. And the extension it runs cannot
@@ -912,8 +912,8 @@ Details that matter:
   `en`, with `originalLanguage`, `status` and `contentRating` from the manifest's
   `title_defaults` (`titleService.ts:113-120`).
 - The processor drops reported series that are *already* tracked before queueing,
-  because a worker only knows the series had no MangaDex id in **its** config copy
-  — which is exactly the state a just-auto-created title leaves behind
+  because a worker only knows the series had no MangaDex id in **its** config copy;
+ which is exactly the state a just-auto-created title leaves behind
   (`core/processor/processor.ts:369-376`).
 
 `TitleService` runs in `core-uploader` because that is where the MangaDex write
@@ -947,8 +947,8 @@ not a trusted source of configuration (`runner.mjs:677-679`).
 (`scheduler/slots.ts:27`); `disabled_extensions` removes an extension from
 scheduling entirely.
 
-**Everything else** — the pause gate, removal mode, the signup gate, the
-scheduler's last tick, the MangaDex session tokens — is a row in `settings`
+**Everything else**, the pause gate, removal mode, the signup gate, the
+scheduler's last tick, the MangaDex session tokens, is a row in `settings`
 (`store/settings.ts`, `md/client.ts:24-25`).
 
 Two payoffs. Changing configuration does not require republishing a bundle or
@@ -969,7 +969,7 @@ JSON, never `console.log`. Every HTTP response carries `x-request-id`.
 
 **Metrics.** `prom-client`, one registry per process. `core-api` serves
 `/metrics`; the other three core services each run the same three routes on their
-own port (8101/8102/8103) via `core/observability/metricsServer.ts` — because
+own port (8101/8102/8103) via `core/observability/metricsServer.ts`: because
 prom-client's registry is per-process, and before that existed the scheduler's and
 uploader's metrics were computed into a registry nobody could reach. A metrics
 port that cannot be bound is a **boot failure**, since a service that silently
@@ -990,7 +990,7 @@ shape cannot report the failure it exists to report":
 
 **Health.** `/healthz` is liveness and is the container healthcheck; `/readyz`
 adds a `SELECT 1` and is deliberately *not*, so a Postgres restart does not
-cascade into killing every service. Workers have no listener at all — liveness is
+cascade into killing every service. Workers have no listener at all; liveness is
 the mtime of a heartbeat file the entry point refreshes on work-related traffic
 with the core, which catches the one failure `restart: unless-stopped` cannot: a
 process that is alive but no longer working
@@ -1000,7 +1000,7 @@ process that is alive but no longer working
 tasks, and quarantined submissions into one time-ordered feed, so triage starts in
 the dashboard rather than in `docker logs` (`routes/ops.ts:262-338`). The
 through-line for the whole ops API is that an operator should never need a shell
-on the core container to answer "what is stuck and why" — container logs stay
+on the core container to answer "what is stuck and why"; container logs stay
 `docker logs`, because they describe processes, not platform state
 (`ops.ts:10-19`).
 

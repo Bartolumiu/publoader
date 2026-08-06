@@ -24,8 +24,8 @@ describe("taskDedupeKey", () => {
   });
 
   it("keeps a partial UPLOAD key but refuses one with no identity at all", () => {
-    // A chapter with no source id is normal; the number and language still
-    // identify it; so the key is partial rather than rejected.
+    // A chapter with no source id is normal, the number and language still
+    // identify it, so the key is partial rather than rejected.
     expect(taskDedupeKey("UPLOAD", { chapterNumber: "1", chapterLanguage: "en" })).toBe("|1|en");
     // All three empty would occupy the single `||` slot for every such chapter,
     // which is the collision cli/migrate-from-mongo.ts also refuses.
@@ -158,8 +158,8 @@ describe("manualTaskProblems", () => {
   });
 
   it("treats an empty string as absent, matching chapterFromJson", () => {
-    // The queue payload reader coerces "" to null, so validation must agree -
-    // otherwise a blank form field would pass here and fail on claim.
+    // The queue payload reader coerces "" to null, so validation must agree;
+ // otherwise a blank form field would pass here and fail on claim.
     expect(manualTaskProblems("DELETE", { mdChapterId: "" }).join()).toContain("mdChapterId");
     expect(manualTaskProblems("UPLOAD", { ...upload, mdGroupId: "" }).join()).toContain("mdGroupId");
   });

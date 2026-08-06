@@ -11,7 +11,7 @@ export interface EffectiveSchedule {
 }
 
 /**
- * Effective schedules: manifest defaults overridden by operator rows -
+ * Effective schedules: manifest defaults overridden by operator rows;
  * the same precedence the legacy scheduler applied to schedule.json + SQLite.
  */
 export function effectiveSchedules(

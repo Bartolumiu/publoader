@@ -401,8 +401,8 @@ export class UploadTaskWorkers {
    *
    *  - `force` re-renders the card for a chapter that has ALREADY been marked
    *    unavailable. Without it the "no externalUrl left" branch below archives
-   *    and returns, which is right for the automated pass; the work is done -
-   *    but makes the card unfixable once posted. A card carrying a wrong series
+   *    and returns, which is right for the automated pass, the work is done,
+ *    but makes the card unfixable once posted. A card carrying a wrong series
    *    title, or one rendered before the layout was corrected, is a page on a
    *    public catalogue, so there has to be a way to replace it.
    *  - `footerNote` overrides the explanatory paragraph on the card, for the
@@ -599,8 +599,8 @@ export class UploadTaskWorkers {
     if (!this.deps.notifier.enabled) return;
 
     // A successful upload is the expected case, and one embed per chapter turns
-    // the channel into a transcript in which the failures; the only entries
-    // anyone can act on; scroll past unread. Off unless an operator asks for
+    // the channel into a transcript in which the failures, the only entries
+    // anyone can act on, scroll past unread. Off unless an operator asks for
     // them; the run-level "Found N chapters" embed already reports the work.
     // Failures are always sent: dropping one silently has no reading in which
     // it is what the operator wanted.

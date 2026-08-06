@@ -101,8 +101,8 @@ const ZIP_EPOCH = new Date("2020-01-01T00:00:00Z");
  * absWorkingDir + a relative entry point keeps the output free of absolute
  * paths: esbuild derives both its file comments and its generated symbol names
  * from the path it was given, so building the same commit out of a different
- * temp directory would otherwise produce different bytes; a new sha256 for
- * identical code on every webhook redelivery; and would bake the server's
+ * temp directory would otherwise produce different bytes, a new sha256 for
+ * identical code on every webhook redelivery, and would bake the server's
  * filesystem layout into a published bundle.
  */
 export async function buildEntrypoint(root: string, source: string, outFile: string): Promise<void> {

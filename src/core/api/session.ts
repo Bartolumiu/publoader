@@ -138,8 +138,8 @@ const PasswordLogin = z.object({
 });
 
 /**
- * Session endpoints. Unauthenticated by construction; POST /session *is* the
- * authentication; so they live outside the admin scope and carry their own
+ * Session endpoints. Unauthenticated by construction, POST /session *is* the
+ * authentication, so they live outside the admin scope and carry their own
  * per-IP limiter.
  */
 export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): void {

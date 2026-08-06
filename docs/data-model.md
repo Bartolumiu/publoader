@@ -24,7 +24,7 @@ truncation costs you.
 | **Transient** | Queue and cache rows with a natural end of life. | `upload_tasks`, `artifacts`, `enroll_tokens`, `admin_sessions`, `login_tokens`, `upload_logs` |
 
 `upload_logs` is transient in lifetime but load-bearing while a chapter is
-in flight — see [its entry](#upload_logs-transient-load-bearing).
+in flight; see [its entry](#upload_logs-transient-load-bearing).
 
 ---
 
@@ -63,7 +63,7 @@ PENDING ──first job claimed──> EXECUTING ──all jobs SUCCEEDED──>
 
 `PENDING → EXECUTING` is set opportunistically by the first successful claim
 (`src/core/store/jobs.ts:191-195`). `→ INGESTING` and `→ DEAD_LETTER`
-are computed by `advanceRuns()` (`jobs.ts:405-431`) — a set-based query, so it is
+are computed by `advanceRuns()` (`jobs.ts:405-431`): a set-based query, so it is
 correct however many jobs a run has. `FAILED` exists in the enum but nothing
 currently writes it; `advanceRuns` uses `DEAD_LETTER` for the terminal-failure
 case.
@@ -108,7 +108,7 @@ NEW ──CAS claim──> CREATING ──title created + tracked──> TRACKED
 ```
 
 `CREATED` exists in the enum and is accepted as a filter value by the admin API
-(`src/core/api/routes/admin.ts:398`) but no code path writes it — the
+(`src/core/api/routes/admin.ts:398`) but no code path writes it; the
 service goes `CREATING → TRACKED` in one step, because tracking is what actually
 unblocks uploads (`src/core/md/titleService.ts:125-138`).
 
@@ -122,7 +122,7 @@ unblocks uploads (`src/core/md/titleService.ts:125-138`).
 | `ErrorClass` | `TRANSIENT`, `PERMANENT`, `POLICY` | Decides retry vs immediate dead-letter. `PERMANENT` dead-letters at once; `TRANSIENT` and `POLICY` requeue with backoff until `maxAttempts` (`store/jobs.ts:246-268`). `POLICY` is written only by ingest, for a manifest or tracked-map violation. |
 | `UploadTaskKind` | `UPLOAD`, `EDIT`, `DELETE`, `UNAVAILABLE` | Drained in the order `DELETE, EDIT, UPLOAD, UNAVAILABLE` (`services/uploader.ts:28`) so a chapter removed upstream never races the re-upload of its replacement. |
 | `UploadOutcome` | `COMMITTING`, `COMMITTED`, `FAILED` | The `upload_logs` bracket around an upload. |
-| `AdminRole` | `OWNER`, `ADMIN`, `CONTRIBUTOR` | An `ADMIN` has full control-plane authority but cannot grant it to anyone else — the one privilege boundary the platform has (`routes/users.ts:8-15`). A `CONTRIBUTOR` curates the series map and triages untracked series: it can **add** mappings but not change or remove existing ones, and cannot reach runs, workers, credentials, or settings (`schema.prisma:477-484`, scope set at `api/scopes.ts:103-121`). |
+| `AdminRole` | `OWNER`, `ADMIN`, `CONTRIBUTOR` | An `ADMIN` has full control-plane authority but cannot grant it to anyone else; the one privilege boundary the platform has (`routes/users.ts:8-15`). A `CONTRIBUTOR` curates the series map and triages untracked series: it can **add** mappings but not change or remove existing ones, and cannot reach runs, workers, credentials, or settings (`schema.prisma:477-484`, scope set at `api/scopes.ts:103-121`). |
 
 ---
 
@@ -135,7 +135,7 @@ Worker identity and credential state.
 | Column | Type | Meaning |
 | --- | --- | --- |
 | `id` | uuid pk | Worker identity; appears in audit actors as `worker:<id>`. |
-| `name` | text | Operator-supplied label, truncated to 128 chars at enrollment (`store/workers.ts:61`). Not unique — two hosts may share a name; the id and token are what identify them. |
+| `name` | text | Operator-supplied label, truncated to 128 chars at enrollment (`store/workers.ts:61`). Not unique; two hosts may share a name; the id and token are what identify them. |
 | `token_hash` | text **unique** | sha256 of the `pw_…` bearer token. The plaintext is returned once at enrollment and is unrecoverable. The unique constraint is what makes the token a lookup key. |
 | `status` | `WorkerStatus` | See enum table above. |
 | `trust` | `TrustTier` | Copied from the enroll token at enrollment (`store/workers.ts:63`); not self-declared. |
@@ -143,7 +143,7 @@ Worker identity and credential state.
 | `last_heartbeat_at` | timestamptz? | Updated by `POST /worker/heartbeat`. Staleness is how an operator spots a dead host; nothing automatic acts on it. |
 | `agent_version` | text? | Reported by the agent; informational. |
 
-Index: `token_hash` unique — serves the authentication lookup, the only
+Index: `token_hash` unique; serves the authentication lookup, the only
 hot-path query on this table.
 
 ### `enroll_tokens` (transient)
@@ -161,7 +161,7 @@ Single-use, expiring invitations to join the fleet.
 
 **Invariant:** one enroll token yields at most one worker. Enforced by
 `updateMany({ where: { id, usedByWorkerId: null, revoked: false } })` and
-checking the affected count — not by a read-then-write. Tested at
+checking the affected count; not by a read-then-write. Tested at
 `test/integration/api.test.ts:116`.
 
 ### `runs` (derived)
@@ -226,7 +226,7 @@ Every envelope a worker ever submitted, judged or not.
 | Column | Meaning |
 | --- | --- |
 | `idempotency_key` **unique** | `res:<jobId>:<attempt>` (`contracts/envelope.ts:50-52`). A retried *delivery* of the same attempt collides here and is answered with the prior verdict (`store/results.ts:39-47`, `ingest.ts:49-53`), which is what turns at-least-once delivery into exactly-once effect. |
-| `job_id` | Not an FK — deliberately, so an envelope for an unknown job is a validation answer rather than a constraint error (`ingest.ts:47-48`). |
+| `job_id` | Not an FK; deliberately, so an envelope for an unknown job is a validation answer rather than a constraint error (`ingest.ts:47-48`). |
 | `attempt` | The job's attempt at ingest time. |
 | `lease_id`, `worker_id` | Who submitted it, under which lease. Both are compared against the live job before anything is believed (`ingest.ts:57-60`). |
 | `envelope` | JSONB. **Stays JSONB on purpose:** it is an immutable audit record of exactly what a worker sent, including fields a future schema version may add. Promoting it to columns would mean the stored evidence no longer matches what was received. It is re-validated on read (`core/processor/processor.ts:308-315`). |
@@ -246,7 +246,7 @@ CREATE UNIQUE INDEX "result_committed_one_per_job"
 ```
 
 **What it prevents:** two submissions for the same job both taking effect. This
-is not a nicety — without it, a lease that expires while a worker is still
+is not a nicety; without it, a lease that expires while a worker is still
 running (network partition, long GC pause, a clock problem) lets both the
 original holder and its replacement commit results for the same job, and the
 chapter is uploaded twice. With it, the second `UPDATE … SET state='COMMITTED'`
@@ -264,7 +264,7 @@ won the index race.
 
 | Column | Meaning |
 | --- | --- |
-| `sha256` | Computed from the received bytes, not trusted from the client; a declared/actual mismatch is a 422 (`store/artifacts.ts:34-37`). Not unique — identical pages from two jobs get two rows. |
+| `sha256` | Computed from the received bytes, not trusted from the client; a declared/actual mismatch is a 422 (`store/artifacts.ts:34-37`). Not unique; identical pages from two jobs get two rows. |
 | `size`, `content_type` | Validated: 1 byte–20 MiB, png/jpeg/gif/webp only. |
 | `content` | `Bytes`. In Postgres for v1; the store is the seam for moving to object storage (`artifacts.ts:15-17`). |
 | `job_id`, `worker_id` | Provenance. |
@@ -281,7 +281,7 @@ collected. Enforced by pinning at commit time (`ingest.ts:104-109`) before the
 | Column | Meaning |
 | --- | --- |
 | `sha256` **unique** | The content address of the zip. This *is* the version pin. |
-| `extension` + `version` **unique together** | One row per extension version. Republishing the same version with different content **replaces** the row and the sha changes; jobs already pinned to the old sha keep their pin but can no longer fetch the bytes — publish under a new version to keep both (`store/bundles.ts:64-73`). |
+| `extension` + `version` **unique together** | One row per extension version. Republishing the same version with different content **replaces** the row and the sha changes; jobs already pinned to the old sha keep their pin but can no longer fetch the bytes; publish under a new version to keep both (`store/bundles.ts:64-73`). |
 | `manifest` | JSONB. **Stays JSONB:** it is a validated external document whose schema is versioned independently of ours, and the core parses it with zod on every read (`ingest.ts:141-143`). Columns would freeze a format extensions are allowed to extend (`manifest.ts:78` is `.passthrough()`). |
 | `archive` | The zip bytes, served to workers by `GET /worker/bundles/:sha256`. |
 | `source_commit` | Provenance from `x-source-commit`; recorded in the audit event too. |
@@ -297,8 +297,8 @@ The MangaDex work queue.
 
 | Column | Meaning |
 | --- | --- |
-| `kind` + `dedupe_key` **unique together** | The idempotency guard. Insertion is `ON CONFLICT DO NOTHING` (`store/uploadTasks.ts:32`), so re-processing a run is a no-op for already-queued chapters. Dedupe keys differ by kind: `UPLOAD` uses `chapterId\|chapterNumber\|chapterLanguage` (`uploadTasks.ts:15-21`), `EDIT`/`DELETE`/`UNAVAILABLE` use the MangaDex chapter id (`core/processor/processor.ts:219`, `490`). **One slot per (kind, chapter), forever**: nothing deletes `DONE` rows, so an operator action on an already-actioned chapter resets the settled row in place instead of inserting (`uploadTasks.requeueForChapter`), which is refused for a `PENDING` or `LEASED` row and never accepted for `UPLOAD` — that would re-arm a double upload. |
-| `chapter` | JSONB. **Stays JSONB, and the asymmetry with the four chapter tables is deliberate** (documented at `schema.prisma:228-235`): this is a transient payload consumed once by one worker and never queried by field, and it is *not* the canonical chapter shape — `EDIT` rows carry `payload`/`oldInfo` and `UNAVAILABLE` rows carry `unavailableAt` (plus `force` and `footerNote` when an operator asked for a fresh card) alongside the chapter, which typed columns would have to model as a union. |
+| `kind` + `dedupe_key` **unique together** | The idempotency guard. Insertion is `ON CONFLICT DO NOTHING` (`store/uploadTasks.ts:32`), so re-processing a run is a no-op for already-queued chapters. Dedupe keys differ by kind: `UPLOAD` uses `chapterId\|chapterNumber\|chapterLanguage` (`uploadTasks.ts:15-21`), `EDIT`/`DELETE`/`UNAVAILABLE` use the MangaDex chapter id (`core/processor/processor.ts:219`, `490`). **One slot per (kind, chapter), forever**: nothing deletes `DONE` rows, so an operator action on an already-actioned chapter resets the settled row in place instead of inserting (`uploadTasks.requeueForChapter`), which is refused for a `PENDING` or `LEASED` row and never accepted for `UPLOAD`: that would re-arm a double upload. |
+| `chapter` | JSONB. **Stays JSONB, and the asymmetry with the four chapter tables is deliberate** (documented at `schema.prisma:228-235`): this is a transient payload consumed once by one worker and never queried by field, and it is *not* the canonical chapter shape; `EDIT` rows carry `payload`/`oldInfo` and `UNAVAILABLE` rows carry `unavailableAt` (plus `force` and `footerNote` when an operator asked for a fresh card) alongside the chapter, which typed columns would have to model as a union. |
 | `state`, `attempt`, `max_attempts` (5), `not_before` | Retry budget, backoff. |
 | `lease_id`, `lease_expires_at` | Same SKIP LOCKED lease pattern as jobs, so multiple uploader processes would be safe (`uploadTasks.ts:38-60`). |
 | `last_error` | Failure reason, or the operator's cancellation note. |
@@ -318,7 +318,7 @@ indexed must re-upload, not silently vanish (`taskWorkers.ts:95-113`).
 
 | Column | Meaning |
 | --- | --- |
-| `dedupe_key` | Joins to the upload task that produced it. Indexed — this is the only query on the table. |
+| `dedupe_key` | Joins to the upload task that produced it. Indexed; this is the only query on the table. |
 | `md_chapter_id` | The committed chapter id; null on `COMMITTING` and `FAILED` rows. |
 | `outcome` | `UploadOutcome`. Rows whose legacy free-text value did not map were conservatively converted to `FAILED` (`migrations/20260729214943_optimise_names/migration.sql`). |
 | `detail` | Failure message, truncated to 4000 chars. |
@@ -335,7 +335,7 @@ These used to hold the whole chapter as an opaque JSONB document. The shape is
 fixed and known, so the document bought nothing and cost type enforcement,
 indexability, and `chapter->>'x'` in every query. They now use **typed columns
 plus a narrow `extra` escape hatch**, and the single mapping both directions
-lives in one module — which is what stops the four tables from drifting apart
+lives in one module; which is what stops the four tables from drifting apart
 (`src/core/md/chapterRows.ts:4-19`).
 
 Shared columns (all nullable unless noted):
@@ -355,9 +355,9 @@ Per-table differences:
 
 | Table | Extra columns | Indexes | Notes |
 | --- | --- | --- | --- |
-| `uploaded_chapters` | — | `(extension)`, `(extension, chapter_id)` | The live mirror of what is on MangaDex. Rows are **deleted** when a chapter is removed or archived (`core/processor/processor.ts:495`, `taskWorkers.ts:350`, `505`). |
+| `uploaded_chapters` |; | `(extension)`, `(extension, chapter_id)` | The live mirror of what is on MangaDex. Rows are **deleted** when a chapter is removed or archived (`core/processor/processor.ts:495`, `taskWorkers.ts:350`, `505`). |
 | `edited_chapters` | `edits` JSONB (default `[]`), `last_edited_at` | none beyond the unique key | `edits` **stays JSONB**: an append-only `{editedAt, old, new}` history of genuinely variable length and shape that nothing queries into (`schema.prisma:317-319`). |
-| `unavailable_chapters` | `unavailable_at` | none beyond the unique key | `extra` also holds `mdAttributes`, the chapter as MangaDex had it at takedown — an external API resource, not our shape. |
+| `unavailable_chapters` | `unavailable_at` | none beyond the unique key | `extra` also holds `mdAttributes`, the chapter as MangaDex had it at takedown; an external API resource, not our shape. |
 | `deleted_chapters` | `deleted_at` | `(extension)` | Deletion is the one irreversible action the platform takes, so the record of what was removed outlives it (`schema.prisma:353-356`). Written *before* the live row is dropped (`taskWorkers.ts:341-350`). |
 
 All four are readable through `GET /api/v1/admin/chapters?archive=…`
@@ -365,13 +365,13 @@ All four are readable through `GET /api/v1/admin/chapters?archive=…`
 forensic: one parameterised query serves all four precisely because they share a
 shape, and the only difference the reader sees is which instant dates the row
 (`created_at`, `unavailable_at`, `deleted_at`, `last_edited_at`). Writes still go
-through the upload queue — the API process never touches MangaDex.
+through the upload queue; the API process never touches MangaDex.
 
 ### `uploaded_ids` (canonical)
 
 The narrow "have we already seen this publisher chapter id?" table, kept
 separate from `uploaded_chapters` because it is what the lease endpoint reads to
-build `postedChapterIds` for every non-clean job (`routes/worker.ts:137-145`) —
+build `postedChapterIds` for every non-clean job (`routes/worker.ts:137-145`):
 a hot path that wants one small index, not the whole history table.
 
 | Column | Meaning |
@@ -382,7 +382,7 @@ a hot path that wants one small index, not the whole history table.
 **Invariant:** insert-only semantics for the mapping. The processor upserts with
 an empty `update: {}` so the *first* MangaDex chapter an extension chapter id
 mapped to is the one that stays recorded (`core/processor/processor.ts:463-470`). The uploader's
-own write does update it (`taskWorkers.ts:530-534`) — that is the path that
+own write does update it (`taskWorkers.ts:530-534`): that is the path that
 learns the real id after a successful commit.
 
 ---
@@ -403,16 +403,16 @@ The authority for publisher-id → MangaDex-title-id.
 Index: `(extension)` serves the lease-time map build.
 
 `namespace` exists because some publishers expose more than one catalogue behind
-one API, and the catalogues number their series independently — viz keys its map
+one API, and the catalogues number their series independently; viz keys its map
 by path, so `709` means one series under one path and a different series under
 another. Without the namespace those two rows collide on
 `(extension, manga_id)`, and whichever was written second wins: chapters get
 attached to the wrong MangaDex title. Note the direction that is *not* a problem
-and needs no namespace — many publisher ids mapping to one `md_manga_id`, which
+and needs no namespace; many publisher ids mapping to one `md_manga_id`, which
 is how per-language editions of one series are tracked, and which the unique
 constraint already permits.
 
-This table — not any file in the bundle — is what the worker receives as
+This table, not any file in the bundle, is what the worker receives as
 `mangaIdMap`, which is why a title auto-created after a bundle was published
 reaches the extension without republishing it (`routes/worker.ts:119-137`). Bundle
 data files only *seed* missing rows and never overwrite existing ones
@@ -422,17 +422,17 @@ The return trip runs weekly: `core/mapsync` writes this table back into each
 extension's `manga_id_map.json` on GitHub, so the file contributors read matches
 what is tracked and a mapping removed here is not re-seeded by the next publish.
 It never creates or empties a file and refuses a write that would delete more
-than half of one — see docs/operations.md §"Series-map sync".
+than half of one; see docs/operations.md §"Series-map sync".
 
 **Known limitation: a namespaced extension runs unpartitioned.** `jobs.segment_manga_ids`
 is a flat list of ids on the wire, so it cannot say which catalogue an id came
-from. For an extension with two, `709` is ambiguous — partitioning on it would
+from. For an extension with two, `709` is ambiguous; partitioning on it would
 either treat two distinct series as one or hand the same id to two workers. The
 scheduler therefore detects a non-empty namespace and creates a single
 unpartitioned job, logging a warning (`scheduler/service.ts:137-143`). That is
 slower for a large namespaced catalogue and it is correct; guessing is neither.
 Lifting it means teaching the wire format, the worker and `invertMangaIdMap` to
-carry a namespace — `invertMangaIdMap` currently *refuses* a namespaced map
+carry a namespace; `invertMangaIdMap` currently *refuses* a namespaced map
 rather than silently inverting it to an empty one, so this is a deliberate
 staged gap and not a latent bug (see `extsdk/context.ts` and
 `test/unit/mangaIdMap.test.ts`).
@@ -465,8 +465,8 @@ and the admin API edits them (`schema.prisma:435-437`).
 
 | Table | Key | Contents |
 | --- | --- | --- |
-| `extension_configs` | `extension` (pk) | `override_options` JSONB: `same`, `multi_chapters`, `custom_language`. **Stays JSONB** — it is operator-authored, open-ended, and read whole. The processor takes it from **here, never from worker output**, because override options decide what counts as a duplicate and which languages may stay on MangaDex, so trusting a worker's copy would let a compromised worker steer deletions (`core/processor/processor.ts:338-347`). |
-| `schedule_overrides` | `extension` (pk) | `hour`, `minute`, `day?` — UTC. Overrides the manifest's `schedule` (`scheduler/slots.ts:17-37`). |
+| `extension_configs` | `extension` (pk) | `override_options` JSONB: `same`, `multi_chapters`, `custom_language`. **Stays JSONB**: it is operator-authored, open-ended, and read whole. The processor takes it from **here, never from worker output**, because override options decide what counts as a duplicate and which languages may stay on MangaDex, so trusting a worker's copy would let a compromised worker steer deletions (`core/processor/processor.ts:338-347`). |
+| `schedule_overrides` | `extension` (pk) | `hour`, `minute`, `day?`: UTC. Overrides the manifest's `schedule` (`scheduler/slots.ts:17-37`). |
 | `disabled_extensions` | `extension` (pk) | Presence means "do not schedule". |
 | `settings` | `key` (pk) | Free-form string settings: `pause_until` (`"inf"` or an epoch), `chapter_removal_mode`, `dash_signups_enabled`, `scheduler_last_tick`, and the MangaDex session tokens `mdauth_access` / `mdauth_refresh` (`md/client.ts:24-25`, replacing the legacy `mdauth.json`). |
 
@@ -482,8 +482,8 @@ and the admin API edits them (`schema.prisma:435-437`).
 | `display_name` | Optional; used as the audit actor when present. |
 | `role` | `OWNER` or `ADMIN`. |
 | `approved` | Self-signups land unapproved (`adminUsers.ts:176-186`); an owner approves. An unapproved account cannot log in even with a correct password (`session.ts:218-221`) and its sessions do not resolve (`adminUsers.ts:227`). |
-| `password_hash` | scrypt `salt:hash`, both hex, N=16384/r=8/p=1, 64-byte key (`adminUsers.ts:22-32`). Null when the account has no password of its own — Discord-only, or invited and still signing in by emailed link. Compared in constant time. |
-| `discord_id` **unique**, `discord_username` | Discord linkage. A linked `discord_id` *is* the account — an email change on Discord's side must not repoint the login. Attached either by a login whose Discord email matches, or explicitly from a live session (`GET /oauth/discord/link`), which is the only route when the two addresses differ. Unique, so one Discord identity belongs to one account. |
+| `password_hash` | scrypt `salt:hash`, both hex, N=16384/r=8/p=1, 64-byte key (`adminUsers.ts:22-32`). Null when the account has no password of its own; Discord-only, or invited and still signing in by emailed link. Compared in constant time. |
+| `discord_id` **unique**, `discord_username` | Discord linkage. A linked `discord_id` *is* the account; an email change on Discord's side must not repoint the login. Attached either by a login whose Discord email matches, or explicitly from a live session (`GET /oauth/discord/link`), which is the only route when the two addresses differ. Unique, so one Discord identity belongs to one account. |
 | `last_login_at` | Set on session creation. |
 
 **Invariant:** at least one `OWNER` always survives. Both demotion and deletion
@@ -494,10 +494,10 @@ otherwise the only way back in is the break-glass token.
 
 | Column | Meaning |
 | --- | --- |
-| `user_id` | FK, `onDelete: Cascade` — deleting an account is also a logout. |
+| `user_id` | FK, `onDelete: Cascade`: deleting an account is also a logout. |
 | `token_hash` **unique** | sha256 of the cookie's secret half. The cookie is `${sessionId}.${secret}`: the id is a lookup key and the secret is what is verified, so a session id appearing in a log or an admin list view is not a credential (`adminUsers.ts:190-210`). |
 | `actor` | The display name recorded at login; what audit events name. |
-| `expires_at`, `revoked` | The row — not the cookie's contents — is the authority, which is what makes one session revocable without signing everyone else out. |
+| `expires_at`, `revoked` | The row, not the cookie's contents, is the authority, which is what makes one session revocable without signing everyone else out. |
 
 Indexes: `(user_id)`, `(expires_at)`.
 
@@ -508,16 +508,16 @@ has no password yet, which is every invited or freshly approved account.
 
 | Column | Meaning |
 | --- | --- |
-| `user_id` | FK, `onDelete: Cascade` — a link mailed minutes before a revocation must not outlive it. |
+| `user_id` | FK, `onDelete: Cascade`: a link mailed minutes before a revocation must not outlive it. |
 | `token_hash` **unique** | sha256 of the secret half, exactly as for sessions, so the table is not a credential store. Uniqueness is also what makes redemption single-use under two concurrent clicks: the claim is a conditional `UPDATE … WHERE consumed_at IS NULL` (`store/loginTokens.ts`). |
-| `purpose` | `LOGIN` (asked for from the sign-in page), `INVITE`, `WELCOME` (approval). Governs the wording and the lifetime — minutes for `LOGIN`, days for the other two. |
+| `purpose` | `LOGIN` (asked for from the sign-in page), `INVITE`, `WELCOME` (approval). Governs the wording and the lifetime; minutes for `LOGIN`, days for the other two. |
 | `email` | The address it was mailed to, as it was at send time: an account whose email later changes must not make an old link evidence of the new address. |
-| `expires_at`, `consumed_at`, `revoked_at` | Consumed and revoked are kept distinct so the audit trail can tell "used" from "superseded" — the difference between the two messages a locked-out operator gets. |
+| `expires_at`, `consumed_at`, `revoked_at` | Consumed and revoked are kept distinct so the audit trail can tell "used" from "superseded"; the difference between the two messages a locked-out operator gets. |
 | `requested_ip` | For abuse triage. Never shown to the recipient. |
 
 **Invariant:** at most one link is live per account. Issuing one retires the
 previous, redeeming one retires the rest, and setting a password retires all of
-them — otherwise every resend would widen the window rather than move it.
+them; otherwise every resend would widen the window rather than move it.
 
 Indexes: `(user_id)`, `(expires_at)`.
 
@@ -564,7 +564,7 @@ is genuinely not ours to fix.**
 Everything else that *was* JSONB has been promoted. `workers.capabilities`
 became a typed `extensions` array, `api_tokens.scopes` and
 `jobs.segment_manga_ids` became `text[]`, and the four chapter tables became
-typed columns — all by data-preserving migrations, not drop-and-add
+typed columns; all by data-preserving migrations, not drop-and-add
 (`migrations/20260729214943_optimise_names/migration.sql`,
 `migrations/20260729225058_normalise_chapter_storage/migration.sql`).
 

@@ -155,8 +155,8 @@ const ConfigSchema = z.object({
    *
    * Restart is implemented as a graceful self-exit and depends entirely on the
    * container runtime starting the service again (`restart: unless-stopped`).
-   * Set this false wherever that policy is absent; a bare `docker run` or a
-   * `docker compose up` with no restart policy; so the button refuses instead
+   * Set this false wherever that policy is absent, a bare `docker run` or a
+   * `docker compose up` with no restart policy, so the button refuses instead
    * of taking the service down for good.
    */
   sysopsRestartEnabled: z

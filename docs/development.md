@@ -21,13 +21,13 @@ Getting the platform running locally, changing it, and proving the change works.
 
 | Tool | Version | Why |
 | --- | --- | --- |
-| Node | **24** | The images pin `node:24-bookworm-slim` by digest, esbuild targets `node24`, and the runner's permission flags were verified against 24 — notably that a comma-separated `--allow-fs-read` list is no longer accepted (`src/worker/executor.ts:290-293`). `package.json` says `>=22`, but develop on 24 |
+| Node | **24** | The images pin `node:24-bookworm-slim` by digest, esbuild targets `node24`, and the runner's permission flags were verified against 24; notably that a comma-separated `--allow-fs-read` list is no longer accepted (`src/worker/executor.ts:290-293`). `package.json` says `>=22`, but develop on 24 |
 | pnpm | 10.12.1 | Pinned in the Dockerfiles via corepack. `corepack enable && corepack prepare pnpm@10.12.1 --activate` |
 | Docker + Compose v2 | recent | The local stack and the e2e suite |
 | Postgres | 16 | Only if you want integration tests without the dev stack; otherwise the stack publishes one on `127.0.0.1:55432` |
 
 `python3`, `zip`, and `curl` are needed by `test/e2e/run-e2e.sh`. You do **not**
-need Python for anything else — the worker image ships no interpreter.
+need Python for anything else; the worker image ships no interpreter.
 
 ---
 
@@ -55,7 +55,7 @@ One command brings up the whole system with MangaDex faked:
 ```
 
 `--build` on the first run (and after changing `src/`), since the dev images are
-built locally. The switcher's `dev` branch is a thin wrapper — it just pins the
+built locally. The switcher's `dev` branch is a thin wrapper; it just pins the
 compose file and the project name `publoader-dev`
 (`scripts/publoader:55-59`), so `docker compose -f docker/dev/docker-compose.yml`
 works identically if you prefer.
@@ -103,7 +103,7 @@ padmin errors
 curl -s http://127.0.0.1:8200/_test/uploads | jq   # what the uploader actually did
 ```
 
-The dashboard is at <http://127.0.0.1:8100/> — sign in with the admin token via
+The dashboard is at <http://127.0.0.1:8100/>; sign in with the admin token via
 "Use the admin token instead".
 
 ### Tear it down
@@ -147,7 +147,7 @@ Every entry point works this way:
 | worker agent | `tsx src/services/worker.ts` | `CORE_URL`, `ENROLL_TOKEN` or `WORKER_TOKEN`, `WORKER_STATE_PATH` (point it at a scratch dir), optional `WORKER_EXTENSIONS` |
 
 Two gotchas. If you run a second `core-scheduler` alongside the containerised one,
-give it a different `METRICS_PORT` — an unbindable port is a deliberate boot
+give it a different `METRICS_PORT`: an unbindable port is a deliberate boot
 failure. And running a worker from source needs a writable
 `WORKER_STATE_PATH`: the agent proves the directory is writable **before**
 enrolling, because enrollment spends a single-use token and a host that enrolls
@@ -155,7 +155,7 @@ and then cannot persist the credential is permanently bricked
 (`src/worker/credentials.ts:54-81`).
 
 Every variable also accepts a `<NAME>_FILE` form pointing at a file whose contents
-are the value — the Docker-secrets convention, honoured for *all* config
+are the value; the Docker-secrets convention, honoured for *all* config
 (`src/config.ts:10-16`).
 
 ---
@@ -177,7 +177,7 @@ The workflow:
 pnpm exec prisma migrate dev --create-only --name describe_the_change
 
 # 3. Read what it generated. If it contains DROP COLUMN, DROP TABLE, a type
-#    change, or a rename it turned into drop-and-add — REPLACE IT.
+#    change, or a rename it turned into drop-and-add; REPLACE IT.
 #    Hand-write data-preserving SQL instead:
 #      * renames        ALTER TABLE … RENAME COLUMN
 #      * type changes   ADD COLUMN / UPDATE / DROP / RENAME (Postgres rejects a
@@ -220,7 +220,7 @@ that is the only thing in the system able to alter the schema
 
 Three layers, and each one tests something the layer below cannot.
 
-### Unit — no database, no network
+### Unit; no database, no network
 
 ```bash
 pnpm test                                    # vitest run test/unit
@@ -237,19 +237,19 @@ redirect re-checking (`guardedFetch.test.ts`), bundle publish rejection rules
 `extensionApi.test.ts`), and the real runner against the real fixture
 (`nodeRunner.test.ts`).
 
-### Integration — needs a real Postgres
+### Integration; needs a real Postgres
 
 ```bash
 pnpm run test:integration      # vitest run test/integration --no-file-parallelism
 ```
 
-**These need a real database and mocks would prove nothing** — `SKIP LOCKED` and
+**These need a real database and mocks would prove nothing**: `SKIP LOCKED` and
 partial unique indexes *are* the system under test (`test/globalSetup.ts:3-11`).
 
 `globalSetup.ts` creates and migrates a dedicated `publoader_test` database, and
 sets `TEST_DB_READY`. If the server is unreachable the integration files **skip
 themselves** rather than fail, which is convenient and is also how a green run can
-be meaningless — check for skips.
+be meaningless; check for skips.
 
 Point it at any server:
 
@@ -268,10 +268,10 @@ confinement (`ops.test.ts`, `tokens.test.ts`), and dashboard sessions, CSRF, and
 account administration (`dashboard.test.ts`).
 
 `test/integration/lease.test.ts` is the file to read if you want to understand the
-exactly-once guarantees — each `it()` is one of the layers described in
+exactly-once guarantees; each `it()` is one of the layers described in
 [architecture-guide.md](architecture-guide.md#why-exactly-once-holds).
 
-### End-to-end — the whole system in Docker
+### End-to-end; the whole system in Docker
 
 ```bash
 ./scripts/publoader dev up -d --build
@@ -281,7 +281,7 @@ exactly-once guarantees — each `it()` is one of the layers described in
 Five steps (`test/e2e/run-e2e.sh`): publish the fixture bundle, trigger a `FORCE`
 run, watch it lease to one of two real workers and execute in the real Node runner,
 assert the mock MangaDex received the uploads, assert the untracked series was
-persisted — then **failover**: switch the fixture into slow mode, `docker compose
+persisted; then **failover**: switch the fixture into slow mode, `docker compose
 kill` the worker holding the lease, and assert the *other* worker completes the
 run.
 
@@ -322,7 +322,7 @@ padmin queues list --state DEAD_LETTER
 padmin stats
 ```
 
-`padmin errors` prints a note that container logs are *not* aggregated — that is
+`padmin errors` prints a note that container logs are *not* aggregated; that is
 deliberate. Container logs describe processes; the API describes platform state
 (`src/core/api/routes/ops.ts:10-19`).
 
@@ -333,7 +333,7 @@ It tells you what happened before you read anything else:
 | `errorClass` | Meaning | Where it came from |
 | --- | --- | --- |
 | `TRANSIENT` | the upstream site, a timeout, a lease expiry | a throw inside `collect()`, or the sweeper |
-| `PERMANENT` | the bundle is wrong — will not import, factory throws, malformed result | the runner's classification (`runner.mjs:754`) |
+| `PERMANENT` | the bundle is wrong; will not import, factory throws, malformed result | the runner's classification (`runner.mjs:754`) |
 | `POLICY` | the envelope violated the manifest | ingest gate 4; there will be a matching quarantine row with the exact reason |
 
 A `POLICY` failure is never fixed by a retry. Read the quarantine reason: it names
@@ -368,7 +368,7 @@ LOG_LEVEL=debug ./scripts/publoader dev up -d worker-a
 ```
 
 If the runner produced no envelope at all, the agent logs the last 256 KiB of its
-stderr with the reason — timed out, or exited without an envelope.
+stderr with the reason; timed out, or exited without an envelope.
 
 ### 6. The database
 
@@ -411,7 +411,7 @@ For production triage see
 
 ## Code conventions
 
-Not aspirational — these are what the codebase actually does, and a review will
+Not aspirational; these are what the codebase actually does, and a review will
 ask about a deviation.
 
 **Strict TypeScript.** `strict`, `noUncheckedIndexedAccess`,
@@ -422,7 +422,7 @@ you handle it. No `any`; `unknown` plus a narrowing check instead.
 TypeScript file is written `./foo.js`:
 
 ```ts
-import { JobStore } from "../store/jobs.js";   // yes — even though it's jobs.ts
+import { JobStore } from "../store/jobs.js";   // yes; even though it's jobs.ts
 import { JobStore } from "../store/jobs";      // no
 ```
 
@@ -432,7 +432,7 @@ is outside the platform tree and writes JSON lines to stderr by hand, and
 `src/cli/admin.ts`, whose output *is* a terminal UI.
 
 **Comments explain WHY.** The bar throughout this codebase is that a comment
-records a constraint, a rejected alternative, or a past incident — something the
+records a constraint, a rejected alternative, or a past incident; something the
 code cannot show. Not what the next line does. Read
 `src/core/store/jobs.ts:4-17` or `src/core/api/scopes.ts:1-18` for the register.
 
@@ -445,7 +445,7 @@ const res = await this.prisma.job.updateMany({
   where: { id: jobId, leaseId, state: "LEASED" },
   data: { state: "RUNNING" },
 });
-return res.count === 1;      // 0 means we lost the race — reject the transition
+return res.count === 1;      // 0 means we lost the race; reject the transition
 ```
 
 `if (job.state === "LEASED") { … update … }` is a bug, however obvious it looks.
@@ -456,7 +456,7 @@ rejection rather than a silently dropped key; the manifest is `.passthrough()`
 because extensions may carry extra keys.
 
 **Validation errors are 400, not 500.** A bare `schema.parse` throws a `ZodError`
-that the server's handler reports as "internal error" — actively misleading for a
+that the server's handler reports as "internal error"; actively misleading for a
 caller who mistyped a filter. Use the `parseOrThrow` pattern with
 `statusCode: 400` (`src/core/api/routes/ops.ts:28-44`).
 
@@ -465,7 +465,7 @@ passwords, constant-time comparison, plaintext shown exactly once.
 
 **Errors carry a class.** `TRANSIENT` / `PERMANENT` / `POLICY` decides retry
 behaviour; pick deliberately. "Would running this again against the same pinned
-bundle produce the same result?" — if yes, it is not `TRANSIENT`.
+bundle produce the same result?"; if yes, it is not `TRANSIENT`.
 
 **Lint:** `pnpm run lint` (`eslint src test`, typescript-eslint).
 
@@ -502,10 +502,10 @@ bundle produce the same result?" — if yes, it is not `TRANSIENT`.
 
 3. Audit every mutation, using the `actor(req)` helper already in the file so
    attribution stays consistent.
-4. Return a meaningful failure. `409` for "wrong state" — and say what the state
+4. Return a meaningful failure. `409` for "wrong state"; and say what the state
    actually is, the way the upload-task routes do (`ops.ts:160-169`).
-5. Add an integration test asserting the endpoint is **confined to its scope** —
-   `test/integration/ops.test.ts:347` is the pattern, and a reviewer will look for
+5. Add an integration test asserting the endpoint is **confined to its scope**:
+ `test/integration/ops.test.ts:347` is the pattern, and a reviewer will look for
    it.
 6. If a client should use it, wire the CLI (`src/cli/admin.ts`) and/or the bot
    (`src/bot/apiClient.ts` + `src/bot/commands.ts`).
@@ -513,7 +513,7 @@ bundle produce the same result?" — if yes, it is not `TRANSIENT`.
 ### Add a scope
 
 1. Append it to `SCOPES` in `src/core/api/scopes.ts:20-45`. That array is the
-   whole taxonomy — `parseScopes` rejects anything not in it, so a token cannot be
+   whole taxonomy; `parseScopes` rejects anything not in it, so a token cannot be
    minted with a scope that does not exist yet.
 2. Use `<area>:read` / `<area>:write` naming. Within an area, `write` implies
    `append` implies `read` for free (`scopes.ts:91-101`); anything else you want
@@ -529,7 +529,7 @@ bundle produce the same result?" — if yes, it is not `TRANSIENT`.
    only valid scopes, so a typo there fails the suite.
 5. Decide what each **role** gets in `scopesForRole` (`scopes.ts:103-121`).
    `ADMIN` is `SCOPES` minus `users:admin`, so a new scope is granted to dashboard
-   admins automatically — exclude it explicitly if that is wrong. `CONTRIBUTOR`
+   admins automatically; exclude it explicitly if that is wrong. `CONTRIBUTOR`
    is an allowlist, so a new scope is *not* granted to contributors unless you add
    it.
 6. Add cases to `test/unit/scopes.test.ts`.
@@ -540,13 +540,13 @@ bundle produce the same result?" — if yes, it is not `TRANSIENT`.
    `publoader_`; counters end `_total`.
 2. Decide who records it. Counters go where the event happens. **Database-derived
    gauges go in `src/core/observability/inventory.ts`**, which the scheduler loop
-   calls — that is the one process that already ticks and can see everything.
+   calls; that is the one process that already ticks and can see everything.
 3. If it is a gauge with labels, **seed every label value to zero** before applying
    counts (`inventory.ts:8-21`). Otherwise a drained queue keeps reading its last
    value, or the series does not exist at all and an alert on `> 0` can never fire.
 4. If it is about liveness, **do not** write a "seconds since X" gauge from the
    process being measured. It reads 0 while healthy and 0 forever once wedged.
-   Export a timestamp and let the scraper subtract — see the note at
+   Export a timestamp and let the scraper subtract; see the note at
    `metrics.ts:19-33`.
 5. Document it in [api-reference.md](api-reference.md#exported-metrics) and, if it
    is alertable, in [operations.md](operations.md#monitoring-quick-reference).
@@ -560,10 +560,10 @@ The dashboard is vanilla JS with no build step, served from
    the `el` / `card` / `row` / `table` helpers.
 2. Register it in the `VIEWS` map and add a tab to `TABS`. Every tab declares what
    it needs, and `tabAllowed` is what filters the tab strip:
-   - `{ scope: "things:read" }` — shown when the principal holds that scope. Use
+   - `{ scope: "things:read" }`: shown when the principal holds that scope. Use
      this by default, and use the **same** scope the endpoints behind the view
      require, so a visible tab always works.
-   - `{ owner: true }` — shown only to an `OWNER`. Use this for account and
+   - `{ owner: true }`: shown only to an `OWNER`. Use this for account and
      credential management specifically, because a wildcard API token holds
      `users:admin` but is never `OWNER`, so a scope check would let it in.
 
@@ -577,7 +577,7 @@ The dashboard is vanilla JS with no build step, served from
 4. **No `innerHTML`, ever.** The CSP has no `unsafe-inline`; use `textContent` and
    `addEventListener`. There is no `innerHTML` anywhere in the file today and that
    is what keeps operator-supplied strings from becoming script.
-5. Cookie-authenticated writes need the CSRF header — the `api()` helper already
+5. Cookie-authenticated writes need the CSRF header; the `api()` helper already
    sends it.
 6. `pnpm run build` copies the assets into `dist/` (`copy:dashboard`); the
    Dockerfile does the same and asserts they landed.
@@ -589,12 +589,12 @@ The dashboard is vanilla JS with no build step, served from
 2. Choose the sensitivity honestly. `mutate` requires an admin allowlist and an
    allowed channel, and **fails closed** when neither is configured
    (`src/bot/authz.ts:104-153`). `destructive` additionally means the handler must
-   require a `confirm: true` option — that check lives in the handler, not in
+   require a `confirm: true` option; that check lives in the handler, not in
    authz.
 3. Add the API call to `src/bot/apiClient.ts` with its `scope` (client-side
    metadata used for error messages) and a timeout if the operation is slow.
-4. If the response contains secret material — an enroll token, a minted token —
-   send it by **DM**, never to a channel (`src/bot/bot.ts:258-273` is the DM path with an
+4. If the response contains secret material, an enroll token, a minted token,
+ send it by **DM**, never to a channel (`src/bot/bot.ts:258-273` is the DM path with an
    ephemeral fallback; `/enroll` is the worked example).
 5. `resolveSensitivity` defaults a missing subcommand key to `destructive`
    (`src/bot/commands.ts:78-82`), so a subcommand you forget to classify fails safe.
@@ -602,7 +602,7 @@ The dashboard is vanilla JS with no build step, served from
    `test/unit/botAuthz.test.ts`.
 7. Update [bot.md](bot.md#5-command-reference).
 
-Retiring a command? Do not delete it — add it to the retired list
+Retiring a command? Do not delete it; add it to the retired list
 (`commands.ts:1168-1262`) so typing the muscle-memory name gets a pointer to the
 replacement instead of "unknown command".
 

@@ -8,8 +8,8 @@ Run them:
 CHROME_PATH=/path/to/chrome ./test/browser/run.sh
 ```
 
-Everything is disposable; a scratch database, a core-api on port 8101, a headless
-Chrome with a throwaway profile; so this is safe to run while the dev and prod
+Everything is disposable, a scratch database, a core-api on port 8101, a headless
+Chrome with a throwaway profile, so this is safe to run while the dev and prod
 stacks are up. The runner drops the database and kills the API on exit, including
 after a failed assertion.
 

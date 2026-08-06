@@ -374,8 +374,8 @@ describe.skipIf(!dbReady())("control-plane API", () => {
    * which reads as a manifest mistake rather than the override working.
    *
    * The three cases below are the whole contract: rejected without a mapping,
-   * accepted with one from the DATABASE, and; the reason the union was left out
-   * originally; never widened by the envelope itself.
+   * accepted with one from the DATABASE, and, the reason the union was left out
+   * originally, never widened by the envelope itself.
    */
   describe("custom_language and the manifest allowlist", () => {
     const envelopeWith = (

@@ -11,7 +11,7 @@
 # What the agent does: exchanges the enroll token for a worker token (once),
 # then long-polls the core API for a job, downloads the pinned extension
 # bundle, verifies its sha256, runs it through the Python runner shim, and
-# submits the result envelope. It never uploads to MangaDex — only the
+# submits the result envelope. It never uploads to MangaDex; only the
 # operator's core-uploader can do that (§8).
 #
 # What a compromised worker gets an attacker: the job inputs (non-secret
@@ -27,7 +27,7 @@ name: publoader-worker
 services:
   worker-agent:
     # Pulled, not built: a worker host runs this file next to a `.env` and
-    # nothing else. A `build:` section here would break exactly that — compose
+    # nothing else. A `build:` section here would break exactly that; compose
     # would resolve the build context relative to this file, find no source
     # tree, and fail with `lstat /docker: no such file or directory`. To build
     # from a checkout, add `-f docker-compose.build.yml`.
@@ -36,7 +36,7 @@ services:
     # self-contained ESM bundles built at publish time, so adding one never
     # requires rebuilding or redeploying a worker.
     image: ${PUBLOADER_WORKER_IMAGE:-ardax/publoader-worker:2.1.5}
-    # No `container_name:` on purpose — a fixed name would make it impossible
+    # No `container_name:` on purpose; a fixed name would make it impossible
     # to run a second worker on the same machine with `-p`, since the two
     # projects would collide on the container name.
     restart: unless-stopped
@@ -61,8 +61,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       RUNNER_EXTRA_ARGS: ${RUNNER_EXTRA_ARGS:-}
       # How stale the liveness heartbeat may get before the container is marked
-      # unhealthy. Raise it only if you also raised the core's LEASE_TTL_SECONDS
-      # — the agent renews a lease every TTL/3, and that is the slowest signal
+      # unhealthy. Raise it only if you also raised the core's LEASE_TTL_SECONDS;
+ # the agent renews a lease every TTL/3, and that is the slowest signal
       # the heartbeat has while a long job runs.
       WORKER_HEARTBEAT_MAX_AGE_SECONDS: ${WORKER_HEARTBEAT_MAX_AGE_SECONDS:-600}
 
@@ -72,7 +72,7 @@ services:
       # is recoverable (re-enroll with a fresh token, revoke the old worker).
       - worker-state:/var/lib/publoader-worker
 
-    # NO `ports:` AND NO `expose:` — BY DESIGN. The agent is outbound-only: it
+    # NO `ports:` AND NO `expose:`: BY DESIGN. The agent is outbound-only: it
     # long-polls the core API and never listens. There is nothing to reach on
     # this host, so a worker can live behind NAT, on a laptop, on a home
     # connection, with no firewall exception and no inbound attack surface.
@@ -116,7 +116,7 @@ services:
 
     # Give an in-flight job a chance to finish or to report failure cleanly on
     # `compose down`. If it does not, the core's lease sweeper reclaims the job
-    # after LEASE_TTL_SECONDS and hands it to another worker — an abrupt kill
+    # after LEASE_TTL_SECONDS and hands it to another worker; an abrupt kill
     # loses nothing but time.
     stop_grace_period: 60s
 
@@ -127,7 +127,7 @@ services:
         max-file: "5"
 
     # Uses the image's HEALTHCHECK: the agent's heartbeat file must stay fresh.
-    # Catches the failure mode restart-on-exit cannot — an agent that stays
+    # Catches the failure mode restart-on-exit cannot; an agent that stays
     # "running" forever while its lease loop no longer turns. Docker only
     # *reports* unhealthy; nothing restarts on it, so watch `docker compose ps`
     # or scrape the docker socket from outside this stack. An autoheal sidecar
@@ -136,5 +136,5 @@ services:
 
 volumes:
   # Holds the worker's identity. Deleting it means re-enrolling (and leaves a
-  # stale worker record on the core side — revoke it there).
+  # stale worker record on the core side; revoke it there).
   worker-state: {}

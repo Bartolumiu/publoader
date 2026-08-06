@@ -4,7 +4,7 @@
 #
 # Kept apart from docker-compose.yml because that file is deployed on its own:
 # servers copy it next to a `.env` and run it with no source tree present. A
-# `build:` section there is not inert — compose resolves the build context and
+# `build:` section there is not inert; compose resolves the build context and
 # tries to build, so a server that has only the two files fails with
 #
 #   lstat /docker: no such file or directory

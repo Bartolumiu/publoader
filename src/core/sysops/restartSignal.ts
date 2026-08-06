@@ -20,7 +20,7 @@
  *  - it is TIME-BOUNDED. A request older than RESTART_REQUEST_TTL_MS is ignored,
  *    so a row left behind by a crash cannot restart a service days later;
  *  - it is ACKNOWLEDGED per service. Without that, a service which restarts in
- *    five seconds would come back, still see a fresh request, and exit again -
+ *    five seconds would come back, still see a fresh request, and exit again;
  *    a crash loop lasting as long as the TTL. The ack row records which request
  *    each service has already honoured.
  *

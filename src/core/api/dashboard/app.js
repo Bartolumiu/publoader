@@ -177,8 +177,8 @@ class ApiError extends Error {
   constructor(status, message, body) {
     super(message);
     this.status = status;
-    // The parsed body, for the callers that need more than the first line -
-    // the bundle preflight returns a list of reasons under a 422, and showing
+    // The parsed body, for the callers that need more than the first line;
+ // the bundle preflight returns a list of reasons under a 422, and showing
     // only `error` would hide all but one of them.
     this.body = body ?? null;
   }
@@ -189,8 +189,8 @@ class ApiError extends Error {
  * to show: loading, ready, empty (ready with nothing in it), and failed.
  *
  * `refreshing` is separate from `loading` on purpose. A poll over data already
- * on screen must not replace the table with a skeleton; that is a flash of
- * nothing every ten seconds; so it dims what is there instead.
+ * on screen must not replace the table with a skeleton, that is a flash of
+ * nothing every ten seconds, so it dims what is there instead.
  */
 class Resource {
   constructor(name, fetcher) {
@@ -937,8 +937,8 @@ const NAV = [
     scope: "runs:read",
     // Chapters first, and that ordering is the default landing tab: the question
     // asked of this page far more often than any other is "what is about to go
-    // up, and in what order". Tasks is the same rows keyed on queue mechanics -
-    // one click away, and where incident work still happens.
+    // up, and in what order". Tasks is the same rows keyed on queue mechanics;
+ // one click away, and where incident work still happens.
     tabs: [
       ["chapters", "Chapters"],
       ["tasks", "Tasks"],
@@ -1312,8 +1312,8 @@ const loginWithToken = (event) =>
 /**
  * Ask for an emailed sign-in link.
  *
- * The server answers the same way whether or not the address has an account -
- * otherwise this endpoint would tell an anonymous caller who has one; so the
+ * The server answers the same way whether or not the address has an account,
+ * otherwise this endpoint would tell an anonymous caller who has one, so the
  * confirmation here is deliberately non-committal, and the button is left
  * disabled afterwards so a second click does not look like a way to find out.
  */
@@ -2172,7 +2172,7 @@ VIEWS.runs = (route) => {
             run.kind,
             chip(run.state),
             // null means no segment has committed an envelope yet, which is not
-            // the same as a run that found nothing; so it reads "-", not "0".
+            // the same as a run that found nothing, so it reads "-", not "0".
             run.chaptersFound == null
               ? "-"
               : el(
@@ -2324,8 +2324,8 @@ const RUN_CHAPTER_PAGE = 100;
 /**
  * Which run's filters are currently in the store. Opening a DIFFERENT run must
  * not inherit the last one's search and page number (page 4 of a run with one
- * page is an empty table), but a redraw of the SAME run; a job cancel refreshes
- * the detail resource; must not wipe what the operator just typed.
+ * page is an empty table), but a redraw of the SAME run, a job cancel refreshes
+ * the detail resource, must not wipe what the operator just typed.
  */
 let runChapterFilterFor = null;
 
@@ -2733,8 +2733,8 @@ function queueDepthPanel() {
  * The queue as chapters: what is about to be published, in the order it will
  * be.
  *
- * The Tasks tab shows the same rows keyed on queue mechanics; dedupe key,
- * attempt count, last error; which is the right view during an incident and
+ * The Tasks tab shows the same rows keyed on queue mechanics, dedupe key,
+ * attempt count, last error, which is the right view during an incident and
  * the wrong one for the question asked far more often: what is going up next,
  * and is any of it wrong? A dedupe key of `1015117|142|en` names a chapter only
  * to someone willing to decode it.
@@ -4253,8 +4253,8 @@ function chapterActionsCard(data, detail) {
     el("p", {
       class: "dim small",
       text:
-        "Each of these queues one upload task. core-uploader; the only process holding MangaDex " +
-        "credentials; picks it up within a few seconds and the result appears under Queues.",
+        "Each of these queues one upload task. core-uploader, the only process holding MangaDex " +
+        "credentials, picks it up within a few seconds and the result appears under Queues.",
     }),
     blocked ? el("p", { class: "error", text: blocked }) : null,
     row(
@@ -4302,7 +4302,7 @@ function chapterMangadexCard(data) {
       ["Chapter", md.chapter || "-"],
       ["Title", md.title || "-"],
       ["Language", md.translatedLanguage || "-"],
-      ["External URL", md.externalUrl || "- (none: this chapter has pages)"],
+      ["External URL", md.externalUrl || "; (none: this chapter has pages)"],
       ["Groups", (md.groups ?? []).join(", ") || "-"],
       ["Version", String(md.version ?? "-")],
       ["Created", fmtTime(md.createdAt)],
@@ -4581,9 +4581,9 @@ function chapterDeleteDialog(data, detail) {
  * apply.
  *
  * The preview is the server's own dry run, and the apply button stays disabled
- * until it has been seen. That is not UI ceremony duplicating a server check -
+ * until it has been seen. That is not UI ceremony duplicating a server check,
  * the server would refuse a live call without `{dryRun: false, confirm: true}`
- * anyway; it is making the safe order the only order the page offers, so the
+ * anyway, it is making the safe order the only order the page offers, so the
  * list of public pages about to change is always read before it changes.
  */
 function chapterBulkDialog({ action, archive, target, targeting, done }) {
@@ -4819,8 +4819,8 @@ const ACTIVITY_WINDOWS = [
  * This is the answer to "what has been happening?" that used to require
  * `docker logs`, and it is worth being precise about what it does and does not
  * replace. Everything here is a durable row, which is why it can be filtered,
- * linked to, and read months later. Process stdout is NOT here; a stack trace
- * from a crash loop, a prisma connection warning; because nothing writes it to
+ * linked to, and read months later. Process stdout is NOT here, a stack trace
+ * from a crash loop, a prisma connection warning, because nothing writes it to
  * the database. That still lives in `docker logs` on the host.
  */
 VIEWS.activity = () => {
@@ -5271,8 +5271,8 @@ function relativeEntries(fileList) {
  *
  * Publishing runs a preflight first and shows the verdict inline. The reason is
  * not convenience: a publish is a code-execution change on every worker that
- * runs this extension, so an operator should be looking at the parsed manifest
- *, name, version, entrypoint, whether it replaces what is live, before they
+ * runs this extension, so an operator should be looking at the parsed manifest,
+ * name, version, entrypoint, whether it replaces what is live, before they
  * confirm, not reading a 422 afterwards.
  */
 function publishCard(extensions) {
@@ -5588,8 +5588,8 @@ function extensionDetail(name, tab) {
 /**
  * The detail view's own tab strip.
  *
- * The shell hides the section tabs for a param route; they would navigate away
- * from the thing being read; so a detail view that has sections draws them
+ * The shell hides the section tabs for a param route, they would navigate away
+ * from the thing being read, so a detail view that has sections draws them
  * itself, pointing at `#/extensions/<name>/<tab>`.
  */
 function extensionTabs(name, current) {
@@ -5792,8 +5792,8 @@ function relationRow(spec, initial, onRemove) {
  * An editable list for one of the three typed relations.
  *
  * These used to be three keys inside a JSON textarea. They are separate tables
- * with separate constraints; an alias has exactly one master, a language code
- * must be one MangaDex accepts; and a free-text blob could express none of
+ * with separate constraints, an alias has exactly one master, a language code
+ * must be one MangaDex accepts, and a free-text blob could express none of
  * that, so a typo was only discovered when the server rejected the save.
  */
 function relationList(spec, initialRows) {
@@ -7443,9 +7443,9 @@ function untrackedEditCard(item, detail, data) {
   };
 
   // The SERVER's reason wins. It is computed by the same code that guards the
-  // POST, so it already accounts for cases this file cannot see; a create in
-  // flight, an instance holding no MangaDex credentials, an api-token principal -
-  // and a locally-derived reason that disagreed would either offer a button that
+  // POST, so it already accounts for cases this file cannot see, a create in
+  // flight, an instance holding no MangaDex credentials, an api-token principal,
+ // and a locally-derived reason that disagreed would either offer a button that
   // 403s or hide one that would have worked. The local derivation stays only as a
   // fallback for a build whose GET predates the field.
   const applyReason =
@@ -7521,8 +7521,8 @@ function untrackedEditCard(item, detail, data) {
             `Applied to MangaDex ${fmtTime(applied.at)} (${ago(applied.at)})` +
             (applied.actor ? ` by ${applied.actor}` : "") +
             (pending.length === 0
-              ? "; nothing differs from the live entry."
-              : `: ${pending.length} field(s) differ now.`),
+              ? ", nothing differs from the live entry."
+              : `, ${pending.length} field(s) differ now.`),
         })
       : null,
     data.mangadex
@@ -7732,7 +7732,7 @@ function auditSearch() {
  * One audit event, by id.
  *
  * This is what a copied permalink resolves to. It used to filter the recent page
- * client-side, which could not find an event that had since been pushed off it -
+ * client-side, which could not find an event that had since been pushed off it;
  * and the id was not a searchable field at all, so the answer was always "no
  * matching events". `GET /audit?id=` looks it up by primary key instead, so the
  * age of the event stops mattering.
@@ -7941,8 +7941,8 @@ function backupPanel() {
 
 /** Assignable roles, most privileged first. Mirrors ASSIGNABLE_ROLES in routes/users.ts. */
 const ROLES = [
-  ["OWNER", "OWNER; full control, including accounts and backups"],
-  ["ADMIN", "ADMIN; full control plane, no account administration"],
+  ["OWNER", "OWNER, full control, including accounts and backups"],
+  ["ADMIN", "ADMIN, full control plane, no account administration"],
   ["CONTRIBUTOR", "CONTRIBUTOR; series map and untracked triage only"],
 ];
 

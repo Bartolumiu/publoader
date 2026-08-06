@@ -10,8 +10,8 @@
  * operator repoint is invisible in the repo, so a contributor opens a pull
  * request adding a series that has been tracked for months.
  *
- * Nothing here does I/O, so every decision; including every reason a file is
- * left alone; is directly testable.
+ * Nothing here does I/O, so every decision, including every reason a file is
+ * left alone, is directly testable.
  */
 import { parseMangaIdMapFile, type ParsedIdMapRow } from "../store/bundles.js";
 import { DEFAULT_NAMESPACE } from "../store/trackedManga.js";

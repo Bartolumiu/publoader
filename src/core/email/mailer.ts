@@ -49,7 +49,7 @@ export interface Mailer {
 
 /**
  * The one SDK surface this module uses. Narrowed to a structural type so a test
- * can supply a stand-in without a network, an API key, or module mocking -
+ * can supply a stand-in without a network, an API key, or module mocking;
  * and so anything else the SDK grows stays out of the auth path.
  */
 export type EmailSender = Pick<Resend["emails"], "send">;
