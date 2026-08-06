@@ -77,6 +77,12 @@ export interface SessionPrincipal {
   role: AdminRole;
   userId: string;
   sessionId: string;
+  /**
+   * What this account may do, after the deployment's role baseline and the
+   * account's own grants and denials. Resolved here rather than in `auth.ts`
+   * so the auth layer keeps knowing nothing about how any of it is stored.
+   */
+  scopes: string[];
 }
 
 /**
@@ -94,6 +100,13 @@ export function sessionAuthenticator(ctx: AppContext) {
       role: resolved.role,
       userId: resolved.userId,
       sessionId: resolved.sessionId,
+      // Recomputed per request: a permission taken away has to apply to the
+      // session already holding it, not at that operator's next login.
+      scopes: await ctx.permissions.effectiveForUser({
+        role: resolved.role,
+        extraScopes: resolved.extraScopes,
+        deniedScopes: resolved.deniedScopes,
+      }),
     };
   };
 }

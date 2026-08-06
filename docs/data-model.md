@@ -19,7 +19,7 @@ truncation costs you.
 
 | Category | Meaning | Tables |
 | --- | --- | --- |
-| **Canonical** | Irreplaceable. Losing a row loses information no other system holds. | `bundles`, `uploaded_chapters`, `uploaded_ids`, `edited_chapters`, `unavailable_chapters`, `deleted_chapters`, `tracked_manga`, `extension_configs`, `schedule_overrides`, `settings`, `admin_users`, `api_tokens`, `audit_events`, `workers`, `disabled_extensions` |
+| **Canonical** | Irreplaceable. Losing a row loses information no other system holds. | `bundles`, `uploaded_chapters`, `uploaded_ids`, `edited_chapters`, `unavailable_chapters`, `deleted_chapters`, `tracked_manga`, `extension_configs`, `schedule_overrides`, `settings`, `admin_users`, `role_permissions`, `api_tokens`, `audit_events`, `workers`, `disabled_extensions` |
 | **Derived** | Reconstructable by re-running work. Losing it costs time, not truth. | `runs`, `jobs`, `result_submissions`, `untracked_manga` |
 | **Transient** | Queue and cache rows with a natural end of life. | `upload_tasks`, `artifacts`, `enroll_tokens`, `admin_sessions`, `login_tokens`, `upload_logs` |
 
@@ -122,7 +122,7 @@ unblocks uploads (`src/core/md/titleService.ts:125-138`).
 | `ErrorClass` | `TRANSIENT`, `PERMANENT`, `POLICY` | Decides retry vs immediate dead-letter. `PERMANENT` dead-letters at once; `TRANSIENT` and `POLICY` requeue with backoff until `maxAttempts` (`store/jobs.ts:246-268`). `POLICY` is written only by ingest, for a manifest or tracked-map violation. |
 | `UploadTaskKind` | `UPLOAD`, `EDIT`, `DELETE`, `UNAVAILABLE` | Drained in the order `DELETE, EDIT, UPLOAD, UNAVAILABLE` (`services/uploader.ts:28`) so a chapter removed upstream never races the re-upload of its replacement. |
 | `UploadOutcome` | `COMMITTING`, `COMMITTED`, `FAILED` | The `upload_logs` bracket around an upload. |
-| `AdminRole` | `OWNER`, `ADMIN`, `CONTRIBUTOR` | An `ADMIN` has full control-plane authority but cannot grant it to anyone else — the one privilege boundary the platform has (`routes/users.ts:8-15`). A `CONTRIBUTOR` curates the series map and triages untracked series: it can **add** mappings but not change or remove existing ones, and cannot reach runs, workers, credentials, or settings (`schema.prisma:477-484`, scope set at `api/scopes.ts:103-121`). |
+| `AdminRole` | `OWNER`, `ADMIN`, `CONTRIBUTOR` | Sets a scope *baseline*, which `role_permissions` may override per deployment and `admin_users.extra_scopes`/`denied_scopes` may tune per account. By default an `ADMIN` has full control-plane authority but cannot grant it to anyone else — the one privilege boundary the platform has (`routes/users.ts:8-15`). A `CONTRIBUTOR` curates the series map and triages untracked series: it can **add** mappings but not change or remove existing ones, and cannot reach runs, workers, credentials, or settings (`schema.prisma:477-484`, scope set at `api/scopes.ts:103-121`). |
 
 ---
 
@@ -480,7 +480,8 @@ and the admin API edits them (`schema.prisma:435-437`).
 | --- | --- |
 | `email` **unique** | Normalized to trimmed lowercase on every read and write (`store/adminUsers.ts:80`, `103`). |
 | `display_name` | Optional; used as the audit actor when present. |
-| `role` | `OWNER` or `ADMIN`. |
+| `role` | `OWNER`, `ADMIN` or `CONTRIBUTOR`. Sets the account's scope *baseline*, which a deployment may redefine — see `role_permissions` below. |
+| `extra_scopes`, `denied_scopes` | Per-account tuning on top of the role. Grants widen, denials narrow, and denials win. Both empty is the default and means "exactly this role". Ignored for an `OWNER`, and cleared outright when an account is promoted to one, so a later demotion cannot resurrect a forgotten denial (`adminUsers.ts` `setRole`). |
 | `approved` | Self-signups land unapproved (`adminUsers.ts:176-186`); an owner approves. An unapproved account cannot log in even with a correct password (`session.ts:218-221`) and its sessions do not resolve (`adminUsers.ts:227`). |
 | `password_hash` | scrypt `salt:hash`, both hex, N=16384/r=8/p=1, 64-byte key (`adminUsers.ts:22-32`). Null when the account has no password of its own — Discord-only, or invited and still signing in by emailed link. Compared in constant time. |
 | `discord_id` **unique**, `discord_username` | Discord linkage. A linked `discord_id` *is* the account — an email change on Discord's side must not repoint the login. Attached either by a login whose Discord email matches, or explicitly from a live session (`GET /oauth/discord/link`), which is the only route when the two addresses differ. Unique, so one Discord identity belongs to one account. |
@@ -489,6 +490,28 @@ and the admin API edits them (`schema.prisma:435-437`).
 **Invariant:** at least one `OWNER` always survives. Both demotion and deletion
 check the remaining owner count and refuse (`adminUsers.ts:137-158`), because
 otherwise the only way back in is the break-glass token.
+
+### `role_permissions` (canonical)
+
+| Column | Meaning |
+| --- | --- |
+| `role` **pk** | `ADMIN` or `CONTRIBUTOR`. |
+| `scopes` | This deployment's baseline for that role, replacing the shipped default. |
+| `updated_by`, `updated_at` | Who last redefined the role, and when. |
+
+An **override list, not the source of truth**: no row means "use the shipped
+default from `DEFAULT_ROLE_SCOPES`", so a deployment that never touches this
+table keeps tracking the defaults as releases change them, and resetting a role
+is a `DELETE` rather than re-typing whatever the default happened to be.
+
+**No `OWNER` row is ever honoured.** `OWNER` is the wildcard by construction and
+is the role that edits permissions at all, so a narrowing mistake against it
+would leave a deployment unable to undo the mistake. A row for it — from a
+hand-edited database — is ignored on read (`store/permissions.ts`).
+
+Read on every authenticated request and written about never, so the store memos
+the table for a few seconds. That bounds staleness when more than one core-api
+is running, since invalidation only reaches the process that did the write.
 
 ### `admin_sessions` (transient)
 

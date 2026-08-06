@@ -527,12 +527,17 @@ bundle produce the same result?" — if yes, it is not `TRANSIENT`.
 4. Consider whether a preset should include it (`SCOPE_PRESETS`,
    `scopes.ts:123-146`). `test/unit/scopes.test.ts` asserts every preset contains
    only valid scopes, so a typo there fails the suite.
-5. Decide what each **role** gets in `scopesForRole` (`scopes.ts:103-121`).
+5. Decide what each **role** gets in `DEFAULT_ROLE_SCOPES` (`scopes.ts`).
    `ADMIN` is `SCOPES` minus `users:admin`, so a new scope is granted to dashboard
    admins automatically — exclude it explicitly if that is wrong. `CONTRIBUTOR`
    is an allowlist, so a new scope is *not* granted to contributors unless you add
-   it.
-6. Add cases to `test/unit/scopes.test.ts`.
+   it. Note this only moves the **default**: a deployment that has redefined a
+   role in `role_permissions` keeps its own list and will not pick the new scope
+   up, which is the intended trade for letting roles be tuned at all.
+6. Describe it in `SCOPE_DESCRIPTIONS` (`scopes.ts`). Not optional — the
+   permission editors render a checkbox per scope, and
+   `test/unit/permissionTuning.test.ts` fails if any scope is undescribed.
+7. Add cases to `test/unit/scopes.test.ts`.
 
 ### Add a metric
 

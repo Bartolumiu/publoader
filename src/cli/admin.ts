@@ -1096,6 +1096,144 @@ program
     kv({ quarantined: res.quarantined, paused: res.paused });
   });
 
+// ---- permission tuning ----
+const permissions = program
+  .command("permissions")
+  .description("what each role means here, and per-account grants and denials");
+
+/** Shared by every subcommand below: `--scopes a,b,c`, or empty for none. */
+function scopeList(raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  return [...new Set(raw.split(",").map((s) => s.trim()).filter(Boolean))];
+}
+
+interface RoleBaselineRow {
+  role: string;
+  scopes: string[];
+  defaults: string[];
+  custom: boolean;
+  tunable: boolean;
+  updatedBy: string | null;
+  updatedAt: string | null;
+}
+
+permissions
+  .command("show")
+  .description("the scope taxonomy and every role's current baseline")
+  .action(async () => {
+    const res = await api<{
+      scopes: { name: string; description: string }[];
+      roles: RoleBaselineRow[];
+      tunableRoles: string[];
+    }>("/api/v1/admin/permissions");
+    console.log("scopes:");
+    const width = Math.max(...res.scopes.map((s) => s.name.length));
+    for (const s of res.scopes) console.log(`  ${s.name.padEnd(width)}  ${s.description}`);
+    console.log("");
+    console.log("roles:");
+    table(res.roles, [
+      { header: "ROLE", get: (r) => r.role },
+      { header: "SOURCE", get: (r) => (r.custom ? "custom" : r.tunable ? "default" : "fixed") },
+      { header: "SCOPES", get: (r) => r.scopes.join(",") },
+      { header: "CHANGED BY", get: (r) => r.updatedBy ?? "-" },
+    ]);
+    console.log("");
+    console.log(`Tunable roles: ${res.tunableRoles.join(", ")}. OWNER is the wildcard by construction.`);
+  });
+
+permissions
+  .command("set-role <role>")
+  .description("redefine a role's baseline (ADMIN | CONTRIBUTOR); replaces the whole list")
+  .requiredOption("--scopes <list>", "comma-separated scopes, or a preset name from `tokens scopes`")
+  .action(async (role: string, opts: { scopes: string }) => {
+    const requested = scopeList(opts.scopes);
+    if (requested.length === 0) fail("--scopes must list at least one scope");
+    // Presets are the least-privilege path, so accept one by name here too.
+    const { presets } = (await api("/api/v1/admin/tokens/scopes")) as {
+      presets: Record<string, string[]>;
+    };
+    const scopes = [...new Set(requested.flatMap((entry) => presets[entry] ?? [entry]))];
+    const res = await api<{ role: string; scopes: string[] }>(
+      `/api/v1/admin/permissions/roles/${encodeURIComponent(role.toUpperCase())}`,
+      { method: "PUT", json: { scopes } },
+    );
+    ok(`${res.role} baseline is now: ${res.scopes.join(", ")}`);
+    console.log("Open sessions pick this up within a few seconds — no re-login needed.");
+  });
+
+permissions
+  .command("reset-role <role>")
+  .description("drop a custom baseline and track the shipped default again")
+  .action(async (role: string) => {
+    const res = await api<{ role: string; scopes: string[] }>(
+      `/api/v1/admin/permissions/roles/${encodeURIComponent(role.toUpperCase())}`,
+      { method: "DELETE" },
+    );
+    ok(`${res.role} is back on the shipped default: ${res.scopes.join(", ")}`);
+  });
+
+permissions
+  .command("user <id>")
+  .description("one account's permissions, and the parts that produced them")
+  .action(async (id: string) => {
+    const res = await api<{
+      email: string;
+      role: string;
+      baseline: string[];
+      extraScopes: string[];
+      deniedScopes: string[];
+      effective: string[];
+      tunable: boolean;
+    }>(`/api/v1/admin/users/${id}/permissions`);
+    kv({
+      email: res.email,
+      role: res.role,
+      baseline: res.baseline.join(",") || "none",
+      granted: res.extraScopes.join(",") || "none",
+      denied: res.deniedScopes.join(",") || "none",
+      effective: res.effective.join(",") || "none",
+    });
+    if (!res.tunable) {
+      console.log("");
+      console.log("This account is an OWNER: it holds every scope and ignores grants and denials.");
+    }
+  });
+
+permissions
+  .command("set-user <id>")
+  .description("grant and deny scopes for one account; both lists are replaced wholesale")
+  .option("--grant <list>", "comma-separated scopes to add on top of the role")
+  .option("--deny <list>", "comma-separated scopes to refuse despite the role")
+  .option("--clear", "remove all tuning and leave the account exactly its role")
+  .action(async (id: string, opts: { grant?: string; deny?: string; clear?: boolean }) => {
+    if (opts.clear && (opts.grant || opts.deny)) {
+      fail("--clear cannot be combined with --grant or --deny");
+    }
+    if (!opts.clear && opts.grant === undefined && opts.deny === undefined) {
+      fail("pass --grant, --deny, or --clear");
+    }
+    // Omitting one list means "leave it as it is", not "empty it" — a command
+    // that only mentions --deny must not silently drop existing grants.
+    const current = await api<{ extraScopes: string[]; deniedScopes: string[] }>(
+      `/api/v1/admin/users/${id}/permissions`,
+    );
+    const json = opts.clear
+      ? { extraScopes: [], deniedScopes: [] }
+      : {
+          extraScopes: opts.grant === undefined ? current.extraScopes : scopeList(opts.grant),
+          deniedScopes: opts.deny === undefined ? current.deniedScopes : scopeList(opts.deny),
+        };
+    const res = await api<{ extraScopes: string[]; deniedScopes: string[]; effective: string[] }>(
+      `/api/v1/admin/users/${id}/permissions`,
+      { method: "PUT", json },
+    );
+    kv({
+      granted: res.extraScopes.join(",") || "none",
+      denied: res.deniedScopes.join(",") || "none",
+      effective: res.effective.join(",") || "none",
+    });
+  });
+
 program
   .command("audit")
   .description("recent audit trail entries")

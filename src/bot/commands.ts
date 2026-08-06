@@ -1113,6 +1113,168 @@ const commands: BotCommand[] = [
     },
   },
   {
+    name: "permissions",
+    description: "What each role may do here, and per-account grants and denials.",
+    // Reads are read; every write grants or removes authority over the control
+    // plane, which is the definition of destructive in this bot's taxonomy.
+    sensitivity: {
+      roles: "read",
+      user: "read",
+      "set-role": "destructive",
+      "reset-role": "destructive",
+      "set-user": "destructive",
+    },
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("permissions")
+      .setDescription("What each role may do here, and per-account grants and denials.")
+      .addSubcommand((s) =>
+        s.setName("roles").setDescription("The scope baseline behind each role on this deployment."),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("user")
+          .setDescription("One account's permissions and the parts that produced them.")
+          .addStringOption((o) => o.setName("id").setDescription("Account id.").setRequired(true)),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("set-role")
+          .setDescription("Redefine what a role may do. Replaces the whole list.")
+          .addStringOption((o) =>
+            o
+              .setName("role")
+              .setDescription("Which role.")
+              .setRequired(true)
+              .addChoices({ name: "ADMIN", value: "ADMIN" }, { name: "CONTRIBUTOR", value: "CONTRIBUTOR" }),
+          )
+          .addStringOption((o) =>
+            o.setName("scopes").setDescription("Comma-separated scopes.").setRequired(true),
+          )
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Yes, change what this role may do.").setRequired(true),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("reset-role")
+          .setDescription("Drop a custom baseline and track the shipped default again.")
+          .addStringOption((o) =>
+            o
+              .setName("role")
+              .setDescription("Which role.")
+              .setRequired(true)
+              .addChoices({ name: "ADMIN", value: "ADMIN" }, { name: "CONTRIBUTOR", value: "CONTRIBUTOR" }),
+          )
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Yes, restore the shipped default.").setRequired(true),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("set-user")
+          .setDescription("Grant and deny scopes for one account. Both lists are replaced.")
+          .addStringOption((o) => o.setName("id").setDescription("Account id.").setRequired(true))
+          .addStringOption((o) => o.setName("grant").setDescription("Comma-separated scopes to add."))
+          .addStringOption((o) => o.setName("deny").setDescription("Comma-separated scopes to refuse."))
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Yes, change what this account may do.").setRequired(true),
+          ),
+      ),
+    async run(ctx) {
+      const sub = ctx.options.subcommand();
+      /** `a, b ,c` → ["a","b","c"]. An omitted option stays undefined. */
+      const list = (name: string): string[] | undefined => {
+        const raw = ctx.options.string(name);
+        if (raw === null || raw === undefined) return undefined;
+        return [...new Set(raw.split(",").map((s) => s.trim()).filter(Boolean))];
+      };
+      const code = (scopes: string[]): string =>
+        scopes.length ? scopes.map((s) => `\`${s}\``).join(", ") : "_none_";
+
+      if (sub === "roles") {
+        const { roles, tunableRoles } = await ctx.api.permissions(ctx.actor);
+        const rendered = roles.map((r) => {
+          const source = r.custom ? " *(customised here)*" : r.tunable ? "" : " *(fixed)*";
+          return `• **${r.role}**${source}\n  ${code(r.scopes)}`;
+        });
+        return {
+          text: lines([
+            "**Role baselines**",
+            ...rendered,
+            `_Tunable: ${tunableRoles.join(", ")}. OWNER is the wildcard by construction._`,
+          ]),
+        };
+      }
+
+      if (sub === "user") {
+        const perms = await ctx.api.userPermissions(ctx.actor, requireString(ctx.options, "id"));
+        const parts = [
+          `**${perms.email}** — ${perms.role}`,
+          `**Role baseline**: ${code(perms.baseline)}`,
+          `**Granted on top**: ${code(perms.extraScopes)}`,
+          `**Denied**: ${code(perms.deniedScopes)}`,
+          `**Effective**: ${code(perms.effective)}`,
+        ];
+        if (!perms.tunable) {
+          parts.push("_This account is an OWNER: it holds every scope and ignores grants and denials._");
+        }
+        return { text: lines(parts) };
+      }
+
+      // Discord makes the option mandatory to *supply*; it is still the
+      // handler's job to insist it says yes.
+      if (ctx.options.boolean("confirm") !== true) {
+        return {
+          text:
+            "Changing permissions changes what other people may do to the platform, and takes effect on sessions " +
+            "that are already open.\nRe-issue with `confirm: true` if that is what you want.",
+        };
+      }
+
+      if (sub === "reset-role") {
+        const role = requireString(ctx.options, "role");
+        const res = await ctx.api.resetRolePermissions(ctx.actor, role);
+        return { text: `:arrows_counterclockwise: **${res.role}** is back on the shipped default: ${code(res.scopes)}` };
+      }
+
+      if (sub === "set-role") {
+        const role = requireString(ctx.options, "role");
+        const scopes = list("scopes") ?? [];
+        if (scopes.length === 0) throw new UserError("`scopes` must list at least one scope.");
+        const res = await ctx.api.setRolePermissions(ctx.actor, role, scopes);
+        return {
+          text: lines([
+            `:closed_lock_with_key: **${res.role}** may now: ${code(res.scopes)}`,
+            "_Open sessions pick this up within a few seconds — nobody needs to sign in again._",
+          ]),
+        };
+      }
+
+      const id = requireString(ctx.options, "id");
+      const grant = list("grant");
+      const deny = list("deny");
+      if (grant === undefined && deny === undefined) {
+        throw new UserError("Pass `grant`, `deny`, or both. To clear all tuning, pass `grant:` and `deny:` empty.");
+      }
+      // An omitted list means "leave it alone", so read the current state
+      // first: a command that only mentions `deny` must not drop the grants.
+      const current = await ctx.api.userPermissions(ctx.actor, id);
+      const res = await ctx.api.setUserPermissions(ctx.actor, id, {
+        extraScopes: grant ?? current.extraScopes,
+        deniedScopes: deny ?? current.deniedScopes,
+      });
+      return {
+        text: lines([
+          `:closed_lock_with_key: **${current.email}**`,
+          `**Granted**: ${code(res.extraScopes)}`,
+          `**Denied**: ${code(res.deniedScopes)}`,
+          `**Effective**: ${code(res.effective)}`,
+        ]),
+      };
+    },
+  },
+  {
     name: "whoami",
     description: "What this bot is, where it points, and what its token may do.",
     sensitivity: "read",
