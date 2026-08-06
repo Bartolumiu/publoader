@@ -1272,69 +1272,89 @@ first and only then offers to queue.
 `unavailable_chapters` and `deleted_chapters` are written by the upload-task
 workers, which means they record what *this platform* did. Nothing records what
 MangaDex did on its own: a publisher rotating an external URL out of
-readability, a staff deletion, a takedown performed by hand. Each of those
-leaves `uploaded_chapters` claiming a chapter is still up when it is not, and
-the claim is invisible until somebody looks the chapter up.
+readability, a staff deletion, a takedown performed by hand. Those changes leave
+our tables describing a catalogue that has moved on, and the gap is invisible
+until somebody looks a specific chapter up.
 
-`scripts/backfill-md-chapter-state.mjs` walks the whole table, asks MangaDex
-about every chapter, and moves the ones that have stopped being live uploads
-into the archive they belong in. Run it inside the stack — `core-uploader` is
-the one service attached to both the `data` and `edge` networks, so it has the
-database and the internet at once:
+`padmin chapters reconcile` closes it. Two passes, and they are not variations
+of one thing:
+
+- **discover** — ask MangaDex which of our groups' chapters it currently refuses
+  to serve, and record those. This is the pass that finds most of the work, and
+  it deliberately does not start from `uploaded_chapters`: on a database whose
+  upload history is younger than the catalogue, none of the unavailable chapters
+  have a row there. Measured on the live deployment, the overlap between
+  "unavailable on MangaDex" and "in `uploaded_chapters`" was zero. The archive
+  row is seeded from the MangaDex record itself.
+- **reconcile** — sweep `uploaded_chapters` for rows MangaDex no longer has, and
+  archive those as deleted. Deletions can only be found in this direction: a
+  chapter that is gone cannot be enumerated, so our own memory of uploading it
+  is the only evidence there was one.
+
+The default is a dry run that writes nothing:
 
 ```bash
-docker compose -f docker/core/docker-compose.yml exec -T core-uploader \
-  node --input-type=module - < scripts/backfill-md-chapter-state.mjs
+padmin chapters reconcile
+#   EXTENSION   GROUP     ON MD   UNAVAILABLE   NEW
+#   mangaplus   4f1de6a2   6220            24    24
+#   scanned 155 uploaded row(s)
+#   would record 24 unavailable and 0 deleted (found 24 / 0; the rest were
+#   already archived) — re-run with --apply to write
 ```
 
-That is a dry run. It reads MangaDex, prints the four counts, and writes
-nothing:
-
-```
-unavailable on MangaDex : 41
-deleted from MangaDex   : 6
-hidden, cause unknown   : 2 (not archived — review)
-still live              : 8104
-```
-
-Read it before applying it. `deleted` is the row that matters — the archive
-claims a chapter is gone forever, so it is only ever recorded on a 404 from the
-chapter's own endpoint, never on a chapter merely missing from a list response.
+Read it before applying it. `deleted` is the row that matters — it claims a
+chapter is gone forever, so it is only ever recorded on a 404 from the chapter's
+own endpoint and never on a chapter merely missing from a list response.
 `hidden` is the honest leftover: on MangaDex, fetchable by id, but absent from
 the collection for a reason that is not unavailability (a future `publishAt` is
-the usual one). Those are never written. Pass `--out=/tmp/state.json` to get the
-full per-chapter classification to look through.
-
-To write, put the flags **after** the `-`, which is what makes node read the
-script from stdin — without it node parses `--apply` as its own option and
-exits:
+the usual one). Those are reported and never written.
 
 ```bash
-docker compose -f docker/core/docker-compose.yml exec -T core-uploader \
-  node --input-type=module - --apply < scripts/backfill-md-chapter-state.mjs
+padmin chapters reconcile --apply
 ```
 
-Applying mirrors what the workers do: upsert the archive row with every column
-carried across unchanged and the MangaDex snapshot under `extra.mdAttributes`,
-then drop the row from `uploaded_chapters`, so a chapter lives in exactly one
-table. It is safe to re-run — an id already archived keeps its original
-timestamp, because that instant is when the change was first seen and today's
-sweep is not a better answer.
-
-Useful when the whole table is more than you want in one pass:
+Applying mirrors what the workers do: upsert the archive row, keep the MangaDex
+snapshot under `extra.mdAttributes`, then drop any `uploaded_chapters` row so a
+chapter lives in exactly one table. It is safe to re-run — an id already
+archived keeps its original timestamp, because that instant is when the change
+was first seen and a later sweep does not know better. A chapter already
+recorded as deleted is never resurrected as merely unavailable.
 
 | Flag | Effect |
 |---|---|
-| `--extension=<name>` | One extension only. |
-| `--limit=<n>` | Stop after n chapters — a first look before committing to a full sweep. |
-| `--keep-uploaded` | Write the archive row but leave `uploaded_chapters` alone. |
-| `--rps=<n>` | MangaDex requests per second (default 3; the API's ceiling is 5, and `core-uploader` is publishing from the same IP). |
+| `--apply` | Write. Without it nothing is written. |
+| `--extension <name...>` | Only these extensions. |
+| `--skip-deleted` | Skip the `uploaded_chapters` sweep — the slow half on a large table, and the only pass that can find deletions. |
+
+**Who can run it.** The dry run needs `chapters:read`, so any scoped token —
+including the bot's — can ask. `/reconcile` in Discord reports the same counts.
+Applying takes the same guard as every other mutating chapter route: ADMIN or
+above, and closed to api tokens, so it is the dashboard (Chapters → the
+unavailable or deleted archive → **Reconcile with MangaDex**) or the break-glass
+`ADMIN_TOKEN`.
+
+**Why this one writes directly** instead of queueing an upload task like every
+other action on a published chapter: it changes nothing on MangaDex. Queueing
+would be actively wrong — every chapter it finds is already unavailable or
+already gone, so running the workers over them would re-upload cards and
+re-issue deletes for work MangaDex did on its own.
 
 What it does **not** find: chapters this platform has already replaced with an
 unavailable card. Those need no backfill — the worker that posts the card writes
 the archive row in the same step — and they have no reliable signature anyway,
 because the card flow repoints `externalUrl` at the series or domain root rather
 than clearing it.
+
+> One MangaDex API trap is worth knowing, because it is the reason this works at
+> all. `isUnavailable` on a chapter looks like the direct answer and is not: the
+> attribute is absent entirely from older records, and on the live group every
+> single unavailable chapter came back with no such key. What MangaDex does
+> reliably is drop them from collection reads unless `includeUnavailable=1` is
+> set, so unavailability is measured as the difference between two otherwise
+> identical calls. Its similarly-named siblings are traps in the other
+> direction: `includeExternalUrl`, `includeEmptyPages` and
+> `includeFuturePublishAt` are exclusive *filters* on that endpoint, and
+> `includeExternalUrl=1` returns only external chapters.
 
 ---
 

@@ -49,6 +49,18 @@ export interface MdChapter {
      * decides which id survives. Empty string when MangaDex omitted it.
      */
     createdAt: string;
+    /**
+     * MangaDex's own "I will not serve this" flag.
+     *
+     * Optional because it is genuinely absent, not merely sometimes false:
+     * chapters whose records predate the field carry no such key even while
+     * MangaDex is refusing to serve them. So `isUnavailable !== true` does not
+     * mean available, and unavailability is established by asking whether the
+     * chapter is dropped from a collection read without `includeUnavailable`
+     * (see MdClient.chapterAvailabilityForGroup). Trust this flag only when it
+     * is `true`.
+     */
+    isUnavailable?: boolean;
   };
   relationships: { id: string; type: string }[];
 }

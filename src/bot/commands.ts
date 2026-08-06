@@ -1030,6 +1030,54 @@ const commands: BotCommand[] = [
     },
   },
   {
+    name: "reconcile",
+    description: "Check which chapters MangaDex has stopped serving or deleted.",
+    // "read" although it walks the whole catalogue: it reports and never
+    // writes. Applying is closed to api tokens at the endpoint, so this command
+    // could not write the rows even if it asked to — `padmin chapters
+    // reconcile --apply` or the dashboard does that.
+    sensitivity: "read",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("reconcile")
+      .setDescription("Check which chapters MangaDex has stopped serving or deleted.")
+      .addStringOption((o) =>
+        o
+          .setName("extension")
+          .setDescription("Only this extension. Omit for every group we have uploaded to.")
+          .setAutocomplete(true),
+      ),
+    async run(ctx) {
+      const extension = ctx.options.string("extension");
+      const report = await ctx.api.reconcileChapters(ctx.actor, extension ? [extension] : []);
+
+      if (report.unavailableRecorded === 0 && report.deletedRecorded === 0) {
+        return {
+          text:
+            ":white_check_mark: Nothing to record — the archives already match MangaDex " +
+            `(${report.unavailableFound} unavailable and ${report.deletedFound} deleted, all known).`,
+        };
+      }
+      const lines = report.groups
+        .filter((group) => group.unavailable > 0)
+        .map(
+          (group) =>
+            `• **${group.extension}** — ${group.unavailable} of ${group.total} unavailable, ` +
+            `${group.recorded} not yet archived`,
+        );
+      return {
+        text:
+          `:mag: **${report.unavailableRecorded}** unavailable and **${report.deletedRecorded}** ` +
+          `deleted chapter(s) are missing from the archives.\n` +
+          (lines.length > 0 ? `${lines.join("\n")}\n` : "") +
+          (report.hidden.length > 0
+            ? `${report.hidden.length} hidden for an unknown reason — not archived.\n`
+            : "") +
+          "Nothing has been written. Run `padmin chapters reconcile --apply` to record them.",
+      };
+    },
+  },
+  {
     name: "tracked",
     description: "The external-id to MangaDex-id mapping for an extension.",
     sensitivity: { list: "read", set: "mutate", remove: "mutate" },

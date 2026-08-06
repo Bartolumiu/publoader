@@ -498,6 +498,14 @@ that has not happened yet.
 | `POST` | `/chapters/:mdChapterId/unavailable` | `chapters:write` + ADMIN | `{force?, footerNote?}`. Queues an `UNAVAILABLE`: render the card, attach it as the chapter's only page, repoint `externalUrl`, archive the row. **`409` when the chapter is already marked unavailable unless `force: true`** — without the flag the uploader treats it as done and changes nothing, which would make a wrong card unfixable |
 | `DELETE` | `/chapters/:mdChapterId` | `chapters:write` + ADMIN | `{confirm: true, reason?}`. Queues a `DELETE`. **`400` without `confirm`**, and the refusal names the unavailable route as the reversible alternative. The whole row goes into the audit detail, because afterwards `deleted_chapters` and that entry are the only records the chapter existed |
 
+And the one chapter route that writes directly instead of queueing, because it
+changes nothing on MangaDex — it corrects our record of what MangaDex already
+did:
+
+| Method | Path | Scope | Notes |
+| --- | --- | --- | --- |
+| `POST` | `/chapters/reconcile` | `chapters:read`, **plus ADMIN and no api tokens when `dryRun: false`** | `{dryRun?, extensions?, skipDeleted?}`, `dryRun` defaulting to **true**. Finds the chapters MangaDex has stopped serving (measured as the difference between two collection reads, since `isUnavailable` is absent on older records) and the ones it 404s, and archives them. Seeds archive rows for chapters with no `uploaded_chapters` row at all — the usual case, and the reason a sweep of our own table finds nothing. Idempotent: an already-archived id keeps its original timestamp. See docs/operations.md §"Reconcile the archives with MangaDex" |
+
 The same three actions over a set of chapters:
 
 | Method | Path | Scope | Notes |

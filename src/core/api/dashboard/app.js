@@ -3912,6 +3912,7 @@ VIEWS.chapters = (route) => {
     "div",
     {},
     chapterFilterCard(extensions, resetPaging),
+    reconcileCard(archive, reload),
     card(
       null,
       live(
@@ -3932,6 +3933,118 @@ VIEWS.chapters = (route) => {
     ),
   );
 };
+
+/**
+ * Bring the archives back in line with what MangaDex actually holds.
+ *
+ * Only on the two archives it can write, because offering it while reading
+ * `uploaded` or `edited` would imply it reconciles those, and it does not — it
+ * moves rows *into* unavailable and deleted.
+ *
+ * Check first, then apply, and never the other way round: the check is the only
+ * thing that says how many rows are about to move, and unlike the bulk actions
+ * above this one cannot be previewed row by row afterwards — an archived row
+ * has left `uploaded_chapters`.
+ */
+function reconcileCard(archive, reload) {
+  if (archive !== "unavailable" && archive !== "deleted") return el("span", {});
+  const output = el("div", { class: "dim small" });
+  let checked = null;
+
+  const render = (report) => {
+    checked = report;
+    const groups = (report.groups ?? []).filter((g) => g.unavailable > 0);
+    setChildren(
+      output,
+      el("div", {}, [
+        el("div", {
+          text:
+            `${report.unavailableRecorded} unavailable and ${report.deletedRecorded} deleted ` +
+            `chapter(s) are not in the archives ` +
+            `(found ${report.unavailableFound} and ${report.deletedFound}; the rest are already recorded).`,
+        }),
+        ...groups.map((g) =>
+          el("div", {
+            text: `${g.extension}: ${g.unavailable} of ${g.total} unavailable on MangaDex, ${g.recorded} new`,
+          }),
+        ),
+        report.hidden?.length
+          ? el("div", {
+              text:
+                `${report.hidden.length} chapter(s) are hidden for a reason that is not ` +
+                "unavailability — those are never archived.",
+            })
+          : el("span", {}),
+      ]),
+    );
+  };
+
+  return card(
+    "Reconcile with MangaDex",
+    el(
+      "div",
+      {},
+      el("p", {
+        class: "dim small",
+        text:
+          "These archives record what this platform did. This finds what MangaDex did on its " +
+          "own — chapters it has stopped serving, and chapters that are gone — and records those too.",
+      }),
+      el(
+        "div",
+        { class: "row" },
+        el("button", {
+          type: "button",
+          text: "Check",
+          onclick: (event) =>
+            act(
+              "chapters.reconcile.check",
+              async () => render(await api("/chapters/reconcile", { method: "POST", body: { dryRun: true } })),
+              { button: event.currentTarget },
+            ),
+        }),
+        el("button", {
+          type: "button",
+          class: "primary",
+          text: "Record them",
+          onclick: async (event) => {
+            const button = event.currentTarget;
+            if (!checked) {
+              toast("Check first — nothing should be written before you have seen the count.", false);
+              return;
+            }
+            const total = checked.unavailableRecorded + checked.deletedRecorded;
+            if (
+              !(await confirmDialog({
+                title: "Record what MangaDex changed",
+                lead: `${total} chapter(s) will move into the unavailable and deleted archives.`,
+                points: [
+                  "Nothing is sent to MangaDex — this only corrects our record of it.",
+                  "Rows that move leave uploaded_chapters, so a chapter lives in exactly one table.",
+                  "Chapters already archived keep the date they were first recorded.",
+                ],
+                confirmLabel: "Record them",
+              }))
+            ) {
+              return;
+            }
+            await act(
+              "chapters.reconcile.apply",
+              async () => {
+                render(await api("/chapters/reconcile", { method: "POST", body: { dryRun: false } }));
+                checked = null;
+                // The listing below now has rows it did not have a moment ago.
+                reload();
+              },
+              { button },
+            );
+          },
+        }),
+      ),
+      output,
+    ),
+  );
+}
 
 /**
  * Bulk actions over the ticked chapters, or over everything the filter matches.
