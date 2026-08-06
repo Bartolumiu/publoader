@@ -144,11 +144,21 @@ just leave the duplicate in place (`core/processor/processor.ts:575-579`).
 
 **run** — One scheduled or manually triggered execution of one extension, and the
 parent of one or more jobs. A run is created idempotently under a key: the
-scheduler uses `sched:<extension>:<slot>`
-(`src/core/scheduler/service.ts:95`), so a scheduler that crashes and
-restarts cannot double-create. Run kinds are `UPDATE` (the scheduled kind),
-`CLEAN` (return the full catalogue so removals can be computed), and `FORCE` (the
-default for a manual trigger).
+scheduler uses `sched:<extension>:<slot>:<kind>`
+(`src/core/scheduler/service.ts`), so a scheduler that crashes and
+restarts cannot double-create. Run kinds are `UPDATE` (the ordinary scheduled
+kind), `CLEAN` (return the full catalogue so removals can be computed), and
+`FORCE` (the default for a manual trigger). The kind is in the key because a
+[schedule slot](#schedule-slot) chooses it: an update and a clean at the same
+minute are two runs, not a collision.
+
+**schedule slot** — One recurring entry in an extension's schedule: a UTC time,
+a weekday set (Monday = 0 … Sunday = 6, empty meaning every day), and the run
+kind it creates. An extension has a *list* of them, so "15:00 update, 01:00
+update, Wednesday 01:00 clean, midnight update" is four slots rather than four
+extensions. Declared in the manifest's `schedule` and/or stored as
+`schedule_entries` rows, which replace the manifest's list wholesale when
+present (`src/core/scheduler/slots.ts`).
 
 **scope** — A permission string on an admin-audience credential, of the form
 `<area>:read` / `<area>:append` / `<area>:write`. Within one area `write` implies

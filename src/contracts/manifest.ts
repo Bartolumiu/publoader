@@ -2,6 +2,88 @@ import { z } from "zod";
 
 export const EXTENSION_NAME_RE = /^[a-z0-9_]+$/;
 
+/** The kinds of run a schedule slot may create. Mirrors Prisma's `RunKind`. */
+export const RUN_KINDS = ["UPDATE", "CLEAN", "FORCE"] as const;
+export const RunKind = z.enum(RUN_KINDS);
+export type RunKind = z.infer<typeof RunKind>;
+
+/**
+ * One slot in a manifest's `schedule`.
+ *
+ * `day` (a single weekday) and `days` (a set) both exist because `day` is what
+ * every published manifest already says; `days` is what "Saturday and Sunday"
+ * needs. Both use Python's `weekday()` numbering — Monday=0 — which is the
+ * numbering the extensions repo has used since before this platform existed;
+ * the conversion to JS's Sunday=0 happens once, in `slots.ts`.
+ */
+export const ManifestScheduleEntry = z.object({
+  hour: z.number().int().min(0).max(23),
+  minute: z.number().int().min(0).max(59),
+  day: z.number().int().min(0).max(6).optional(),
+  days: z.array(z.number().int().min(0).max(6)).max(7).optional(),
+  /** What the slot creates. `UPDATE` is the ordinary incremental run. */
+  kind: RunKind.default("UPDATE"),
+  /** Operator-facing note; never interpreted. */
+  label: z.string().min(1).max(80).optional(),
+  timezone: z.literal("UTC").default("UTC"),
+});
+export type ManifestScheduleEntry = z.infer<typeof ManifestScheduleEntry>;
+
+/**
+ * A schedule slot with every optional form resolved: one weekday SET (empty =
+ * every day) and an explicit kind. Everything downstream — the scheduler, the
+ * API, the CLI table — reads this shape, so `day` vs `days` and the absent-kind
+ * default are decided exactly once, here.
+ */
+export interface ScheduleSlot {
+  hour: number;
+  minute: number;
+  /** Monday=0 … Sunday=6. Empty means every day. */
+  days: number[];
+  kind: RunKind;
+  label?: string;
+}
+
+/** Resolve `day`/`days` into the sorted, duplicate-free set the slot fires on. */
+export function normalizeWeekdays(entry: { day?: number; days?: number[] }): number[] {
+  const set = new Set<number>(entry.days ?? []);
+  if (entry.day !== undefined) set.add(entry.day);
+  return [...set].sort((a, b) => a - b);
+}
+
+/** Normalise a manifest's `schedule` (object, list, or absent) into slots. */
+export function manifestSchedule(manifest: Pick<Manifest, "schedule">): ScheduleSlot[] {
+  if (!manifest.schedule) return [];
+  const entries = Array.isArray(manifest.schedule) ? manifest.schedule : [manifest.schedule];
+  return entries.map((entry) => ({
+    hour: entry.hour,
+    minute: entry.minute,
+    days: normalizeWeekdays(entry),
+    kind: entry.kind,
+    ...(entry.label !== undefined ? { label: entry.label } : {}),
+  }));
+}
+
+/** `15:05 UTC daily, update` — the one rendering every surface shows. */
+export const WEEKDAY_NAMES = [
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday",
+] as const;
+
+export function formatSlot(slot: ScheduleSlot): string {
+  const at = `${String(slot.hour).padStart(2, "0")}:${String(slot.minute).padStart(2, "0")} UTC`;
+  const when =
+    slot.days.length === 0
+      ? "daily"
+      : slot.days.map((d) => WEEKDAY_NAMES[d] ?? `day ${d}`).join(", ");
+  return `${at} ${when}, ${slot.kind.toLowerCase()}`;
+}
+
 /**
  * Validated, ENFORCED extension manifest (manifest.json in each extension
  * directory). Extends the format already used by publoader-extensions —
@@ -32,14 +114,15 @@ export const Manifest = z
         subprocess: z.boolean().default(false),
       })
       .default({ network: true, filesystem_read: [], filesystem_write: [], subprocess: false }),
-    schedule: z
-      .object({
-        hour: z.number().int().min(0).max(23),
-        minute: z.number().int().min(0).max(59),
-        day: z.number().int().min(0).max(6).optional(),
-        timezone: z.literal("UTC").default("UTC"),
-      })
-      .optional(),
+    /**
+     * When this extension runs, and as what kind of run.
+     *
+     * One object or a list of them. The list is the point: a source that wants
+     * a 15:00 update, a 01:00 update and a Wednesday 01:00 CLEAN is describing
+     * three independent slots, and the single-object form could only ever
+     * express one of them.
+     */
+    schedule: z.union([ManifestScheduleEntry, z.array(ManifestScheduleEntry).min(1).max(48)]).optional(),
     data_files: z.record(z.string()).default({}),
     maintainers: z.array(z.string()).default([]),
     homepage: z.string().url().optional(),

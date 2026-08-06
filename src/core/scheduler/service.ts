@@ -169,9 +169,13 @@ export class SchedulerService {
       if (!due) continue;
       const entry = manifests.find((m) => m.manifest.name === schedule.extension);
       if (!entry) continue;
+      // The kind is part of the key, so an extension scheduled for both an
+      // update and a clean at the same minute gets one of each — while two
+      // slots that agree on minute AND kind still collapse to a single run,
+      // which is what makes a duplicated slot harmless.
       await this.createRunForExtension(entry.manifest, entry.bundle, {
-        idempotencyKey: `sched:${schedule.extension}:${slotId(due)}`,
-        kind: "UPDATE",
+        idempotencyKey: `sched:${schedule.extension}:${slotId(due)}:${schedule.kind}`,
+        kind: schedule.kind,
         triggeredBy: "scheduler",
         scheduledFor: due,
       });

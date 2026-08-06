@@ -189,17 +189,30 @@ reads the persisted `scheduler_last_tick` setting, so a scheduler that was down
 resumes exactly where it left off rather than storming through history — and on
 first boot it looks back one minute only (`service.ts:75-77`).
 
-Effective schedules are the manifest's `schedule` overridden by
-`schedule_overrides` rows, minus anything in `disabled_extensions`
-(`scheduler/slots.ts:17-37`). A slot is due when its UTC minute falls in
-`(lastTick, now]`, compared at whole-minute resolution
-(`slots.ts:51-72`). Comparing minutes is what makes ticks idempotent and
-crash-tolerant: a scheduler down over the slot still creates the run on its next
-tick within the same UTC day.
+An extension has a **list** of schedule slots, not one time: a 15:00 update, a
+01:00 update and a Wednesday 01:00 clean are three independent decisions about
+when to run and what kind of run to create. Effective schedules are the
+manifest's `schedule` list *replaced* by `schedule_entries` rows when the
+extension has any, minus anything in `disabled_extensions`
+(`scheduler/slots.ts`). Replacement rather than merge, because a merge has no
+way to say "not that one" — an operator could never drop a slot the manifest
+declared. Presence of rows decides it, not their count: an extension whose every
+row is switched off runs *nothing*, since falling back there would turn "pause
+the weekly clean" into "and now do whatever the manifest said".
 
-Then `createRunForExtension` (`service.ts:112-168`) computes
+A slot is due when its UTC minute falls in `(lastTick, now]`, compared at
+whole-minute resolution, and its weekday set (empty = every day) contains the
+candidate's weekday. Comparing minutes is what makes ticks idempotent and
+crash-tolerant: a scheduler down over the slot still creates the run on its next
+tick within the same UTC day. Judging the weekday against the *candidate* rather
+than `now` is what makes that recovery correct across a midnight boundary.
+
+Then `createRunForExtension` (`service.ts`) computes
 [segments](#partitioned-execution) and calls `createRun`, whose idempotency key is
-`sched:<extension>:<slot>`. `createRun` (`store/jobs.ts:72-129`) inserts the run
+`sched:<extension>:<slot>:<kind>`. The kind is in the key so an update and a
+clean scheduled at the same minute produce one run each, while two slots that
+agree on both minute and kind collapse to a single run — which is what makes a
+duplicated slot harmless. `createRun` (`store/jobs.ts:72-129`) inserts the run
 and all its jobs **in one transaction**, and a duplicate key returns the existing
 run untouched. It handles the concurrent case explicitly: a `P2002` unique
 violation means another creator won, so it returns theirs
@@ -943,9 +956,9 @@ duplicate and which languages may stay on MangaDex (`core/processor/processor.ts
 runner does not even try: it reports `overrideOptions: {}` because the worker is
 not a trusted source of configuration (`runner.mjs:677-679`).
 
-**Schedules.** `schedule_overrides` beats the manifest's `schedule`
-(`scheduler/slots.ts:27`); `disabled_extensions` removes an extension from
-scheduling entirely.
+**Schedules.** `schedule_entries` rows replace the manifest's `schedule` list
+outright when an extension has any (`scheduler/slots.ts`);
+`disabled_extensions` removes an extension from scheduling entirely.
 
 **Everything else** — the pause gate, removal mode, the signup gate, the
 scheduler's last tick, the MangaDex session tokens — is a row in `settings`

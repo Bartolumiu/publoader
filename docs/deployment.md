@@ -460,7 +460,7 @@ none of it needs a shell on a container:
 | Control | Where it lives | Dashboard | CLI |
 |---|---|---|---|
 | Pause / resume | `settings.pause_until` | Overview | `padmin pause` / `resume` |
-| Schedules, removal mode, per-extension overrides | `schedule_overrides`, `settings`, `extension_configs` | Extensions | `padmin schedules`, `removal-mode`, `ext-config` |
+| Schedules, removal mode, per-extension overrides | `schedule_entries`, `settings`, `extension_configs` | Extensions | `padmin schedules`, `removal-mode`, `ext-config` |
 | Tracked manga mapping | `tracked_manga` | Extensions → Configure | `padmin tracked` |
 | Upload queue triage | `upload_tasks` | Queues | `padmin queues` |
 | Failure feed | `jobs`, `upload_tasks`, `result_submissions` | Errors | `padmin errors` |

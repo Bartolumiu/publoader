@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { computeSegments, dueSlot, effectiveSchedules, slotId } from "../../src/core/scheduler/slots.js";
 import { backoffSeconds } from "../../src/core/store/jobs.js";
-import { Manifest } from "../../src/contracts/manifest.js";
+import { Manifest, manifestSchedule, type ScheduleSlot } from "../../src/contracts/manifest.js";
 
 const manifest = (over: object = {}) =>
   Manifest.parse({
@@ -15,19 +15,79 @@ const manifest = (over: object = {}) =>
     ...over,
   });
 
+const slot = (over: Partial<ScheduleSlot> = {}): ScheduleSlot => ({
+  hour: 15,
+  minute: 5,
+  days: [],
+  kind: "UPDATE",
+  ...over,
+});
+
+describe("manifestSchedule", () => {
+  it("accepts the single-object form every published manifest already uses", () => {
+    expect(manifestSchedule(manifest())).toEqual([slot()]);
+  });
+
+  it("accepts a list, so one extension can declare several slots", () => {
+    const parsed = manifest({
+      schedule: [
+        { hour: 15, minute: 0 },
+        { hour: 1, minute: 0 },
+        { hour: 1, minute: 0, day: 2, kind: "CLEAN", label: "weekly deep clean" },
+      ],
+    });
+    expect(manifestSchedule(parsed)).toEqual([
+      slot({ hour: 15, minute: 0 }),
+      slot({ hour: 1, minute: 0 }),
+      slot({ hour: 1, minute: 0, days: [2], kind: "CLEAN", label: "weekly deep clean" }),
+    ]);
+  });
+
+  it("folds `day` and `days` into one sorted, duplicate-free set", () => {
+    const parsed = manifest({ schedule: { hour: 1, minute: 0, day: 2, days: [5, 2, 0] } });
+    expect(manifestSchedule(parsed)[0]?.days).toEqual([0, 2, 5]);
+  });
+
+  it("defaults an unspecified kind to UPDATE, not to whatever ran last", () => {
+    expect(manifestSchedule(manifest())[0]?.kind).toBe("UPDATE");
+  });
+});
+
 describe("effectiveSchedules", () => {
-  it("applies operator overrides over manifest defaults and drops disabled", () => {
+  it("flattens every slot of every enabled extension", () => {
+    const schedules = effectiveSchedules(
+      [manifest({ schedule: [{ hour: 15, minute: 0 }, { hour: 1, minute: 0 }] }), manifest({ name: "k_manga" })],
+      {},
+      [],
+    );
+    expect(schedules).toEqual([
+      { extension: "mangaplus", ...slot({ hour: 15, minute: 0 }) },
+      { extension: "mangaplus", ...slot({ hour: 1, minute: 0 }) },
+      { extension: "k_manga", ...slot() },
+    ]);
+  });
+
+  it("lets operator rows replace the manifest wholesale, and drops disabled extensions", () => {
     const schedules = effectiveSchedules(
       [manifest(), manifest({ name: "k_manga" })],
-      { mangaplus: { hour: 3, minute: 30, day: 2 } },
+      { mangaplus: [slot({ hour: 3, minute: 30, days: [2], kind: "CLEAN" })] },
       ["k_manga"],
     );
-    expect(schedules).toEqual([{ extension: "mangaplus", hour: 3, minute: 30, day: 2 }]);
+    expect(schedules).toEqual([
+      { extension: "mangaplus", ...slot({ hour: 3, minute: 30, days: [2], kind: "CLEAN" }) },
+    ]);
+  });
+
+  it("an extension whose every slot is switched off runs NOTHING, not the manifest", () => {
+    // The key is present with an empty list: "the operator has an opinion, and
+    // the opinion is none". Falling back here would resurrect the manifest's
+    // schedule the moment somebody paused the only slot they had.
+    expect(effectiveSchedules([manifest()], { mangaplus: [] }, [])).toEqual([]);
   });
 });
 
 describe("dueSlot", () => {
-  const sched = { extension: "x", hour: 15, minute: 5 };
+  const sched = slot();
   it("fires exactly once per slot window", () => {
     const now = new Date("2026-07-29T15:05:30Z");
     const lastTick = new Date("2026-07-29T15:04:30Z");
@@ -38,15 +98,40 @@ describe("dueSlot", () => {
   it("does not fire before the slot or on the wrong weekday", () => {
     expect(dueSlot(sched, new Date("2026-07-29T15:03:00Z"), new Date("2026-07-29T15:04:00Z"))).toBeNull();
     // 2026-07-29 is a Wednesday (python weekday 2).
-    const withDay = { ...sched, day: 3 };
-    expect(dueSlot(withDay, new Date("2026-07-29T15:04:00Z"), new Date("2026-07-29T15:06:00Z"))).toBeNull();
-    const rightDay = { ...sched, day: 2 };
+    const wrongDay = slot({ days: [3] });
+    expect(dueSlot(wrongDay, new Date("2026-07-29T15:04:00Z"), new Date("2026-07-29T15:06:00Z"))).toBeNull();
+    const rightDay = slot({ days: [2] });
     expect(dueSlot(rightDay, new Date("2026-07-29T15:04:00Z"), new Date("2026-07-29T15:06:00Z"))).not.toBeNull();
+  });
+  it("fires on any weekday in the set", () => {
+    const midweekAndWeekend = slot({ days: [2, 5] });
+    // Wednesday.
+    expect(
+      dueSlot(midweekAndWeekend, new Date("2026-07-29T15:04:00Z"), new Date("2026-07-29T15:06:00Z")),
+    ).not.toBeNull();
+    // Saturday.
+    expect(
+      dueSlot(midweekAndWeekend, new Date("2026-08-01T15:04:00Z"), new Date("2026-08-01T15:06:00Z")),
+    ).not.toBeNull();
+    // Thursday: not in the set.
+    expect(
+      dueSlot(midweekAndWeekend, new Date("2026-07-30T15:04:00Z"), new Date("2026-07-30T15:06:00Z")),
+    ).toBeNull();
   });
   it("recovers a slot missed during downtime within the same day", () => {
     const lastTick = new Date("2026-07-29T14:00:00Z");
     const now = new Date("2026-07-29T16:00:00Z");
     expect(dueSlot(sched, lastTick, now)?.toISOString()).toBe("2026-07-29T15:05:00.000Z");
+  });
+  it("several slots on one day are each independently due", () => {
+    // The whole point of the feature: 01:00 and 15:00 on the same extension are
+    // two fires, not one, and a tick that spans both must produce both.
+    const lastTick = new Date("2026-07-29T00:30:00Z");
+    const now = new Date("2026-07-29T16:00:00Z");
+    const early = dueSlot(slot({ hour: 1, minute: 0 }), lastTick, now);
+    const late = dueSlot(slot({ hour: 15, minute: 0 }), lastTick, now);
+    expect(early?.toISOString()).toBe("2026-07-29T01:00:00.000Z");
+    expect(late?.toISOString()).toBe("2026-07-29T15:00:00.000Z");
   });
   it("slotId is minute-resolution UTC", () => {
     expect(slotId(new Date("2026-07-29T15:05:00Z"))).toBe("2026-07-29T15:05");

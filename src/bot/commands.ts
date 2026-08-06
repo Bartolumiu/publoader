@@ -13,7 +13,14 @@
  * what to do instead (see RETIRED_COMMANDS) — a bot that answers "unknown
  * command" to `/logs` teaches nobody anything.
  */
-import { SlashCommandBuilder, type SlashCommandOptionsOnlyBuilder, type SlashCommandSubcommandsOnlyBuilder } from "discord.js";
+import {
+  SlashCommandBuilder,
+  type SlashCommandIntegerOption,
+  type SlashCommandOptionsOnlyBuilder,
+  type SlashCommandStringOption,
+  type SlashCommandSubcommandBuilder,
+  type SlashCommandSubcommandsOnlyBuilder,
+} from "discord.js";
 import { EXTENSION_NAME_RE } from "../contracts/manifest.js";
 import type { Logger } from "../logging.js";
 import {
@@ -203,6 +210,116 @@ async function statusReply(ctx: HandlerContext): Promise<BotReply> {
   return { text: lines(parts) };
 }
 
+// ---- schedule options and parsing -----------------------------------------
+
+const WEEKDAY_ABBREVIATIONS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const WEEKDAY_FULL = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+
+/**
+ * `mon,wed` / `weekdays` / `weekends` / `0,2` → the Monday=0 weekday set.
+ *
+ * Names come first in the documentation because 0=Monday is genuinely
+ * surprising to anyone who knows JavaScript's 0=Sunday; typing `0` for Sunday
+ * and getting Monday is a mistake nothing downstream can catch. Numbers stay
+ * legal because the contract has always used them.
+ */
+function parseWeekdays(raw: string | null): number[] {
+  if (!raw) return [];
+  const out = new Set<number>();
+  for (const token of raw.split(/[,\s]+/).map((t) => t.trim().toLowerCase()).filter(Boolean)) {
+    if (token === "daily" || token === "everyday" || token === "every") return [];
+    if (token === "weekdays") {
+      [0, 1, 2, 3, 4].forEach((d) => out.add(d));
+      continue;
+    }
+    if (token === "weekends") {
+      [5, 6].forEach((d) => out.add(d));
+      continue;
+    }
+    const byName = WEEKDAY_FULL.findIndex((name) => token.length >= 3 && name.startsWith(token));
+    if (byName >= 0) {
+      out.add(byName);
+      continue;
+    }
+    const asNumber = Number(token);
+    if (!Number.isInteger(asNumber) || asNumber < 0 || asNumber > 6) {
+      throw new UserError(
+        `\`${token}\` is not a weekday. Use \`mon\`…\`sun\`, \`weekdays\`, \`weekends\`, or 0-6 with 0 = Monday.`,
+      );
+    }
+    out.add(asNumber);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/** Shared so every schedule subcommand names the extension the same way. */
+const extensionOption = (o: SlashCommandStringOption): SlashCommandStringOption =>
+  o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true);
+
+/** Which row a mutating subcommand acts on, as printed by `/schedule show`. */
+const slotNumberOption = (o: SlashCommandIntegerOption): SlashCommandIntegerOption =>
+  o
+    .setName("slot")
+    .setDescription("Which slot, as numbered by /schedule show.")
+    .setRequired(true)
+    .setMinValue(1);
+
+/** The options `add` and `set` share; declared once so they cannot drift. */
+function withSlotOptions(s: SlashCommandSubcommandBuilder): SlashCommandSubcommandBuilder {
+  return s
+    .addStringOption(extensionOption)
+    .addIntegerOption((o) =>
+      o.setName("hour").setDescription("Hour, 0-23 UTC.").setRequired(true).setMinValue(0).setMaxValue(23),
+    )
+    .addIntegerOption((o) =>
+      o.setName("minute").setDescription("Minute, 0-59.").setRequired(true).setMinValue(0).setMaxValue(59),
+    )
+    .addStringOption((o) =>
+      o
+        .setName("days")
+        .setDescription("mon,wed / weekdays / weekends / 0-6 (0=Monday). Omit for every day."),
+    )
+    .addStringOption((o) =>
+      o
+        .setName("kind")
+        .setDescription("What this slot runs. Default: update.")
+        .addChoices(...RUN_KINDS),
+    )
+    .addStringOption((o) =>
+      o
+        .setName("label")
+        .setDescription('A note for the listing, e.g. "weekly deep clean".')
+        .setMaxLength(80),
+    );
+}
+
+/**
+ * Slot number (as printed by `/schedule show`) → the row it names.
+ *
+ * Re-reads the list rather than trusting a number the operator typed from a
+ * message that may be minutes old: the answer names the slot back to them
+ * ("Removed 01:00 UTC Wed clean"), so a stale number produces a visibly wrong
+ * confirmation rather than a silent deletion of the wrong row.
+ */
+async function resolveSlot(
+  ctx: HandlerContext,
+  extension: string,
+  index: number | null,
+): Promise<{ id: string; hour: number; minute: number; days: number[]; kind: string; label?: string }> {
+  if (index === null) throw new UserError("`slot` is required — run `/schedule show` to see the numbers.");
+  const { entries } = await ctx.api.extensionSchedule(ctx.actor, extension);
+  if (entries.length === 0) {
+    throw new UserError(
+      `\`${extension}\` has no operator slots to change. It is on its manifest schedule; \`/schedule add\` takes it over.`,
+    );
+  }
+  const slot = entries[index - 1];
+  if (!slot || !slot.id) {
+    throw new UserError(`\`${extension}\` has ${entries.length} slot(s); \`${index}\` is not one of them.`);
+  }
+  return { ...slot, id: slot.id };
+}
+
 // ---- command table --------------------------------------------------------
 
 const RUN_KINDS: { name: string; value: RunKind }[] = [
@@ -388,40 +505,63 @@ const commands: BotCommand[] = [
   {
     name: "schedule",
     description: "Inspect or override extension run schedules.",
-    sensitivity: { list: "read", set: "mutate", remove: "mutate" },
+    sensitivity: {
+      list: "read",
+      show: "read",
+      add: "mutate",
+      set: "mutate",
+      enable: "mutate",
+      disable: "mutate",
+      remove: "mutate",
+      reset: "mutate",
+    },
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("schedule")
       .setDescription("Inspect or override extension run schedules.")
-      .addSubcommand((s) => s.setName("list").setDescription("Manifest defaults and operator overrides."))
+      .addSubcommand((s) => s.setName("list").setDescription("Every extension's slots and where they come from."))
       .addSubcommand((s) =>
         s
-          .setName("set")
-          .setDescription("Override an extension's daily schedule (UTC).")
-          .addStringOption((o) =>
-            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
-          )
-          .addIntegerOption((o) =>
-            o.setName("hour").setDescription("Hour, 0-23 UTC.").setRequired(true).setMinValue(0).setMaxValue(23),
-          )
-          .addIntegerOption((o) =>
-            o.setName("minute").setDescription("Minute, 0-59.").setRequired(true).setMinValue(0).setMaxValue(59),
-          )
-          .addIntegerOption((o) =>
-            o
-              .setName("day")
-              .setDescription("Day of week, 0=Monday. Omit for every day.")
-              .setMinValue(0)
-              .setMaxValue(6),
-          ),
+          .setName("show")
+          .setDescription("One extension's slots, numbered for the other subcommands.")
+          .addStringOption(extensionOption),
+      )
+      .addSubcommand((s) =>
+        withSlotOptions(
+          s.setName("add").setDescription("Add a slot, keeping the ones already there (UTC)."),
+        ),
+      )
+      .addSubcommand((s) =>
+        withSlotOptions(
+          s.setName("set").setDescription("REPLACE the whole schedule with this single slot (UTC)."),
+        ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("disable")
+          .setDescription("Stop one slot firing, keeping it in the list.")
+          .addStringOption(extensionOption)
+          .addIntegerOption(slotNumberOption),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("enable")
+          .setDescription("Switch a slot back on.")
+          .addStringOption(extensionOption)
+          .addIntegerOption(slotNumberOption),
       )
       .addSubcommand((s) =>
         s
           .setName("remove")
-          .setDescription("Drop an override and fall back to the manifest default.")
-          .addStringOption((o) =>
-            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
-          ),
+          .setDescription("Delete one slot.")
+          .addStringOption(extensionOption)
+          .addIntegerOption(slotNumberOption),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("reset")
+          .setDescription("Drop every operator slot and fall back to the manifest schedule.")
+          .addStringOption(extensionOption),
       ),
     async run(ctx) {
       const sub = ctx.options.subcommand();
@@ -430,11 +570,10 @@ const commands: BotCommand[] = [
         const names = [...new Set([...Object.keys(defaults), ...Object.keys(overrides)])].sort();
         if (names.length === 0) return { text: "No schedules configured." };
         const rendered = names.map((name) => {
-          const override = overrides[name];
-          const base = defaults[name];
-          const effective = override ?? base;
-          const at = effective ? formatSchedule(effective) : "—";
-          return `• \`${name}\` — ${at}${override ? " *(override)*" : base ? " (manifest default)" : ""}`;
+          const slots = overrides[name] ?? defaults[name] ?? [];
+          const source = overrides[name] ? "override" : "manifest default";
+          if (slots.length === 0) return `• \`${name}\` — nothing scheduled *(${source})*`;
+          return `• \`${name}\` *(${source})* — ${slots.map(formatSchedule).join(" · ")}`;
         });
         return {
           text: lines([
@@ -443,26 +582,81 @@ const commands: BotCommand[] = [
           ]),
         };
       }
+
       const extension = requireExtensionName(ctx.options.string("extension"));
-      if (sub === "remove") {
+
+      if (sub === "show") {
+        const res = await ctx.api.extensionSchedule(ctx.actor, extension);
+        const body =
+          res.entries.length > 0
+            ? res.entries.map((slot, index) => `\`${index + 1}.\` ${formatSchedule(slot)}`)
+            : ["*No operator slots. The manifest schedule below is what runs.*"];
+        return {
+          text: lines([
+            `**\`${extension}\`** — ${res.source === "operator" ? "operator slots" : "manifest schedule"} (UTC)`,
+            ...body,
+            `Manifest: ${res.manifest.map(formatSchedule).join(" · ") || "none"}`,
+          ]),
+        };
+      }
+
+      if (sub === "reset") {
         const result = await ctx.api.removeSchedule(ctx.actor, extension);
         return {
           text: result.removed
-            ? `:wastebasket: Override removed for \`${extension}\` — it falls back to its manifest schedule.`
-            : `\`${extension}\` had no override; nothing changed.`,
+            ? `:wastebasket: All operator slots removed for \`${extension}\` — it falls back to its manifest schedule.`
+            : `\`${extension}\` had no operator slots; nothing changed.`,
         };
       }
+
+      if (sub === "remove" || sub === "enable" || sub === "disable") {
+        // Slots are addressed by their position in `/schedule show`, not by
+        // their uuid. Discord has no way to paste one that is not "read it off
+        // another message and hope"; a number the operator just looked at is
+        // the identifier they actually have.
+        const slot = await resolveSlot(ctx, extension, ctx.options.integer("slot"));
+        if (sub === "remove") {
+          await ctx.api.removeScheduleEntry(ctx.actor, extension, slot.id);
+          return { text: `:wastebasket: Removed ${formatSchedule(slot)} from \`${extension}\`.` };
+        }
+        const enabled = sub === "enable";
+        await ctx.api.setScheduleEnabled(ctx.actor, extension, slot.id, enabled);
+        return {
+          text: enabled
+            ? `:green_circle: ${formatSchedule(slot)} is on again for \`${extension}\`.`
+            : `:no_entry: ${formatSchedule(slot)} is switched off for \`${extension}\` — the row is kept.`,
+        };
+      }
+
       const hour = ctx.options.integer("hour");
       const minute = ctx.options.integer("minute");
-      const day = ctx.options.integer("day");
       if (hour === null || minute === null) throw new UserError("`hour` and `minute` are required.");
-      await ctx.api.setSchedule(ctx.actor, extension, {
+      const entry = {
         hour,
         minute,
-        ...(day === null ? {} : { day }),
-      });
+        days: parseWeekdays(ctx.options.string("days")),
+        kind: (ctx.options.string("kind") ?? "UPDATE") as "UPDATE" | "CLEAN" | "FORCE",
+        ...(ctx.options.string("label") ? { label: ctx.options.string("label") as string } : {}),
+      };
+
+      if (sub === "add") {
+        const res = await ctx.api.addSchedule(ctx.actor, extension, entry);
+        const seeded =
+          res.seeded > 0
+            ? ` Its ${res.seeded} manifest slot(s) were copied in first, so they keep running.`
+            : "";
+        return {
+          text: res.created
+            ? `:calendar: \`${extension}\` also runs ${formatSchedule(entry)}.${seeded} Takes effect within one scheduler tick.`
+            : `\`${extension}\` already had ${formatSchedule(entry)}; nothing changed.${seeded}`,
+        };
+      }
+
+      await ctx.api.setSchedule(ctx.actor, extension, entry);
       return {
-        text: `:calendar: \`${extension}\` now runs at ${formatSchedule({ hour, minute, day })}. Takes effect within one scheduler tick.`,
+        text:
+          `:calendar: \`${extension}\` now runs **only** ${formatSchedule(entry)} — every other slot was removed. ` +
+          "Use `/schedule add` to keep the others. Takes effect within one scheduler tick.",
       };
     },
   },
@@ -1440,11 +1634,22 @@ export async function runCommand(command: BotCommand, ctx: HandlerContext): Prom
   }
 }
 
-function formatSchedule(entry: { hour: number; minute: number; day?: number | null }): string {
+function formatSchedule(entry: {
+  hour: number;
+  minute: number;
+  days: number[];
+  kind: string;
+  label?: string;
+  enabled?: boolean;
+}): string {
   const time = `${String(entry.hour).padStart(2, "0")}:${String(entry.minute).padStart(2, "0")} UTC`;
-  if (entry.day === null || entry.day === undefined) return `${time} daily`;
-  const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-  return `${time} on ${days[entry.day] ?? `day ${entry.day}`}`;
+  const when =
+    entry.days.length === 0
+      ? "daily"
+      : entry.days.map((d) => WEEKDAY_ABBREVIATIONS[d] ?? `day ${d}`).join("/");
+  const off = entry.enabled === false ? " *(off)*" : "";
+  const note = entry.label ? ` — ${entry.label}` : "";
+  return `${time} ${when} \`${entry.kind.toLowerCase()}\`${off}${note}`;
 }
 
 function runIcon(state: string): string {

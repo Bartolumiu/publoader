@@ -76,7 +76,7 @@ The preset above covers every read plus the two write areas you want day to day
 | Add this scope | To get |
 |---|---|
 | `settings:write` | `/pause`, `/resume`, `/removal-mode get`/`set`, `/mdauth status`/`clear` |
-| `extensions:write` | `/extensions enable`/`disable`, `/schedule set`/`remove`, `/tracked set`/`remove` |
+| `extensions:write` | `/extensions enable`/`disable`, every mutating `/schedule` subcommand, `/tracked set`/`remove` |
 | `workers:write` | `/workers drain`/`activate`/`revoke` |
 | `enroll:write` | `/enroll` |
 | `bundles:write` | nothing — **the bot has no publish command; never grant it** |
@@ -139,7 +139,7 @@ Every command is classified by how much damage it can do:
 | Class | Gate | Examples |
 |---|---|---|
 | **read** | channel allowlist only, if one is configured | `/status`, `/runs`, `/audit`, `/whoami` |
-| **mutate** | admin **and** allowed channel | `/run`, `/pause`, `/extensions disable`, `/schedule set` |
+| **mutate** | admin **and** allowed channel | `/run`, `/pause`, `/extensions disable`, `/schedule add`/`set` |
 | **destructive** | admin, allowed channel, **and** an explicit `confirm: true` | `/run mode:CLEAN`, `/workers revoke`, `/untracked approve`, `/enroll` |
 
 Evaluated in order — guild, then channel, then privilege — so the message you
@@ -254,9 +254,14 @@ as the legacy `force_login` without a chat command that handles a password.
 | `/extensions list` | read | `extensions:read` | Published bundles with version, hash and disabled state. |
 | `/extensions enable <extension>` | mutate | `extensions:write` | Schedule it again. |
 | `/extensions disable <extension>` | mutate | `extensions:write` | Stop scheduling it. In-flight jobs are unaffected. |
-| `/schedule list` | read | `extensions:read` | Manifest defaults and operator overrides, with the effective time. |
-| `/schedule set <extension> <hour> <minute> [day]` | mutate | `extensions:write` | Override the schedule (UTC, `day` 0=Monday). Effective within one scheduler tick. |
-| `/schedule remove <extension>` | mutate | `extensions:write` | Drop the override, falling back to the manifest. |
+| `/schedule list` | read | `extensions:read` | Every extension's slots, and whether they come from the manifest or an operator. |
+| `/schedule show <extension>` | read | `extensions:read` | One extension's slots, **numbered** — those numbers are what the mutating subcommands take. |
+| `/schedule add <extension> <hour> <minute> [days] [kind] [label]` | mutate | `extensions:write` | Add a slot, keeping the others. Copies the manifest's slots in first if the extension has none, and says so. |
+| `/schedule set <extension> <hour> <minute> [days] [kind] [label]` | mutate | `extensions:write` | **Replaces** the whole schedule with this one slot. Use `add` to keep the others. |
+| `/schedule disable <extension> <slot>` | mutate | `extensions:write` | Stop one slot firing, keeping the row. |
+| `/schedule enable <extension> <slot>` | mutate | `extensions:write` | Switch it back on. |
+| `/schedule remove <extension> <slot>` | mutate | `extensions:write` | Delete one slot. |
+| `/schedule reset <extension>` | mutate | `extensions:write` | Drop every operator slot, falling back to the manifest. |
 | `/tracked list <extension>` | read | `extensions:read` | The external-id → MangaDex-id mapping. |
 | `/tracked set <extension> <manga-id> <md-manga-id>` | mutate | `extensions:write` | Add or repoint a mapping. |
 | `/tracked remove <extension> <manga-id>` | mutate | `extensions:write` | Stop tracking. Does not touch MangaDex. |
@@ -264,6 +269,18 @@ as the legacy `force_login` without a chat command that handles a password.
 
 `/extensions list` shows **published bundles**, not files on disk. An extension
 in the repo that was never published does not appear — that is intended.
+
+`/schedule` addresses slots by their **position in `/schedule show`**, not by
+their database id: Discord gives nobody a way to paste a uuid except reading it
+off another message and hoping. The bot re-reads the list on every mutating
+call and names the slot back in its answer ("Removed 01:00 UTC wed `clean`"), so
+a number typed from a stale message produces a visibly wrong confirmation rather
+than a silent deletion of the wrong row.
+
+`days` accepts `mon,wed`, `weekdays`, `weekends`, or the raw contract numbers
+`0-6` with **0 = Monday**. Names are the documented form because `0` reads as
+Sunday to anyone who knows JavaScript, and that mistake is invisible until the
+run happens on the wrong day.
 
 ### Untracked series
 

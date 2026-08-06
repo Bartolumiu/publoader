@@ -365,9 +365,13 @@ Pausing stops new leases (`routes/worker.ts:110`), scheduled run creation
 | `GET` | `/extensions` | `extensions:read` | Latest non-yanked bundle per extension + `disabled` flag |
 | `POST` | `/extensions/:name/enable` | `extensions:write` | `400` on a name failing `^[a-z0-9_]+$` |
 | `POST` | `/extensions/:name/disable` | `extensions:write` | Stops scheduling; does not touch in-flight runs |
-| `GET` | `/schedules` | `extensions:read` | `{defaults, overrides}` — manifest defaults and DB overrides, separately |
-| `PUT` | `/schedules/:name` | `extensions:write` | `{hour: 0..23, minute: 0..59, day?: 0..6}`, UTC, `day` 0 = Monday |
-| `DELETE` | `/schedules/:name` | `extensions:write` | → `{ok, removed}` |
+| `GET` | `/schedules` | `extensions:read` | `{defaults, overrides, effective}` — manifest slots, DB rows, and what will actually run. Each is `Record<extension, slot[]>` |
+| `GET` | `/schedules/:name` | `extensions:read` | `{extension, manifest, entries, effective, source}`. `entries` carries the `id` every mutating call below needs |
+| `PUT` | `/schedules/:name` | `extensions:write` | **Replaces** the whole schedule. `{entries: slot[]}`, or a bare slot meaning a one-element list. `{entries: []}` means *run nothing* — not the same as `DELETE` |
+| `POST` | `/schedules/:name` | `extensions:write` | **Appends** one slot → `{ok, id, created, seeded}`. Seeds the manifest's slots first when the extension has none, so adding never silently drops them. `created: false` when an identical slot already exists |
+| `PATCH` | `/schedules/:name/:id` | `extensions:write` | `{enabled: boolean}` — stop a slot firing without losing it. **404** on an id not belonging to `:name` |
+| `DELETE` | `/schedules/:name/:id` | `extensions:write` | Drop one slot. **404** on an id not belonging to `:name` |
+| `DELETE` | `/schedules/:name` | `extensions:write` | Drop every slot → `{ok, removed}`; the extension falls back to its manifest |
 | `GET` | `/extensions/:name/tracked` | `tracked:read` | Every publisher-id → MangaDex-title mapping |
 | `PUT` | `/extensions/:name/tracked` | `tracked:append` | `{mangaId, mdMangaId}`; upsert, records the actor as `source`. **403** when the mapping already exists and points somewhere else and the caller lacks `tracked:write` — repointing a series is an edit, and a silent one |
 | `POST` | `/extensions/:name/tracked/batch` | `tracked:append` | Bulk curation — see below |
@@ -379,6 +383,55 @@ Pausing stops new leases (`routes/worker.ts:110`), scheduled run creation
 | `POST` | `/removal-mode` | `settings:write` | `{mode: "unavailable"\|"delete"}` |
 
 `routes/admin.ts:208-280`, `387-470`.
+
+#### Schedule slots
+
+One extension has a *list* of slots, not one time. A slot is:
+
+```json
+{
+  "hour": 1,
+  "minute": 0,
+  "days": [2],
+  "kind": "CLEAN",
+  "label": "weekly deep clean"
+}
+```
+
+- `days` is a **set** of weekdays, **Monday = 0 … Sunday = 6** (Python's
+  `weekday()`, the numbering the extension contract has always used — *not*
+  JavaScript's Sunday = 0). An empty or absent array means **every day**. A
+  single `day: 0..6` is accepted as shorthand and folded into `days`.
+- `kind` is `UPDATE` (default, the ordinary incremental run), `CLEAN` (full
+  catalogue so removals can be computed), or `FORCE`.
+- `label` is never interpreted; it exists so `01:00 Wed clean` has a name in a
+  listing.
+
+The four-slot example the feature was built for — 15:00 update, 01:00 update,
+Wednesday 01:00 clean, midnight update:
+
+```json
+{"entries": [
+  {"hour": 15, "minute": 0},
+  {"hour": 1,  "minute": 0},
+  {"hour": 1,  "minute": 0, "days": [2], "kind": "CLEAN", "label": "weekly deep clean"},
+  {"hour": 0,  "minute": 0}
+]}
+```
+
+**Precedence is replacement, not merge.** If an extension has any rows, they are
+its whole schedule and the manifest's slots are ignored — including when every
+row is switched off, which means *run nothing* rather than *fall back*. A merge
+could not express "not that one": there would be no way to drop a slot the
+manifest declared. `POST` compensates for the sharp edge by copying the
+manifest's slots in before appending (`seeded` in the response says how many),
+so adding a weekly clean cannot silently cancel the daily update.
+
+**Run identity.** The scheduler keys each run
+`sched:<extension>:<slot-minute>:<kind>`. Two slots at the same minute with
+different kinds therefore produce two runs; two that agree on both collapse to
+one, which is what makes a duplicated slot harmless
+(`core/scheduler/service.ts`).
 
 #### Bulk series-map curation
 

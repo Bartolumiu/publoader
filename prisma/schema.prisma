@@ -562,14 +562,42 @@ model ExtensionLanguageMap {
   @@map("extension_language_maps")
 }
 
-model ScheduleOverride {
-  extension String   @id
+/// One recurring slot in an extension's run schedule.
+///
+/// A row per slot rather than a row per extension, because one extension
+/// legitimately wants several: a 15:00 update, a 01:00 update, and a Wednesday
+/// 01:00 CLEAN are three independent decisions about when to run and what kind
+/// of run to create. The old single-row `schedule_overrides` could express one
+/// time and one weekday, so the only way to get a weekly deep run was to give
+/// up the daily one.
+///
+/// `days` is the weekday filter, Monday=0 … Sunday=6 (Python's `weekday()`,
+/// the numbering the extension contract has always used). Empty means every
+/// day — the common case, and the one an operator gets by not answering the
+/// question.
+///
+/// Rows for an extension REPLACE its manifest schedule wholesale, exactly as
+/// the single override row did. `schedules add` materialises the manifest
+/// entries first when none exist, so "add a weekly clean" does not silently
+/// drop the manifest's daily update; clearing every row falls back to the
+/// manifest again.
+model ScheduleEntry {
+  id        String   @id @default(uuid())
+  extension String
   hour      Int
   minute    Int
-  day       Int?
+  days      Int[]    @default([])
+  kind      RunKind  @default(UPDATE)
+  /// Operator-facing note ("weekly deep clean"); never interpreted.
+  label     String?
+  /// Off keeps the row but stops it firing — pausing the weekly clean while
+  /// investigating it should not mean retyping it afterwards.
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  @@map("schedule_overrides")
+  @@index([extension])
+  @@map("schedule_entries")
 }
 
 model DisabledExtension {

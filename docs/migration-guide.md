@@ -206,7 +206,9 @@ docker compose run --rm --no-deps \
   core-processor node dist/src/cli/import-sqlite.js /legacy/publoader.db
 ```
 
-This imports `schedule_overrides`, `disabled_extensions`, and the two settings
+This imports the legacy `schedule_overrides` table (each row becoming one
+`schedule_entries` slot: same time, kind `UPDATE`, its optional `day` becoming a
+one-element weekday set), `disabled_extensions`, and the two settings
 the platform honours (`chapter_removal_mode`, `pause_until`). `run_history` is
 deliberately **not** imported — the platform's `runs` table carries state,
 bundle pins and segments that the legacy rows cannot supply. Keep the SQLite
@@ -226,7 +228,7 @@ docker compose exec postgres psql -U publoader -d publoader -c "
   UNION ALL SELECT 'unavailable_chapters', count(*) FROM unavailable_chapters
   UNION ALL SELECT 'upload_tasks', count(*) FROM upload_tasks
   UNION ALL SELECT 'artifacts', count(*) FROM artifacts
-  UNION ALL SELECT 'schedule_overrides', count(*) FROM schedule_overrides;"
+  UNION ALL SELECT 'schedule_entries', count(*) FROM schedule_entries;"
 ```
 
 Compare against the counts you recorded in stage 0.

@@ -299,41 +299,168 @@ describe("/extensions", () => {
 });
 
 describe("/schedule", () => {
-  it("shows the override winning over the manifest default", async () => {
+  const daily = (hour: number, over: object = {}) => ({
+    hour,
+    minute: 0,
+    days: [],
+    kind: "UPDATE",
+    ...over,
+  });
+
+  it("shows every slot an extension has, not just the first", async () => {
     const api = fakeApi({
       schedules: vi.fn().mockResolvedValue({
-        defaults: { mangaplus: { hour: 15, minute: 5 }, k_manga: { hour: 1, minute: 0 } },
-        overrides: { mangaplus: { hour: 3, minute: 30, day: 2 } },
+        defaults: { mangaplus: [daily(15)], k_manga: [daily(1)] },
+        overrides: {
+          mangaplus: [
+            daily(15),
+            daily(1),
+            daily(1, { days: [2], kind: "CLEAN", label: "weekly deep clean" }),
+          ],
+        },
+        effective: {},
       }),
     });
     const reply = await invoke("schedule", api, {}, "list");
-    expect(reply.text).toContain("03:30 UTC on Wed *(override)*");
-    expect(reply.text).toContain("01:00 UTC daily (manifest default)");
+    expect(reply.text).toContain("15:00 UTC daily");
+    expect(reply.text).toContain("01:00 UTC wed `clean` — weekly deep clean");
+    expect(reply.text).toContain("*(override)*");
+    expect(reply.text).toContain("01:00 UTC daily `update`");
   });
 
-  it("sets a daily override without a day field", async () => {
-    const setSchedule = vi.fn().mockResolvedValue({ ok: true });
-    await invoke("schedule", fakeApi({ setSchedule }), { extension: "mangaplus", hour: 4, minute: 15 }, "set");
-    expect(setSchedule).toHaveBeenCalledWith("discord:ardax", "mangaplus", { hour: 4, minute: 15 });
-  });
-
-  it("passes a weekday through when given", async () => {
-    const setSchedule = vi.fn().mockResolvedValue({ ok: true });
+  it("adds a slot without disturbing the ones already there", async () => {
+    const addSchedule = vi.fn().mockResolvedValue({ ok: true, id: "abc", created: true, seeded: 0 });
     await invoke(
       "schedule",
-      fakeApi({ setSchedule }),
-      { extension: "mangaplus", hour: 4, minute: 15, day: 0 },
-      "set",
+      fakeApi({ addSchedule }),
+      { extension: "mangaplus", hour: 1, minute: 0, days: "wed", kind: "CLEAN", label: "weekly" },
+      "add",
     );
-    expect(setSchedule).toHaveBeenCalledWith("discord:ardax", "mangaplus", { hour: 4, minute: 15, day: 0 });
+    expect(addSchedule).toHaveBeenCalledWith("discord:ardax", "mangaplus", {
+      hour: 1,
+      minute: 0,
+      days: [2],
+      kind: "CLEAN",
+      label: "weekly",
+    });
   });
 
-  it("distinguishes removing an override from there never having been one", async () => {
+  it("reports the manifest slots it copied in, so nothing looks silently dropped", async () => {
+    const addSchedule = vi.fn().mockResolvedValue({ ok: true, id: "abc", created: true, seeded: 2 });
+    const reply = await invoke(
+      "schedule",
+      fakeApi({ addSchedule }),
+      { extension: "mangaplus", hour: 1, minute: 0 },
+      "add",
+    );
+    expect(reply.text).toContain("2 manifest slot(s) were copied in first");
+  });
+
+  it("accepts weekday names and rejects a word that is not one", async () => {
+    const addSchedule = vi.fn().mockResolvedValue({ ok: true, id: "a", created: true, seeded: 0 });
+    await invoke(
+      "schedule",
+      fakeApi({ addSchedule }),
+      { extension: "mangaplus", hour: 1, minute: 0, days: "sat,sun" },
+      "add",
+    );
+    expect(addSchedule.mock.calls[0]?.[2]).toMatchObject({ days: [5, 6] });
+
+    const bad = await invoke(
+      "schedule",
+      fakeApi({ addSchedule }),
+      { extension: "mangaplus", hour: 1, minute: 0, days: "funday" },
+      "add",
+    );
+    expect(bad.text).toContain("not a weekday");
+  });
+
+  it("`set` says out loud that it replaced everything else", async () => {
+    const setSchedule = vi.fn().mockResolvedValue({ ok: true, entries: 1 });
+    const reply = await invoke(
+      "schedule",
+      fakeApi({ setSchedule }),
+      { extension: "mangaplus", hour: 4, minute: 15 },
+      "set",
+    );
+    expect(setSchedule).toHaveBeenCalledWith("discord:ardax", "mangaplus", {
+      hour: 4,
+      minute: 15,
+      days: [],
+      kind: "UPDATE",
+    });
+    expect(reply.text).toContain("every other slot was removed");
+  });
+
+  it("addresses a slot by its listed number, not by a uuid nobody can type", async () => {
+    const extensionSchedule = vi.fn().mockResolvedValue({
+      extension: "mangaplus",
+      manifest: [],
+      entries: [
+        { id: "id-one", enabled: true, ...daily(15) },
+        { id: "id-two", enabled: true, ...daily(1, { days: [2], kind: "CLEAN" }) },
+      ],
+      effective: [],
+      source: "operator",
+    });
+    const removeScheduleEntry = vi.fn().mockResolvedValue({ ok: true, removed: true });
+    const reply = await invoke(
+      "schedule",
+      fakeApi({ extensionSchedule, removeScheduleEntry }),
+      { extension: "mangaplus", slot: 2 },
+      "remove",
+    );
+    expect(removeScheduleEntry).toHaveBeenCalledWith("discord:ardax", "mangaplus", "id-two");
+    // The confirmation names the slot back, so a stale number is visible.
+    expect(reply.text).toContain("01:00 UTC wed");
+  });
+
+  it("refuses a slot number the extension does not have", async () => {
+    const extensionSchedule = vi.fn().mockResolvedValue({
+      extension: "mangaplus",
+      manifest: [],
+      entries: [{ id: "id-one", enabled: true, ...daily(15) }],
+      effective: [],
+      source: "operator",
+    });
+    const reply = await invoke(
+      "schedule",
+      fakeApi({ extensionSchedule }),
+      { extension: "mangaplus", slot: 4 },
+      "remove",
+    );
+    expect(reply.text).toContain("has 1 slot(s)");
+  });
+
+  it("switching a slot off keeps the row", async () => {
+    const extensionSchedule = vi.fn().mockResolvedValue({
+      extension: "mangaplus",
+      manifest: [],
+      entries: [{ id: "id-one", enabled: true, ...daily(1, { days: [2], kind: "CLEAN" }) }],
+      effective: [],
+      source: "operator",
+    });
+    const setScheduleEnabled = vi.fn().mockResolvedValue({ ok: true, enabled: false });
+    const reply = await invoke(
+      "schedule",
+      fakeApi({ extensionSchedule, setScheduleEnabled }),
+      { extension: "mangaplus", slot: 1 },
+      "disable",
+    );
+    expect(setScheduleEnabled).toHaveBeenCalledWith("discord:ardax", "mangaplus", "id-one", false);
+    expect(reply.text).toContain("the row is kept");
+  });
+
+  it("distinguishes resetting an override from there never having been one", async () => {
     const had = fakeApi({ removeSchedule: vi.fn().mockResolvedValue({ ok: true, removed: true }) });
-    expect((await invoke("schedule", had, { extension: "mangaplus" }, "remove")).text).toContain("Override removed");
+    expect((await invoke("schedule", had, { extension: "mangaplus" }, "reset")).text).toContain(
+      "All operator slots removed",
+    );
 
     const none = fakeApi({ removeSchedule: vi.fn().mockResolvedValue({ ok: true, removed: false }) });
-    expect((await invoke("schedule", none, { extension: "mangaplus" }, "remove")).text).toContain("no override");
+    expect((await invoke("schedule", none, { extension: "mangaplus" }, "reset")).text).toContain(
+      "no operator slots",
+    );
   });
 });
 
