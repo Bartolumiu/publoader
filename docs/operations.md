@@ -1480,6 +1480,62 @@ another token or touch accounts.
 
 ---
 
+## Change what a role or an account may do
+
+Roles ship with a scope baseline, not a fixed law. Two knobs, and reaching for
+the smaller one first is usually right.
+
+**Redefine a role** when the answer should apply to everybody in it:
+
+```bash
+padmin permissions show                    # the taxonomy, and where each role stands
+padmin permissions set-role CONTRIBUTOR \
+  --scopes extensions:read,tracked:read,tracked:append,untracked:write,stats:read
+padmin permissions reset-role CONTRIBUTOR  # back to the shipped default
+```
+
+Only `ADMIN` and `CONTRIBUTOR` are tunable. `OWNER` is the wildcard by
+construction and is the role that edits permissions at all, so narrowing it
+could leave nobody able to widen it again; `ADMIN_TOKEN` is the only thing
+behind it.
+
+Resetting is a delete, not a re-typing of the default: a role with no override
+tracks the shipped default as future releases change it, which is how a new
+scope reaches your admins without you noticing. A role you have redefined does
+**not** pick up new scopes — that is the trade for tuning it at all.
+
+**Tune one account** when the answer is about one person, and inventing a fourth
+role would be worse:
+
+```bash
+padmin permissions user <userId>                       # baseline, grants, denials, effective
+padmin permissions set-user <userId> --deny bundles:write     # an ADMIN who may not publish
+padmin permissions set-user <userId> --grant runs:read        # a contributor who may watch runs
+padmin permissions set-user <userId> --clear                  # exactly their role again
+```
+
+Denials win over grants and over the role. They close **upward**: denying
+`runs:read` also denies `runs:write`, because a write implies the read and would
+hand it straight back. Denying a write leaves the read alone, which is how you
+express "watch but do not touch".
+
+Owners cannot be tuned — they hold everything regardless — and promoting an
+account to `OWNER` clears its tuning rather than parking it, so a later demotion
+cannot resurrect a denial nobody remembers.
+
+**All of it takes effect on sessions that are already open**, within a few
+seconds. You do not need to force anyone to sign in again; if you want them out
+regardless, revoke the session from **Users → Sessions**.
+
+Same operations in the dashboard's **Permissions** view and the **Permissions**
+button on each account row, and from Discord with `/permissions` — though the
+writing half of that needs the OWNER role, which a bot token never has (see
+[bot.md](bot.md#which-scope-unlocks-which-command)). Every change is audited as
+`permissions.role`, `permissions.role.reset` or `permissions.user`, recording
+the before and after.
+
+---
+
 ## Untracked series triage
 
 When an extension reports a series that has no `tracked_manga` mapping, the

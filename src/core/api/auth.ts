@@ -85,6 +85,12 @@ export interface AdminPrincipal {
   role: AdminRole;
   userId: string;
   sessionId: string;
+  /**
+   * The account's effective scope set, already tuned. Optional so a caller
+   * that has no permission store to consult still gets the shipped defaults
+   * for the role rather than nothing.
+   */
+  scopes?: readonly string[];
 }
 
 export interface AdminAuthOptions {
@@ -161,7 +167,9 @@ export function adminAuthHook(opts: AdminAuthOptions) {
       // Kind-prefixed to match the rest of the audit log (worker:…, token:…,
       // ip:…), so an actor string always says what sort of thing acted.
       name: `user:${session.actor}`,
-      scopes: scopesForRole(session.role),
+      // Already tuned by the session resolver; the role default is the floor
+      // for a caller that supplied no store to tune against.
+      scopes: session.scopes ?? scopesForRole(session.role),
     };
   };
 }

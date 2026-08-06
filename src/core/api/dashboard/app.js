@@ -412,6 +412,7 @@ const ICONS = {
   workers: "M4 17h16M6 17V9l6-4 6 4v8M10 17v-4h4v4",
   users: "M12 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-7 9c0-3.3 3.1-6 7-6s7 2.7 7 6",
   tokens: "M14 4a6 6 0 1 1-4.6 9.9L4 19v2h3v-2h2v-2h2l1.5-1.5A6 6 0 0 1 14 4Zm2.5 3.5h.01",
+  permissions: "M6 11V8a6 6 0 0 1 12 0v3m-13 0h14v9H5v-9Zm7 3.5v2",
   audit: "M7 3h7l5 5v13H7V3Zm7 0v5h5M10 13h7m-7 4h7",
   system: "M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm8 3.5-1.8.6-.7 1.7 1 1.6-1.6 1.6-1.6-1-1.7.7L13 19h-2l-.6-1.8-1.7-.7-1.6 1L5.5 16l1-1.6-.7-1.7L4 12v-2l1.8-.6.7-1.7-1-1.6L7.1 4.5l1.6 1 1.7-.7L11 3h2l.6 1.8 1.7.7 1.6-1 1.6 1.6-1 1.6.7 1.7L20 10v2Z",
   chevron: "M15 6l-6 6 6 6",
@@ -1064,6 +1065,14 @@ const NAV = [
       ["mint", "Mint"],
     ],
     blurb: "Scoped per-client credentials.",
+  },
+  {
+    id: "permissions",
+    label: "Permissions",
+    group: "Admin",
+    icon: "permissions",
+    owner: true,
+    blurb: "What each role may do on this deployment.",
   },
   {
     id: "audit",
@@ -8430,7 +8439,25 @@ VIEWS.users = (route) => {
                   ? el("div", { class: "dim small", text: `discord: ${user.discordUsername}` })
                   : null,
               ),
-              chip(user.role),
+              // "tuned" is worth a glance in the table: an account that is not
+              // simply its role is the one whose access nobody remembers.
+              el(
+                "div",
+                { class: "row tight" },
+                chip(user.role),
+                (user.extraScopes?.length ?? 0) + (user.deniedScopes?.length ?? 0) > 0
+                  ? el("span", {
+                      class: "chip",
+                      text: "tuned",
+                      title: [
+                        user.extraScopes?.length ? `granted: ${user.extraScopes.join(", ")}` : null,
+                        user.deniedScopes?.length ? `denied: ${user.deniedScopes.join(", ")}` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · "),
+                    })
+                  : null,
+              ),
               chip(user.approved ? "approved" : "pending"),
               // Both can be true, that is the point of linking, so this is a
               // list, not a ladder. Neither means the account has only ever
@@ -8477,6 +8504,15 @@ VIEWS.users = (route) => {
                     })
                   : null,
                 el("button", { type: "button", text: "Set password", onclick: () => passwordDialog(user, users) }),
+                // Per-account tuning. Offered for everyone except owners, who
+                // hold every scope regardless of what the lists say.
+                user.role !== "OWNER"
+                  ? el("button", {
+                      type: "button",
+                      text: "Permissions",
+                      onclick: () => userPermissionsDialog(user, users),
+                    })
+                  : null,
                 // The recovery path for a Discord account nobody holds any
                 // more; without it that operator account is stranded.
                 user.discordId
@@ -8612,6 +8648,335 @@ function passwordDialog(user, users) {
       ),
     ),
   );
+}
+
+// ---------------------------------------------------------------- permissions
+
+/**
+ * A checkbox per scope, grouped by area.
+ *
+ * Grouping is not decoration: the flat taxonomy is 21 entries and the question
+ * being answered is nearly always about an area ("may they touch chapters at
+ * all?"), so a flat list makes the reader do the sorting every time. Each box
+ * carries its description as a title, because a checkbox labelled
+ * `tracked:append` alone assumes the reader already knows the answer they came
+ * to look up.
+ *
+ * Returns handles rather than a bare node: the caller needs to read the
+ * selection back and to set it from a preset.
+ */
+function scopePicker(scopes, { selected = [], idPrefix = "scope", onchange } = {}) {
+  const boxes = new Map();
+  const areas = new Map();
+  for (const scope of scopes) {
+    const area = scope.name.split(":")[0];
+    if (!areas.has(area)) areas.set(area, []);
+    areas.get(area).push(scope);
+  }
+  const chosen = new Set(selected);
+
+  const node = el(
+    "div",
+    { class: "grid" },
+    [...areas].map(([area, list]) =>
+      el(
+        "div",
+        { class: "stat" },
+        el("div", { class: "k", text: area }),
+        list.map((scope) => {
+          const id = `${idPrefix}-${scope.name}`;
+          const box = el("input", {
+            type: "checkbox",
+            id,
+            value: scope.name,
+            checked: chosen.has(scope.name),
+            ...(onchange ? { onchange } : {}),
+          });
+          boxes.set(scope.name, box);
+          return el(
+            "div",
+            { class: "row tight", title: scope.description },
+            box,
+            el("label", { class: "inline", for: id, text: scope.name }),
+          );
+        }),
+      ),
+    ),
+  );
+
+  return {
+    node,
+    get: () => [...boxes].filter(([, box]) => box.checked).map(([name]) => name),
+    set: (wanted) => {
+      const set = new Set(wanted);
+      for (const [name, box] of boxes) box.checked = set.has(name);
+      onchange?.();
+    },
+  };
+}
+
+/**
+ * What each role means here.
+ *
+ * The wildcard is shown as itself rather than expanded into 21 boxes: OWNER
+ * holds scopes that do not exist yet, and a checklist would quietly claim
+ * otherwise.
+ */
+VIEWS.permissions = () => {
+  const catalogue = new Resource("permissions", () => api("/permissions"));
+
+  return el(
+    "div",
+    {},
+    card(
+      "Roles",
+      el("p", {
+        class: "dim small",
+        text:
+          "A role's baseline is what every account in it starts with. Changing one takes effect on sessions that " +
+          "are already open, within a few seconds — nobody has to sign in again. Individual accounts can be tuned " +
+          "further from the Users page.",
+      }),
+      live(
+        [catalogue],
+        (data) =>
+          el(
+            "div",
+            {},
+            data.roles.map((role) => rolePanel(role, data, catalogue)),
+          ),
+        {
+          reserve: 400,
+          skeleton: () => el("div", {}, el("div", { class: "skeleton skeleton-line" }), skeletonGrid(6)),
+        },
+      ),
+    ),
+  );
+};
+
+/** One role's editor, or its read-only statement when it is not tunable. */
+function rolePanel(role, data, catalogue) {
+  const heading = el(
+    "div",
+    { class: "row" },
+    el("h3", { text: role.role }),
+    chip(role.custom ? "customised" : role.tunable ? "shipped default" : "fixed"),
+    role.updatedBy ? el("span", { class: "dim small", text: `last changed by ${role.updatedBy}` }) : null,
+  );
+
+  if (!role.tunable) {
+    return el(
+      "div",
+      { class: "stat" },
+      heading,
+      el("p", {
+        class: "dim small",
+        text:
+          "OWNER holds every scope, including ones added by future releases, and cannot be narrowed. It is the " +
+          "role that edits permissions, so leaving it editable would let one mistake lock this deployment out of " +
+          "its own control plane.",
+      }),
+      el("div", { class: "row tight" }, chip("*")),
+    );
+  }
+
+  const picker = scopePicker(data.scopes, { selected: role.scopes, idPrefix: `role-${role.role}` });
+
+  return el(
+    "div",
+    { class: "stat" },
+    heading,
+    row(
+      el("span", { class: "dim small", text: "Presets:" }),
+      Object.entries(data.presets).map(([preset, list]) =>
+        el("button", {
+          type: "button",
+          text: preset,
+          title: list.join(", "),
+          onclick: () => picker.set(list),
+        }),
+      ),
+      el("button", { type: "button", text: "shipped default", onclick: () => picker.set(role.defaults) }),
+      el("button", { type: "button", text: "clear", onclick: () => picker.set([]) }),
+    ),
+    picker.node,
+    row(
+      el("button", {
+        type: "button",
+        class: "primary",
+        text: "Save baseline",
+        onclick: async (event) => {
+          const scopes = picker.get();
+          const removed = role.scopes.filter((s) => s !== "*" && !scopes.includes(s));
+          const confirmed = await confirmDialog({
+            title: `Change what ${role.role} may do`,
+            lead: `Every ${role.role} on this deployment will hold exactly these ${scopes.length} scope(s).`,
+            points: [
+              ...(removed.length ? [`Removed: ${removed.join(", ")}`] : []),
+              ...(scopes.length === 0 ? ["Nobody in this role will be able to do anything."] : []),
+              "Sessions already open pick this up within a few seconds.",
+            ],
+            confirmLabel: "Change the role",
+          });
+          if (!confirmed) return;
+          await act(
+            "permissions.role",
+            () => api(`/permissions/roles/${role.role}`, { method: "PUT", body: { scopes } }),
+            { button: event.currentTarget, refresh: [catalogue] },
+          );
+        },
+      }),
+      role.custom
+        ? el("button", {
+            type: "button",
+            text: "Reset to shipped default",
+            onclick: async (event) => {
+              await act("permissions.role.reset", () => api(`/permissions/roles/${role.role}`, { method: "DELETE" }), {
+                button: event.currentTarget,
+                refresh: [catalogue],
+              });
+            },
+          })
+        : null,
+    ),
+  );
+}
+
+/**
+ * Tune one account on top of its role.
+ *
+ * Grants and denials are separate pickers rather than one tri-state list,
+ * because they answer different questions and denial is the dangerous one:
+ * making an operator pick it out of a shared control would be how somebody
+ * removes an ability they meant to add.
+ */
+function userPermissionsDialog(user, users) {
+  const status = el("p", { class: "field-error" });
+  const body = el("div", {});
+  openModal(`Permissions · ${user.email}`, body);
+
+  void (async () => {
+    const [catalogue, current] = await Promise.all([api("/permissions"), api(`/users/${user.id}/permissions`)]);
+    if (!catalogue || !current) return;
+
+    if (!current.tunable) {
+      setChildren(
+        body,
+        el("p", {
+          text:
+            "This account is an OWNER: it holds every scope by construction and ignores grants and denials. " +
+            "Change its role first if it should be restricted.",
+        }),
+        row(el("button", { type: "button", text: "Close", onclick: closeModal })),
+      );
+      return;
+    }
+
+    const known = new Set(catalogue.scopes.map((s) => s.name));
+    const all = (list, extra) => {
+      const out = new Set();
+      for (const s of list) {
+        if (s === "*") {
+          for (const name of known) out.add(name);
+          continue;
+        }
+        if (!known.has(s)) continue;
+        out.add(s);
+        for (const implied of extra(s)) if (known.has(implied)) out.add(implied);
+      }
+      return [...out];
+    };
+    // Mirrors expandScopes/denialClosure in src/core/api/scopes.ts. A grant
+    // closes downward (a write carries its read); a denial closes upward (
+    // refusing the read has to refuse the write, which would imply it back).
+    const expand = (list) =>
+      all(list, (s) => {
+        const [area, verb] = s.split(":");
+        if (verb === "write") return [`${area}:read`, `${area}:append`];
+        if (verb === "append") return [`${area}:read`];
+        return [];
+      });
+    const refuse = (list) =>
+      all(list, (s) => {
+        const [area, verb] = s.split(":");
+        if (verb === "read") return [`${area}:append`, `${area}:write`];
+        if (verb === "append") return [`${area}:write`];
+        return [];
+      });
+
+    const effective = el("div", { class: "row tight" });
+    const refreshPreview = () => {
+      const granted = [...new Set([...current.baseline, ...grant.get()])];
+      const denied = new Set(refuse(deny.get()));
+      const result = denied.size ? expand(granted).filter((s) => !denied.has(s)) : granted;
+      setChildren(effective, result.length ? result.map((s) => chip(s)) : el("span", { class: "dim", text: "none" }));
+    };
+
+    const grant = scopePicker(catalogue.scopes, {
+      selected: current.extraScopes,
+      idPrefix: "grant",
+      onchange: () => refreshPreview(),
+    });
+    const deny = scopePicker(catalogue.scopes, {
+      selected: current.deniedScopes,
+      idPrefix: "deny",
+      onchange: () => refreshPreview(),
+    });
+
+    setChildren(
+      body,
+      el("p", {
+        class: "dim small",
+        text:
+          `${user.email} is a ${current.role}, which grants: ${current.baseline.join(", ") || "nothing"}. ` +
+          "Everything below is on top of that.",
+      }),
+      el("h3", { text: "Granted beyond the role" }),
+      grant.node,
+      el("h3", { text: "Denied despite the role" }),
+      el("p", {
+        class: "dim small",
+        text: "Denials are applied last and win. This is how you express “an ADMIN, but not bundles”.",
+      }),
+      deny.node,
+      el("h3", { text: "Effective" }),
+      effective,
+      status,
+      row(
+        el("button", {
+          type: "button",
+          class: "primary",
+          text: "Save",
+          onclick: async (event) => {
+            const extraScopes = grant.get();
+            const deniedScopes = deny.get();
+            const both = extraScopes.filter((s) => deniedScopes.includes(s));
+            if (both.length) {
+              status.textContent = `Cannot both grant and deny: ${both.join(", ")}`;
+              return;
+            }
+            status.textContent = "";
+            const saved = await act(
+              "permissions.user",
+              () => api(`/users/${user.id}/permissions`, { method: "PUT", body: { extraScopes, deniedScopes } }),
+              { button: event.currentTarget, refresh: users ? [users] : [] },
+            );
+            if (saved) closeModal();
+          },
+        }),
+        el("button", {
+          type: "button",
+          text: "Clear tuning",
+          onclick: () => {
+            grant.set([]);
+            deny.set([]);
+          },
+        }),
+        el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+      ),
+    );
+    refreshPreview();
+  })();
 }
 
 function sessionsPanel() {
