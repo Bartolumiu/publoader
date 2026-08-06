@@ -1,12 +1,12 @@
 /**
  * Discord-side gating. This is the bot's *own* allowlist, layered on top of
- * whatever the API token is scoped to — the token decides what the bot could
+ * whatever the API token is scoped to; the token decides what the bot could
  * do, this decides who is allowed to ask it to.
  *
  * Two things make this module worth its own file: it is the security boundary
  * between "anyone in the guild" and the platform's control plane, and it is
  * pure. It takes a plain `{userId, roleIds, channelId, guildId}` shape and
- * returns a decision — no discord.js objects, no I/O — so every branch is
+ * returns a decision, no discord.js objects, no I/O, so every branch is
  * unit-testable (test/unit/botAuthz.test.ts).
  *
  * ## Deliberate difference from the legacy bot
@@ -35,7 +35,7 @@ export type Sensitivity =
   | "destructive";
 
 export interface AuthzConfig {
-  /** When set, commands from any other guild — and all DMs — are refused. */
+  /** When set, commands from any other guild, and all DMs, are refused. */
   guildId: string | null;
   adminUserIds: ReadonlySet<string>;
   adminRoleIds: ReadonlySet<string>;
@@ -61,7 +61,7 @@ const ALLOW: Decision = { allowed: true };
  * Non-numeric junk is dropped rather than rejected: the legacy config was
  * hand-edited and often carried `<@123>` mention syntax or trailing commas, and
  * a bot that refuses to boot over a stray character is worse than one that
- * ignores it. Digits-only is the real filter — a snowflake is always numeric,
+ * ignores it. Digits-only is the real filter; a snowflake is always numeric,
  * so a mis-pasted username can never widen the allowlist.
  */
 export function parseIdList(raw: string | undefined): Set<string> {
@@ -164,7 +164,7 @@ export function describeAuthz(config: AuthzConfig): string {
       : "channels: any for reads, NONE for writes (DISCORD_ALLOWED_CHANNELS unset)",
     hasAdminAllowlist(config)
       ? `${config.adminUserIds.size} admin user(s), ${config.adminRoleIds.size} admin role(s)`
-      : "admins: NONE configured — all writes denied",
+      : "admins: NONE configured; all writes denied",
   ];
   return parts.join("; ");
 }

@@ -16,7 +16,7 @@ function env(name: string): string | undefined {
 }
 
 const ConfigSchema = z.object({
-  // Empty on worker agents by design — workers never see the database.
+  // Empty on worker agents by design; workers never see the database.
   // Core services fail fast in getPrisma() if it is missing.
   databaseUrl: z.string().default(""),
   port: z.coerce.number().int().default(8100),
@@ -27,7 +27,7 @@ const ConfigSchema = z.object({
    * Trimmed because this value is compared for exact equality and is typically
    * put in `.env` by hand or by shell redirection, which is how a trailing
    * newline gets in. Untrimmed, the stored token silently stops matching the
-   * one the operator holds and every login fails as "invalid admin token" — a
+   * one the operator holds and every login fails as "invalid admin token"; a
    * message that points at the token rather than at the whitespace around it.
    */
   adminToken: z.string().trim().min(16).optional(),
@@ -103,11 +103,11 @@ const ConfigSchema = z.object({
   magicLinkTtlMinutes: z.coerce.number().int().min(5).max(120).default(15),
   /**
    * Lifetime of an invite/approval link. Long, because nobody is waiting at
-   * the keyboard for it — it has to survive a weekend and a spam folder.
+   * the keyboard for it; it has to survive a weekend and a spam folder.
    */
   inviteTtlHours: z.coerce.number().int().min(1).max(336).default(72),
 
-  // GitHub push webhook (core-api only). See docs/webhooks.md — CI-side
+  // GitHub push webhook (core-api only). See docs/webhooks.md; CI-side
   // publishing is the preferred alternative to all of this.
   /**
    * Shared HMAC secret for X-Hub-Signature-256. The endpoint is
@@ -133,7 +133,7 @@ const ConfigSchema = z.object({
   /**
    * Whether to write `manga_id_map.json` back to the extensions repos on a
    * timer. On by default, but it does nothing without a GITHUB_TOKEN that can
-   * write and at least one repo in GITHUB_EXTENSIONS_REPOS — and it never syncs
+   * write and at least one repo in GITHUB_EXTENSIONS_REPOS; and it never syncs
    * on the first boot after it is enabled, so a deploy cannot produce commits.
    */
   mapSyncEnabled: z
@@ -155,8 +155,8 @@ const ConfigSchema = z.object({
    *
    * Restart is implemented as a graceful self-exit and depends entirely on the
    * container runtime starting the service again (`restart: unless-stopped`).
-   * Set this false wherever that policy is absent — a bare `docker run` or a
-   * `docker compose up` with no restart policy — so the button refuses instead
+   * Set this false wherever that policy is absent; a bare `docker run` or a
+   * `docker compose up` with no restart policy; so the button refuses instead
    * of taking the service down for good.
    */
   sysopsRestartEnabled: z

@@ -6,7 +6,7 @@
  * and untrack series from the dashboard. The `manga_id_map.json` files in the
  * extensions repos only ever SEED that table (see
  * `BundleStore.seedConfigFromBundle`), so nothing has been putting those changes
- * back — the files in git go stale, and a contributor reading one cannot tell
+ * back; the files in git go stale, and a contributor reading one cannot tell
  * what is actually tracked. Worse, a mapping an operator deliberately removed
  * from the database is still in the file, so the next publish re-seeds it.
  *
@@ -53,7 +53,7 @@ const EXTENSIONS_DIR = "src";
 
 /**
  * Total wall clock for one run. Well under the weekly interval by three orders
- * of magnitude — the cap is not about scheduling, it is so a GitHub that has
+ * of magnitude; the cap is not about scheduling, it is so a GitHub that has
  * started timing out cannot leave the run half-done for hours.
  */
 export const MAP_SYNC_BUDGET_MS = 120_000;
@@ -164,7 +164,7 @@ export class MapSyncService {
    *
    * On the very first call nothing is synced: the timestamp is seeded and the
    * first automatic write happens one interval later. Deploying a release must
-   * not push commits to the extensions repos within thirty seconds of starting —
+   * not push commits to the extensions repos within thirty seconds of starting -
    * an operator who wants it now has `publoader-admin maps sync`, which is a
    * deliberate act with a `--dry-run` in front of it.
    *
@@ -218,7 +218,7 @@ export class MapSyncService {
   }
 
   /**
-   * Write every extension's map file. Safe to call by hand at any time — it is
+   * Write every extension's map file. Safe to call by hand at any time; it is
    * idempotent, and a run with nothing to say makes no commits.
    */
   async sync(opts: MapSyncOptions = {}): Promise<MapSyncReport> {

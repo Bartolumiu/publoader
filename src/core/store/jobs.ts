@@ -3,7 +3,7 @@ import { Prisma, PrismaClient, type Job, type Run } from "@prisma/client";
 
 /**
  * Durable job store. Every state transition is a single SQL statement (or one
- * transaction) whose WHERE clause names the expected prior state — and, for
+ * transaction) whose WHERE clause names the expected prior state; and, for
  * worker-driven transitions, the lease id. Zero rows affected = the caller
  * lost the race and must treat the transition as rejected. There is no
  * read-then-write anywhere in this file.
@@ -67,7 +67,7 @@ export function backoffSeconds(attempt: number, policy: RetryPolicy): number {
 const FAIRNESS_ALIVE_SECONDS = 120;
 
 /**
- * How long after claiming a worker is asked to stand aside. Short on purpose —
+ * How long after claiming a worker is asked to stand aside. Short on purpose -
  * it bounds what a heartbeating-but-wedged peer can cost the queue, since after
  * this the previous claimer is eligible again regardless.
  */
@@ -81,7 +81,7 @@ export class JobStore {
 
   /**
    * Idempotently create a run and its jobs. A duplicate idempotency key
-   * returns the existing run untouched (`created: false`) — safe under
+   * returns the existing run untouched (`created: false`): safe under
    * scheduler crash/restart and under concurrent duplicate schedulers.
    */
   async createRun(input: CreateRunInput): Promise<{ run: Run; created: boolean }> {
@@ -174,7 +174,7 @@ export class JobStore {
           -- Fairness: do not hand consecutive jobs to the same worker.
           --
           -- Workers pull, so without this whichever host polls first takes
-          -- everything — systematically the fastest or least loaded one. That
+          -- everything; systematically the fastest or least loaded one. That
           -- defeats the reason to run several: publishers rate-limit per source
           -- IP, and one worker doing all the scraping is one IP doing it.
           --
@@ -301,12 +301,12 @@ export class JobStore {
    *
    * POLICY used to dead-letter on the first occurrence, on the reasoning that a
    * rejected envelope would be rejected again. But the envelope is produced by a
-   * *worker*, and a hostile or broken one can fail policy on demand — so that
+   * *worker*, and a hostile or broken one can fail policy on demand; so that
    * reasoning handed any single worker the ability to dead-letter every job it
    * could lease, and `advanceRuns` then killed those runs along with their
    * healthy segments. Retrying costs one more attempt and, because the next
    * attempt is very likely leased elsewhere, routes around the bad worker.
-   * A genuinely bad bundle still dead-letters — it just takes maxAttempts.
+   * A genuinely bad bundle still dead-letters; it just takes maxAttempts.
    */
   async fail(
     jobId: string,
@@ -353,7 +353,7 @@ export class JobStore {
    * Sweeper: recover jobs whose lease expired without completion. Retryable
    * ones return to PENDING with backoff; exhausted ones dead-letter. Both
    * paths clear the stale lease, so the previous holder can no longer renew
-   * or complete — its late submission is superseded at ingestion.
+   * or complete; its late submission is superseded at ingestion.
    */
   async sweepExpiredLeases(): Promise<{ requeued: Job[]; deadLettered: Job[] }> {
     const requeued = await this.prisma.$queryRaw<Job[]>(Prisma.sql`
@@ -414,7 +414,7 @@ export class JobStore {
   }
 
   /**
-   * Stop all outstanding work for one extension — the "unload" half of
+   * Stop all outstanding work for one extension; the "unload" half of
    * enable/disable.
    *
    * Disabling used to mean only "stop scheduling it", which left whatever was
@@ -441,7 +441,7 @@ export class JobStore {
    *
    * Distinct from `cancel(jobId)`, which is graceful: it flags a running job and
    * lets the worker finish its current step. This is the operator saying "stop
-   * this run now" — usually because it is doing something wrong — so every
+   * this run now", usually because it is doing something wrong, so every
    * non-terminal job goes straight to CANCELLED rather than being asked nicely.
    *
    * That is safe in flight for two reasons already built into the system:
@@ -454,12 +454,12 @@ export class JobStore {
    *    superseded instead of committed. A killed run cannot produce late writes.
    *
    * The run itself is set to CANCELLED directly. `advanceRuns` only ever moves
-   * runs out of PENDING/EXECUTING, so it cannot resurrect this one — and it
+   * runs out of PENDING/EXECUTING, so it cannot resurrect this one; and it
    * would otherwise have landed the run in DEAD_LETTER, which reads as a failure
    * rather than a decision.
    *
    * Returns null when the run does not exist, and "rejected" when it has already
-   * finished — cancelling a PROCESSED run would be a lie, its work is done.
+   * finished; cancelling a PROCESSED run would be a lie, its work is done.
    */
   async cancelRun(
     runId: string,
@@ -512,7 +512,7 @@ export class JobStore {
     return { runs, jobs };
   }
 
-  /** Same, for every job pinned to one bundle — used when a bundle is yanked. */
+  /** Same, for every job pinned to one bundle; used when a bundle is yanked. */
   async cancelAllForBundle(sha256: string): Promise<{ cancelled: number; flagged: number }> {
     const cancelled = await this.prisma.job.updateMany({
       where: { bundleSha256: sha256, state: "PENDING" },
@@ -531,7 +531,7 @@ export class JobStore {
    * The parent run must be revived too. `advanceRuns` only ever moves a run out
    * of PENDING/EXECUTING, so a run that already reached DEAD_LETTER is
    * terminal: replaying its job alone made the job succeed and then sit there,
-   * with the run never advancing to INGESTING and the chapters never uploaded —
+   * with the run never advancing to INGESTING and the chapters never uploaded -
    * while the API answered `{ok: true}` and the job disappeared from the
    * dead-letter list. The retry looked like it worked and silently did nothing,
    * which is worse than refusing. Both are reset in one transaction.

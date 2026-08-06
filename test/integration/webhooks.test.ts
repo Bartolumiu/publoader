@@ -12,7 +12,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
 /**
  * The webhook end to end: a signed GitHub delivery arrives and a bundle exists
  * afterwards. The archive fetcher is injected, so nothing here touches the
- * network — but everything from the HMAC check to BundleStore.publish is the
+ * network; but everything from the HMAC check to BundleStore.publish is the
  * real code path, including the raw-body content-type parser that has to
  * coexist with the server's global JSON parser.
  */
@@ -315,7 +315,7 @@ describe.skipIf(!dbReady())("github push webhook", () => {
       const built = new AdmZip(Buffer.from(bundle.archive)).getEntry("index.mjs")!.getData().toString();
       expect(built).toContain("hi");
       // A bundler is free to emit `export { x as default }` rather than the
-      // literal `export default` — esbuild does exactly that when it bundles,
+      // literal `export default`: esbuild does exactly that when it bundles,
       // so asserting the literal string tests the bundler's style rather than
       // the requirement. What matters is that a default export exists in one of
       // the forms the publish validator accepts.
@@ -328,7 +328,7 @@ describe.skipIf(!dbReady())("github push webhook", () => {
     it("rebuilds a TypeScript extension to the identical sha256 on redelivery", async () => {
       // esbuild derives both its file comments and its generated symbol names
       // from the path it is handed, so a build out of a fresh temp directory has
-      // to stay reproducible — otherwise every redelivery churns a new bundle
+      // to stay reproducible; otherwise every redelivery churns a new bundle
       // for byte-identical source.
       archive = tsArchive("mangaplus");
       const body = pushBody(["src/mangaplus/index.ts"]);

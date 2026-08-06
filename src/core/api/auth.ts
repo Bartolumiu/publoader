@@ -21,7 +21,7 @@ import {
  * Admin routes additionally accept a dashboard session cookie, which is the
  * same audience by another carrier (see `session.ts`). Because a cookie is
  * attached by the browser automatically, cookie-authed writes must also carry
- * a header no cross-origin form can set — SameSite=Strict is the first line of
+ * a header no cross-origin form can set; SameSite=Strict is the first line of
  * CSRF defence, this is the second.
  */
 
@@ -172,7 +172,7 @@ export function adminAuthHook(opts: AdminAuthOptions) {
  *
  * The 403 names the missing scope deliberately: the caller already proved it
  * holds a valid credential, and "which scope do I need?" is the only useful
- * next question — leaving them to guess is how over-granted tokens happen.
+ * next question; leaving them to guess is how over-granted tokens happen.
  */
 export function requireScope(required: Scope) {
   return async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
@@ -191,7 +191,7 @@ export function requireScope(required: Scope) {
 }
 
 /**
- * Second-stage guard for the operations that manage *who else* has access —
+ * Second-stage guard for the operations that manage *who else* has access -
  * accounts, roles, the signup gate, and force-logout. Register it after
  * `adminAuthHook`, which is what populates `adminRole`.
  */

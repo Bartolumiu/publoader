@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `publoader-admin` — operator CLI for the platform control plane.
+ * `publoader-admin`: operator CLI for the platform control plane.
  *
  * Every subcommand is a thin wrapper over an admin API endpoint (see
  * docs/ipc-to-api-mapping.md for the legacy IPC equivalences). The CLI holds no
@@ -54,7 +54,7 @@ type RequestOptions = {
 
 /**
  * One request against the admin API. Non-2xx responses abort the process with
- * the server's error message — an operator running a script wants a non-zero
+ * the server's error message; an operator running a script wants a non-zero
  * exit, not a partially-applied change reported as success.
  */
 async function api<T = unknown>(path: string, opts: RequestOptions = {}): Promise<T> {
@@ -426,7 +426,7 @@ const tracked = program
  * `--namespace` names one of an extension's catalogues (viz has `shonenjump`
  * and `vizmanga`, where the same numeric id under each is a different series).
  * Omitting it means the single flat id space, which is what every extension
- * except viz has — so no existing invocation changes.
+ * except viz has; so no existing invocation changes.
  */
 tracked
   .command("list <extension>")
@@ -649,7 +649,7 @@ extConfig
       method: "PUT",
       json: { overrideOptions },
     });
-    // A rejected row is not a failed command — the rest of the document landed —
+    // A rejected row is not a failed command; the rest of the document landed -
     // but it must be visible, because a dropped `custom_language` row silently
     // stops protecting a language from the chapter-removal pass.
     for (const row of res.rejected) {
@@ -814,7 +814,7 @@ bundle
       fail(`${root} does not exist`);
     }
     // The same build+zip the GitHub push webhook runs (core/webhooks/
-    // bundleBuilder.ts), so both publish paths produce identical bytes — and so
+    // bundleBuilder.ts), so both publish paths produce identical bytes; and so
     // an operator gets an immediate, obvious error rather than a 422 after
     // uploading tens of megabytes.
     let built;
@@ -874,7 +874,7 @@ tokens
 
 tokens
   .command("list")
-  .description("issued tokens (metadata only — secrets are unrecoverable)")
+  .description("issued tokens (metadata only; secrets are unrecoverable)")
   .action(async () => {
     const res = await api<{ tokens: Record<string, unknown>[] }>("/api/v1/admin/tokens");
     table(res.tokens, [
@@ -1031,7 +1031,7 @@ program
       { header: "MESSAGE", get: (e) => e.message.slice(0, 80) || "-" },
     ], "nothing has failed");
     console.log("");
-    console.log("Container logs are not aggregated here — use `docker compose logs` on the host.");
+    console.log("Container logs are not aggregated here; use `docker compose logs` on the host.");
   });
 
 // ---- MangaDex session ----

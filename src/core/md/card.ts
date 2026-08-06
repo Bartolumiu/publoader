@@ -3,18 +3,18 @@ import sharp from "sharp";
 /**
  * Per-chapter info card, uploaded to MangaDex as the visible page when a
  * publisher takes an external chapter down. Port of publoader/chapter_image.py:
- * the same 1000x1000 logical layout rendered at 2x (a 2000x2000 PNG) — orange
+ * the same 1000x1000 logical layout rendered at 2x (a 2000x2000 PNG): orange
  * hairline, "EXTERNAL CHAPTER" eyebrow, publisher pill, series title with an
  * accent bar, chapter number/title, source URL pill, and a footer carrying the
  * language, availability window and the removal note.
  *
  * Pillow drew this imperatively; here the same geometry is emitted as an SVG
  * and rasterised by sharp. Because SVG has no text metrics we can query, line
- * breaking uses a Helvetica advance-width table (see `advance`) — good enough
+ * breaking uses a Helvetica advance-width table (see `advance`): good enough
  * for wrapping decisions and, crucially, identical on every host.
  *
  * Output is a pure function of the options: no timestamps, no randomness. It is
- * byte-identical across runs on a given image, given the same installed fonts —
+ * byte-identical across runs on a given image, given the same installed fonts -
  * the one environmental input, which is why the family list below is pinned to
  * fonts the core image ships rather than a bare `sans-serif`.
  */

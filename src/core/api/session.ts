@@ -16,7 +16,7 @@ import { verifyPassword } from "../store/adminUsers.js";
  * and receives an HttpOnly, SameSite=Strict cookie.
  *
  * The cookie is `${sessionId}.${secret}` and the authority is the
- * `admin_sessions` row, not the cookie's contents — which is what makes a
+ * `admin_sessions` row, not the cookie's contents; which is what makes a
  * single session revocable without signing everyone else out. Only a sha256 of
  * the secret is stored, so the table is not a credential store.
  */
@@ -30,7 +30,7 @@ const MAX_COOKIE_BYTES = 4096;
 
 /**
  * HMAC key for short-lived signed cookies (the OAuth state nonce). Session
- * cookies no longer depend on it — they are DB rows. An explicit
+ * cookies no longer depend on it; they are DB rows. An explicit
  * SESSION_SECRET is preferred; otherwise derive from the admin token via HKDF
  * so the raw token is never itself an HMAC key.
  */
@@ -138,8 +138,8 @@ const PasswordLogin = z.object({
 });
 
 /**
- * Session endpoints. Unauthenticated by construction — POST /session *is* the
- * authentication — so they live outside the admin scope and carry their own
+ * Session endpoints. Unauthenticated by construction; POST /session *is* the
+ * authentication; so they live outside the admin scope and carry their own
  * per-IP limiter.
  */
 export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): void {
@@ -204,7 +204,7 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
         return reply.code(401).send({ error: "invalid admin token" });
       }
       // The token is owner-equivalent, so its session hangs off the seeded
-      // owner account — that is what makes it the way to bootstrap a password.
+      // owner account; that is what makes it the way to bootstrap a password.
       const owner = await ctx.adminUsers.ensureOwner(ctx.config.dashOwnerEmail);
       return issue(reply, req, owner, actor);
     }
@@ -231,7 +231,7 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
 
   /**
    * Who am I? The cookie is HttpOnly, so a reloaded page cannot read its own
-   * actor back out — it has to ask. Safe to leave unauthenticated: it reports
+   * actor back out; it has to ask. Safe to leave unauthenticated: it reports
    * only what the caller's own session already grants.
    */
   app.get("/api/v1/admin/session", async (req: FastifyRequest, reply: FastifyReply) => {

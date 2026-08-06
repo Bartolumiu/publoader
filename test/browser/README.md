@@ -8,8 +8,8 @@ Run them:
 CHROME_PATH=/path/to/chrome ./test/browser/run.sh
 ```
 
-Everything is disposable — a scratch database, a core-api on port 8101, a headless
-Chrome with a throwaway profile — so this is safe to run while the dev and prod
+Everything is disposable; a scratch database, a core-api on port 8101, a headless
+Chrome with a throwaway profile; so this is safe to run while the dev and prod
 stacks are up. The runner drops the database and kills the API on exit, including
 after a failed assertion.
 
@@ -42,9 +42,9 @@ So: **jsdom for behaviour, this for what the operator can see.** A change to
 
 | File | What it is |
 | --- | --- |
-| `cdp.mjs` | Dependency-free Chrome DevTools Protocol driver, ~230 lines. Launches headless Chrome and talks to it over a WebSocket using Node's built-in client — no puppeteer, no playwright, nothing to keep up to date. |
+| `cdp.mjs` | Dependency-free Chrome DevTools Protocol driver, ~230 lines. Launches headless Chrome and talks to it over a WebSocket using Node's built-in client; no puppeteer, no playwright, nothing to keep up to date. |
 | `seed.mjs` | Fills the scratch database with enough to render every view. |
-| `seed-accounts.mjs` | Sets the owner password and creates a contributor, over HTTP — the API hashes passwords, so a direct column write would store something no login can match. |
+| `seed-accounts.mjs` | Sets the owner password and creates a contributor, over HTTP; the API hashes passwords, so a direct column write would store something no login can match. |
 | `verify.mjs` | The main suite: login, routing, every sidebar destination, tabs, focus. |
 | `verify-untracked.mjs` | The untracked queue and its detail/edit view. |
 | `verify-modules.mjs` | The two dynamically-imported destinations, Maintenance and Docs. |
@@ -55,7 +55,7 @@ So: **jsdom for behaviour, this for what the operator can see.** A change to
 
 `verify-modules.mjs` asserts that Maintenance and Docs **render**, not that their
 buttons work. GitHub sync, service restart and extension install all mutate the
-platform, so they are deliberately not fired here — exercise those against the dev
+platform, so they are deliberately not fired here; exercise those against the dev
 stack by hand, or against `test/integration/sysops.test.ts`, which drives the
 endpoints behind them.
 

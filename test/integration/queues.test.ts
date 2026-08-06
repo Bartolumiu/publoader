@@ -11,7 +11,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  * Full operator control of the upload queues.
  *
  * The properties worth proving here are the ones that cost real damage when
- * they regress, and none of them can be checked without a live postgres —
+ * they regress, and none of them can be checked without a live postgres -
  * SKIP LOCKED claims, a unique (kind, dedupe_key) constraint and guarded
  * single-statement updates are the system under test:
  *
@@ -20,7 +20,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  *  - a reorder changes what `claim` actually hands out next, not merely a column;
  *  - hand-enqueueing a duplicate is refused by the constraint that makes double
  *    uploads impossible;
- *  - deleting a DONE row — half of that same guard — needs an explicit flag;
+ *  - deleting a DONE row, half of that same guard, needs an explicit flag;
  *  - and the sharpest verb, manual add, is out of a CONTRIBUTOR's reach.
  */
 describe.skipIf(!dbReady())("queue management endpoints", () => {
@@ -39,7 +39,7 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
   /**
    * server.ts is owned by another module's integrator, so these routes may or
    * may not be wired into `buildServer` yet. Probe a throwaway instance and
-   * register them by hand only when they are absent — registering twice would
+   * register them by hand only when they are absent; registering twice would
    * throw on duplicate routes, and skipping when they are wired would test a
    * different server than production runs. Routes inside `app.register(…)` do
    * not exist until the plugin boots, hence the ready-then-check.
@@ -90,7 +90,7 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
       },
     });
 
-  /** A LEASED row with a live lease — the thing nothing here may touch. */
+  /** A LEASED row with a live lease; the thing nothing here may touch. */
   const LEASE_ID = "11111111-1111-4111-8111-111111111111";
   const leasedTask = (overrides: Record<string, unknown> = {}) =>
     task({
@@ -225,7 +225,7 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
    *
    * `taskDedupeKey` returns the bare MangaDex chapter UUID for EDIT, DELETE and
    * UNAVAILABLE, so before `identity` the only column identifying those rows was
-   * an opaque id — "what is scheduled to be marked unavailable?" could not be
+   * an opaque id; "what is scheduled to be marked unavailable?" could not be
    * answered from the list at all, only by opening rows one at a time. The
    * payload itself must still stay server-side, which is the pair of properties
    * asserted here.
@@ -363,7 +363,7 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
     expect(left.map((r) => r.dedupeKey)).toEqual(["comikey-fail"]);
 
     // The audit row is the only surviving record of a purge, so it has to carry
-    // the narrowing keys — logging just {kind, state} would describe a far wider
+    // the narrowing keys; logging just {kind, state} would describe a far wider
     // deletion than the one that ran.
     const event = await prisma.auditEvent.findFirstOrThrow({
       where: { action: "queue.purge" },
@@ -529,7 +529,7 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
     expect(unconfirmed.json().error).toContain("confirm");
     expect(await prisma.uploadTask.count({ where: { id: pending.id } })).toBe(1);
 
-    // "false" as a query word must not read as true — this is the flag guarding
+    // "false" as a query word must not read as true; this is the flag guarding
     // a permanent delete.
     const lying = await app.inject({
       method: "DELETE",
@@ -622,7 +622,7 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
     expect(dry.json()).toMatchObject({ dryRun: true, matched: 3, wouldDelete: 3 });
     expect(dry.json().sample).toHaveLength(3);
     expect(dry.json().breakdown).toEqual([{ kind: "UPLOAD", state: "DEAD_LETTER", count: 3 }]);
-    // Nothing written — not one row, and not an audit event either. A dry run
+    // Nothing written; not one row, and not an audit event either. A dry run
     // reports an intention, so even the log stays untouched.
     expect(await prisma.uploadTask.count()).toBe(before);
     expect(await prisma.auditEvent.count({ where: { action: { startsWith: "queue." } } })).toBe(0);
@@ -921,7 +921,7 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
       app.inject({ method: "POST", url: "/api/v1/admin/queues/tasks", headers: root, payload });
 
     // Every one of these corresponds to a TaskError that would otherwise be
-    // discovered after the task was claimed — for UPLOAD, after a MangaDex
+    // discovered after the task was claimed; for UPLOAD, after a MangaDex
     // upload session was already open.
     const noManga = await post({ kind: "UPLOAD", chapter: uploadChapter({ mdMangaId: null }) });
     expect(noManga.statusCode).toBe(422);
@@ -976,7 +976,7 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
       headers: contributor,
       payload: { kind: "UPLOAD", chapter: uploadChapter() },
     });
-    // Refused on the role, before the scope check — this endpoint can create a
+    // Refused on the role, before the scope check; this endpoint can create a
     // real chapter on MangaDex, so it sits at ADMIN-or-above.
     expect(res.statusCode).toBe(403);
     expect(res.json().error).toContain("admin role or above");

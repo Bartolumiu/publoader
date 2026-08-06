@@ -9,7 +9,7 @@
 #   ./test/browser/run.sh                 # all three suites
 #   ./test/browser/run.sh verify.mjs      # just one
 #
-# Requires Chrome (override with CHROME_PATH) and a reachable Postgres — by
+# Requires Chrome (override with CHROME_PATH) and a reachable Postgres; by
 # default the dev stack's, on 55432. No psql needed.
 set -euo pipefail
 
@@ -23,7 +23,7 @@ export DASH_ORIGIN="http://127.0.0.1:${PORT}"
 
 echo "==> scratch database: ${DB}"
 # Via node's `pg` rather than `psql`, which is not installed on every machine that
-# can run this — the Postgres here usually lives in a container.
+# can run this; the Postgres here usually lives in a container.
 db() {
   node -e '
     const { Client } = require("pg");
@@ -53,7 +53,7 @@ PORT="${PORT}" HOST=127.0.0.1 \
   LOG_LEVEL=warn \
   npx tsx src/services/api.ts &
 API_PID=$!
-# Always reap the API and the scratch database, including on a failed assertion —
+# Always reap the API and the scratch database, including on a failed assertion -
 # otherwise a red run leaves a port bound and the next one fails for the wrong
 # reason.
 cleanup() {

@@ -3,7 +3,7 @@ import type { Config } from "../../config.js";
 import type { Logger } from "../../logging.js";
 
 /**
- * Discord notifications — the slice of publoader/webhook.py the upload workers
+ * Discord notifications; the slice of publoader/webhook.py the upload workers
  * need: build embeds, clip them to Discord's limits, fan them out to every
  * configured URL.
  *
@@ -118,7 +118,7 @@ export class DiscordNotifier {
   /**
    * Split embeds into messages that satisfy both the 10-embeds and the
    * 6000-character caps. An embed larger than the total cap on its own still
-   * gets its own message — Discord will reject it, but the batch around it
+   * gets its own message; Discord will reject it, but the batch around it
    * still goes out.
    */
   private static batch(embeds: DiscordEmbedPayload[]): DiscordEmbedPayload[][] {

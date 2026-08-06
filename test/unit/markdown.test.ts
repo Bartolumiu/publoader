@@ -7,8 +7,8 @@ import { fileURLToPath } from "node:url";
  * The dashboard's markdown renderer.
  *
  * The escaping tests are the point of this file. Everything else here could be
- * wrong and the result would be an ugly page; if escaping is wrong, a document —
- * or, later, anything else someone decides to render through this — becomes
+ * wrong and the result would be an ugly page; if escaping is wrong, a document -
+ * or, later, anything else someone decides to render through this; becomes
  * script execution inside the operator's authenticated session, which is the
  * whole dashboard.
  *
@@ -271,7 +271,7 @@ describe("nested lists and tables", () => {
 describe("the real documentation", () => {
   /**
    * Render every document that ships, as the viewer will. This is the test that
-   * catches a construct we use but did not think to support — a renderer that
+   * catches a construct we use but did not think to support; a renderer that
    * passes twenty unit tests and mangles deployment.md is no use to the operator
    * reading deployment.md at 03:00.
    */
@@ -295,7 +295,7 @@ describe("the real documentation", () => {
 describe("slugify", () => {
   it("matches the heading ids the renderer emits", () => {
     expect(md.slugify("Backups and restores")).toBe("backups-and-restores");
-    expect(md.slugify("§ Weird — Punctuation!")).toBe("weird-punctuation");
+    expect(md.slugify("§ Weird; Punctuation!")).toBe("weird-punctuation");
     expect(md.slugify("`code` in a heading")).toBe("code-in-a-heading");
   });
 });

@@ -23,7 +23,7 @@
  */
 import type { DiscordEmbedInput, DiscordField } from "./webhook.js";
 
-/** `COLOUR` in webhook.py — the default for anything that does not override it. */
+/** `COLOUR` in webhook.py; the default for anything that does not override it. */
 export const COLOUR_DEFAULT = "B86F8C";
 /** `PubloaderDupesWebhook.colour`. */
 export const COLOUR_DUPES = "C8AA69";
@@ -149,7 +149,7 @@ export interface UpdatesInput {
  * `PubloaderUpdatesWebhook`: what a run decided to do, per manga.
  *
  * This is the one that fires at UPDATE-CHECK time rather than after a successful
- * upload — "To Upload" is a plan, not a result. That distinction is the whole
+ * upload; "To Upload" is a plan, not a result. That distinction is the whole
  * character of the Python notifications and is why a channel full of
  * "upload succeeded" messages reads wrong.
  *
@@ -210,7 +210,7 @@ export function queueEmbed(
     title: titleCase(workerType),
     colour: COLOUR_DEFAULT,
     // Only on failure, and only when there is something to say. Python's embed
-    // had no description, and a successful upload needs no explanation — but a
+    // had no description, and a successful upload needs no explanation; but a
     // failure that does not say why is a notification the operator cannot act
     // on, which is the whole reason to be told about it.
     ...(!processed && detail ? { description: detail } : {}),
@@ -248,7 +248,7 @@ export function queueFinishedEmbed(workerType: string): DiscordEmbedInput {
 /**
  * `PubloaderDupesWebhook`: duplicate chapters found on MangaDex for one manga.
  *
- * Each field names the chapter the duplicates are OF, then lists them — the
+ * Each field names the chapter the duplicates are OF, then lists them; the
  * grouping matters, because the operator's next action is deleting all but one.
  */
 export function dupesEmbeds(
@@ -318,7 +318,7 @@ export function messageEmbed(
 //
 // The five `PubloaderWebhook` calls the Python run made around each extension.
 // They are what tells a channel that a run started, what it found, and whether
-// it blew up — without them the only traffic is per-chapter upload results,
+// it blew up; without them the only traffic is per-chapter upload results,
 // which says nothing until uploads are already happening.
 //
 // Titles are reproduced verbatim, including Python's `extensions.` prefix on
@@ -340,7 +340,7 @@ export interface UntrackedMangaLike {
  * `send_untracked_manga_webhook`: series the extension reports that have no
  * MangaDex mapping yet, so somebody can go and create or link them.
  *
- * Note the count in every title is the TOTAL, not the size of that page — a
+ * Note the count in every title is the TOTAL, not the size of that page; a
  * reader seeing "47 Untracked Manga (2)" learns there are 47 in all, which is
  * the number that matters.
  */
@@ -401,7 +401,7 @@ export function runErrorEmbed(extensionName: string, error: unknown): DiscordEmb
  * Python attached this to the logger so anything at or above a level went to
  * Discord. That is reproduced, but note the platform also records every
  * application-level event as a durable row visible in the dashboard's Activity
- * feed — so this is best pointed at ERROR and above, or the channel becomes a
+ * feed; so this is best pointed at ERROR and above, or the channel becomes a
  * firehose that duplicates a better view.
  */
 export function logEmbed(level: string, message: string, extensionName?: string | null): DiscordEmbedInput {

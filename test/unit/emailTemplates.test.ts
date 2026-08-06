@@ -11,8 +11,8 @@ import {
  *
  * These are not cosmetic assertions. The link is sometimes the only way into an
  * account, so it has to survive a plaintext-only client (hence the text part),
- * and it has to be escaped, because everything interpolated into these bodies —
- * the recipient's address, the URL, the role — is attacker-influenced somewhere
+ * and it has to be escaped, because everything interpolated into these bodies -
+ * the recipient's address, the URL, the role; is attacker-influenced somewhere
  * upstream.
  */
 

@@ -97,7 +97,7 @@ async function probeRunner(dir: string, file: string, envHint: string): Promise<
 
 /**
  * Locate runner.mjs, the extension API v2 runner. NODE_RUNNER_PATH overrides
- * the probe — PUBLOADER_NODE_RUNNER is the name the worker image sets.
+ * the probe; PUBLOADER_NODE_RUNNER is the name the worker image sets.
  */
 export async function resolveNodeRunnerPath(): Promise<string> {
   const override = process.env["NODE_RUNNER_PATH"] ?? process.env["PUBLOADER_NODE_RUNNER"];
@@ -120,7 +120,7 @@ export async function resolveRunnerPath(): Promise<string> {
  * Runs one leased job end to end: materialise the bundle, drive the runner,
  * upload page images as artifacts, and build the result envelope.
  *
- * The executor never writes to the control plane's state itself — its only
+ * The executor never writes to the control plane's state itself; its only
  * output is an envelope for the caller to submit.
  */
 export class JobExecutor {
@@ -308,8 +308,8 @@ export class JobExecutor {
    *   --allow-fs-write=<workdir>    scratch (outputDir lives under it)
    *
    * Directory grants ARE recursive, so nested data files resolve. Network is
-   * deliberately NOT restricted by the permission model — it has no network
-   * component — DNS and TLS work with no further grants, and egress control is
+   * deliberately NOT restricted by the permission model; it has no network
+   * component; DNS and TLS work with no further grants, and egress control is
    * the guarded fetch's job.
    */
   private async nodeRunnerArgv(opts: {
@@ -374,7 +374,7 @@ export class JobExecutor {
         { runnerPath },
         "DEPRECATED: running a python (extension API v1) bundle. Python bundles are " +
           "no longer accepted at publish; port this extension to extension API v2 " +
-          "(TypeScript/ESM) — the legacy runner will be removed.",
+          "(TypeScript/ESM): the legacy runner will be removed.",
       );
       command = this.config.runnerPython;
       args = [runnerPath, ...jobArgs];

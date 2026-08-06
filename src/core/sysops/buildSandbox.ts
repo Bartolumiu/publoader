@@ -2,7 +2,7 @@
  * Running esbuild over an untrusted extension directory, in a subprocess.
  *
  * esbuild does not execute the code it bundles, so this is not a sandbox for
- * arbitrary execution — it is a blast radius and a resource bound for a step
+ * arbitrary execution; it is a blast radius and a resource bound for a step
  * that reads attacker-supplied source in the control-plane process. Four things
  * made the in-process `await import("esbuild")` unacceptable here:
  *
@@ -14,7 +14,7 @@
  *     near a build of code someone uploaded, so the child gets an explicit
  *     minimal env rather than an inherited one.
  *  3. TSCONFIG. This one was not theoretical. esbuild honours a `tsconfig.json`
- *     found next to the sources, including `compilerOptions.paths` — and paths
+ *     found next to the sources, including `compilerOptions.paths`: and paths
  *     may be ABSOLUTE. A `manifest.json` + `index.ts` + a two-line tsconfig
  *     mapping `"secrets": ["/proc/self/environ"]` had esbuild inline that file
  *     into the published bundle, which any enrolled worker can then download.
@@ -25,11 +25,11 @@
  *     child. Killing only our direct child on timeout would leave that running,
  *     so the child is `detached` and the whole group is signalled.
  *
- * NO PACKAGE MANAGER IS EVER INVOKED — not npm, not pnpm, not yarn, not `npm
+ * NO PACKAGE MANAGER IS EVER INVOKED; not npm, not pnpm, not yarn, not `npm
  * exec`. This is deliberate and is the only real guarantee that a
  * `scripts.postinstall` in an uploaded package.json stays inert: there is no
  * code path from here to a lifecycle script. `external: []` completes the
- * picture — a third-party import is a build FAILURE with an explanation, never
+ * picture; a third-party import is a build FAILURE with an explanation, never
  * a fetch.
  */
 import { spawn } from "node:child_process";
@@ -65,7 +65,7 @@ export interface SandboxBuildRequest {
  * (vitest, tsx) and `dist/` (the container), and a build step that works in one
  * and not the other is a deploy-time surprise. esbuild's absolute path is passed
  * in argv and `require`d directly: the child's cwd is the untrusted extraction
- * directory, which has no node_modules — and must not be searched for one.
+ * directory, which has no node_modules; and must not be searched for one.
  */
 const CHILD = `
 const [esbuildPath, root, entry, outFile] = process.argv.slice(1);

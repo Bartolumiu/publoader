@@ -18,8 +18,8 @@
  *   to_unavailable    -> upload_tasks kind=UNAVAILABLE
  *   GridFS "images"   -> artifacts (referenced by chapter.imageArtifacts)
  *
- * Per-extension configuration did NOT live in Mongo — the legacy stack read it
- * from JSON files beside each extension — so `--extensions <dir>` imports that
+ * Per-extension configuration did NOT live in Mongo; the legacy stack read it
+ * from JSON files beside each extension; so `--extensions <dir>` imports that
  * half of the cutover from the extension checkout:
  *
  * (one subdirectory per extension, keyed by its manifest.json name)
@@ -35,7 +35,7 @@
  * `extension_configs` collection, if present, is imported the same way.
  *
  * Environment: MONGODB_URI, MONGODB_DB_NAME, DATABASE_URL.
- * Run exactly one instance at a time — concurrent passes could orphan
+ * Run exactly one instance at a time; concurrent passes could orphan
  * artifacts whose owning upload task loses the ON CONFLICT race.
  */
 import { randomUUID, createHash } from "node:crypto";
@@ -73,7 +73,7 @@ const EXTENSIONS_DIR = flagValue("--extensions");
 /**
  * By default already-migrated rows are left untouched (pure ON CONFLICT skip).
  * `--refresh` additionally rewrites the JSONB payload of the history mirrors
- * (uploaded / edited / unavailable), which legacy updates in place — use it on
+ * (uploaded / edited / unavailable), which legacy updates in place; use it on
  * the final delta pass so late edits are not lost.
  */
 const REFRESH = args.has("--refresh");
@@ -162,8 +162,8 @@ const carriedKeys = new Map<string, number>();
  * `images` GridFS ids, `archivedAt`, …).
  *
  * `ownColumns` names camelCased keys that have their own dedicated column on
- * the target table — `edits` and `lastEditedAt` on edited_chapters,
- * `unavailableAt` on unavailable_chapters — so they are not duplicated into
+ * the target table; `edits` and `lastEditedAt` on edited_chapters,
+ * `unavailableAt` on unavailable_chapters; so they are not duplicated into
  * `extra` alongside it.
  */
 function chapterColumnsFromDoc(doc: Document, ownColumns: string[] = []): ChapterColumns {
@@ -176,12 +176,12 @@ function chapterColumnsFromDoc(doc: Document, ownColumns: string[] = []): Chapte
 /**
  * A legacy queue document as the `upload_tasks.chapter` payload.
  *
- * This USED TO project the document down to the canonical chapter keys, on the
- * stated premise that the uploader parses the strict ChapterRecord schema. It
- * does not — ChapterRecord validates worker *envelopes*; task rows are read
- * tolerantly. The projection threw away the sidecar fields the upload workers
- * read alongside the chapter, so a migrated `to_edit` document arrived without
- * its `payload` and taskWorkers rejected it with "edit task has no payload",
+ * The document is not projected down to the canonical chapter keys. The
+ * uploader does not parse the strict ChapterRecord schema: that validates
+ * worker envelopes, while task rows are read tolerantly. Projecting threw away
+ * the sidecar fields the upload workers read alongside the chapter, so a
+ * migrated `to_edit` document arrived without its `payload` and taskWorkers
+ * rejected it with "edit task has no payload",
  * dead-lettering every migrated edit. The shape now lives in chapterRows.ts
  * next to the rest of the Chapter <-> storage mapping.
  */
@@ -312,7 +312,7 @@ async function migrateEdited(db: Db, prisma: PrismaClient): Promise<Counts> {
         counts.skipped += 1;
         continue;
       }
-      // The edits array is the audit history — never collapsed or truncated.
+      // The edits array is the audit history; never collapsed or truncated.
       const edits = (toJson(d["edits"]) ?? []) as Prisma.InputJsonValue;
       const columns = chapterColumnsFromDoc(d, ["edits", "lastEditedAt"]);
       if (DRY_RUN) {
@@ -349,7 +349,7 @@ async function migrateEdited(db: Db, prisma: PrismaClient): Promise<Counts> {
 }
 
 /**
- * `deleted` — the archive of chapters hard-deleted from MangaDex, appended by
+ * `deleted`: the archive of chapters hard-deleted from MangaDex, appended by
  * the legacy workers/deleter.py. Pure history: nothing reads it during a run,
  * but it is the only record of what was removed, so it migrates rather than
  * being dropped.
@@ -400,7 +400,7 @@ async function migrateUnavailable(db: Db, prisma: PrismaClient): Promise<Counts>
   // Run-scoped, not per-batch: the same chapter can be marked unavailable more
   // than once, and those repeats need not land in the same 500-doc batch. A
   // per-batch set lets cross-batch duplicates through, which the unique index
-  // then absorbs — harmless for the data, but it made the dry-run report claim
+  // then absorbs; harmless for the data, but it made the dry-run report claim
   // more inserts than the collection has distinct chapters, and that report is
   // what an operator uses to judge whether the migration looks right.
   const seen = new Set<string>();
@@ -456,7 +456,7 @@ function sniffContentType(data: Buffer): string {
 
 /**
  * Pull each referenced GridFS file into an `artifacts` row and return the new
- * artifact ids in the same order the legacy `images` array had them — page
+ * artifact ids in the same order the legacy `images` array had them; page
  * order is the upload order, so it must be preserved exactly.
  */
 async function migrateImages(
@@ -489,7 +489,7 @@ async function migrateImages(
     }
     if (data.length > MAX_ARTIFACT_BYTES) {
       console.warn(
-        `  warn: GridFS image ${objectId.toHexString()} is ${data.length} bytes, over the ${MAX_ARTIFACT_BYTES} cap — skipped`,
+        `  warn: GridFS image ${objectId.toHexString()} is ${data.length} bytes, over the ${MAX_ARTIFACT_BYTES} cap; skipped`,
       );
       stats.oversize += 1;
       continue;
@@ -594,7 +594,7 @@ function readJsonFile(path: string): unknown {
  * by design and the second pass must not undo curation done between passes.
  * `ExtensionConfigStore.replace` is what splits the legacy document into the
  * three relation tables, so the migration and the admin API agree on what a
- * valid row is — including which MangaDex language codes are real.
+ * valid row is; including which MangaDex language codes are real.
  */
 async function importExtensionConfig(
   prisma: PrismaClient,
@@ -640,8 +640,8 @@ async function importExtensionConfig(
 
 /**
  * `--extensions <dir>`: walk the legacy extension checkout. Per-extension
- * configuration was never in Mongo — the Python stack loaded manga_id_map.json
- * and override_options.json from disk beside each extension — so this is the
+ * configuration was never in Mongo; the Python stack loaded manga_id_map.json
+ * and override_options.json from disk beside each extension; so this is the
  * only place the cutover can get it from.
  */
 async function migrateExtensionFiles(
@@ -716,8 +716,8 @@ async function main(): Promise<void> {
   const dbName = requireEnv("MONGODB_DB_NAME");
   requireEnv("DATABASE_URL");
 
-  if (DRY_RUN) log("DRY RUN — reading from Mongo, writing nothing to Postgres");
-  if (REFRESH) log("REFRESH — existing history rows will have their JSONB payload rewritten");
+  if (DRY_RUN) log("DRY RUN: reading from Mongo, writing nothing to Postgres");
+  if (REFRESH) log("REFRESH: existing history rows will have their JSONB payload rewritten");
 
   const mongo = new MongoClient(mongoUri);
   const prisma = new PrismaClient();

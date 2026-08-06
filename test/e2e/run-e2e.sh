@@ -73,7 +73,7 @@ echo "run: $run_id"
 wait_run "$run_id" 180
 
 say "3/5 assert mock MangaDex received the uploads"
-# Upload tasks drain asynchronously after the run is PROCESSED — poll.
+# Upload tasks drain asynchronously after the run is PROCESSED; poll.
 count=0
 for _ in $(seq 1 30); do
   count="$(curl -fsS "$MOCK/_test/uploads" | json "len(d['commits'])")"
@@ -93,7 +93,7 @@ if [ "${1:-}" = "--no-failover" ]; then say "SKIPPING failover"; echo PASS; exit
 
 say "5/5 failover: kill the worker mid-job, the other one must finish"
 # Slow mode = tracked map gains the marker id "slow" (DB is config authority,
-# so this needs no bundle republish — which itself proves the overlay works).
+# so this needs no bundle republish; which itself proves the overlay works).
 curl -fsS -X PUT "$API/api/v1/admin/extensions/e2etest/tracked" -H "$ADMIN" \
   -H 'content-type: application/json' \
   -d '{"mangaId": "slow", "mdMangaId": "33333333-3333-4333-8333-333333333333"}' >/dev/null
@@ -112,7 +112,7 @@ done
 [ -n "$lease_worker" ] || fail "no worker leased the slow job"
 victim_name="$(curl -fsS "$API/api/v1/admin/workers" -H "$ADMIN" \
   | json "next(w['name'] for w in d['workers'] if w['id']=='$lease_worker')")"
-echo "lease held by $victim_name — killing it"
+echo "lease held by $victim_name; killing it"
 $COMPOSE kill "$victim_name"
 
 wait_run "$run_id" 300
@@ -125,4 +125,4 @@ echo "run completed by a different worker after lease expiry"
 $COMPOSE start "$victim_name" >/dev/null
 curl -fsS -X DELETE "$API/api/v1/admin/extensions/e2etest/tracked/slow" -H "$ADMIN" >/dev/null
 
-say "PASS — full pipeline + failover verified"
+say "PASS; full pipeline + failover verified"

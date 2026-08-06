@@ -59,7 +59,7 @@ const after = await page.eval(`const b = ${box}; return { login: b("login"), app
 console.log("after: ", JSON.stringify(after));
 ok("the app is on screen", after.app.painted && after.app.hidden === false);
 ok(
-  "the login card is gone — attribute AND layout (the reported bug)",
+  "the login card is gone; attribute AND layout (the reported bug)",
   after.login.hidden === true && after.login.display === "none" && !after.login.painted,
   `display=${after.login.display} painted=${after.login.painted} height=${after.login.h}px`,
 );
@@ -159,7 +159,7 @@ console.log("\n=== 4. the audit permalink opens one event ===");
 // ===========================================================================
 // The login above wrote session.login rows. Take the OLDEST id available, so
 // the fix is exercised against an event that client-side filtering of the most
-// recent page would still have found — then also prove the endpoint resolves an
+// recent page would still have found; then also prove the endpoint resolves an
 // id that is off the first page entirely.
 const auditIds = await page.eval(`
   const res = await fetch("/api/v1/admin/audit?limit=500", { headers: { "x-requested-with": "publoader-dash" } });
@@ -256,7 +256,7 @@ if (untracked) {
   ok("the MangaDex push is disabled with a reason", form.apply?.disabled === true && Boolean(form.apply.title));
   ok("the reason is also written on the page", form.reasonShown);
 } else {
-  console.log("SKIP  untracked detail — no untracked rows in this database");
+  console.log("SKIP  untracked detail; no untracked rows in this database");
 }
 
 // A contributor following a link into an admin-only view must be told, not 403'd.

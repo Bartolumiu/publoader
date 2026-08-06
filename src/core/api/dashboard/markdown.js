@@ -2,12 +2,12 @@
  * A small, dependency-free markdown renderer for the docs viewer.
  *
  * There is no bundler in this project and the dashboard's CSP forbids a CDN
- * (`script-src 'self'`), so marked/markdown-it are not options — and pulling a
+ * (`script-src 'self'`), so marked/markdown-it are not options; and pulling a
  * general-purpose renderer in to display fifteen files we wrote ourselves would
  * be a poor trade anyway. This covers exactly the constructs our docs use.
  *
  * The one rule that matters: TEXT IS ESCAPED BEFORE IT IS FORMATTED, never
- * after. The documents are trusted — they ship in the image — but a renderer
+ * after. The documents are trusted, they ship in the image, but a renderer
  * that interpolates raw text into HTML is a habit that outlives its input, and
  * the next thing someone renders through it will be a bundle manifest or an
  * error message from a worker. Escaping first also makes the two remaining
@@ -16,7 +16,7 @@
  *   - code spans and fences hold their content ESCAPED, and are pulled out
  *     before inline formatting runs so their contents cannot be reinterpreted;
  *   - link targets go through `safeUrl`, which is an allowlist. Escaping alone
- *     would happily emit href="javascript:…" — that is not an HTML-escaping
+ *     would happily emit href="javascript:…"; that is not an HTML-escaping
  *     problem and cannot be fixed by escaping harder.
  */
 
@@ -61,7 +61,7 @@ export function safeUrl(url) {
 
 /**
  * A link target: anything but whitespace and parentheses, plus ONE level of
- * balanced parens. `javascript:alert(1)` has to be captured whole — a pattern
+ * balanced parens. `javascript:alert(1)` has to be captured whole; a pattern
  * that stopped at the first `)` would hand `javascript:alert(1` to safeUrl,
  * which refuses it, and then leave a stray `)` in the text. Getting the refusal
  * right matters more than the parens do.
@@ -137,7 +137,7 @@ const TABLE_DIVIDER_RE = /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/;
  * Render a whole document.
  *
  * Returns an HTML string for `innerHTML`. Every path through here escapes, so
- * the caller does not have to know which constructs are "safe" — that knowledge
+ * the caller does not have to know which constructs are "safe"; that knowledge
  * living in the caller is how renderers grow holes.
  */
 export function renderMarkdown(source) {
@@ -145,7 +145,7 @@ export function renderMarkdown(source) {
     .replace(/\r\n?/g, "\n")
     // Control characters are stripped before anything is parsed. They have no
     // meaning in markdown, and two of this module's internals (the code-span
-    // placeholder and the hard-break marker) use them — so removing them here is
+    // placeholder and the hard-break marker) use them; so removing them here is
     // what makes those internals impossible to forge from a document.
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "");
   return renderBlocks(text.split("\n")).join("\n");
@@ -317,7 +317,7 @@ function renderTable(header, aligns, rows) {
  *
  * A stack rather than recursion over the text: indentation in real documents is
  * inconsistent (two spaces here, four there, a tab in the file someone edited on
- * a different machine), so levels are tracked by *relative* depth — each new
+ * a different machine), so levels are tracked by *relative* depth; each new
  * indent that exceeds the current one opens exactly one level, which is what the
  * writer meant however many spaces they used.
  */

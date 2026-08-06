@@ -3,7 +3,7 @@ import { chapterFromColumns, type StoredChapterRow } from "../md/chapterRows.js"
 import type { Chapter } from "../md/types.js";
 
 /**
- * Read access to the four chapter history tables — what this platform has put
+ * Read access to the four chapter history tables; what this platform has put
  * on MangaDex, and what has since happened to it.
  *
  * The writers already exist (processor.ts records uploads, taskWorkers.ts
@@ -15,7 +15,7 @@ import type { Chapter } from "../md/types.js";
  *
  * The four tables are structurally identical (see md/chapterRows.ts), so one
  * parameterised query serves all four. Table and column names come from the
- * closed ARCHIVES map below and never from a request — `Prisma.raw` appears
+ * closed ARCHIVES map below and never from a request; `Prisma.raw` appears
  * only with values from that map, and every operator-supplied value is bound.
  */
 
@@ -25,7 +25,7 @@ export type ChapterArchive = (typeof CHAPTER_ARCHIVES)[number];
 interface ArchiveSpec {
   /** Physical table. */
   table: string;
-  /** The column that dates the row — what "at" means for this archive. */
+  /** The column that dates the row; what "at" means for this archive. */
   instant: string;
   /** Human name for messages, matching the vocabulary the dashboard uses. */
   label: string;
@@ -242,8 +242,8 @@ export class ChapterStore {
 
   /**
    * Per-extension counts for one archive, for the filter picker, for the "what
-   * does this extension have up?" question the Extensions view asks, and — with
-   * a filter — for the breakdown a bulk dry run reports, which is how an
+   * does this extension have up?" question the Extensions view asks, and; with
+   * a filter; for the breakdown a bulk dry run reports, which is how an
    * operator recognises the set they are about to act on.
    */
   async byExtension(
@@ -262,7 +262,7 @@ export class ChapterStore {
     return rows.map((row) => ({ extension: row.extension ?? "", count: Number(row.count) }));
   }
 
-  /** Row counts for all four archives — the header of the Chapters view. */
+  /** Row counts for all four archives; the header of the Chapters view. */
   async totals(): Promise<Record<ChapterArchive, number>> {
     const entries = await Promise.all(
       CHAPTER_ARCHIVES.map(async (archive) => {

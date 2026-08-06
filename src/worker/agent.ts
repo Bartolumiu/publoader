@@ -29,8 +29,8 @@ const LEASE_ERROR_MAX_MS = 60_000;
 const MIN_RENEW_INTERVAL_MS = 5_000;
 
 /**
- * Credentials were rejected. Nothing the agent can do about it — the operator
- * must revoke and re-enroll — so this always ends the process.
+ * Credentials were rejected. Nothing the agent can do about it; the operator
+ * must revoke and re-enroll; so this always ends the process.
  */
 export class FatalAuthError extends Error {
   constructor(message: string) {
@@ -138,8 +138,8 @@ export class WorkerAgent {
             // the poll for waitSeconds, so this branch is normally already
             // paced. But that makes our request rate depend entirely on the
             // server choosing to be slow: point a worker at a core that answers
-            // 204 immediately — misconfigured waitSeconds, a proxy that buffers,
-            // an older core — and this loop spins as fast as the network allows
+            // 204 immediately; misconfigured waitSeconds, a proxy that buffers,
+            // an older core; and this loop spins as fast as the network allows
             // (measured: ~190k requests in 18s against a stub). A client must
             // pace itself rather than trust the server to do it.
             await sleep(IDLE_SLEEP_MS);

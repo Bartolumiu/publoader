@@ -3,7 +3,7 @@ import { z } from "zod";
 /**
  * Wire mirror of the Python `Chapter` pydantic dataclass
  * (publoader/models/dataclasses.py). Field-for-field, camelCased; `images`
- * (raw bytes) is replaced by `imageArtifacts` — ids of separately uploaded,
+ * (raw bytes) is replaced by `imageArtifacts`: ids of separately uploaded,
  * checksummed artifacts. Datetimes travel as ISO-8601 strings (UTC).
  */
 export const ChapterRecord = z
@@ -47,7 +47,7 @@ export type MangaRecord = z.infer<typeof MangaRecord>;
  * - multi_chapters: chapter id -> chapter numbers it legitimately maps to
  * - custom_language: extension-chosen key -> MangaDex language code
  *
- * At rest those three are tables, not a document — see
+ * At rest those three are tables, not a document; see
  * src/core/store/extensionConfig.ts, which is the only thing that writes them
  * and the only thing that decides which rows are acceptable. This schema stays
  * deliberately TOLERANT because it also validates worker envelopes: the

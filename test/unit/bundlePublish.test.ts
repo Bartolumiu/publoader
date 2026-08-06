@@ -5,7 +5,7 @@ import { BundleRejectedError, BundleStore } from "../../src/core/store/bundles.j
 
 /**
  * Every case here is rejected before any database call, so the store gets a
- * prisma that throws if it is ever touched — reaching it would itself be the
+ * prisma that throws if it is ever touched; reaching it would itself be the
  * bug (an invalid bundle must never be persisted).
  */
 const noPrisma = new Proxy(
@@ -129,7 +129,7 @@ describe("BundleStore.publish node entrypoint validation", () => {
         { "index.py": "# default export? no such thing\nexport default\n" },
       ),
       // The manifest schema constrains the extension list, so this is caught
-      // either there or by the .mjs/.js check — both are correct rejections.
+      // either there or by the .mjs/.js check; both are correct rejections.
     ).rejects.toThrow();
   });
 });

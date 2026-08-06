@@ -1,15 +1,15 @@
 /**
  * Realistic browser headers, applied to every request an extension makes.
  *
- * This used to live inside individual extensions — alpha_manga and viz each
- * carried their own copy — which meant every new extension either reimplemented
+ * This used to live inside individual extensions; alpha_manga and viz each
+ * carried their own copy; which meant every new extension either reimplemented
  * it or went out with a bare `undici` fingerprint. Publishers block on exactly
  * that, so the default belongs in the platform: an extension gets plausible
  * headers without asking, and anything it sets explicitly still wins.
  *
  * A profile is chosen **per request**, not per process. A worker that pins one
  * User-Agent for its whole lifetime is as fingerprintable as one that sends
- * none, just more slowly — and the header set has to stay internally consistent
+ * none, just more slowly; and the header set has to stay internally consistent
  * (the `Sec-CH-UA` client hints must agree with the `User-Agent`), which is why
  * these are whole profiles rather than a UA string picked from a list.
  */
@@ -37,13 +37,13 @@ export const BROWSER_PROFILES: readonly BrowserProfile[] = [
     "Sec-CH-UA-Platform": '"macOS"',
   },
   {
-    // Firefox on Windows — no Sec-CH-UA at all, which is itself correct:
+    // Firefox on Windows; no Sec-CH-UA at all, which is itself correct:
     // Firefox does not send client hints, and sending them with a Firefox UA
     // is a contradiction a fingerprinter checks for.
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0",
   },
   {
-    // Safari on macOS — likewise no client hints.
+    // Safari on macOS; likewise no client hints.
     "User-Agent":
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 " +
       "(KHTML, like Gecko) Version/18.1 Safari/605.1.15",
@@ -62,7 +62,7 @@ export const BROWSER_PROFILES: readonly BrowserProfile[] = [
 export interface BrowserHeaderOptions {
   /**
    * A document request rather than an API call. Changes `Accept` and adds the
-   * navigation `Sec-Fetch-*` set — asking for HTML with an API `Accept` header
+   * navigation `Sec-Fetch-*` set; asking for HTML with an API `Accept` header
    * is a mismatch worth avoiding.
    */
   document?: boolean;

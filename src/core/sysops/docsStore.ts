@@ -2,12 +2,12 @@
  * Serving the repository's own documentation to the dashboard.
  *
  * This is a file-serving endpoint reachable from the internet, so the primary
- * risk is not a bug in the markdown renderer — it is path traversal. The rules
+ * risk is not a bug in the markdown renderer; it is path traversal. The rules
  * here are therefore deliberately narrow and layered, in this order:
  *
  *   1. the requested name must match DOC_NAME_RE, which cannot express a
  *      separator, a leading dot, or `..`;
- *   2. it must appear in the directory listing, which is the allowlist — a name
+ *   2. it must appear in the directory listing, which is the allowlist; a name
  *      that passes the regex but is not a document we shipped is a 404;
  *   3. the resolved absolute path must still be inside the docs directory,
  *      which catches anything the first two rules failed to anticipate
@@ -15,7 +15,7 @@
  *
  * Any one of those would probably do. All three are here because the cost is a
  * few lines and the failure mode is reading arbitrary files out of the
- * container — including the prisma schema, the compiled source, and anything an
+ * container; including the prisma schema, the compiled source, and anything an
  * operator later bind-mounts nearby.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -24,7 +24,7 @@ import { fileURLToPath } from "node:url";
 
 /**
  * A document name. Lowercase or mixed-case word characters, dots, dashes and
- * underscores, ending in `.md`, and never starting with a dot — so `..`,
+ * underscores, ending in `.md`, and never starting with a dot; so `..`,
  * `../x.md`, `/etc/passwd` and `.env` are all unrepresentable rather than
  * checked for.
  */
@@ -106,7 +106,7 @@ export function listDocs(dir: string): DocSummary[] {
 
 /**
  * One document, or null when `name` is not one we serve. Null covers every
- * rejection — a bad name, an unknown name, a path that escaped — because the
+ * rejection, a bad name, an unknown name, a path that escaped, because the
  * caller answers 404 for all of them: distinguishing "malformed" from "not
  * found" here would confirm which files exist to whoever is probing.
  */

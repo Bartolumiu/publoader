@@ -8,7 +8,7 @@ import { createLogger } from "../../src/logging.js";
  *
  * This exists because of a real bug: `searchManga` passed the bare route
  * `"manga"` where every sibling passed `` `${mdApiUrl}/manga` ``. `buildUrl`
- * does `new URL(base)`, which throws on a relative string — so the call threw
+ * does `new URL(base)`, which throws on a relative string; so the call threw
  * every single time. It sat inside `TitleService.createOne`'s try block, so the
  * throw was recorded as a *create failure*: auto-creating a MangaDex title was
  * broken outright, and the duplicate-title guard it was added to provide had
@@ -17,7 +17,7 @@ import { createLogger } from "../../src/logging.js";
  *
  * So this test is deliberately not about `searchManga`. It drives every read
  * method through a stubbed `fetch` and asserts the URL is absolute and on the
- * configured host — the class of mistake, not the instance, because the next
+ * configured host; the class of mistake, not the instance, because the next
  * method added is as likely to forget the base as that one was.
  */
 describe("MdClient request URLs", () => {

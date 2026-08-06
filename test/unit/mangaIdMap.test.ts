@@ -14,7 +14,7 @@ import {
  * indistinguishable from "this extension tracks nothing". The extension would
  * then report its entire catalogue as untracked, and an extension with
  * `auto_create_titles` enabled turns that into a request to create a duplicate
- * MangaDex title for every series it publishes — public, and someone else's
+ * MangaDex title for every series it publishes; public, and someone else's
  * cleanup. A failed job that retries is strictly the better outcome.
  */
 describe("invertMangaIdMap", () => {

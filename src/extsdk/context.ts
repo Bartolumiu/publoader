@@ -10,7 +10,7 @@ import { createGuardedFetch, type GuardedFetch, type GuardedFetchOptions } from 
  * The context is the extension's entire world: a read-only manifest, the
  * platform's tracked-manga map, its own bundled data files, a guarded fetch,
  * and a log sink. Anything an extension wants that is not on this object it
- * has to reach for through Node directly — which is what the worker's
+ * has to reach for through Node directly; which is what the worker's
  * permission-model flags exist to refuse.
  */
 
@@ -21,13 +21,13 @@ export interface ExtensionContextOptions {
   bundleDir: string;
   /**
    * The lease's tracked map in its legacy `{mdMangaId: [externalIds]}` shape.
-   * Inverted here — extensions want external -> MangaDex, the DB stores the
+   * Inverted here; extensions want external -> MangaDex, the DB stores the
    * other direction because one title can have several external ids.
    */
   mangaIdMap?: LeaseMangaIdMap | undefined;
   /**
    * Set by the control plane when `mangaIdMap` is keyed by catalogue. Carried
-   * explicitly because sniffing the shape fails silently — see
+   * explicitly because sniffing the shape fails silently; see
    * `UnsupportedMangaIdMapError`.
    */
   mangaIdMapNamespaced?: boolean | undefined;
@@ -37,7 +37,7 @@ export interface ExtensionContextOptions {
   fetch?: Omit<GuardedFetchOptions, "allowedHosts" | "log"> | undefined;
   /** Correlation fields stamped on every log line. */
   logFields?: Record<string, unknown> | undefined;
-  /** Where log lines go. stderr by design — stdout is the envelope channel. */
+  /** Where log lines go. stderr by design; stdout is the envelope channel. */
   logStream?: { write(chunk: string): unknown } | undefined;
 }
 
@@ -64,7 +64,7 @@ export type LeaseMangaIdMap =
  * Thrown rather than tolerated: a namespaced map inverted by flat-only code
  * produces an EMPTY lookup, and an empty lookup does not read as an error. The
  * extension would conclude that none of its series is tracked and report its
- * ENTIRE catalogue as untracked — which, with `auto_create_titles` on, is a
+ * ENTIRE catalogue as untracked; which, with `auto_create_titles` on, is a
  * request to create a duplicate MangaDex title for every series it publishes.
  * A crashed job that retries is a far better outcome than that, so refuse.
  */

@@ -105,7 +105,7 @@ async function connect(wsUrl, viewport) {
       await send("Log.enable");
       await send("Network.enable");
       // Headless Chrome has no OS focus, and Element.focus() is a no-op in an
-      // unfocused document — which makes every focus assertion vacuously false.
+      // unfocused document; which makes every focus assertion vacuously false.
       await send("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {});
       await send("Emulation.setDeviceMetricsOverride", {
         width: viewport.width,
@@ -134,7 +134,7 @@ async function connect(wsUrl, viewport) {
      * Navigate and wait for load plus a settle window for the SPA's own fetches.
      *
      * A hash-only change within the same document does not fire a load event, so
-     * it is driven the way a clicked link would drive it — which is also what the
+     * it is driven the way a clicked link would drive it; which is also what the
      * router is supposed to handle.
      */
     async goto(url, settle = 900) {
@@ -224,7 +224,7 @@ async function connect(wsUrl, viewport) {
 let failures = 0;
 export function ok(label, cond, extra = "") {
   if (!cond) failures++;
-  console.log(`${cond ? "PASS" : "FAIL"}  ${label}${extra ? `  — ${extra}` : ""}`);
+  console.log(`${cond ? "PASS" : "FAIL"}  ${label}${extra ? ` ; ${extra}` : ""}`);
   return cond;
 }
 export const failureCount = () => failures;

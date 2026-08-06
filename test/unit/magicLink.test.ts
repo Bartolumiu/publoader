@@ -10,7 +10,7 @@ import { decodeState, encodeState } from "../../src/core/api/oauth.js";
  * The property that matters: an unauthenticated caller supplies the address, so
  * no outcome may depend on knowing whether that address has an account (the
  * route answers 202 for all of them), and creating an account from a bare
- * address must stay behind the signups gate — otherwise the endpoint is a way
+ * address must stay behind the signups gate; otherwise the endpoint is a way
  * to write rows into `admin_users` and mail strangers.
  */
 
@@ -45,7 +45,7 @@ describe("resolveLinkRequest", () => {
     expect(d.createPending).not.toHaveBeenCalled();
   });
 
-  it("sends a link to an approved account that has no password — this is the whole point", async () => {
+  it("sends a link to an approved account that has no password; this is the whole point", async () => {
     const d = deps({ byEmail: vi.fn(async () => user({ passwordHash: null })) });
     await expect(resolveLinkRequest("ops@example.com", d)).resolves.toMatchObject({ kind: "send" });
   });

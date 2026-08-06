@@ -110,7 +110,7 @@ describe("AdminApiClient error mapping", () => {
     expect((err as AdminApiError).isAuth).toBe(true);
   });
 
-  it("keeps a non-JSON error body as the detail — proxies return HTML", async () => {
+  it("keeps a non-JSON error body as the detail; proxies return HTML", async () => {
     const { api } = client({ status: 502, body: "<html>Bad Gateway</html>" });
     const err = (await api.stats("discord:ardax").catch((e: unknown) => e)) as AdminApiError;
     expect(err.detail).toContain("Bad Gateway");
@@ -190,7 +190,7 @@ describe("describeApiError", () => {
     expect(describeApiError(make(401, "admin token required"))).toContain("BOT_API_TOKEN");
   });
 
-  it("passes the API's own text through on a 409 — that is the actionable part", () => {
+  it("passes the API's own text through on a 409; that is the actionable part", () => {
     expect(describeApiError(make(409, "platform is paused"))).toContain("platform is paused");
   });
 

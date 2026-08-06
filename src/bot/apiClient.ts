@@ -4,7 +4,7 @@
  *
  * The bot is an API client and nothing else: it holds no database URL, no
  * MangaDex credential, and no Docker socket. Everything it can do to the
- * platform, it does through one bearer token over HTTPS — which means the blast
+ * platform, it does through one bearer token over HTTPS; which means the blast
  * radius of a compromised bot host is exactly the set of scopes on that token.
  */
 import type { Logger } from "../logging.js";
@@ -78,7 +78,7 @@ export function describeApiError(err: unknown): string {
     switch (err.status) {
       case 401:
         return (
-          `**401 — the bot's API token was rejected.** The API said: \`${err.detail}\`\n` +
+          `**401: the bot's API token was rejected.** The API said: \`${err.detail}\`\n` +
           "Check `BOT_API_TOKEN`: it must be a token the core currently accepts, " +
           "and it must be sent to the right `CORE_URL`. If the token was rotated, " +
           "redeploy the bot with the new value."
@@ -89,24 +89,24 @@ export function describeApiError(err: unknown): string {
             ? `\nThe token currently holds: ${err.held.map((s) => `\`${s}\``).join(", ")}.`
             : "";
         return (
-          `**403 — the bot's API token lacks the \`${err.scope}\` scope.** The API said: \`${err.detail}\`${holds}\n` +
+          `**403: the bot's API token lacks the \`${err.scope}\` scope.** The API said: \`${err.detail}\`${holds}\n` +
           `Mint a replacement token that includes \`${err.scope}\` (\`publoader-admin tokens create\`), or accept that this command is not available to the bot.`
         );
       }
       case 404:
-        return `**404 — not found.** The API said: \`${err.detail}\``;
+        return `**404: not found.** The API said: \`${err.detail}\``;
       case 409:
         // 409 is the API's "your request is valid but the world says no":
         // paused platform, uncancellable job, un-skippable row.
-        return `**409 — conflict.** The API said: \`${err.detail}\``;
+        return `**409: conflict.** The API said: \`${err.detail}\``;
       case 429: {
         const wait = err.retryAfterSeconds
           ? `Wait ${err.retryAfterSeconds}s and try again.`
           : "Wait a few seconds and try again.";
-        return `**429 — rate limited by the admin API.** ${wait} The API said: \`${err.detail}\``;
+        return `**429: rate limited by the admin API.** ${wait} The API said: \`${err.detail}\``;
       }
       case 503:
-        return `**503 — that part of the API is not available on this deployment.** The API said: \`${err.detail}\``;
+        return `**503: that part of the API is not available on this deployment.** The API said: \`${err.detail}\``;
       default:
         return `**${err.status} from the admin API.** It said: \`${err.detail}\``;
     }
@@ -120,7 +120,7 @@ export function describeApiError(err: unknown): string {
 // ---- response shapes -------------------------------------------------------
 // Structural subsets of what admin.ts returns: only the fields the bot renders.
 // Prisma rows come back verbatim, so these intentionally do not try to mirror
-// the whole model — a field added server-side must not break the bot.
+// the whole model; a field added server-side must not break the bot.
 
 export interface Stats {
   jobs: Record<string, number>;
@@ -233,7 +233,7 @@ export interface TriggerRunResult {
   created: boolean;
 }
 
-/** A row from the uploader's queue — the view legacy `queue_peek` gave. */
+/** A row from the uploader's queue; the view legacy `queue_peek` gave. */
 export interface UploadTask {
   id: string;
   kind: string;
@@ -335,7 +335,7 @@ export class AdminApiClient {
   /**
    * True when the token looks like a scoped per-client credential rather than
    * the platform's root ADMIN_TOKEN. Prefix-based and therefore a hint, not a
-   * guarantee — but a bot running on the root token is worth warning about on
+   * guarantee; but a bot running on the root token is worth warning about on
    * every startup, and this is the only signal available client-side.
    */
   get looksScoped(): boolean {
@@ -344,7 +344,7 @@ export class AdminApiClient {
 
   /**
    * Scopes observed on this token, if any command has been refused for lacking
-   * one. Not authoritative — it is empty until the first 403 — but it is the
+   * one. Not authoritative, it is empty until the first 403, but it is the
    * only scope information available without an introspection endpoint.
    */
   get observedScopes(): readonly string[] | undefined {
@@ -434,7 +434,7 @@ export class AdminApiClient {
    * never hold. So a 404 here is the expected answer and means "this deployment
    * cannot describe the token" rather than a failure. The probe stays because
    * the day such an endpoint exists, `/whoami` starts listing real scopes with
-   * no change to the bot. A 403 is also treated as "cannot tell" — it still
+   * no change to the bot. A 403 is also treated as "cannot tell"; it still
    * yields the held-scope list via `observedScopes`.
    */
   async tokenSelf(actor: string): Promise<TokenIdentity | null> {
@@ -835,7 +835,7 @@ function extractError(body: string): string | null {
       return JSON.stringify(value);
     }
   } catch {
-    // Not JSON — a proxy error page, most likely.
+    // Not JSON; a proxy error page, most likely.
   }
   return body.slice(0, 300);
 }

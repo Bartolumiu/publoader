@@ -8,7 +8,7 @@ import { buildInSandbox, SandboxBuildError } from "../../src/core/sysops/buildSa
  * The subprocess esbuild runs in.
  *
  * esbuild does not execute the code it bundles, so this is not a sandbox for
- * arbitrary execution — it is a bound on a step that READS attacker-supplied
+ * arbitrary execution; it is a bound on a step that READS attacker-supplied
  * source inside the control plane. The tests are therefore about the four things
  * that bound: no environment, no dependency resolution, no on-disk tsconfig, and
  * a wall clock.
@@ -16,7 +16,7 @@ import { buildInSandbox, SandboxBuildError } from "../../src/core/sysops/buildSa
  * The tsconfig case is a regression test for a real vulnerability, not a
  * hypothetical: with esbuild's defaults, a two-line `tsconfig.json` shipped
  * inside an extension directory mapped an import onto an ABSOLUTE path and
- * esbuild inlined that file into the published bundle — which every enrolled
+ * esbuild inlined that file into the published bundle; which every enrolled
  * worker can then download. `tsconfigRaw` is what closes it.
  */
 

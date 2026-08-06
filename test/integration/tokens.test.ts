@@ -10,7 +10,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
 /**
  * Blast-radius containment: a scoped token must reach its own area and nothing
  * else. These tests are the evidence for the security claim, so they assert
- * both halves — the permitted call succeeds AND the neighbouring areas 403.
+ * both halves; the permitted call succeeds AND the neighbouring areas 403.
  */
 describe.skipIf(!dbReady())("scoped api tokens", () => {
   const prisma = testPrisma();
@@ -126,7 +126,7 @@ describe.skipIf(!dbReady())("scoped api tokens", () => {
     ).toBe(403);
   });
 
-  it("no token — however broadly scoped — can mint or widen credentials", async () => {
+  it("no token, however broadly scoped, can mint or widen credentials", async () => {
     const wildcard = await mint(["*"]);
     const headers = { authorization: `Bearer ${wildcard}` };
     // Wildcard reaches operational areas...

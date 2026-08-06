@@ -28,7 +28,7 @@ import {
  * The point of the port is that a Discord channel which has been receiving these
  * for years does not suddenly read differently, so the assertions are about
  * exact wording and layout rather than "an embed was produced". Several of them
- * pin behaviour that looks like a bug and is faithful — those say so, because
+ * pin behaviour that looks like a bug and is faithful; those say so, because
  * the next person to read them will otherwise'fix' it.
  */
 
@@ -99,7 +99,7 @@ describe("chapterField", () => {
   });
 
   it("suppresses only the MangaDex links on a failed upload", () => {
-    // The source links still matter — they are how an operator checks what the
+    // The source links still matter; they are how an operator checks what the
     // publisher actually published.
     const value = chapterField(chapter, { failedUpload: true }).value;
     expect(value).not.toContain("Mangadex chapter link:");
@@ -295,7 +295,7 @@ describe("the remaining Python webhooks", () => {
     }));
     const embeds = untrackedMangaEmbeds("mangaplus", manga);
     expect(embeds).toHaveLength(2);
-    // The TOTAL, not the page size — "47" is the number the operator acts on.
+    // The TOTAL, not the page size; "47" is the number the operator acts on.
     expect(embeds[0]!.title).toBe("47 Untracked Manga");
     expect(embeds[1]!.title).toBe("47 Untracked Manga (2)");
     expect(embeds[0]!.description!.split("\n")).toHaveLength(30);

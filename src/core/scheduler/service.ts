@@ -69,7 +69,7 @@ export class SchedulerService {
       // Isolated deliberately. Slot creation touches bundles, manifests and
       // settings, so it has plenty of ways to throw; letting it abort the tick
       // also skipped the lease sweeper and run advancement below, which is how
-      // a single bad manifest could quietly stop the whole queue — visible only
+      // a single bad manifest could quietly stop the whole queue; visible only
       // as one log line every 30 seconds. Recovery work must not depend on
       // scheduling work succeeding.
       try {
@@ -110,7 +110,7 @@ export class SchedulerService {
    * Poll GitHub for changed extensions, at most once per SYNC_INTERVAL_MS.
    *
    * Rate-limited by a persisted timestamp rather than a timer so that restarts
-   * do not reset the clock — a crash-looping scheduler must not turn into a
+   * do not reset the clock; a crash-looping scheduler must not turn into a
    * GitHub API hammer.
    */
   private async maybeSyncGithub(now: Date): Promise<void> {
@@ -145,7 +145,7 @@ export class SchedulerService {
 
   private async createDueRuns(now: Date): Promise<void> {
     const lastTickRaw = await this.settings.getSetting(LAST_TICK_KEY);
-    // First boot: look back one minute only — never storm through history.
+    // First boot: look back one minute only; never storm through history.
     const lastTick = lastTickRaw ? new Date(lastTickRaw) : new Date(now.getTime() - 60_000);
 
     const bundles = await this.bundles.listLatest();
@@ -193,17 +193,17 @@ export class SchedulerService {
   ): Promise<{ runId: string; created: boolean; segments: number }> {
     let segments: ReturnType<typeof computeSegments> = [];
     // CLEAN runs are all-or-nothing over the full catalogue; never partition
-    // them — a missing segment must not read as "chapters were removed".
+    // them; a missing segment must not read as "chapters were removed".
     if (manifest.partition && opts.kind !== "CLEAN") {
       // The DB (TrackedManga) is the source of truth for the tracked catalogue
-      // — bundle data files only seed it at publish time.
+      //; bundle data files only seed it at publish time.
       const tracked = await this.prisma.trackedManga.findMany({
         where: { extension: manifest.name },
         select: { namespace: true, mangaId: true },
       });
       // `segmentMangaIds` is a flat list of external ids on the wire, so it
       // cannot name WHICH catalogue an id belongs to. For an extension with more
-      // than one, `709` is ambiguous — it would either segment two different
+      // than one, `709` is ambiguous; it would either segment two different
       // series as one or send the same id to two workers. Running the whole job
       // unpartitioned is slower and correct; guessing is neither.
       const namespaces = new Set(tracked.map((t) => t.namespace));
@@ -264,7 +264,7 @@ export class SchedulerService {
   /**
    * `Reading data from {extension}`: the run has begun.
    *
-   * Swallows failures — a Discord outage must not stop runs being scheduled,
+   * Swallows failures; a Discord outage must not stop runs being scheduled,
    * which is the one thing this service exists to do.
    */
   private async reportRunStarted(extension: string): Promise<void> {

@@ -127,7 +127,7 @@ export function registerWorkerRoutes(app: FastifyInstance, ctx: AppContext): voi
             }),
             ctx.extensionConfig.loadForLease(claimed.job.extension),
           ]);
-          // Delivered in the legacy manga_id_map shape — flat
+          // Delivered in the legacy manga_id_map shape; flat
           // {mdMangaId: [externalIds]} while the extension has one id space, and
           // {namespace: {mdMangaId: [externalIds]}} once it has more, which is
           // the shape viz's own file already has. See MangaIdMapPayload for why

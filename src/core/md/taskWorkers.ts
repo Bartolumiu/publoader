@@ -12,7 +12,7 @@ import type { Chapter } from "./types.js";
 import type { SettingsStore } from "../store/settings.js";
 
 /**
- * Execution of a single claimed UploadTask — the TypeScript port of
+ * Execution of a single claimed UploadTask; the TypeScript port of
  * publoader/workers/{uploader,editor,deleter,unavailable}.py.
  *
  * The Python workers deleted their queue row on success and left it in place on
@@ -24,7 +24,7 @@ import type { SettingsStore } from "../store/settings.js";
  * bracketed by UploadLog rows: a `committing` marker before the session opens
  * and a `committed` row carrying the MangaDex chapter id after. A retry that
  * finds a prior `committed` row verifies the chapter still exists on MangaDex
- * before skipping — a recorded id that MangaDex never indexed must re-upload,
+ * before skipping; a recorded id that MangaDex never indexed must re-upload,
  * not silently vanish.
  */
 
@@ -103,7 +103,7 @@ export class UploadTaskWorkers {
    * closest this architecture has: Python named the embed after the thread, and
    * here one uploader drains typed queues, so the kind IS the queue.
    *
-   * Nothing is sent when nothing was processed — Python only spoke when it had
+   * Nothing is sent when nothing was processed; Python only spoke when it had
    * done something, and a per-tick "finished 0 items" would be constant noise.
    */
   async flushQueueSummary(counts: Map<string, { processed: number; failed: number }>): Promise<void> {
@@ -215,7 +215,7 @@ export class UploadTaskWorkers {
       const row = byId.get(id);
       if (!row) throw new TaskError(`artifact ${id} referenced by the chapter is missing`);
       // MangaDex echoes the filename back as originalFileName, and page order is
-      // rebuilt from it — so the name must be the page's index and nothing else.
+      // rebuilt from it; so the name must be the page's index and nothing else.
       return { name: String(index), data: Buffer.from(row.content) };
     });
   }
@@ -373,7 +373,7 @@ export class UploadTaskWorkers {
       throw new TaskError(message);
     }
 
-    // Archive first, then drop the live row — deletion is irreversible, so the
+    // Archive first, then drop the live row; deletion is irreversible, so the
     // record of what was removed outlives it (legacy deleter.py appended to the
     // `deleted` collection for exactly this reason).
     const columns = chapterToColumns({ ...chapter, mdChapterId });
@@ -401,7 +401,7 @@ export class UploadTaskWorkers {
    *
    *  - `force` re-renders the card for a chapter that has ALREADY been marked
    *    unavailable. Without it the "no externalUrl left" branch below archives
-   *    and returns, which is right for the automated pass — the work is done —
+   *    and returns, which is right for the automated pass; the work is done -
    *    but makes the card unfixable once posted. A card carrying a wrong series
    *    title, or one rendered before the layout was corrected, is a page on a
    *    public catalogue, so there has to be a way to replace it.
@@ -429,7 +429,7 @@ export class UploadTaskWorkers {
     }
 
     if (detail === null) {
-      // Gone from MangaDex already — archiving is the correct end state.
+      // Gone from MangaDex already; archiving is the correct end state.
       log.info({ mdChapterId }, "chapter already gone from MangaDex, archiving");
       await this.archiveUnavailable(mdChapterId, chapter, null);
       metrics.uploadsTotal.inc({ outcome: "unavailable_already_gone" });
@@ -599,8 +599,8 @@ export class UploadTaskWorkers {
     if (!this.deps.notifier.enabled) return;
 
     // A successful upload is the expected case, and one embed per chapter turns
-    // the channel into a transcript in which the failures — the only entries
-    // anyone can act on — scroll past unread. Off unless an operator asks for
+    // the channel into a transcript in which the failures; the only entries
+    // anyone can act on; scroll past unread. Off unless an operator asks for
     // them; the run-level "Found N chapters" embed already reports the work.
     // Failures are always sent: dropping one silently has no reading in which
     // it is what the operator wanted.
@@ -610,7 +610,7 @@ export class UploadTaskWorkers {
     // Success/Manga/Chapter/Extension plus the language, title, expiry and the
     // four links, titled after the queue that did the work. A channel that has
     // been reading these for years should not have to relearn them. The failure
-    // reason rides along as the description — see queueEmbed.
+    // reason rides along as the description; see queueEmbed.
     this.pending.push(queueEmbed(action, chapter, success, detail));
   }
 }
@@ -656,7 +656,7 @@ function domainRoot(url: string | null | undefined): string | null {
 /**
  * What externalUrl to leave behind once the chapter link is dead: the
  * publisher's manga page if we have one, else the publisher's site root, else
- * nothing — port of `_resolve_replacement_url`.
+ * nothing; port of `_resolve_replacement_url`.
  */
 function resolveReplacementUrl(liveExternalUrl: string | null, chapter: Chapter): string | null {
   const mangaUrl = (chapter.mangaUrl ?? "").trim();

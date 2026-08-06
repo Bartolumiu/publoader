@@ -41,7 +41,7 @@ export function unavailableCardOptions(input: {
 
 /**
  * Series title for the card. Prefer the manga relationship MangaDex returned
- * (via includes[]=manga) over whatever the queue row carried — the queued name
+ * (via includes[]=manga) over whatever the queue row carried; the queued name
  * is often absent, which is what used to render cards as "Untitled".
  */
 export function resolveMangaName(detail: MdChapterDetail | null, chapter: Chapter): string {

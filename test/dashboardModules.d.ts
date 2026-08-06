@@ -11,7 +11,7 @@
  * call site keeps the one thing worth type-checking: both modules must export a
  * function that takes the host object and resolves to a DOM node, because that is
  * exactly what `app.js` does with the result (`host.replaceChildren(await
- * build(moduleHost()))`). `unknown` for the host and the node is deliberate — the
+ * build(moduleHost()))`). `unknown` for the host and the node is deliberate; the
  * DOM lib is not in this program's `lib`, on purpose, since adding it would
  * conflict with Node's `fetch` typing and would stop the server sources failing to
  * compile when they reach for a browser global.

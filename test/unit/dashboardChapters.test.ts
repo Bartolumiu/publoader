@@ -7,14 +7,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * The three chapter views, actually rendered.
  *
  * `dashboard/app.js` is 7 000 lines of vanilla JavaScript that nothing
- * type-checks and — until this file — nothing executed. The server-side tests
+ * type-checks and, until this file, nothing executed. The server-side tests
  * assert it is *served*; `dashboardModules.test.ts` covers the two views that
  * live in their own ES modules. The shell itself, where a mistyped helper name
  * is a blank card and a green suite, had no coverage at all.
  *
  * So this drives the real file under jsdom against a stubbed API: sign in as an
  * owner, navigate to each new destination, and assert the chapters actually
- * appear. It is a smoke test by design — it proves the views mount, ask the
+ * appear. It is a smoke test by design; it proves the views mount, ask the
  * endpoints this branch added, and put the returned chapters on the page. It
  * deliberately does not assert layout.
  *
@@ -266,7 +266,7 @@ function installFetch(): void {
   });
 }
 
-/** Let the view's promises settle — resources fetch, then redraw. */
+/** Let the view's promises settle; resources fetch, then redraw. */
 async function settle(times = 6): Promise<void> {
   for (let i = 0; i < times; i++) await new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -285,7 +285,7 @@ describe("dashboard chapter views", () => {
     const html = readFileSync(INDEX_HTML, "utf8");
     // Body only: the <head> would pull app.js and style.css over the network,
     // and the script is evaluated by hand below. The markup is this repo's own
-    // checked-in file, not input — this is the shipped page, which is the point.
+    // checked-in file, not input; this is the shipped page, which is the point.
     const body = html.split("<body>")[1]?.split("</body>")[0];
     if (!body) throw new Error("index.html has no <body>: the dashboard shell cannot be mounted");
     doc.body.innerHTML = body;
@@ -294,7 +294,7 @@ describe("dashboard chapter views", () => {
 
     // jsdom implements <dialog> as an element but not its modal methods, so the
     // real `showModal()` every dialog in app.js calls throws asynchronously out
-    // of a click handler — which vitest reports as an unhandled error and exits
+    // of a click handler; which vitest reports as an unhandled error and exits
     // non-zero even though the assertions below pass. Stubbing the two methods
     // to the `open` attribute they set is enough for the tests here, which read
     // a dialog's rendered content rather than its modality.
@@ -385,7 +385,7 @@ describe("dashboard chapter views", () => {
     expect(view).toContain("Mark unavailable…");
     expect(view).toContain("Delete from MangaDex…");
     // What the platform holds, what is already queued against it, and how it
-    // got to its current state — the three things the detail view joins.
+    // got to its current state; the three things the detail view joins.
     expect(view).toContain("Sakamoto Days");
     expect(view).toContain("Queued against this chapter");
     expect(view).toContain("Edit history");
@@ -428,7 +428,7 @@ describe("dashboard chapter views", () => {
         String(url).includes(`/chapters/${MD_CHAPTER}`) && init?.method === "PATCH",
     );
     expect(call).toBeTruthy();
-    // `volume` and `chapter` were left alone, so they are not in the body — a
+    // `volume` and `chapter` were left alone, so they are not in the body; a
     // form that submitted all of them would write "unchanged" edits into the
     // chapter's permanent history.
     expect(JSON.parse(call[1].body)).toEqual({ title: "Corrected title" });

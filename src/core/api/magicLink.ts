@@ -13,7 +13,7 @@ import { SESSION_COOKIE, cleanActor, cookieHeader, isSecureRequest } from "./ses
  * Email sign-in links.
  *
  * The reason this exists: an invited account has no password and no Discord
- * linkage, so before this it could not sign in at all — an owner had to choose
+ * linkage, so before this it could not sign in at all; an owner had to choose
  * a password *for* somebody else and send it over some other channel. A link
  * mailed to the address that defines the account replaces that, and stays the
  * account's credential until its holder sets a password of their own.
@@ -23,7 +23,7 @@ import { SESSION_COOKIE, cleanActor, cookieHeader, isSecureRequest } from "./ses
  *   https://publoader.example/#token=<secret>
  *
  * A fragment is never sent to a server, so the secret cannot land in this
- * process's request log, in a proxy's access log, or in a Referer header — and
+ * process's request log, in a proxy's access log, or in a Referer header; and
  * a mail-scanner that fetches the URL cannot burn a single-use token before
  * its owner clicks it, which is the usual way magic links fail in practice.
  * The dashboard reads the fragment and posts it back. The cost is that a mail
@@ -60,7 +60,7 @@ export class MagicLinkService {
   /**
    * Issue a link and mail it. Rejects when the send fails, so that an owner
    * clicking "invite" is told the invite did not go out rather than being left
-   * to wonder — the account still exists, and the link can be re-sent.
+   * to wonder; the account still exists, and the link can be re-sent.
    */
   async send(
     user: AdminUser,
@@ -123,8 +123,8 @@ export class MagicLinkService {
 /**
  * What a "email me a sign-in link" request for `email` should do.
  *
- * Pulled out as a pure decision with injected side effects — same shape as
- * `matchDiscordIdentity` — because this is the policy that matters and it must
+ * Pulled out as a pure decision with injected side effects; same shape as
+ * `matchDiscordIdentity`: because this is the policy that matters and it must
  * be assertable without a database, a mailer or an HTTP server.
  *
  * The caller answers 202 for every outcome including "ignore": the endpoint is
@@ -165,15 +165,15 @@ const LinkRedeem = z.object({ token: z.string().min(1).max(512) });
 
 /** Why a redemption failed, in words an operator can act on. */
 const REDEEM_MESSAGE: Record<string, string> = {
-  unknown: "this sign-in link is not valid — request a new one",
-  used: "this sign-in link has already been used — request a new one",
-  expired: "this sign-in link has expired — request a new one",
+  unknown: "this sign-in link is not valid; request a new one",
+  used: "this sign-in link has already been used; request a new one",
+  expired: "this sign-in link has expired; request a new one",
   revoked: "this sign-in link was replaced by a newer one",
   unapproved: "your account is awaiting approval",
 };
 
 /**
- * Unauthenticated by construction — redeeming a link *is* the authentication —
+ * Unauthenticated by construction; redeeming a link *is* the authentication -
  * so these register outside the admin scope and carry their own limiters.
  */
 export function registerMagicLinkRoutes(app: FastifyInstance, ctx: AppContext): void {
@@ -184,7 +184,7 @@ export function registerMagicLinkRoutes(app: FastifyInstance, ctx: AppContext): 
       return reply.code(503).send({ error: "email sign-in links are not configured on this deployment" });
     }
     if (!ctx.magicLinkLimiter.allow(req.ip)) {
-      return reply.code(429).send({ error: "too many requests — try again in a minute" });
+      return reply.code(429).send({ error: "too many requests; try again in a minute" });
     }
     const parsed = LinkRequest.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: "a valid email address is required" });
@@ -193,7 +193,7 @@ export function registerMagicLinkRoutes(app: FastifyInstance, ctx: AppContext): 
     // Second bucket, keyed on the address: the per-IP limit alone lets a
     // distributed caller mailbomb one known inbox.
     if (!ctx.magicLinkEmailLimiter.allow(email)) {
-      return reply.code(429).send({ error: "too many requests — try again in a minute" });
+      return reply.code(429).send({ error: "too many requests; try again in a minute" });
     }
 
     const outcome = await resolveLinkRequest(email, {
@@ -242,12 +242,12 @@ export function registerMagicLinkRoutes(app: FastifyInstance, ctx: AppContext): 
 
   /**
    * Redeem. A POST, not the GET the email links to, because the secret travels
-   * in a fragment the dashboard reads and posts back — see the note at the top
+   * in a fragment the dashboard reads and posts back; see the note at the top
    * of this file.
    */
   app.post("/api/v1/admin/session/magic-link", async (req: FastifyRequest, reply: FastifyReply) => {
     if (!ctx.magicLinkLimiter.allow(req.ip)) {
-      return reply.code(429).send({ error: "too many attempts — try again in a minute" });
+      return reply.code(429).send({ error: "too many attempts; try again in a minute" });
     }
     const parsed = LinkRedeem.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: "a sign-in link token is required" });

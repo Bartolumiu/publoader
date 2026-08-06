@@ -17,7 +17,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  * Two properties matter beyond "the happy path works". First, scope
  * containment: these routes reach the upload pipeline and the platform's own
  * MangaDex credential state, so a token scoped elsewhere must be refused.
- * Second, a LEASED upload task belongs to a live uploader process — the API
+ * Second, a LEASED upload task belongs to a live uploader process; the API
  * must refuse to touch it rather than race that process.
  */
 describe.skipIf(!dbReady())("operational triage endpoints", () => {
@@ -36,8 +36,8 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
 
   /**
    * A MangaDex stand-in for the untracked-series routes. Not the dev mock over
-   * HTTP: these tests are about what the API does with what MangaDex says —
-   * including saying nothing, or refusing an edit as stale — and driving those
+   * HTTP: these tests are about what the API does with what MangaDex says -
+   * including saying nothing, or refusing an edit as stale; and driving those
    * answers is exactly what a stub is for. The mock at docker/dev/mock-md covers
    * the wire format for the e2e stack.
    */
@@ -591,7 +591,7 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
       csrfHeader: "x-requested-with",
     });
 
-    // A token reports its own scopes and is never OWNER — which is what the
+    // A token reports its own scopes and is never OWNER; which is what the
     // dashboard needs in order to hide what the server would refuse.
     const headers = await mint(["runs:read", "stats:read"]);
     const asToken = await app.inject({ method: "GET", url: "/api/v1/admin/whoami", headers });
@@ -637,7 +637,7 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     expect(me.json().scopes).not.toContain("runs:write");
     expect(me.json().scopes).not.toContain("*");
 
-    // Authentication is still required — "who am I" is not a public question.
+    // Authentication is still required; "who am I" is not a public question.
     expect((await app.inject({ method: "GET", url: "/api/v1/admin/whoami" })).statusCode).toBe(401);
   });
 
@@ -759,7 +759,7 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
       currentlyPublished: null,
     });
 
-    // Nothing was published — that is the whole point of a preflight.
+    // Nothing was published; that is the whole point of a preflight.
     expect(await prisma.bundle.count()).toBe(0);
 
     const missingEntrypoint = await post(zipWith({ "manifest.json": JSON.stringify(manifest) }), root);
@@ -790,7 +790,7 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     expect(fields).toContain("mangadex_group_id");
 
     // An empty entrypoint is a real publishing failure that a file listing alone
-    // would not catch — the file is present and useless.
+    // would not catch; the file is present and useless.
     const emptyEntrypoint = await post(
       zipWith({ "manifest.json": JSON.stringify(manifest), "index.mjs": "   \n" }),
       root,
@@ -889,7 +889,7 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
 
   it("keeps a database dump out of reach of every token, however broadly scoped", async () => {
     // A dump contains every operator password hash, every token hash, and the
-    // saved MangaDex session in plaintext — so taking one is a credential-theft
+    // saved MangaDex session in plaintext; so taking one is a credential-theft
     // primitive, not a read. It must sit at the same bar as account
     // administration: OWNER role AND users:admin, which together exclude api
     // tokens by construction (adminAuthHook never gives one the OWNER role).
@@ -902,7 +902,7 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
 
     // The break-glass credential is owner-equivalent, so it gets past the guard.
     // Whether the dump then runs depends on pg_dump being installed, which the
-    // runtime image deliberately omits — 503 with a fix is the correct answer
+    // runtime image deliberately omits; 503 with a fix is the correct answer
     // there, and either outcome proves authorization passed.
     const allowed = await app.inject({ method: "GET", url: "/api/v1/admin/backup", headers: root });
     expect([200, 503]).toContain(allowed.statusCode);
@@ -997,7 +997,7 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
 
   it("still answers when the MangaDex read fails", async () => {
     const row = await untracked({ state: "TRACKED", mdMangaId: MD_ID });
-    md.failReadWith = new MdRequestError("GET /manga failed — 503: upstream down", 503);
+    md.failReadWith = new MdRequestError("GET /manga failed; 503: upstream down", 503);
 
     const res = await app.inject({
       method: "GET",
@@ -1196,7 +1196,7 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
 
     expect(md.edits).toHaveLength(1);
     // The version read in the same request is what the write carries, and only
-    // the changed field is sent — the entry's links, status and content rating
+    // the changed field is sent; the entry's links, status and content rating
     // are not this platform's to restate.
     expect(md.edits[0]).toMatchObject({ mangaId: MD_ID, version: 3, payload: { title: { en: "Correct Name" } } });
     expect(md.edits[0]!.payload).not.toHaveProperty("links");
@@ -1230,7 +1230,7 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
 
   it("refuses a curator token, which holds untracked:write but is not a vetted human", async () => {
     // The hole this closes: the gate used to refuse only the CONTRIBUTOR role,
-    // and `adminAuthHook` assigns every api token `adminRole = "ADMIN"` — meaning
+    // and `adminAuthHook` assigns every api token `adminRole = "ADMIN"`: meaning
     // "not owner-equivalent", not "vetted human". So the `curator` preset, which
     // carries untracked:write precisely so a community curator can work this
     // queue, cleared a gate whose stated purpose is to stop that very person
@@ -1301,7 +1301,7 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
   it("reports a version conflict rather than overwriting the other edit", async () => {
     const row = await untracked({ state: "TRACKED", mdMangaId: MD_ID, mangaName: "Correct Name" });
     seedTitle(MD_ID, { en: "Mangled Nmae" }, "https://example.com/series/1");
-    md.failEditWith = new MdRequestError("PUT /manga failed — 409: version 3 is stale", 409);
+    md.failEditWith = new MdRequestError("PUT /manga failed; 409: version 3 is stale", 409);
 
     const res = await app.inject({
       method: "POST",

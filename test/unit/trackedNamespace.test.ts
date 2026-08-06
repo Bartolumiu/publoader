@@ -15,7 +15,7 @@ const MD_C = "333f4d22-7753-4e3b-b0da-0a69b2cdce4f";
  * The namespace exists because one extension is not guaranteed to have one flat
  * external id space: viz serves `shonenjump` and `vizmanga` from a single
  * extension, and `709` under each is a different series. These tests pin the two
- * places that fact has to survive — reading the file, and building the lease.
+ * places that fact has to survive; reading the file, and building the lease.
  */
 describe("manga id map wire shape", () => {
   it("stays flat while every row is in the default id space", () => {
@@ -155,7 +155,7 @@ describe("parseMangaIdMapFile", () => {
 
   it("reads the nested shape viz ships, one namespace per catalogue", () => {
     // Row order follows Object.entries, which puts integer-like keys in numeric
-    // order regardless of how the file listed them — 218 before 709 here. Order
+    // order regardless of how the file listed them; 218 before 709 here. Order
     // is not significant to any caller (the rows go to createMany), but the
     // expectation has to match it.
     expect(

@@ -107,7 +107,7 @@ function helpers(host) {
                           ? el("td", {}, cell)
                           : Array.isArray(cell)
                             ? el("td", { class: "actions row tight" }, cell)
-                            : el("td", { text: cell == null || cell === "" ? "—" : cell }),
+                            : el("td", { text: cell == null || cell === "" ? "-" : cell }),
                       ),
                     ),
                   ),
@@ -117,7 +117,7 @@ function helpers(host) {
   };
 }
 
-const short = (sha) => (sha ? String(sha).slice(0, 7) : "—");
+const short = (sha) => (sha ? String(sha).slice(0, 7) : "-");
 
 // -------------------------------------------------------------------- the view
 
@@ -289,7 +289,7 @@ function renderGithub(h, host) {
       body.replaceChildren(outcomesTable(h, result.outcomes), body.lastChild || el("span", {}));
       toast(
         isDryRun
-          ? "Dry run complete — nothing was published."
+          ? "Dry run complete; nothing was published."
           : `Published ${result.outcomes.filter((o) => o.status === "published").length} bundle(s).`,
         result.ok !== false,
       );
@@ -316,7 +316,7 @@ function outcomesTable(h, outcomes) {
         el("span", { class: `chip ${outcomeTone(outcome.status)}`, text: outcome.status }),
         outcome.version,
         short(outcome.sha256),
-        outcome.isLatest === undefined ? "—" : outcome.isLatest ? "yes" : "no (older version)",
+        outcome.isLatest === undefined ? "-" : outcome.isLatest ? "yes" : "no (older version)",
         outcome.detail,
       ]),
     ),
@@ -361,7 +361,7 @@ function renderInstall(h, host) {
     el("p", {
       class: "dim",
       text:
-        "manifest.json plus either a built index.mjs or the TypeScript source — the source is built " +
+        "manifest.json plus either a built index.mjs or the TypeScript source; the source is built " +
         "here with the same esbuild step the webhook uses. Zipping the folder itself is fine.",
     }),
     row(file, upload),
@@ -450,7 +450,7 @@ function renderRestart(h, host) {
       class: "dim",
       text:
         "A restart is a graceful exit: the service finishes what it is doing, shuts down cleanly, and " +
-        "the container runtime starts it again. This needs a restart policy — with `docker run` and no " +
+        "the container runtime starts it again. This needs a restart policy; with `docker run` and no " +
         "--restart, or a compose file without one, the service will stay down.",
     }),
     row(
@@ -488,7 +488,7 @@ function renderRestart(h, host) {
    * Watch for the API to come back and reload once it does.
    *
    * Without this the operator is left on a dead page wondering whether the
-   * restart worked — and a failed reload after ~30s is itself the answer that
+   * restart worked; and a failed reload after ~30s is itself the answer that
    * the restart policy is missing, which is the one failure mode of this feature.
    */
   async function waitForApi() {
@@ -510,7 +510,7 @@ function renderRestart(h, host) {
     outcome.className = "error";
     outcome.textContent =
       "The API did not come back within 30 seconds. If this deployment has no container restart " +
-      "policy, it will not come back on its own — start it from the host.";
+      "policy, it will not come back on its own; start it from the host.";
   }
 }
 

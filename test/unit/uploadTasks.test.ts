@@ -24,8 +24,8 @@ describe("taskDedupeKey", () => {
   });
 
   it("keeps a partial UPLOAD key but refuses one with no identity at all", () => {
-    // A chapter with no source id is normal — the number and language still
-    // identify it — so the key is partial rather than rejected.
+    // A chapter with no source id is normal; the number and language still
+    // identify it; so the key is partial rather than rejected.
     expect(taskDedupeKey("UPLOAD", { chapterNumber: "1", chapterLanguage: "en" })).toBe("|1|en");
     // All three empty would occupy the single `||` slot for every such chapter,
     // which is the collision cli/migrate-from-mongo.ts also refuses.
@@ -129,7 +129,7 @@ describe("manualTaskProblems", () => {
 
   it("names each field taskWorkers would throw on", () => {
     // Every message below stands in for a TaskError raised after the task was
-    // claimed — for UPLOAD, after a MangaDex upload session was already open.
+    // claimed; for UPLOAD, after a MangaDex upload session was already open.
     expect(manualTaskProblems("UPLOAD", { ...upload, mdMangaId: null }).join()).toContain("mdMangaId");
     expect(manualTaskProblems("UPLOAD", { ...upload, mdGroupId: null }).join()).toContain("mdGroupId");
     expect(manualTaskProblems("UPLOAD", { ...upload, chapterLanguage: null }).join()).toContain(
@@ -158,7 +158,7 @@ describe("manualTaskProblems", () => {
   });
 
   it("treats an empty string as absent, matching chapterFromJson", () => {
-    // The queue payload reader coerces "" to null, so validation must agree —
+    // The queue payload reader coerces "" to null, so validation must agree -
     // otherwise a blank form field would pass here and fail on claim.
     expect(manualTaskProblems("DELETE", { mdChapterId: "" }).join()).toContain("mdChapterId");
     expect(manualTaskProblems("UPLOAD", { ...upload, mdGroupId: "" }).join()).toContain("mdGroupId");

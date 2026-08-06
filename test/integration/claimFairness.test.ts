@@ -6,7 +6,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  * Rotation across the fleet, against real Postgres.
  *
  * Workers pull: whoever polls first claims. Left alone that means the fastest or
- * least-loaded host takes everything, which defeats the reason to run several —
+ * least-loaded host takes everything, which defeats the reason to run several -
  * publishers rate-limit per source IP, and one worker doing all the scraping is
  * one IP doing it.
  *

@@ -10,7 +10,7 @@
  *
  * Parity with the legacy Python bot is tracked in docs/ipc-to-api-mapping.md.
  * Where the platform has no equivalent, the command still exists and explains
- * what to do instead (see RETIRED_COMMANDS) — a bot that answers "unknown
+ * what to do instead (see RETIRED_COMMANDS): a bot that answers "unknown
  * command" to `/logs` teaches nobody anything.
  */
 import { SlashCommandBuilder, type SlashCommandOptionsOnlyBuilder, type SlashCommandSubcommandsOnlyBuilder } from "discord.js";
@@ -66,7 +66,7 @@ export interface BotCommand {
   /**
    * Either one sensitivity for the whole command, or one per subcommand. A
    * missing subcommand key is a programming error and is treated as
-   * `destructive` — the safe direction to fail.
+   * `destructive`: the safe direction to fail.
    */
   sensitivity: Sensitivity | Record<string, Sensitivity>;
   /** Reply visible only to the invoker. Default for anything operational. */
@@ -97,9 +97,9 @@ function lines(parts: string[]): string {
   return truncate(parts.join("\n"));
 }
 
-/** `2026-07-29T15:05` — enough to correlate, short enough for a chat line. */
+/** `2026-07-29T15:05`: enough to correlate, short enough for a chat line. */
 function shortTime(value: string | null | undefined): string {
-  if (!value) return "—";
+  if (!value) return "-";
   return value.slice(0, 16).replace("T", " ");
 }
 
@@ -159,41 +159,41 @@ async function statusReply(ctx: HandlerContext): Promise<BotReply> {
   const parts: string[] = [];
 
   parts.push(stats.paused ? "**Platform: PAUSED** :pause_button:" : "**Platform: running** :green_circle:");
-  parts.push(`**Jobs** — ${counts(stats.jobs)}`);
+  parts.push(`**Jobs**: ${counts(stats.jobs)}`);
 
   const depths = stats.uploadTasks ?? [];
   if (depths.length === 0) {
-    parts.push("**Upload tasks** — none queued");
+    parts.push("**Upload tasks**: none queued");
   } else {
     const rendered = depths
       .filter((d) => d.count > 0)
       .map((d) => `${d.kind}/${d.state}=${d.count}`)
       .join(" ");
-    parts.push(`**Upload tasks** — ${rendered || "none queued"}`);
+    parts.push(`**Upload tasks**: ${rendered || "none queued"}`);
   }
 
-  parts.push(`**Workers** — ${counts(stats.workers)}`);
+  parts.push(`**Workers**: ${counts(stats.workers)}`);
   parts.push(
     stats.quarantined > 0
-      ? `**Quarantined results** — ${stats.quarantined} :warning: (see \`/quarantine\`)`
-      : "**Quarantined results** — 0",
+      ? `**Quarantined results**: ${stats.quarantined} :warning: (see \`/quarantine\`)`
+      : "**Quarantined results**: 0",
   );
 
   // The legacy /status also listed workers by name with per-worker queue depth.
-  // Stats only carries counts by status, so fetch the fleet too — but a missing
+  // Stats only carries counts by status, so fetch the fleet too; but a missing
   // workers:read scope must not take the whole status command down with it.
   try {
     const { workers } = await ctx.api.workers(ctx.actor);
     if (workers.length > 0) {
       const fleet = workers
         .slice(0, 10)
-        .map((w) => `• \`${w.name}\` — ${w.status}/${w.trust}, heartbeat ${age(w.lastHeartbeatAt)}`);
+        .map((w) => `• \`${w.name}\`: ${w.status}/${w.trust}, heartbeat ${age(w.lastHeartbeatAt)}`);
       if (workers.length > 10) fleet.push(`…and ${workers.length - 10} more`);
       parts.push(`**Fleet**\n${fleet.join("\n")}`);
     }
   } catch (err) {
     if (err instanceof AdminApiError && err.status === 403) {
-      parts.push("**Fleet** — not shown: the bot's token lacks `workers:read`.");
+      parts.push("**Fleet** not shown: the bot's token lacks `workers:read`.");
     } else {
       throw err;
     }
@@ -269,7 +269,7 @@ const commands: BotCommand[] = [
           .addChoices(...RUN_KINDS.map((k) => ({ name: k.name, value: k.value }))),
       )
       .addBooleanOption((o) =>
-        o.setName("confirm").setDescription("Required for mode:clean — confirms a destructive re-scrape."),
+        o.setName("confirm").setDescription("Required for mode:clean; confirms a destructive re-scrape."),
       ),
     async run(ctx) {
       const extension = requireExtensionName(ctx.options.string("extension"));
@@ -290,7 +290,7 @@ const commands: BotCommand[] = [
       });
       return {
         text: result.created
-          ? `:rocket: Started **${kind}** run for \`${extension}\` — run \`${result.runId}\`. Follow it with \`/runs show id:${result.runId}\`.`
+          ? `:rocket: Started **${kind}** run for \`${extension}\`: run \`${result.runId}\`. Follow it with \`/runs show id:${result.runId}\`.`
           : `:information_source: A run for that exact request already existed: \`${result.runId}\` (nothing new was created).`,
       };
     },
@@ -362,7 +362,7 @@ const commands: BotCommand[] = [
         const { extensions } = await ctx.api.extensions(ctx.actor);
         if (extensions.length === 0) {
           return {
-            text: "No bundles published yet. `/extensions list` shows *published bundles*, not files on disk — publish with `publoader-admin bundle publish <dir>`.",
+            text: "No bundles published yet. `/extensions list` shows *published bundles*, not files on disk; publish with `publoader-admin bundle publish <dir>`.",
           };
         }
         const rendered = extensions
@@ -379,7 +379,7 @@ const commands: BotCommand[] = [
       await ctx.api.setExtensionEnabled(ctx.actor, extension, enable);
       return {
         text: enable
-          ? `:green_circle: \`${extension}\` enabled — it will be scheduled again.`
+          ? `:green_circle: \`${extension}\` enabled; it will be scheduled again.`
           : `:no_entry: \`${extension}\` disabled. Scheduled runs will skip it; in-flight jobs are unaffected.`,
       };
     },
@@ -432,8 +432,8 @@ const commands: BotCommand[] = [
           const override = overrides[name];
           const base = defaults[name];
           const effective = override ?? base;
-          const at = effective ? formatSchedule(effective) : "—";
-          return `• \`${name}\` — ${at}${override ? " *(override)*" : base ? " (manifest default)" : ""}`;
+          const at = effective ? formatSchedule(effective) : "-";
+          return `• \`${name}\`: ${at}${override ? " *(override)*" : base ? " (manifest default)" : ""}`;
         });
         return {
           text: lines([
@@ -447,7 +447,7 @@ const commands: BotCommand[] = [
         const result = await ctx.api.removeSchedule(ctx.actor, extension);
         return {
           text: result.removed
-            ? `:wastebasket: Override removed for \`${extension}\` — it falls back to its manifest schedule.`
+            ? `:wastebasket: Override removed for \`${extension}\`: it falls back to its manifest schedule.`
             : `\`${extension}\` had no override; nothing changed.`,
         };
       }
@@ -534,13 +534,13 @@ const commands: BotCommand[] = [
         const rendered = runs.map(
           (r) =>
             `${runIcon(r.state)} \`${r.id.slice(0, 8)}\` **${r.extension}** [${r.kind}] ${r.state} ` +
-            `— ${shortTime(r.createdAt)} by ${r.triggeredBy ?? "schedule"}`,
+            `- ${shortTime(r.createdAt)} by ${r.triggeredBy ?? "schedule"}`,
         );
         return { text: lines([`**${runs.length} recent run(s)**`, ...rendered]) };
       }
       const { run } = await ctx.api.getRun(ctx.actor, requireString(ctx.options, "id"));
       const header = [
-        `${runIcon(run.state)} **${run.extension}** [${run.kind}] — **${run.state}**`,
+        `${runIcon(run.state)} **${run.extension}** [${run.kind}]: **${run.state}**`,
         `run \`${run.id}\``,
         `created ${shortTime(run.createdAt)}, finished ${shortTime(run.finishedAt)}`,
         `triggered by ${run.triggeredBy ?? "schedule"}`,
@@ -551,7 +551,7 @@ const commands: BotCommand[] = [
           j.segmentIndex === null || j.segmentIndex === undefined
             ? ""
             : ` seg ${j.segmentIndex + 1}/${j.segmentTotal ?? "?"}`;
-        const error = j.lastError ? ` — \`${j.lastError.slice(0, 120)}\`` : "";
+        const error = j.lastError ? `: \`${j.lastError.slice(0, 120)}\`` : "";
         return `• \`${j.id.slice(0, 8)}\`${segment} ${j.state} attempt ${j.attempt}${error}`;
       });
       if (jobs.length > 15) jobLines.push(`…and ${jobs.length - 15} more job(s)`);
@@ -611,7 +611,7 @@ const commands: BotCommand[] = [
       if (jobs.length > 15) rendered.push(`…and ${jobs.length - 15} more`);
       return {
         text: lines([
-          `**${jobs.length} dead-lettered job(s)** — replay one with \`/jobs retry id:<id>\``,
+          `**${jobs.length} dead-lettered job(s)**: replay one with \`/jobs retry id:<id>\``,
           ...rendered,
         ]),
       };
@@ -633,12 +633,12 @@ const commands: BotCommand[] = [
         .map(
           (q) =>
             `• job \`${q.jobId.slice(0, 8)}\` worker \`${(q.workerId ?? "?").slice(0, 8)}\` ` +
-            `${shortTime(q.createdAt)} — \`${(q.rejectReason ?? "no reason recorded").slice(0, 140)}\``,
+            `${shortTime(q.createdAt)}; \`${(q.rejectReason ?? "no reason recorded").slice(0, 140)}\``,
         );
       if (quarantined.length > 15) rendered.push(`…and ${quarantined.length - 15} more`);
       return {
         text: lines([
-          `:warning: **${quarantined.length} quarantined submission(s)** — a worker submitting these repeatedly should be drained.`,
+          `:warning: **${quarantined.length} quarantined submission(s)**: a worker submitting these repeatedly should be drained.`,
           ...rendered,
         ]),
       };
@@ -722,7 +722,7 @@ const commands: BotCommand[] = [
           .map((c) => `${c.kind}/${c.state}=${c.count}`)
           .join(" ");
         if (tasks.length === 0) {
-          return { text: `No matching upload tasks.\n**Queue depths** — ${depths || "empty"}` };
+          return { text: `No matching upload tasks.\n**Queue depths**: ${depths || "empty"}` };
         }
         const rendered = tasks.map(
           (t) =>
@@ -732,8 +732,8 @@ const commands: BotCommand[] = [
         );
         return {
           text: lines([
-            `**Queue depths** — ${depths || "empty"}`,
-            `**${tasks.length} task(s)** — ids are truncated above; use \`/queue list\` output with the full id from the dashboard for retry/cancel.`,
+            `**Queue depths**: ${depths || "empty"}`,
+            `**${tasks.length} task(s)**: ids are truncated above; use \`/queue list\` output with the full id from the dashboard for retry/cancel.`,
             ...rendered,
           ]),
         };
@@ -744,7 +744,7 @@ const commands: BotCommand[] = [
           text:
             result.requeued > 0
               ? `:arrows_counterclockwise: Requeued **${result.requeued}** stale upload task(s).`
-              : "Nothing to requeue — no upload task is holding an expired lease.",
+              : "Nothing to requeue; no upload task is holding an expired lease.",
         };
       }
       const id = requireString(ctx.options, "id");
@@ -761,7 +761,7 @@ const commands: BotCommand[] = [
         };
       }
       await ctx.api.cancelUploadTask(ctx.actor, id);
-      return { text: `:octagonal_sign: Upload task \`${id}\` abandoned — it was never sent to MangaDex.` };
+      return { text: `:octagonal_sign: Upload task \`${id}\` abandoned; it was never sent to MangaDex.` };
     },
   },
   {
@@ -802,9 +802,9 @@ const commands: BotCommand[] = [
               : `expires ${shortTime(auth.expiresAt)} (in ~${Math.round((auth.expiresInSeconds ?? 0) / 60)} min)`;
         return {
           text: lines([
-            `${auth.expired ? ":red_circle:" : ":green_circle:"} **MangaDex session** — access token ${auth.hasAccess ? "stored" : "missing"}, refresh token ${auth.hasRefresh ? "stored" : "missing"}`,
+            `${auth.expired ? ":red_circle:" : ":green_circle:"} **MangaDex session**: access token ${auth.hasAccess ? "stored" : "missing"}, refresh token ${auth.hasRefresh ? "stored" : "missing"}`,
             `Access ${expiry}.`,
-            "An expired access token is normal — it is refreshed on demand. Only clear the session if refreshing keeps failing.",
+            "An expired access token is normal; it is refreshed on demand. Only clear the session if refreshing keeps failing.",
           ]),
         };
       }
@@ -813,7 +813,7 @@ const commands: BotCommand[] = [
           text:
             ":warning: **MangaDex session not cleared.** Clearing forces a fresh login on the next call; an upload " +
             "in flight at that moment can fail and be retried.\nRe-issue with `confirm: true` if refreshing is broken.\n" +
-            "This does *not* revoke anything on MangaDex's side — that is a credential rotation (`docs/operations.md`).",
+            "This does *not* revoke anything on MangaDex's side; that is a credential rotation (`docs/operations.md`).",
         };
       }
       await ctx.api.clearMdAuth(ctx.actor);
@@ -885,7 +885,7 @@ const commands: BotCommand[] = [
         }
         const rendered = workers.map(
           (w) =>
-            `${workerIcon(w.status)} \`${w.name}\` — ${w.status}/${w.trust}, agent ${w.agentVersion ?? "?"}, ` +
+            `${workerIcon(w.status)} \`${w.name}\`: ${w.status}/${w.trust}, agent ${w.agentVersion ?? "?"}, ` +
             `heartbeat ${age(w.lastHeartbeatAt)}\n   id \`${w.id}\``,
         );
         return { text: lines([`**${workers.length} worker(s)**`, ...rendered]) };
@@ -894,7 +894,7 @@ const commands: BotCommand[] = [
       if (sub === "revoke" && ctx.options.boolean("confirm") !== true) {
         return {
           text:
-            `:warning: **Worker \`${id}\` not revoked.** Revocation is permanent — the host must re-enroll with a ` +
+            `:warning: **Worker \`${id}\` not revoked.** Revocation is permanent; the host must re-enroll with a ` +
             "fresh token to come back.\nRe-issue with `confirm: true` to proceed, or use `drain` if you only want it idle.",
         };
       }
@@ -935,12 +935,12 @@ const commands: BotCommand[] = [
       });
       // The token is a bearer credential that becomes a worker identity. It goes
       // to the invoker's DM and never to a channel, not even an ephemeral reply
-      // in one — ephemeral messages are still channel-scoped and get screen-shared.
+      // in one; ephemeral messages are still channel-scoped and get screen-shared.
       return {
         text: `:envelope_with_arrow: Enrollment token minted (${trust}, expires ${shortTime(token.expiresAt)}) and sent to you by DM. It is single-use and is not shown here.`,
         dm: lines([
           `**Worker enrollment token** (${trust}, expires ${shortTime(token.expiresAt)})`,
-          "Single-use. Set it as `ENROLL_TOKEN` on the worker host, start the agent once, then delete it — the agent exchanges it for a long-lived worker token.",
+          "Single-use. Set it as `ENROLL_TOKEN` on the worker host, start the agent once, then delete it; the agent exchanges it for a long-lived worker token.",
           codeBlock(token.token),
           "If you did not ask for this, tell an admin: someone used the bot's `/enroll` command.",
         ]),
@@ -1002,11 +1002,11 @@ const commands: BotCommand[] = [
         if (untracked.length === 0) return { text: "Nothing untracked." };
         const rendered = untracked.map(
           (u) =>
-            `• \`${u.id}\` **${u.extension}** ${u.state} — ${u.title ?? u.mangaId} (${shortTime(u.createdAt)})`,
+            `• \`${u.id}\` **${u.extension}** ${u.state}: ${u.title ?? u.mangaId} (${shortTime(u.createdAt)})`,
         );
         return {
           text: lines([
-            `**${untracked.length} untracked series** — approve with \`/untracked approve id:<id> confirm:true\``,
+            `**${untracked.length} untracked series**: approve with \`/untracked approve id:<id> confirm:true\``,
             ...rendered,
           ]),
         };
@@ -1014,7 +1014,7 @@ const commands: BotCommand[] = [
       const id = requireString(ctx.options, "id");
       if (sub === "skip") {
         await ctx.api.skipUntracked(ctx.actor, id);
-        return { text: `:no_bell: \`${id}\` marked SKIPPED — no title will be created for it.` };
+        return { text: `:no_bell: \`${id}\` marked SKIPPED; no title will be created for it.` };
       }
       if (ctx.options.boolean("confirm") !== true) {
         return {
@@ -1025,7 +1025,7 @@ const commands: BotCommand[] = [
       }
       const result = await ctx.api.approveUntracked(ctx.actor, id);
       return {
-        text: `:white_check_mark: Title created and tracked${result.mdMangaId ? ` — MangaDex id \`${result.mdMangaId}\`` : ""}.`,
+        text: `:white_check_mark: Title created and tracked${result.mdMangaId ? `: MangaDex id \`${result.mdMangaId}\`` : ""}.`,
       };
     },
   },
@@ -1107,7 +1107,7 @@ const commands: BotCommand[] = [
       const { events } = await ctx.api.audit(ctx.actor, ctx.options.integer("limit") ?? 20);
       if (events.length === 0) return { text: "No audit events recorded." };
       const rendered = events.map(
-        (e) => `• \`${shortTime(e.createdAt)}\` **${e.action}** ${e.target ? `\`${e.target}\` ` : ""}— ${e.actor}`,
+        (e) => `• \`${shortTime(e.createdAt)}\` **${e.action}** ${e.target ? `\`${e.target}\` ` : ""}- ${e.actor}`,
       );
       return { text: lines([`**${events.length} audit event(s)**`, ...rendered]) };
     },
@@ -1124,12 +1124,12 @@ const commands: BotCommand[] = [
       const parts = [
         `**Core API**: ${ctx.api.baseUrl}`,
         `**Token**: ${ctx.api.tokenFingerprint}`,
-        `**Acting as**: \`${ctx.actor}\` — this is what lands in the audit log for your commands.`,
+        `**Acting as**: \`${ctx.actor}\`. This is what lands in the audit log for your commands.`,
       ];
       if (!ctx.api.looksScoped) {
         parts.push(
           ":warning: This token does not look like a scoped `pa_…` token. If it is the platform's root `ADMIN_TOKEN`, " +
-            "the bot can do everything the control plane can — including publishing bundles. See `docs/bot.md`.",
+            "the bot can do everything the control plane can, including publishing bundles. See `docs/bot.md`.",
         );
       }
       const identity = await ctx.api.tokenSelf(ctx.actor);
@@ -1138,13 +1138,13 @@ const commands: BotCommand[] = [
         const source = identity?.scopes ? "" : " *(learned from an earlier refused command)*";
         parts.push(`**Scopes**${source}: ${scopes.map((s) => `\`${s}\``).join(", ")}`);
         if (scopes.includes("*")) {
-          parts.push(":warning: `*` is every scope — that defeats the point of a scoped token.");
+          parts.push(":warning: `*` is every scope; that defeats the point of a scoped token.");
         }
       } else {
         parts.push(
           "**Scopes**: the API has no token-introspection endpoint, so the bot cannot list them up front. " +
             "A command needing a grant the token lacks fails with a 403 that names the missing scope *and* " +
-            "the ones it holds — run one and this command will report them afterwards.",
+            "the ones it holds; run one and this command will report them afterwards.",
         );
       }
       return { text: lines(parts) };
@@ -1169,12 +1169,12 @@ export const RETIRED_COMMANDS: RetiredCommand[] = [
   {
     name: "logs",
     replacement:
-      "There is no log API — work runs on machines the core cannot read. For failures use `/errors`, which merges dead-lettered jobs, failed uploads and quarantines into one list. For process output, `docker compose logs -f core-api` on the core host.",
+      "There is no log API; work runs on machines the core cannot read. For failures use `/errors`, which merges dead-lettered jobs, failed uploads and quarantines into one list. For process output, `docker compose logs -f core-api` on the core host.",
   },
   {
     name: "kill",
     replacement:
-      "There is no in-memory queue to drain. Cancel work individually — `/jobs cancel id:<id>` for scrape jobs, `/queue cancel id:<id>` for uploads — or `/pause` the platform to stop new work.",
+      "There is no in-memory queue to drain. Cancel work individually, `/jobs cancel id:<id>` for scrape jobs, `/queue cancel id:<id>` for uploads, or `/pause` the platform to stop new work.",
   },
   {
     name: "restart-workers",
@@ -1189,12 +1189,12 @@ export const RETIRED_COMMANDS: RetiredCommand[] = [
   {
     name: "login",
     replacement:
-      "There is no \"log in now\" operation. `/mdauth clear confirm:true` forgets the stored session, and the next MangaDex call authenticates from the configured credentials — same outcome, without a command that holds a password.",
+      "There is no \"log in now\" operation. `/mdauth clear confirm:true` forgets the stored session, and the next MangaDex call authenticates from the configured credentials; same outcome, without a command that holds a password.",
   },
   {
     name: "logout",
     replacement:
-      "Use `/mdauth clear confirm:true` to forget the stored session. It does not revoke anything MangaDex-side — that is a credential rotation, see `docs/operations.md`.",
+      "Use `/mdauth clear confirm:true` to forget the stored session. It does not revoke anything MangaDex-side; that is a credential rotation, see `docs/operations.md`.",
   },
   {
     name: "pull",
@@ -1204,7 +1204,7 @@ export const RETIRED_COMMANDS: RetiredCommand[] = [
   {
     name: "reload",
     replacement:
-      "There is no in-process module tree to reload — extension code is fetched per job as a sha256-pinned bundle. Publish a new bundle and the next job picks it up.",
+      "There is no in-process module tree to reload; extension code is fetched per job as a sha256-pinned bundle. Publish a new bundle and the next job picks it up.",
   },
   {
     name: "restart",
@@ -1248,7 +1248,7 @@ export const RETIRED_COMMANDS: RetiredCommand[] = [
 ];
 
 function retiredCommand(retired: RetiredCommand): BotCommand {
-  const description = `Retired legacy command — tells you what replaced it.`;
+  const description = `Retired legacy command: tells you what replaced it.`;
   return {
     name: retired.name,
     description,

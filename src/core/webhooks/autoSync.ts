@@ -17,7 +17,7 @@ import {
  * The push webhook already does this, and is better when it works: it fires
  * within seconds and carries the exact commit. But it only works if GitHub can
  * reach the core, if the hook is still registered on every repo, and if no
- * delivery was dropped — none of which the platform can observe. When any of
+ * delivery was dropped; none of which the platform can observe. When any of
  * them is false the failure is *silent*: extensions simply stop updating, and
  * the first symptom is a run producing stale results days later.
  *
@@ -131,7 +131,7 @@ export async function autoSyncExtensions(
       }
 
       // Only remember the commit when nothing failed. A transient build or
-      // network failure must not mark this commit done — the next pass has to
+      // network failure must not mark this commit done; the next pass has to
       // retry it, and recording it here would skip the repo until somebody
       // pushed again, which is exactly the silent staleness this guards against.
       const failed = outcomes.filter((o) => o.status === "failed");
@@ -163,7 +163,7 @@ export async function autoSyncExtensions(
 /**
  * The extension directories present in a repo archive.
  *
- * A directory counts only if it holds a `manifest.json` — repos keep `src/lib`,
+ * A directory counts only if it holds a `manifest.json`: repos keep `src/lib`,
  * `src/types` and similar beside the extensions, and trying to publish those
  * would produce a failure row on every pass forever.
  */
