@@ -10,14 +10,14 @@ import { MIN_PASSWORD_LENGTH, toPublicUser } from "../../store/adminUsers.js";
  * Account administration: who can reach the dashboard, with what role, and
  * which of their sessions are live.
  *
- * Everything here is OWNER-only except setting your own password — an ADMIN
+ * Everything here is OWNER-only except setting your own password; an ADMIN
  * has full control-plane authority but cannot grant it to anybody else.
  *
  * Three roles, and the gap between the first two is much smaller than the gap
  * to the third: OWNER and ADMIN differ only in account administration, while
  * CONTRIBUTOR is a genuinely confined role (see `scopesForRole`) that can
  * curate the series map and work the untracked queue and nothing else. That is
- * the role to hand someone outside the operator group — an ADMIN can publish
+ * the role to hand someone outside the operator group; an ADMIN can publish
  * bundles, which is code execution on every worker.
  */
 const ASSIGNABLE_ROLES = ["OWNER", "ADMIN", "CONTRIBUTOR"] as const;
@@ -51,7 +51,7 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
      * Sending is a side effect of an account action, and the account action is
      * the one that must not be lost: an invite whose mail bounced is still an
      * invite an owner can re-send. So the failure travels back in the response
-     * body — `emailed: false` plus a reason — instead of failing the request.
+     * body, `emailed: false` plus a reason, instead of failing the request.
      */
     const sendLink = async (
       user: AdminUser,
@@ -80,7 +80,7 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
      * invited account has no password and no Discord linkage, so an invite
      * that did not mail a link would create something nobody can reach.
      *
-     * A failed send is reported but does NOT roll the account back — the
+     * A failed send is reported but does NOT roll the account back; the
      * account is the durable half, and the link can be re-sent. `emailed`
      * tells the caller which of the two happened.
      */
@@ -115,8 +115,8 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
 
     /**
      * Re-send a sign-in link. The invite mail is the part most likely to go
-     * missing — spam folders, typo'd addresses, expiry over a long weekend —
-     * so recovering from that must not require an owner to invent a password
+     * missing, spam folders, typo'd addresses, expiry over a long weekend,
+ * so recovering from that must not require an owner to invent a password
      * for somebody else and send it over some other channel.
      */
     scope.post("/api/v1/admin/users/:id/magic-link", owner, async (req, reply) => {
@@ -157,8 +157,8 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
     });
 
     /**
-     * Set a password. Self-service — which is what an account that got in with
-     * an emailed link does first — or an owner setting one for somebody else,
+     * Set a password. Self-service, which is what an account that got in with
+     * an emailed link does first, or an owner setting one for somebody else,
      * which is also how the seeded owner gets its first password after logging
      * in with the break-glass token.
      */
@@ -188,7 +188,7 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
 
     /**
      * Detach Discord. Self-service, or an owner doing it for somebody who has
-     * lost the Discord account — which is the case that matters, because
+     * lost the Discord account; which is the case that matters, because
      * without this the operator account is stranded behind a credential nobody
      * holds any more.
      *

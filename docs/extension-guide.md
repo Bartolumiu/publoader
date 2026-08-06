@@ -42,10 +42,10 @@ export interface ExtensionRuntime {
 
 This replaces v1's five methods and six attributes. Identity (name, group id,
 languages) now comes from the manifest, and configuration (the tracked map,
-override options, the schedule) comes from the database — the extension no longer
+override options, the schedule) comes from the database; the extension no longer
 duplicates either (`extensionApi.ts:3-26`).
 
-### `CollectInput` — what you are told
+### `CollectInput`: what you are told
 
 ```ts
 interface CollectInput {
@@ -58,12 +58,12 @@ interface CollectInput {
 }
 ```
 
-`trackedSubset` is an **optimization, not a correctness requirement** — the runner
+`trackedSubset` is an **optimization, not a correctness requirement**: the runner
 filters your output to that set regardless (`runner.mjs:637-642`). Honour it
 anyway: it is the whole point of partitioning, which exists to spread load across
 worker hosts without multiplying requests to the publisher.
 
-### `CollectResult` — what you return
+### `CollectResult`: what you return
 
 ```ts
 {
@@ -77,7 +77,7 @@ worker hosts without multiplying requests to the publisher.
 publisher has for the series I looked at", and the platform uses it to decide what
 to *remove* from MangaDex. Return `null` unless your run genuinely gathered a full
 listing. `null` means "no removal information"; an empty array means "the publisher
-has nothing here any more" — and those are very different instructions
+has nothing here any more"; and those are very different instructions
 (`extensionApi.ts:65-67`, `processor/dedupe.ts:46-63`). Getting it backwards turns
 a partial scrape into a mass deletion.
 
@@ -86,15 +86,15 @@ fetched the whole catalogue, and `null` otherwise.
 
 ### `ChapterInput`
 
-`extensionApi.ts:29-50`. Validated with zod at `.strict()` — an unknown field is a
+`extensionApi.ts:29-50`. Validated with zod at `.strict()`: an unknown field is a
 rejection, not a dropped key.
 
 | Field | Type | Notes |
 | --- | --- | --- |
 | `chapterId` | string ≤512 | **required.** The publisher's chapter identity. A chapter without it is dropped |
-| `chapterUrl` | string ≤2048 | **required.** Must be on a host in `allowed_hosts` — enforced at ingest, so a mistake here quarantines the run |
+| `chapterUrl` | string ≤2048 | **required.** Must be on a host in `allowed_hosts`: enforced at ingest, so a mistake here quarantines the run |
 | `mangaId` | string ≤512 | **required.** The publisher's series id |
-| `mdMangaId` | uuid \| null | Omit or `null` — the runner resolves it from `ctx.mangaIdMap`, and an unresolvable chapter is dropped |
+| `mdMangaId` | uuid \| null | Omit or `null`: the runner resolves it from `ctx.mangaIdMap`, and an unresolvable chapter is dropped |
 | `chapterNumber` | string ≤64 \| null | A **string**, not a number: `"12.5"`, `"ex"`, `"0"` |
 | `chapterTitle` | string ≤1024 \| null | |
 | `chapterVolume` | string ≤64 \| null | Leave null and the processor backfills it from the MangaDex aggregate |
@@ -117,7 +117,7 @@ MangaDex mapping for; the platform will either create the title automatically or
 queue it for an operator. See
 [the untracked-title pipeline](architecture-guide.md#the-untracked-title-pipeline).
 
-### `ExtensionContext` — your entire world
+### `ExtensionContext`: your entire world
 
 `extensionApi.ts:86-106`. Anything not on this object you have to reach for
 through Node directly, which is what the sandbox refuses.
@@ -125,7 +125,7 @@ through Node directly, which is what the sandbox refuses.
 | Member | What it is |
 | --- | --- |
 | `manifest` | Your own manifest, frozen and read-only |
-| `mangaIdMap` | `ReadonlyMap<externalMangaId, mdMangaId>` from the platform's `tracked_manga` table — **including titles auto-created since your bundle was published** |
+| `mangaIdMap` | `ReadonlyMap<externalMangaId, mdMangaId>` from the platform's `tracked_manga` table; **including titles auto-created since your bundle was published** |
 | `fetch(input, init?)` | The only sanctioned network primitive. Same signature as global `fetch`. Enforces `allowed_hosts`, applies a per-host politeness delay, a timeout, and bounded retries |
 | `dataFile(name)` | Read a bundled data file, by `data_files` key or by relative path. Cannot escape the bundle directory |
 | `log(message, fields?)` | Structured logging into the job's log stream. Never stdout |
@@ -134,7 +134,7 @@ through Node directly, which is what the sandbox refuses.
 
 ## A complete minimal extension
 
-This is the platform's own e2e fixture — real, executed by the real runner in CI,
+This is the platform's own e2e fixture; real, executed by the real runner in CI,
 and deliberately plain ESM with no build step
 ([`test/e2e/fixtures/e2etest/`](../test/e2e/fixtures/e2etest/)).
 
@@ -146,8 +146,8 @@ const MANGA_ID = "m1";
 /** An ExtensionFactory: takes the context, returns something with collect(). */
 const factory = (ctx) => ({
   async collect({ postedChapterIds, cleanRun }) {
-    // Whatever you already uploaded is not news. Cheapest possible filter —
-    // do it before you fetch anything, not after.
+    // Whatever you already uploaded is not news. Cheapest possible filter;
+ // do it before you fetch anything, not after.
     const posted = new Set(postedChapterIds);
 
     const now = new Date();
@@ -176,7 +176,7 @@ const factory = (ctx) => ({
       });
     }
 
-    // Goes to the job's log stream, never stdout — stdout is the envelope.
+    // Goes to the job's log stream, never stdout; stdout is the envelope.
     ctx.log("collected", { updated: updatedChapters.length, cleanRun });
 
     return {
@@ -234,7 +234,7 @@ doing it *well*.
 
 Schema and defaults:
 [`src/contracts/manifest.ts:10-79`](../src/contracts/manifest.ts).
-The schema is `.passthrough()`, so extra keys are preserved rather than rejected —
+The schema is `.passthrough()`, so extra keys are preserved rather than rejected;
 but nothing reads them.
 
 ### Required
@@ -243,10 +243,10 @@ but nothing reads them.
 | --- | --- |
 | `name` | Must match `^[a-z0-9_]+$`. This is the extension's identity everywhere: the directory name, the audit subject, the `extension` column |
 | `version` | 1–32 chars. Free-form; semver by convention |
-| `entrypoint` | Must match `^[a-zA-Z0-9_./-]+\.(py\|mjs\|js)$`. For a node bundle it must be `.mjs` or `.js`, must exist in the zip, must be non-empty, and must contain a default export — all checked at publish (`store/bundles.ts:181-209`). This is the **built** file, not your TypeScript source |
+| `entrypoint` | Must match `^[a-zA-Z0-9_./-]+\.(py\|mjs\|js)$`. For a node bundle it must be `.mjs` or `.js`, must exist in the zip, must be non-empty, and must contain a default export; all checked at publish (`store/bundles.ts:181-209`). This is the **built** file, not your TypeScript source |
 | `mangadex_group_id` | uuid. Enforced at ingest: an envelope naming a different group id is quarantined (`ingest.ts:148-150`) |
 | `languages` | ≥1 entry, each 2–16 chars. **Enforced as policy**: a chapter in an undeclared language quarantines the run |
-| `allowed_hosts` | ≥1 entry. See below — this is the most consequential field in the file |
+| `allowed_hosts` | ≥1 entry. See below; this is the most consequential field in the file |
 
 ### `allowed_hosts` is enforced policy, twice
 
@@ -258,7 +258,7 @@ Matching is exact-host or subdomain: `example.com` matches `example.com` and
 It is enforced at two independent points:
 
 1. **Before any packet leaves.** `ctx.fetch` refuses a disallowed host, and
-   re-checks **every redirect hop** — a 302 to an unlisted host is the obvious way
+   re-checks **every redirect hop**: a 302 to an unlisted host is the obvious way
    to turn an allowlisted request into an arbitrary one
    (`extsdk/guardedFetch.ts:195-214`).
 2. **On the way back in.** Ingest checks every `chapterUrl` you report against the
@@ -266,7 +266,7 @@ It is enforced at two independent points:
    envelope and dead-letters the job** (`ingest.ts:176-181`).
 
 An empty list blocks everything (`guardedFetch.test.ts:88`). List every host you
-fetch *and* every host you build URLs on — mangaplus lists two for exactly that
+fetch *and* every host you build URLs on; mangaplus lists two for exactly that
 reason: the API host it calls, and the web host its `chapterUrl` values point at.
 
 ### Optional, with defaults
@@ -277,16 +277,16 @@ reason: the API host it calls, and the web host its `chapterUrl` values point at
 | `runtime` | inferred | `"node"` for anything new. `"python"` survives only so historical bundles remain describable, and publishing one is refused |
 | `class_name` | `"Extension"` | v1 vestige; unused by the v2 runner |
 | `permissions` | network on, no fs, no subprocess | **Descriptive, not enforced.** The real sandbox is the runner's argv and the guarded fetch. Fill it in honestly as documentation of intent |
-| `schedule` | none | One slot, or a **list** of them (max 48). A slot is `{hour: 0..23, minute: 0..59, day?: 0..6, days?: [0..6], kind?: "UPDATE"\|"CLEAN"\|"FORCE", label?, timezone: "UTC"}`. `day`/`days` use **Monday = 0** (Python's `weekday()`, not JS's `getUTCDay()` — the conversion is in `slots.ts`); omitting both means every day. `kind` defaults to `UPDATE`. Without a schedule the extension is never scheduled and can only be run manually. Operators can replace the whole list in the database |
+| `schedule` | none | One slot, or a **list** of them (max 48). A slot is `{hour: 0..23, minute: 0..59, day?: 0..6, days?: [0..6], kind?: "UPDATE"\|"CLEAN"\|"FORCE", label?, timezone: "UTC"}`. `day`/`days` use **Monday = 0** (Python's `weekday()`, not JS's `getUTCDay()`: the conversion is in `slots.ts`); omitting both means every day. `kind` defaults to `UPDATE`. Without a schedule the extension is never scheduled and can only be run manually. Operators can replace the whole list in the database |
 | `data_files` | `{}` | Logical name → filename in the bundle. Two names are special: `manga_id_map` and `override_options` seed `tracked_manga` and `extension_configs` at first publish (`store/bundles.ts:103-132`) |
 | `partition` | none | `{mode: "tracked_manga", maxSegments: 2..32 (4), minMangaPerSegment: ≥1 (25)}`. See [partitioned execution](architecture-guide.md#partitioned-execution). Declare it once you have enough tracked series that one host cannot get through them politely |
 | `min_trust` | `"COMMUNITY"` | Set `"TRUSTED"` to restrict this extension to workers the operator vouched for. Enforced in the claim query, so it is not bypassable |
 | `chapter_removal_mode` | none | `"unavailable"` or `"delete"`, overriding the global setting for this extension |
-| `auto_create_titles` | `false` | When true, untracked series get a MangaDex title created and committed automatically. When false they queue for operator approval — the safer default, and what mangaplus uses |
+| `auto_create_titles` | `false` | When true, untracked series get a MangaDex title created and committed automatically. When false they queue for operator approval; the safer default, and what mangaplus uses |
 | `title_defaults` | `{originalLanguage: "ja", contentRating: "safe", status: "ongoing"}` | Used when auto-creating. `contentRating` is one of safe/suggestive/erotica/pornographic; `status` one of ongoing/completed/hiatus/cancelled |
 | `timeout_seconds` | `3600` | 60–21600. Becomes the job's `timeoutSeconds`; the worker hard-kills the runner's process group at that wall clock, and the runner emits a diagnosable envelope at 95% of it |
 | `max_attempts` | `3` | 1–10. The job's retry budget |
-| `maintainers`, `homepage`, `requirements` | `[]` / none / `[]` | Informational. `requirements` is a v1 vestige — a node bundle has no runtime install step |
+| `maintainers`, `homepage`, `requirements` | `[]` / none / `[]` | Informational. `requirements` is a v1 vestige; a node bundle has no runtime install step |
 
 ---
 
@@ -313,12 +313,12 @@ node --disallow-code-generation-from-strings
 | Reading anything outside the bundle, the workdir, and the runner directory | `--allow-fs-read` allowlist | Your bundle's own files are your business; the worker's credential file is not |
 | Writing anywhere except the workdir and output directory | `--allow-fs-write` allowlist | No persistence between jobs. A bundle cannot leave anything behind |
 | Reaching a host not in `allowed_hosts` | the guarded fetch, checked again on every redirect | Egress control. See above |
-| Reading the worker's own configuration | a minimal spawn environment — `PATH`, `HOME`, `TMPDIR`, `LANG` and nothing else | The worker token, the core URL, and everything else the agent was configured with stay out of your process (`executor.ts:363-368`) |
+| Reading the worker's own configuration | a minimal spawn environment; `PATH`, `HOME`, `TMPDIR`, `LANG` and nothing else | The worker token, the core URL, and everything else the agent was configured with stay out of your process (`executor.ts:363-368`) |
 | Writing to stdout | `runner.mjs` captures `process.stdout.write` and the `console` methods **before any bundle code runs** and redirects them to stderr | stdout is the envelope channel. Libraries write to fd 1 without asking (`runner.mjs:61-78`) |
 
 Directory grants **are** recursive, so nested data files resolve. Network is
-deliberately *not* restricted by the permission model — it has no network
-component — so DNS and TLS work with no further grants and egress control is the
+deliberately *not* restricted by the permission model, it has no network
+component, so DNS and TLS work with no further grants and egress control is the
 guarded fetch's job alone.
 
 ### Consequences for how you write code
@@ -329,17 +329,17 @@ guarded fetch's job alone.
   (`extsdk/context.ts:65-89`).
 - **No ambient `fetch`.** Use `ctx.fetch`. The global one is not blocked by the
   permission model, but nothing stops ingest from quarantining whatever you bring
-  back from a host your manifest does not list — so you gain nothing and lose the
+  back from a host your manifest does not list; so you gain nothing and lose the
   politeness delay, timeout, retries, and `Retry-After` handling.
 - **No native modules, no runtime dependency install.** The publish step bundles
   your dependencies into one self-contained ESM file with `external: []`, so
   everything must be pure JS that esbuild can inline.
 - **Do not use TypeScript parameter properties** if you intend to run your tests
-  under Node's type-stripping loader — it does not implement them. mangaplus
+  under Node's type-stripping loader; it does not implement them. mangaplus
   declares fields explicitly for this reason.
 - **Throw for a site problem; let the runner classify.** A throw from inside
   `collect()` is treated as `TRANSIENT` and the job retries. A bad import, a
-  factory that throws, or a malformed return value is `PERMANENT` — a retry against
+  factory that throws, or a malformed return value is `PERMANENT`: a retry against
   the same pinned bundle would fail identically (`runner.mjs:566-599`, `754`).
 
 ---
@@ -357,7 +357,7 @@ run that mostly re-learns nothing.
 
 So it separates *evidence gathering* from *fetching*:
 
-**Step 1 — three cheap listing calls, in parallel** (`src/index.ts:382-387`):
+**Step 1; three cheap listing calls, in parallel** (`src/index.ts:382-387`):
 
 ```ts
 const [catalogue, webHome, updated] = await Promise.all([
@@ -367,22 +367,22 @@ const [catalogue, webHome, updated] = await Promise.all([
 ]);
 ```
 
-**Step 2 — reduce those into per-title evidence** (`src/listing.ts:86-135`): is
+**Step 2; reduce those into per-title evidence** (`src/listing.ts:86-135`): is
 the title in the catalogue at all, did a feed say it updated recently, and what is
 the newest chapter id and timestamp anyone advertised for it. Where a title appears
 several times on the home page, only the newest release supplies the chapter id.
 
-**Step 3 — decide who actually needs a detail call** (`src/planner.ts:112-148`).
+**Step 3; decide who actually needs a detail call** (`src/planner.ts:112-148`).
 Four skip reasons:
 
 | Reason | Meaning |
 | --- | --- |
-| `absent-from-listing` | not in the catalogue — nothing to fetch |
+| `absent-from-listing` | not in the catalogue; nothing to fetch |
 | `latest-chapter-posted` | the advertised newest chapter id is already in `postedChapterIds`, and no feed contradicts that with a newer timestamp |
 | `no-update-signal` | neither update feed mentioned it |
 | `outside-update-window` | its newest advertised chapter predates the update window |
 
-**Step 4 — fetch only the survivors**, four at a time
+**Step 4; fetch only the survivors**, four at a time
 (`index.ts:259-261`, `TITLE_CONCURRENCY = 4`).
 
 Three details make this safe rather than merely fast, and they are the transferable
@@ -394,7 +394,7 @@ lessons:
 - **It fails *open*, never quiet.** If both update feeds are dead, or if they
   answer but name zero updated titles, the planner fetches everything
   (`planner.ts:167-175`, `listing.ts:150`). "Feeds answered with no updates" is
-  the signature of protobuf schema drift, not of a quiet day — so it is treated as
+  the signature of protobuf schema drift, not of a quiet day; so it is treated as
   *no evidence*, not as evidence of nothing.
 - **An absent timestamp is unknown, not zero.** proto3 omits default values, so a
   missing `updatedTimeStamp` never justifies a skip (`planner.ts:140-146`).
@@ -407,19 +407,19 @@ Other things it gets right that a first extension usually gets wrong:
   `success` body. One dead series does not fail the run.
 - It decodes protobuf with a ~450-line dependency-free decoder
   (`src/proto.ts`) rather than a runtime, because only two wire types occur. The
-  decoder mimics Python's `MessageToDict` — proto3 defaults are *omitted*, which
+  decoder mimics Python's `MessageToDict`: proto3 defaults are *omitted*, which
   is what the "absent means unknown" logic depends on.
 - Language resolution is explicit and ordered: `custom_language[mangaId]` wins,
   then an already-MangaDex code passes through, then a built-in map
   (`index.ts:172-184`).
-- Untracked detection reuses the catalogue it already fetched — zero extra
-  requests — and tests membership against the **whole** `mangaIdMap`, so a
+- Untracked detection reuses the catalogue it already fetched, zero extra
+  requests, and tests membership against the **whole** `mangaIdMap`, so a
   partitioned segment never claims another segment's title
   (`index.ts:417-447`).
 - One source chapter can legitimately become several MangaDex chapters, so its
   normalizer returns an array of numbers and fans out
   (`src/normalise.ts:339-348`).
-- Its pure modules — `listing.ts`, `planner.ts`, `normalise.ts` — do no I/O and are
+- Its pure modules, `listing.ts`, `planner.ts`, `normalise.ts`, do no I/O and are
   unit-tested with `node:test` against hand-encoded protobuf bytes
   (`src/planner.test.ts`, `src/listing.test.ts`).
 
@@ -442,7 +442,7 @@ npm test              # node --test --experimental-transform-types "src/**/*.tes
 npm run build         # esbuild → index.mjs
 ```
 
-Note that mangaplus's `tsconfig.json` sets `"types": []` — Node globals are
+Note that mangaplus's `tsconfig.json` sets `"types": []`: Node globals are
 structurally denied to extension source, and only its test config adds them. That
 is a good habit to copy: it makes an accidental `fs` import a compile error rather
 than a runtime denial.
@@ -467,7 +467,7 @@ under the real flags is the only way to find out that you were relying on
 something the sandbox denies.
 
 `test/unit/nodeRunner.test.ts` does exactly this against the e2e fixture
-and is worth reading as a template — it covers segment filtering, dropped
+and is worth reading as a template; it covers segment filtering, dropped
 unmapped chapters, `postedChapterIds` handling, and stdout hygiene.
 
 ### Run it through the whole platform
@@ -502,13 +502,13 @@ The build-and-zip step lives in
 [`src/core/webhooks/bundleBuilder.ts`](../src/core/webhooks/bundleBuilder.ts),
 not in the CLI, because **two callers need it**: an operator on a laptop, and the
 [GitHub push webhook](webhooks.md) building a directory it just extracted from a
-repo archive. Both must produce byte-identical archives for the same input — the
+repo archive. Both must produce byte-identical archives for the same input; the
 sha256 of the zip is the version pin a worker verifies, so two publish paths that
 disagreed would be two different programs (`bundleBuilder.ts:1-16`).
 
 `buildExtensionBundle(root)` (`bundleBuilder.ts:217-249`):
 
-1. Reads `<dir>/manifest.json` and requires `name` and `version` — locally, so you
+1. Reads `<dir>/manifest.json` and requires `name` and `version`: locally, so you
    do not upload megabytes to be told about a typo.
 2. Detects a source entrypoint: `index.ts`, then `src/index.ts`, else `main` from a
    `package.json` that declares a `build` script (`bundleBuilder.ts:137-159`). No
@@ -517,15 +517,15 @@ disagreed would be two different programs (`bundleBuilder.ts:1-16`).
    `platform: "node"`, `target: "node24"`, **`external: []`**
    (`bundleBuilder.ts:98-134`). Dependencies are inlined, so the sha256 pins your
    whole program and not just your own source. The flip side: every import must
-   resolve from the extension directory — a node builtin or a relative path.
+   resolve from the extension directory; a node builtin or a relative path.
 4. Stages only what ships: the built `index.mjs`, a manifest **rewritten** with
-   `entrypoint: "index.mjs"`, and each declared `data_files` value — failing if one
+   `entrypoint: "index.mjs"`, and each declared `data_files` value; failing if one
    is missing (`bundleBuilder.ts:167-193`). Source, tests, `node_modules`, and
    lockfiles are left behind. A bundle is the program, not the project.
 5. Zips **deterministically** (`bundleBuilder.ts:51-76`): entries in sorted order,
    `__pycache__`/`.git`/`node_modules`/`dist`/`.turbo` excluded, and every entry
    stamped with a fixed mtime rather than the filesystem's. That last detail
-   matters — a repo archive extracts with "now" as its mtime, so without it the
+   matters; a repo archive extracts with "now" as its mtime, so without it the
    webhook would compute a different sha256 than the CLI for the very same commit,
    and every redelivery would look like a new version of identical code.
 
@@ -539,7 +539,7 @@ If a build is needed and esbuild is not installed, the error says so and tells y
 to run `pnpm install` at the repo root or ship a prebuilt `index.mjs`
 (`bundleBuilder.ts:105-110`).
 
-Publishing needs the `bundles:write` scope — the `ci-publisher` preset is exactly
+Publishing needs the `bundles:write` scope; the `ci-publisher` preset is exactly
 that one scope, and nothing else.
 
 **Rejections** (all 422, all with a readable reason):
@@ -547,14 +547,14 @@ that one scope, and nothing else.
 | Reason | Fix |
 | --- | --- |
 | python runtime without `--allow-legacy-runtime` | Port to v2 |
-| missing `manifest.json`, or invalid zip | — |
+| missing `manifest.json`, or invalid zip |; |
 | manifest failed schema validation | The message names the field |
 | entrypoint missing from the bundle | Check `entrypoint` matches the built filename |
-| entrypoint is empty | — |
+| entrypoint is empty |; |
 | entrypoint is not `.mjs`/`.js` for a node runtime | Point it at the built file, not the source |
 | entrypoint has no default export | `export default factory` |
 
-The entrypoint checks are deliberately a shallow smell test, not a parser — the
+The entrypoint checks are deliberately a shallow smell test, not a parser; the
 real validation is the runner importing the file and refusing it if `default` is
 not a function. The point is to fail at publish, where an operator is watching,
 rather than on a worker an hour later (`store/bundles.ts:172-180`).
@@ -577,7 +577,7 @@ CI-side publishing is preferred: [webhooks.md](webhooks.md).
   `bundleSha256` disagrees with the job's pin.
 - **`(extension, version)` is unique.** Republishing the same `version` with
   different content *replaces* the row and produces a new sha. Jobs already pinned
-  to the old sha keep their pin but can no longer fetch the bytes — so **bump the
+  to the old sha keep their pin but can no longer fetch the bytes; so **bump the
   version** rather than republishing over one, if you need both to remain runnable
   (`store/bundles.ts:64-73`).
 - **The scheduler pins the latest non-yanked bundle** at run-creation time
@@ -595,7 +595,7 @@ The v1 Python contract is gone: publishing a python bundle is refused at the
 publish endpoint (`store/bundles.ts:37-43`), and the worker image ships no
 interpreter. There is an audited `--allow-legacy-runtime` escape hatch, and it
 exists so a rollback to a known-good legacy bundle is possible without a code
-change — not for new work.
+change; not for new work.
 
 The mapping:
 
@@ -603,7 +603,7 @@ The mapping:
 | --- | --- |
 | `class Extension` with five methods | one factory returning `{ collect() }` |
 | `get_updated_chapters()` | `collect()` → `updatedChapters` |
-| `get_all_chapters()` | `collect()` → `allChapters` — **but return `null`, not `[]`, unless you really gathered everything** |
+| `get_all_chapters()` | `collect()` → `allChapters`: **but return `null`, not `[]`, unless you really gathered everything** |
 | `get_updated_manga()` | `collect()` → `untrackedManga` |
 | `name`, `mangadex_group_id`, `languages` attributes | `manifest.json` fields |
 | `open_manga_id_map()` reading `manga_id_map.json` | `ctx.mangaIdMap`, from the database and therefore current |
@@ -626,7 +626,7 @@ Two behavioural notes for porters:
 - **Politeness is no longer your problem, and no longer your choice.** The
   monolith relied on extensions being polite; `ctx.fetch` imposes a per-host
   minimum interval regardless (`guardedFetch.ts:12-18`). Budget your run's
-  `timeout_seconds` accordingly — a 700-request run at 500 ms is six minutes
+  `timeout_seconds` accordingly; a 700-request run at 500 ms is six minutes
   before you count the site's own latency, which is the arithmetic that motivates
   [targeted fetching](#worked-example-how-mangaplus-avoids-most-of-its-work).
 

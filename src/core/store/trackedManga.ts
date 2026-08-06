@@ -6,7 +6,7 @@ import type { PrismaClient } from "@prisma/client";
  * The map used to live in `manga_id_map.json` inside each extension bundle, so
  * adding a hundred series meant editing a file, opening a pull request and
  * republishing. The database is authoritative now, which makes bulk editing an
- * API concern — and a permissions concern, because "add series" is a job worth
+ * API concern; and a permissions concern, because "add series" is a job worth
  * delegating to a contributor while "repoint or delete a series" is not.
  *
  * Every operation reports per-row outcomes rather than failing the whole batch:
@@ -91,7 +91,7 @@ function pairKey(namespace: string, mangaId: string): string {
  * catalogue (viz: `vizmanga,709,9a0f1e7e-…`).
  *
  * Also accepts whitespace/tab/semicolon separators, `#` comments, a header row,
- * and the columns in any order — because someone will paste it that way and
+ * and the columns in any order; because someone will paste it that way and
  * guessing correctly is better than rejecting a whole paste over column order.
  * The MangaDex id is identified by being a uuid, and on a three-column line the
  * two remaining values keep their relative order: namespace first, then
@@ -170,12 +170,12 @@ export interface MangaIdMapPayload {
    * namespace column fixes:
    *
    *   flat        {mdMangaId: [externalId, …]}
-   *               — every row is in the default id space. This is mangaplus's
+   *               - every row is in the default id space. This is mangaplus's
    *                 manga_id_map.json verbatim, so an unchanged runner and an
    *                 unchanged extension see exactly what they saw before.
    *
    *   namespaced  {namespace: {mdMangaId: [externalId, …]}}
-   *               — at least one row names a catalogue. This mirrors viz's
+   *               - at least one row names a catalogue. This mirrors viz's
    *                 manga_id_map.json, which is `{namespace: {…}}`.
    *
    * The two are distinguishable without a flag (a flat map's values are arrays,
@@ -192,7 +192,7 @@ export interface MangaIdMapPayload {
  * Build the lease payload from tracked rows.
  *
  * Rows in the default id space keep the `""` key when any other row is
- * namespaced — dropping them would hide half an extension's catalogue, and
+ * namespaced; dropping them would hide half an extension's catalogue, and
  * inventing a name for them would not match the file the operator curates.
  */
 export function buildMangaIdMap(
@@ -239,8 +239,8 @@ export class TrackedMangaStore {
    * reported) rather than silently applied or the whole batch refused.
    *
    * With `dryRun`, every row is judged exactly as it would be and nothing is
-   * written. The judgement above this line is already pure — it reads the
-   * current mappings and decides outcomes — so the preview is the real thing
+   * written. The judgement above this line is already pure, it reads the
+   * current mappings and decides outcomes, so the preview is the real thing
    * minus its last statement, not a second implementation that can drift.
    */
   async applyBatch(

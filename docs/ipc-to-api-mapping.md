@@ -2,7 +2,7 @@
 
 Date: 2026-07-29
 
-This is the migration contract for the two existing API clients — the Discord
+This is the migration contract for the two existing API clients; the Discord
 bot and the dashboard. Both currently speak JSON-RPC over a Unix socket to
 `run.py`'s in-process IPC server (`_setup_ipc_server`, 27 registered commands).
 Both must move to HTTPS against the core admin API.
@@ -11,7 +11,7 @@ Both must move to HTTPS against the core admin API.
 its own copy of the credential: core-api serves it as static assets at the
 domain root (`src/core/api/dashboard/`) and it calls the same
 `/api/v1/admin/*` endpoints as everything else. Operators sign in with their
-own accounts — email + password or Discord — and get a revocable session
+own accounts, email + password or Discord, and get a revocable session
 cookie; the admin token is the break-glass path only. The "Dashboard" column
 below is the migration map for the old UI, and it covers every admin endpoint.
 What remains to port is the bot.
@@ -45,25 +45,25 @@ Base path for every endpoint below is `/api/v1/admin`. "CLI" is the
 
 | Legacy IPC | Endpoint | CLI | Dashboard | Notes |
 |---|---|---|---|---|
-| `run` | `POST /runs` | `runs trigger <ext> [--kind]` | Extensions → Run / Force / Clean | `force: true` → `kind: "FORCE"`; `clean: true` → `kind: "CLEAN"`; neither → `UPDATE`. One extension per call — the legacy `extensions: [...]` list becomes N calls. Returns `{runId, created}`; `created: false` means the idempotency key already existed. Returns 409 while paused, matching the legacy paused rejection. |
-| `list_schedule` | `GET /schedules` | `schedules list` | Extensions → Configure → Schedule | Returns `{defaults, overrides, effective}`, each a `Record<extension, slot[]>` — an extension now has a **list** of slots, not one time. `defaults` comes from each bundle's `manifest.json` rather than `schedule*.json` files on disk. |
-| — | `GET /schedules/:name` | `schedules show <ext>` | Extensions → Configure → Schedule | New. Carries the slot `id`s the mutating calls take. No legacy equivalent: legacy had nothing to identify. |
+| `run` | `POST /runs` | `runs trigger <ext> [--kind]` | Extensions → Run / Force / Clean | `force: true` → `kind: "FORCE"`; `clean: true` → `kind: "CLEAN"`; neither → `UPDATE`. One extension per call; the legacy `extensions: [...]` list becomes N calls. Returns `{runId, created}`; `created: false` means the idempotency key already existed. Returns 409 while paused, matching the legacy paused rejection. |
+| `list_schedule` | `GET /schedules` | `schedules list` | Extensions → Configure → Schedule | Returns `{defaults, overrides, effective}`, each a `Record<extension, slot[]>`; an extension now has a **list** of slots, not one time. `defaults` comes from each bundle's `manifest.json` rather than `schedule*.json` files on disk. |
+| none | `GET /schedules/:name` | `schedules show <ext>` | Extensions → Configure → Schedule | New. Carries the slot `id`s the mutating calls take. No legacy equivalent: legacy had nothing to identify. |
 | `set_schedule` | `PUT /schedules/:name` | `schedules set <ext> <hour> <minute> [--days] [--kind] [--label]` | Extensions → Configure → Schedule → Replace whole schedule | **Replaces** the whole schedule. Body `{entries: slot[]}`, or a bare slot (the legacy `{hour, minute, day?}` body still means exactly what it always did: this extension's schedule is this one time). No explicit reschedule step: the scheduler recomputes due slots every tick, so the change takes effect within one `SCHEDULER_INTERVAL_SECONDS`. |
-| — | `POST /schedules/:name` | `schedules add <ext> <hour> <minute> [--days] [--kind] [--label]` | Extensions → Configure → Schedule → Add slot | New, and the one an operator usually wants. Appends a slot, seeding the manifest's slots first so adding never silently drops them. |
-| — | `PATCH /schedules/:name/:id` | `schedules enable\|disable <ext> <id>` | Extensions → Configure → Schedule → Switch on/off | New. Stops a slot firing without losing what it said. |
-| — | `DELETE /schedules/:name/:id` | `schedules remove <ext> <id>` | Extensions → Configure → Schedule → Remove | New. Drops one slot. |
-| `remove_schedule` | `DELETE /schedules/:name` | `schedules reset <ext>` | Extensions → Configure → Schedule → Reset to manifest | Renamed from `remove` — with per-slot removal now existing, "remove" had to mean one slot. Returns `{removed: boolean}`, same "no override existed" semantics. |
-| `get_removal_mode` | `GET /removal-mode` | `removal-mode get` | Extensions → Settings | Returns `{mode, validModes}`. The legacy `explicit` / `default` fields are dropped — read `settings` if you need to distinguish. |
+| none | `POST /schedules/:name` | `schedules add <ext> <hour> <minute> [--days] [--kind] [--label]` | Extensions → Configure → Schedule → Add slot | New, and the one an operator usually wants. Appends a slot, seeding the manifest's slots first so adding never silently drops them. |
+| none | `PATCH /schedules/:name/:id` | `schedules enable\|disable <ext> <id>` | Extensions → Configure → Schedule → Switch on/off | New. Stops a slot firing without losing what it said. |
+| none | `DELETE /schedules/:name/:id` | `schedules remove <ext> <id>` | Extensions → Configure → Schedule → Remove | New. Drops one slot. |
+| `remove_schedule` | `DELETE /schedules/:name` | `schedules reset <ext>` | Extensions → Configure → Schedule → Reset to manifest | Renamed from `remove`: with per-slot removal now existing, "remove" had to mean one slot. Returns `{removed: boolean}`, same "no override existed" semantics. |
+| `get_removal_mode` | `GET /removal-mode` | `removal-mode get` | Extensions → Settings | Returns `{mode, validModes}`. The legacy `explicit` / `default` fields are dropped; read `settings` if you need to distinguish. |
 | `set_removal_mode` | `POST /removal-mode` | `removal-mode set <mode>` | Extensions → Settings → Save | Body `{mode}`, validated against `unavailable \| delete`. |
-| `list_extensions` | `GET /extensions` | `extensions list` | Extensions | Source of truth changes: the legacy version scanned `publoader/extensions/src/` on the local disk; this lists **published bundles** with version, sha256, and disabled flag. An extension that exists in the repo but was never published does not appear — that is the intended behaviour. |
+| `list_extensions` | `GET /extensions` | `extensions list` | Extensions | Source of truth changes: the legacy version scanned `publoader/extensions/src/` on the local disk; this lists **published bundles** with version, sha256, and disabled flag. An extension that exists in the repo but was never published does not appear; that is the intended behaviour. |
 | `disable_extension` | `POST /extensions/:name/disable` | `extensions disable <name>` | Extensions → Disable | |
 | `enable_extension` | `POST /extensions/:name/enable` | `extensions enable <name>` | Extensions → Enable | |
 | `run_history` | `GET /runs?limit=&extension=` | `runs list` | Runs | Richer than the SQLite `run_history` rows: state machine state, segment count, bundle pin. Use `GET /runs/:id` (`runs show`) for per-job detail including `lastError`. |
 | `stats` | `GET /stats` | `stats` | Overview | Returns job counts by state, upload-task depths by (kind, state), worker counts by status, quarantine count, pause flag. Replaces both `stats` and the queue-length half of `status`. |
 | `pause` | `POST /pause` | `pause [--minutes]` | Overview → Pause | Body `{minutes?}`; omit for indefinite. Unlike the legacy version the pause is authoritative in Postgres, so it is honoured by every replica immediately rather than by one process's global. |
 | `resume` | `POST /resume` | `resume` | Overview → Resume | |
-| `status` | `GET /stats` + `GET /workers` | `stats`, `workers list` | Overview + Workers | Split in two. `pid` and the in-process `schedule` job list have no equivalent — see below. |
-| `queue_peek` | `GET /stats` (depths only) | `stats` | Overview → Upload queue — outstanding (depths only) | **Partial.** Depths are covered; per-row sampling is not — see gaps. The card shows outstanding states only; DONE totals sit behind its “Completed” disclosure. |
+| `status` | `GET /stats` + `GET /workers` | `stats`, `workers list` | Overview + Workers | Split in two. `pid` and the in-process `schedule` job list have no equivalent; see below. |
+| `queue_peek` | `GET /stats` (depths only) | `stats` | Overview → Upload queue: outstanding (depths only) | **Partial.** Depths are covered; per-row sampling is not; see gaps. The card shows outstanding states only; DONE totals sit behind its “Completed” disclosure. |
 
 ### New capabilities with no legacy counterpart
 
@@ -79,10 +79,10 @@ surface them because they are where operational problems now appear.
 | `POST /jobs/:id/cancel` | `jobs cancel <id>` | Runs → run drawer → Cancel | Cancel one job. |
 | `POST /jobs/:id/retry` | `jobs retry <id>` | Runs → run drawer → Retry, or Dead letter → Replay | Replay a dead-lettered job. |
 | `GET /dead-letter` | `dead-letter` | Runs → Dead letter | Jobs that exhausted retries or hit a permanent/policy error. |
-| `GET /quarantine` | `quarantine` | Quarantine | Result envelopes rejected by schema or policy validation — the signal that a worker is misbehaving. |
+| `GET /quarantine` | `quarantine` | Quarantine | Result envelopes rejected by schema or policy validation; the signal that a worker is misbehaving. |
 | `POST /bundles` | `bundle publish <dir>` | Extensions → Settings → Publish bundle (.zip) | Publish a content-addressed extension bundle. Also performs the one-time seed of `manga_id_map.json` / `override_options.json` into the database. |
 | `GET /audit` | `audit` | Audit | Who did what, when. |
-| `GET /extensions/:name/tracked` | `tracked list <ext>` | Extensions → Configure → Tracked manga | The external-id → MangaDex-id mapping. **Replaces `manga_id_map.json`** — the database is the config authority. |
+| `GET /extensions/:name/tracked` | `tracked list <ext>` | Extensions → Configure → Tracked manga | The external-id → MangaDex-id mapping. **Replaces `manga_id_map.json`**: the database is the config authority. |
 | `PUT /extensions/:name/tracked` | `tracked set <ext> <mangaId> <mdMangaId>` | Extensions → Configure → Tracked manga → Add / repoint | Add or repoint a mapping. |
 | `DELETE /extensions/:name/tracked/:mangaId` | `tracked remove <ext> <mangaId>` | Extensions → Configure → Tracked manga → Remove | Stop tracking a manga. Does not touch MangaDex. |
 | `GET /extensions/:name/config` | `ext-config get <ext>` | Extensions → Configure → Override options | Override options as JSON. **Replaces `override_options.json`.** |
@@ -91,7 +91,7 @@ surface them because they are where operational problems now appear.
 | `POST /untracked/:id/approve` | `untracked approve <id>` | Untracked → Approve (confirms; links the new title) | Create the MangaDex title now and start tracking it. Synchronous; returns the new `mdMangaId`. |
 | `POST /untracked/:id/skip` | `untracked skip <id>` | Untracked → Skip | Never create a title for this series. |
 
-### Retired — and what replaces the capability
+### Retired; and what replaces the capability
 
 | Legacy IPC | Why it is gone | What to do instead |
 |---|---|---|
@@ -99,13 +99,13 @@ surface them because they are where operational problems now appear.
 | `restart` | `worker.kill()` → GitHub tarball self-update → `pip install` → `os.execv`. A container must not rewrite and re-exec itself. | Redeploy the image: `docker compose pull && docker compose up -d`, then `prisma migrate deploy`. See `docs/operations.md` → "Upgrade the core". |
 | `pull` | Downloaded a GitHub tarball with a PAT and `shutil.move`d it over the live source tree. Mutating a running deployment's source is exactly the supply-chain property the bundle pipeline removes. | Build bundles in CI from the extensions repos and `bundle publish --source-commit <sha>`. Bundles are immutable, versioned, hash-addressed, and recorded in the audit log. |
 | `restart_workers` | Killed and respawned four `multiprocessing.Process` children inside one container. The upload workers are now separate container replicas and the scrape workers are remote hosts. | Upload-task workers: `docker compose restart core-uploader`. Scrape workers: `workers drain <id>` then restart the remote agent, then `workers activate <id>`. In-flight work is leased and requeues automatically either way. |
-| `kill_tasks` | Drained an in-memory `queue.Queue` and restarted local children. There is no in-memory queue — every unit of work is a durable row. | `jobs cancel <id>` per job. **Bulk cancel is a gap** (see below). |
+| `kill_tasks` | Drained an in-memory `queue.Queue` and restarted local children. There is no in-memory queue; every unit of work is a durable row. | `jobs cancel <id>` per job. **Bulk cancel is a gap** (see below). |
 | `logs` | Tailed `*.log` files from the scheduler's own filesystem. Work now executes on machines the core cannot read. | Container logs via the host log driver (`docker compose logs -f core-api`). For a failure, the diagnostic path is `runs show <id>` → per-job `lastError` → `dead-letter` → `quarantine` → `audit`. **Centralised log aggregation is a gap** (see below). |
 | `config_show` | Read a local `config.ini` through `configparser`. | Configuration is environment/Docker-secret driven (`src/config.ts`). Inspect with `docker compose config` on the core host; secrets are deliberately not exposed over the API. |
 | `config_set` | Rewrote `config.ini` in place and only affected that one process. | Edit the compose env / secret file and redeploy. Nothing that changes MangaDex credentials or database URLs should be settable from a Discord message. |
-| `mdauth_status` | Read the local `mdauth.json`. | **Gap** — see below. Only `core-uploader` holds MD credentials now. |
-| `force_login` | Forced a MangaDex password-grant login and rewrote `mdauth.json`; other processes kept stale copies. | **Gap** — see below. |
-| `logout` | Deleted `mdauth.json` and poked private attributes on an in-process singleton. | **Gap** — see below. Credential revocation now means rotating the secret and redeploying `core-uploader`. |
+| `mdauth_status` | Read the local `mdauth.json`. | **Gap**: see below. Only `core-uploader` holds MD credentials now. |
+| `force_login` | Forced a MangaDex password-grant login and rewrote `mdauth.json`; other processes kept stale copies. | **Gap**: see below. |
+| `logout` | Deleted `mdauth.json` and poked private attributes on an in-process singleton. | **Gap**: see below. Credential revocation now means rotating the secret and redeploying `core-uploader`. |
 
 ## Gaps to close before the bot and dashboard can fully cut over
 
@@ -127,7 +127,7 @@ migration, but the bot loses a feature until they land.
    Suggested: `GET /api/v1/admin/upload-tasks?kind=&state=&limit=` for the
    sample, and `POST /api/v1/admin/upload-tasks/:id/cancel`. A bulk purge
    equivalent to `queue_clear` should stay behind an explicit
-   `?confirm=<count>` guard — the legacy version could empty a queue of
+   `?confirm=<count>` guard; the legacy version could empty a queue of
    thousands of pending uploads with one Discord message.
 
 3. **Bulk cancel** (`kill_tasks`). Suggested: `POST /api/v1/admin/runs/:id/cancel`
@@ -135,7 +135,7 @@ migration, but the bot loses a feature until they land.
    run was a mistake"). Cancelling the entire queue is not a useful operation
    on a durable store.
 
-4. **Log access** (`logs`). v1 has no centralised log API by design — logs are
+4. **Log access** (`logs`). v1 has no centralised log API by design; logs are
    structured JSON on stdout with `runId`/`jobId`/`workerId` correlation, meant
    to be scraped by the host's logging stack. If the bot needs `/logs` back,
    the right shape is a query against a log aggregator, not a file-tailing
@@ -166,7 +166,7 @@ migration, but the bot loses a feature until they land.
   definition.
 - **`untracked approve` is destructive-ish and synchronous.** It creates a real
   MangaDex title and cannot be undone from the API. If the bot exposes it as a
-  slash command, gate it — this is not a read-only convenience.
+  slash command, gate it; this is not a read-only convenience.
 - **Token scope.** There is one admin token in v1 and it grants everything,
   including `bundle publish`. The bot and dashboard both hold it. Per-client
   tokens with scopes are a follow-up; until then, treat the bot's token as
@@ -181,7 +181,7 @@ setup and the command reference are in `docs/bot.md`.
 
 Two things above are now out of date and worth stating plainly:
 
-1. **"Token scope … per-client tokens with scopes are a follow-up"** — they have
+1. **"Token scope … per-client tokens with scopes are a follow-up"**: they have
    landed. The bot holds a scoped `pa_…` token (`src/core/api/scopes.ts`,
    `routes/tokens.ts`), *not* `ADMIN_TOKEN`, and every admin route enforces a
    scope. The bot's token is no longer equivalent to shell access to the control
@@ -198,7 +198,7 @@ and a slash command). The new bot is slash-only.
 
 | Legacy | New command | Notes |
 |---|---|---|
-| `run [ext…]` | `/run <extension>` | One extension per invocation — the legacy list becomes N calls, matching `POST /runs`. Uses the Discord interaction id as the idempotency key. |
+| `run [ext…]` | `/run <extension>` | One extension per invocation; the legacy list becomes N calls, matching `POST /runs`. Uses the Discord interaction id as the idempotency key. |
 | `force [ext…]` | `/run <extension> mode:FORCE` | |
 | `clean [ext…]` | `/run <extension> mode:CLEAN confirm:true` | Confirmation required; a CLEAN run can republish a lot of content. |
 | `status`, `ping` | `/status`, `/ping` | Split: `/status` is the state (from `GET /stats` + `GET /workers`), `/ping` is API reachability and latency. |
@@ -211,15 +211,15 @@ and a slash command). The new bot is slash-only.
 | `schedule list` | `/schedule list` | Shows every slot each extension has, and whether it came from the manifest or an operator. |
 | `schedule set` | `/schedule set` | Still replaces the whole schedule; `/schedule add` is the additive one. |
 | `schedule remove` | `/schedule remove` | Now takes a slot number from `/schedule show`. `/schedule reset` is the old whole-extension behaviour. |
-| `removal show` | `/removal-mode get` | Renamed. Needs `settings:write` — the GET is guarded by the write scope server-side. |
+| `removal show` | `/removal-mode get` | Renamed. Needs `settings:write`: the GET is guarded by the write scope server-side. |
 | `removal set` | `/removal-mode set` | Renamed. |
 | `history [ext]` | `/runs recent [extension] [limit]` | Renamed. Richer: run state, kind and trigger source. |
-| `queue peek <worker>` | `/queue list [kind] [state]` | Restored in full by `routes/ops.ts` (`GET /upload-tasks`), which returns rows *and* depth totals. Filters are by task kind and state rather than by worker name — upload tasks are no longer per-worker queues. |
+| `queue peek <worker>` | `/queue list [kind] [state]` | Restored in full by `routes/ops.ts` (`GET /upload-tasks`), which returns rows *and* depth totals. Filters are by task kind and state rather than by worker name; upload tasks are no longer per-worker queues. |
 | `queue clear <worker>` | `/queue cancel <id> confirm:true` | **Per task, not bulk, on purpose.** The legacy command could empty a queue of thousands of pending uploads from one chat message. `/queue requeue-stale` covers the other reason people reached for it (an uploader died holding leases). |
 | `mdauth_status` | `/mdauth status` | Restored by `routes/ops.ts` (`GET /mangadex/auth`). Reports whether tokens are stored and when the access token goes stale; never returns the tokens. |
 | `logout` | `/mdauth clear confirm:true` | Restored as "forget the stored session", which is what the legacy command actually did. It does not revoke anything MangaDex-side. |
 | `force_login` | `/mdauth clear confirm:true` | No direct equivalent, and none is wanted: clearing the session makes the next MangaDex call authenticate from the configured credentials, which is the same outcome without a chat command that handles a password. |
-| `logs` | `/errors list [limit]` (partial) | `GET /admin/errors` merges dead-lettered jobs, failed upload tasks and quarantined submissions into one time-ordered feed — the triage half of what `logs` was used for. `/errors clear` acknowledges a failure so the feed stays a to-do list rather than growing forever. Process output stays in `docker compose logs`. |
+| `logs` | `/errors list [limit]` (partial) | `GET /admin/errors` merges dead-lettered jobs, failed upload tasks and quarantined submissions into one time-ordered feed; the triage half of what `logs` was used for. `/errors clear` acknowledges a failure so the feed stays a to-do list rather than growing forever. Process output stays in `docker compose logs`. |
 | `kill`, `workers restart`, `config show`, `config set`, `pull`, `reload`, `restart`, `refresh`, `start`, `shutdown` | *(retired)* | See the table below. |
 
 ### New commands with no legacy counterpart
@@ -227,7 +227,7 @@ and a slash command). The new bot is slash-only.
 `/runs show <id>`, `/jobs cancel <id>`, `/jobs retry <id>`, `/dead-letter`,
 `/quarantine`, `/errors list|clear|restore`, `/workers list|drain|activate|revoke`, `/enroll`,
 `/untracked list|approve|skip`, `/tracked list|set|remove`,
-`/queue retry|cancel|requeue-stale`, `/audit`, `/whoami` — the endpoints listed
+`/queue retry|cancel|requeue-stale`, `/audit`, `/whoami`: the endpoints listed
 under "New capabilities" above plus those in `routes/ops.ts`, now reachable from
 chat.
 
@@ -265,20 +265,20 @@ explanation for both.
 
 Against the checklist above:
 
-- **Idempotency** — done. Every `/run` sends `idempotencyKey:
+- **Idempotency**: done. Every `/run` sends `idempotencyKey:
   discord:<interactionId>`, so a Discord retry or a double-submit collapses into
   one run. The reply distinguishes "started" from "already existed".
-- **Polling** — not implemented. `/run` returns the run id and points at
+- **Polling**: not implemented. `/run` returns the run id and points at
   `/runs show <id>`. A bot that polled would either spam the channel or trip the
   admin rate limiter; the run-complete notification path is still the existing
   `DISCORD_WEBHOOK_URLS` webhook, which is unchanged.
-- **Rate limiting** — the client surfaces 429 with the `Retry-After` value
+- **Rate limiting**: the client surfaces 429 with the `Retry-After` value
   instead of retrying. There is no polling loop to trip it.
-- **Config is in the database now** — the bot reads nothing from disk. Tracked
+- **Config is in the database now**: the bot reads nothing from disk. Tracked
   manga come from `GET /extensions/:name/tracked` via `/tracked list`.
-- **`untracked approve` is destructive-ish** — gated: admin-only *and*
+- **`untracked approve` is destructive-ish**: gated: admin-only *and*
   `confirm: true`.
-- **Command surface allowlisted on the bot side** — done, and it now fails
+- **Command surface allowlisted on the bot side**: done, and it now fails
   closed rather than open; see `docs/bot.md` §4.
 
 ### Remaining gaps, from the bot's point of view
@@ -290,10 +290,10 @@ closed by `routes/ops.ts`. What an operator will still notice missing from chat:
    would give the bot a `/runs cancel <id>` covering the realistic case ("that
    FORCE run was a mistake").
 2. **Next-fire times.** `/schedule list` shows configuration, not when an
-   extension runs next — gap 5 above. Adding `nextRunAt` to `GET /schedules`
+   extension runs next; gap 5 above. Adding `nextRunAt` to `GET /schedules`
    would let the bot show a countdown.
-3. **Token introspection.** `/whoami` cannot list the bot's scopes up front —
-   `/api/v1/admin/tokens/*` is gated on `users:admin` + OWNER, which a bot token
+3. **Token introspection.** `/whoami` cannot list the bot's scopes up front;
+ `/api/v1/admin/tokens/*` is gated on `users:admin` + OWNER, which a bot token
    can never hold. It reports them after any 403 (whose body includes the held
    scope list), and probes a `GET /api/v1/admin/tokens/self` that does not exist
    yet, so adding one would make `/whoami` complete with no bot change.

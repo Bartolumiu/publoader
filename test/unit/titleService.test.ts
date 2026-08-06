@@ -15,7 +15,7 @@ import type { MdApi, MdMangaDetail } from "../../src/core/md/types.js";
  *    MangaDex leaves absent fields alone and echoing them back would put this
  *    pipeline's idea of a title's description or tags over a human's;
  *  - a field that IS sent carries the merged value, because MangaDex replaces
- *    whatever is sent wholesale — the failure mode being a correction that
+ *    whatever is sent wholesale; the failure mode being a correction that
  *    silently deletes a title's other names or its AniList link;
  *  - the version travels with the write, because it is the only thing standing
  *    between two concurrent editors and a lost correction.
@@ -311,8 +311,8 @@ describe("TitleService.applyToMangaDex", () => {
     expect(audits[0]).toMatchObject({ actor: "user:ardax", action: "untracked.mangadex_apply" });
     // A row that has just been reconciled has no outstanding MangaDex error,
     // and records WHEN and BY WHOM it was applied. Those two columns are what
-    // `GET /untracked/:id` reads back, so they are the point of this write —
-    // deriving the same fact by scanning the audit log made a routine read
+    // `GET /untracked/:id` reads back, so they are the point of this write;
+ // deriving the same fact by scanning the audit log made a routine read
     // depend on how long logs are kept.
     expect(saved).toHaveLength(1);
     expect(saved[0]).toMatchObject({ lastError: null, mdAppliedBy: "user:ardax" });
@@ -337,7 +337,7 @@ describe("TitleService.applyToMangaDex", () => {
     const { titles, audits, saved } = service(row(), {
       mangaById: async () => title(),
       editManga: async () => {
-        throw new MdRequestError("PUT failed — 409: version 4 is stale", 409);
+        throw new MdRequestError("PUT failed; 409: version 4 is stale", 409);
       },
     });
 
@@ -354,7 +354,7 @@ describe("TitleService.applyToMangaDex", () => {
     const { titles } = service(row(), {
       mangaById: async () => title(),
       editManga: async () => {
-        throw new MdRequestError("PUT failed — 400: title is too long", 400);
+        throw new MdRequestError("PUT failed; 400: title is too long", 400);
       },
     });
     const result = await titles.applyToMangaDex(row().id, "user:ardax");

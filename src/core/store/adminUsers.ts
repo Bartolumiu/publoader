@@ -56,6 +56,13 @@ export interface ResolvedSession {
   role: AdminRole;
   email: string;
   expiresAt: Date;
+  /**
+   * The account's own permission tuning, carried on the session so the scope
+   * set is recomputed per request. That is what makes a revoked permission
+   * take effect on a session that is already open, rather than at next login.
+   */
+  extraScopes: string[];
+  deniedScopes: string[];
 }
 
 export type AdminUserPublic = Omit<AdminUser, "passwordHash"> & { hasPassword: boolean };
@@ -147,8 +154,8 @@ export class AdminUserStore {
   }
 
   /**
-   * Demotion and deletion both have to leave at least one OWNER standing —
-   * otherwise the only way back in is the break-glass admin token.
+   * Demotion and deletion both have to leave at least one OWNER standing;
+ * otherwise the only way back in is the break-glass admin token.
    */
   async setRole(id: string, role: AdminRole): Promise<"ok" | "unknown" | "last-owner"> {
     const user = await this.byId(id);
@@ -156,8 +163,34 @@ export class AdminUserStore {
     if (user.role === "OWNER" && role !== "OWNER" && (await this.ownerCount(id)) === 0) {
       return "last-owner";
     }
-    await this.prisma.adminUser.update({ where: { id }, data: { role } });
+    // Promotion to OWNER drops the account's tuning rather than parking it.
+    // An owner ignores grants and denials, so keeping them would mean a later
+    // demotion silently reinstates restrictions nobody remembers setting.
+    const clearTuning = role === "OWNER" && user.role !== "OWNER";
+    await this.prisma.adminUser.update({
+      where: { id },
+      data: { role, ...(clearTuning ? { extraScopes: [], deniedScopes: [] } : {}) },
+    });
     return "ok";
+  }
+
+  /**
+   * Tune one account on top of its role: scopes it holds beyond the role, and
+   * scopes it is refused despite the role. Both lists are replaced wholesale —
+   * an editor that reads the current state and writes the intended state back
+   * cannot half-apply, which a per-scope add/remove API can.
+   */
+  async setScopes(
+    id: string,
+    tuning: { extraScopes: string[]; deniedScopes: string[] },
+  ): Promise<AdminUser> {
+    return this.prisma.adminUser.update({
+      where: { id },
+      data: {
+        extraScopes: [...new Set(tuning.extraScopes)],
+        deniedScopes: [...new Set(tuning.deniedScopes)],
+      },
+    });
   }
 
   async remove(id: string): Promise<"ok" | "unknown" | "last-owner"> {
@@ -261,6 +294,8 @@ export class AdminUserStore {
       role: session.user.role,
       email: session.user.email,
       expiresAt: session.expiresAt,
+      extraScopes: session.user.extraScopes,
+      deniedScopes: session.user.deniedScopes,
     };
   }
 
@@ -272,7 +307,7 @@ export class AdminUserStore {
     return res.count === 1;
   }
 
-  /** Live sessions only — revoked and expired rows are noise in the UI. */
+  /** Live sessions only; revoked and expired rows are noise in the UI. */
   listSessions(): Promise<(AdminSession & { user: AdminUser })[]> {
     return this.prisma.adminSession.findMany({
       where: { revoked: false, expiresAt: { gt: new Date() } },

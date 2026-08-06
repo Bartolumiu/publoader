@@ -1,13 +1,13 @@
 // Publoader platform durable state. PostgreSQL is the single source of truth
 // for scheduling, leases, results, canonical chapter history, and audit.
-// Hot-path claim statements use $queryRaw with FOR UPDATE SKIP LOCKED — table
+// Hot-path claim statements use $queryRaw with FOR UPDATE SKIP LOCKED; table
 // and column names are snake_case-mapped so raw SQL stays unquoted.
 
 generator client {
   provider      = "prisma-client-js"
   // Pinned explicitly rather than left to build-host detection. The runtime
   // images are Debian with OpenSSL 3, but `prisma generate` guesses from the
-  // BUILD stage — and when that stage had no openssl it guessed 1.1.x, so the
+  // BUILD stage; and when that stage had no openssl it guessed 1.1.x, so the
   // engine silently failed to load at runtime. Listing both architectures also
   // means one image build works on arm64 and amd64 hosts.
   binaryTargets = ["native", "linux-arm64-openssl-3.0.x", "debian-openssl-3.0.x"]
@@ -201,7 +201,7 @@ model ResultSubmission {
   createdAt      DateTime    @default(now()) @map("created_at")
 
   // A partial unique index (one COMMITTED row per job) is added in the
-  // migration SQL — Prisma cannot express partial indexes declaratively:
+  // migration SQL; Prisma cannot express partial indexes declaratively:
   //   CREATE UNIQUE INDEX result_committed_one_per_job
   //     ON result_submissions (job_id) WHERE state = 'COMMITTED';
   @@index([jobId])
@@ -248,7 +248,7 @@ model UploadTask {
    * Stays JSONB while the four chapter tables use typed columns, and the
    * asymmetry is deliberate: this is a transient queue payload consumed once by
    * one worker, never queried by field. It is also NOT the canonical chapter
-   * shape — EDIT rows carry `payload`/`oldInfo` and UNAVAILABLE rows carry
+   * shape; EDIT rows carry `payload`/`oldInfo` and UNAVAILABLE rows carry
    * `unavailableAt` alongside the chapter, which columns would have to model as
    * a union. The row is deleted-by-state as soon as it is done.
    */
@@ -268,7 +268,7 @@ model UploadTask {
   @@map("upload_tasks")
 }
 
-/// The canonical record of what each extension has on MangaDex — the mirror of
+/// The canonical record of what each extension has on MangaDex; the mirror of
 /// Mongo `uploaded`. The chapter shape is fixed and known, so it lives in typed
 /// columns rather than a JSONB document; see src/core/md/chapterRows.ts for the
 /// single Chapter <-> columns mapping all four chapter tables share.
@@ -362,7 +362,7 @@ model UnavailableChapter {
   mdMangaId        String?   @map("md_manga_id")
   mdGroupId        String?   @map("md_group_id")
   /// Also holds the `mdAttributes` snapshot of the chapter as MangaDex had it
-  /// at takedown time — an external API resource, not our shape.
+  /// at takedown time; an external API resource, not our shape.
   extra            Json?
   unavailableAt    DateTime  @default(now()) @map("unavailable_at")
 
@@ -449,7 +449,7 @@ model UntrackedManga {
 /// external manga id -> MangaDex title id, the database replacement for each
 /// bundle's manga_id_map.json.
 ///
-/// Uniqueness is on the EXTERNAL side only — (extension, namespace, mangaId) —
+/// Uniqueness is on the EXTERNAL side only, (extension, namespace, mangaId),
 /// which is what makes the legacy `{mdMangaId: [externalIds]}` file shape
 /// expressible: many external ids may point at one MangaDex title (mangaplus
 /// routinely does, one id per language edition of the same series), while one
@@ -460,7 +460,7 @@ model TrackedManga {
   /// Sub-id-space within the extension, "" when the extension has just one.
   ///
   /// An extension is not guaranteed to have a single flat id space. viz serves
-  /// two catalogues from one extension — `shonenjump` and `vizmanga` — and the
+  /// two catalogues from one extension, `shonenjump` and `vizmanga`, and the
   /// same numeric id under each is a DIFFERENT series, so keying only on
   /// (extension, mangaId) silently collapses them into one row. "" is the
   /// default so the flat case (mangaplus, alpha_manga) is untouched, and it is
@@ -480,7 +480,7 @@ model TrackedManga {
 /// Per-extension runtime configuration the platform does NOT interpret.
 ///
 /// The three relations that used to hide in this blob (`same`,
-/// `multi_chapters`, `custom_language`) are tables now — see the three models
+/// `multi_chapters`, `custom_language`) are tables now; see the three models
 /// below. What is left is genuinely extension-private: mangaplus's `empty`,
 /// `noformat`, `custom` (title regexes), `num2words`,
 /// `override_chapter_numbers` and `no_chapters` are read by the extension in
@@ -498,7 +498,7 @@ model ExtensionConfig {
 /// `override_options.same`: alternate chapter ids that are the same chapter as
 /// a master id, so the alternate is never uploaded a second time.
 ///
-/// Unique on (extension, aliasChapterId) — an alias has exactly ONE master.
+/// Unique on (extension, aliasChapterId): an alias has exactly ONE master.
 /// That is the constraint the JSON dict could not express: nothing stopped
 /// `{"a": ["x"], "b": ["x"]}`, and findKeyFromListValue would then resolve x to
 /// whichever master happened to be enumerated first, making "was this chapter
@@ -520,8 +520,8 @@ model ExtensionChapterAlias {
 /// backs several MangaDex chapter numbers (a merged release), so the extra
 /// MangaDex chapters are not treated as duplicates to delete.
 ///
-/// Unique on all three columns; the declared numbers are a SET, not a sequence
-/// — every consumer in core/processor/dedupe.ts tests membership only
+/// Unique on all three columns; the declared numbers are a SET, not a sequence;
+/// every consumer in core/processor/dedupe.ts tests membership only
 /// (`allowedNumbers.includes`, `declaredNumbers.includes`, and a `keep` list
 /// whose contents depend on membership rather than iteration order), so no
 /// ordering column is needed to reproduce the JSON array's behaviour.
@@ -544,7 +544,7 @@ model ExtensionMultiChapter {
 /// may publish in beyond the ones its manifest declares.
 ///
 /// `sourceLanguage` keeps the name the contract has always used, but the key is
-/// whatever the extension decided to key on and core does not interpret it —
+/// whatever the extension decided to key on and core does not interpret it;
 /// mangaplus keys it by MANGA id (`{"200159": "es-la"}`), overriding the
 /// language of one series. Only the VALUE is load-bearing for the platform: it
 /// widens the set of languages allowed to stay on a title, which is why it is
@@ -573,7 +573,7 @@ model ExtensionLanguageMap {
 ///
 /// `days` is the weekday filter, Monday=0 … Sunday=6 (Python's `weekday()`,
 /// the numbering the extension contract has always used). Empty means every
-/// day — the common case, and the one an operator gets by not answering the
+/// day: the common case, and the one an operator gets by not answering the
 /// question.
 ///
 /// Rows for an extension REPLACE its manifest schedule wholesale, exactly as
@@ -590,7 +590,7 @@ model ScheduleEntry {
   kind      RunKind  @default(UPDATE)
   /// Operator-facing note ("weekly deep clean"); never interpreted.
   label     String?
-  /// Off keeps the row but stops it firing — pausing the weekly clean while
+  /// Off keeps the row but stops it firing; pausing the weekly clean while
   /// investigating it should not mean retyping it afterwards.
   enabled   Boolean  @default(true)
   createdAt DateTime @default(now()) @map("created_at")
@@ -624,6 +624,24 @@ enum AdminRole {
   CONTRIBUTOR
 }
 
+/**
+ * Per-role scope baseline, when a deployment wants one other than the shipped
+ * default. Absent row means "use the code default" — this table is an override
+ * list, not the source of truth, so a deployment that never touches it keeps
+ * getting the defaults as they evolve across releases.
+ *
+ * OWNER is deliberately not storable here: it is the wildcard by construction
+ * and the way back in when the permission tables are the problem.
+ */
+model RolePermission {
+  role      AdminRole @id
+  scopes    String[]
+  updatedBy String?   @map("updated_by")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  @@map("role_permissions")
+}
+
 // Dashboard operator accounts. ALL auth state lives in Postgres: accounts,
 // Discord linkage, and revocable sessions. The bearer ADMIN_TOKEN remains the
 // break-glass path and the bot/CLI credential.
@@ -633,11 +651,19 @@ model AdminUser {
   displayName     String?        @map("display_name")
   role            AdminRole      @default(ADMIN)
   /**
+   * Per-account tuning on top of the role baseline: scopes this account holds
+   * beyond its role, and scopes it is refused despite its role. Denials are
+   * applied last and win, which is what makes "an ADMIN, but not bundles"
+   * expressible without inventing a role for one person.
+   */
+  extraScopes     String[]       @map("extra_scopes")
+  deniedScopes    String[]       @map("denied_scopes")
+  /**
    * Signups (when enabled) create unapproved accounts; an OWNER approves.
    */
   approved        Boolean        @default(true)
   /**
-   * scrypt "salt:hash" — null when the account is Discord-only.
+   * scrypt "salt:hash"; null when the account is Discord-only.
    */
   passwordHash    String?        @map("password_hash")
   discordId       String?        @unique @map("discord_id")
@@ -653,7 +679,7 @@ model AdminUser {
 
 /**
  * Why a link was sent. Only the wording of the email and the token's lifetime
- * differ — every purpose consumes to the same thing, a session.
+ * differ; every purpose consumes to the same thing, a session.
  */
 enum LoginTokenPurpose {
   /// "Email me a sign-in link" from the login page.
@@ -667,8 +693,8 @@ enum LoginTokenPurpose {
 /**
  * Single-use, short-lived email sign-in links ("magic links").
  *
- * This is the credential for an account that has no password yet — which is
- * every invited or freshly approved account — so it is held to the same rules
+ * This is the credential for an account that has no password yet, which is
+ * every invited or freshly approved account, so it is held to the same rules
  * as a session: only a sha256 of the secret is stored, it expires, it is
  * consumed exactly once, and consuming one retires every other outstanding
  * link for that user.
@@ -723,7 +749,7 @@ model AdminSession {
 // Scoped per-client API tokens (`pa_…`, hashed at rest). Blast-radius
 // containment: each machine client (Discord bot, CI publisher, scripts) gets
 // its own token carrying only the scopes it needs, so one exposed credential
-// affects one area — never the whole system. The env ADMIN_TOKEN remains the
+// affects one area; never the whole system. The env ADMIN_TOKEN remains the
 // break-glass root ("*") and should live in a vault, not in clients.
 model ApiToken {
   id         String    @id @default(uuid())
@@ -765,7 +791,7 @@ model AuditEvent {
 /// acknowledgement is measured against; and the acknowledgement is operator
 /// bookkeeping, not part of the execution state a claim statement reads.
 ///
-/// The feed stays the source of truth for what failed — clearing hides an entry
+/// The feed stays the source of truth for what failed; clearing hides an entry
 /// from the triage list, it does not edit history. The Activity feed and the
 /// per-run views still show the failure, which is what keeps "we cleared it and
 /// then forgot" recoverable.
@@ -774,7 +800,7 @@ model ClearedError {
   source    ErrorSource
   /// The id of the job / upload task / result submission. Not a foreign key on
   /// purpose: one column cannot reference three tables, and an acknowledgement
-  /// that outlives its row is harmless — it matches nothing and is swept by
+  /// that outlives its row is harmless; it matches nothing and is swept by
   /// `pruneClearedErrors`.
   subjectId String      @map("subject_id")
   /// The timestamp the feed showed for this entry when it was cleared.
@@ -787,7 +813,7 @@ model ClearedError {
   clearedAt DateTime    @default(now()) @map("cleared_at")
   /// Actor string from the request, same shape as `audit_events.actor`.
   clearedBy String      @map("cleared_by")
-  /// Optional operator note — "upstream 503s, extension fixed in 1.4.2".
+  /// Optional operator note: "upstream 503s, extension fixed in 1.4.2".
   note      String?
 
   /// One acknowledgement per row: clearing twice updates the timestamp rather

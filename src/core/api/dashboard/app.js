@@ -3,7 +3,7 @@
  *
  * One classic script, no build step, no dependencies. Runs under a CSP with no
  * 'unsafe-inline', so every handler is attached with addEventListener and every
- * value is written with textContent — there is no innerHTML anywhere in this
+ * value is written with textContent; there is no innerHTML anywhere in this
  * file, which is what keeps operator-supplied strings (extension names, worker
  * names, error text) from becoming script.
  *
@@ -17,7 +17,7 @@
  *                and optimistic mutation with rollback
  *   live()       a region that redraws itself when its resources change
  *   NAV          the sidebar registry: destination, group, scope, tabs
- *   routing      #/<section>[/<param>][/<tab>] — the URL is the whole view state
+ *   routing      #/<section>[/<param>][/<tab>]; the URL is the whole view state
  *
  * Authentication is the session cookie set by POST /api/v1/admin/session; the
  * admin token is never held in JS beyond the login submit.
@@ -25,7 +25,7 @@
  * What the page offers is decided by GET /api/v1/admin/whoami: every destination
  * names the scope its view needs, and every control that mutates something is
  * either absent or visibly disabled without the scope behind it. That is
- * presentation only — the server checks the same scopes on every request, and
+ * presentation only; the server checks the same scopes on every request, and
  * the integration suite asserts the refusals rather than trusting this file.
  */
 
@@ -54,7 +54,7 @@ const store = {
   scopes: [],
   /** "root" | "api-token" | "session". */
   kind: null,
-  /** { section, param, tab } — parsed from the hash, the source of view truth. */
+  /** { section, param, tab }; parsed from the hash, the source of view truth. */
   route: { section: null, param: null, tab: null },
   navCollapsed: false,
   navOpen: false,
@@ -104,7 +104,7 @@ const store = {
     activityQuery: "",
     activityExtension: "",
     activityLimit: 100,
-    /** Errors view: "without" | "with" | "only" — cleared entries hidden by default. */
+    /** Errors view: "without" | "with" | "only"; cleared entries hidden by default. */
     errorsCleared: "without",
     auditQuery: "",
     auditActor: "",
@@ -149,7 +149,7 @@ function setFilter(patch) {
  * implies append implies read within an area. Two copies of one rule is a
  * liability, so be clear about which is which: the server's copy is the
  * control, and this one exists only to decide what to draw. Getting this wrong
- * can hide a control the operator is entitled to, or show one that 403s — it
+ * can hide a control the operator is entitled to, or show one that 403s; it
  * can never grant anything.
  */
 function can(required) {
@@ -179,8 +179,8 @@ class ApiError extends Error {
   constructor(status, message, body) {
     super(message);
     this.status = status;
-    // The parsed body, for the callers that need more than the first line —
-    // the bundle preflight returns a list of reasons under a 422, and showing
+    // The parsed body, for the callers that need more than the first line;
+ // the bundle preflight returns a list of reasons under a 422, and showing
     // only `error` would hide all but one of them.
     this.body = body ?? null;
   }
@@ -191,8 +191,8 @@ class ApiError extends Error {
  * to show: loading, ready, empty (ready with nothing in it), and failed.
  *
  * `refreshing` is separate from `loading` on purpose. A poll over data already
- * on screen must not replace the table with a skeleton — that is a flash of
- * nothing every ten seconds — so it dims what is there instead.
+ * on screen must not replace the table with a skeleton, that is a flash of
+ * nothing every ten seconds, so it dims what is there instead.
  */
 class Resource {
   constructor(name, fetcher) {
@@ -254,7 +254,7 @@ class Resource {
   }
 
   /**
-   * Apply a change locally, then send it — and put the old value back if the
+   * Apply a change locally, then send it; and put the old value back if the
    * server refuses.
    *
    * Worth the machinery for the small edits (approve, skip, disable, rename)
@@ -319,7 +319,7 @@ async function api(path, opts) {
   // runs:write". Probes pass `quiet` because a 403 is their expected answer.
   if (res.status === 403 && !options.quiet) {
     const scope = /^missing scope:\s*(\S+)/.exec(message);
-    if (scope) toast(`Not permitted — this credential is missing the "${scope[1]}" scope.`, false);
+    if (scope) toast(`Not permitted; this credential is missing the "${scope[1]}" scope.`, false);
   }
   if (!res.ok) throw new ApiError(res.status, message, data);
   return data;
@@ -385,7 +385,7 @@ function append(node, kids) {
  *
  * Always use this instead of `node.replaceChildren(...)` when any argument can
  * be null. `replaceChildren` takes `(Node or DOMString)`, so a null argument is
- * not skipped — it is stringified, and the page gets a literal "null" text node.
+ * not skipped; it is stringified, and the page gets a literal "null" text node.
  * That is what put a "null" in front of every page title: the crumb argument is
  * null whenever the route has no parameter, which is most of the time.
  */
@@ -412,6 +412,7 @@ const ICONS = {
   workers: "M4 17h16M6 17V9l6-4 6 4v8M10 17v-4h4v4",
   users: "M12 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-7 9c0-3.3 3.1-6 7-6s7 2.7 7 6",
   tokens: "M14 4a6 6 0 1 1-4.6 9.9L4 19v2h3v-2h2v-2h2l1.5-1.5A6 6 0 0 1 14 4Zm2.5 3.5h.01",
+  permissions: "M6 11V8a6 6 0 0 1 12 0v3m-13 0h14v9H5v-9Zm7 3.5v2",
   audit: "M7 3h7l5 5v13H7V3Zm7 0v5h5M10 13h7m-7 4h7",
   system: "M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm8 3.5-1.8.6-.7 1.7 1 1.6-1.6 1.6-1.6-1-1.7.7L13 19h-2l-.6-1.8-1.7-.7-1.6 1L5.5 16l1-1.6-.7-1.7L4 12v-2l1.8-.6.7-1.7-1-1.6L7.1 4.5l1.6 1 1.7-.7L11 3h2l.6 1.8 1.7.7 1.6-1 1.6 1.6-1 1.6.7 1.7L20 10v2Z",
   chevron: "M15 6l-6 6 6 6",
@@ -445,7 +446,7 @@ const row = (...kids) => el("div", { class: "row" }, ...kids);
  *
  * Every cell carries its column name in `data-label`, which is what lets the
  * stylesheet restack the rows as cards below 620px instead of showing a column
- * of unlabelled values. Wider than that it scrolls inside `.scroll` — never
+ * of unlabelled values. Wider than that it scrolls inside `.scroll`: never
  * taking the page sideways with it.
  */
 function table(headers, rows, { empty, stack = true } = {}) {
@@ -472,7 +473,7 @@ function table(headers, rows, { empty, stack = true } = {}) {
               if (cell && cell.nodeType) return el("td", { "data-label": label }, cell);
               return el("td", {
                 "data-label": label,
-                text: cell == null || cell === "" ? "—" : cell,
+                text: cell == null || cell === "" ? "-" : cell,
               });
             }),
           ),
@@ -491,13 +492,13 @@ function defs(pairs) {
       .filter(Boolean)
       .map(([key, value]) => [
         el("dt", { text: key }),
-        el("dd", {}, value && value.nodeType ? value : String(value ?? "—")),
+        el("dd", {}, value && value.nodeType ? value : String(value ?? "-")),
       ]),
   );
 }
 
 const STATE_TONE = {
-  // Enrolment tokens: PENDING is the one that matters — an unused token is a
+  // Enrolment tokens: PENDING is the one that matters; an unused token is a
   // live credential, so it is warned rather than greyed out.
   PENDING: "warn",
   USED: "ok",
@@ -530,10 +531,10 @@ const STATE_TONE = {
   OWNER: "busy",
 };
 
-const chip = (value) => el("span", { class: `chip ${STATE_TONE[value] || ""}`.trim(), text: value ?? "—" });
+const chip = (value) => el("span", { class: `chip ${STATE_TONE[value] || ""}`.trim(), text: value ?? "-" });
 
 function fmtTime(value) {
-  if (!value) return "—";
+  if (!value) return "-";
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleString();
 }
@@ -542,7 +543,7 @@ function fmtTime(value) {
 function ago(value) {
   if (!value) return "never";
   const seconds = Math.round((Date.now() - new Date(value).getTime()) / 1000);
-  if (!Number.isFinite(seconds)) return "—";
+  if (!Number.isFinite(seconds)) return "-";
   if (seconds < 60) return `${seconds}s ago`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
   if (seconds < 86_400) return `${Math.round(seconds / 3600)}h ago`;
@@ -610,7 +611,7 @@ function skeletonTable(rows = 5, cols = 4) {
             "tr",
             {},
             Array.from({ length: cols }, () =>
-              el("td", {}, el("div", { class: "skeleton skeleton-line", text: "—" })),
+              el("td", {}, el("div", { class: "skeleton skeleton-line", text: "-" })),
             ),
           ),
         ),
@@ -851,7 +852,7 @@ function teardownView() {
  * A region that redraws itself whenever any of its resources changes.
  *
  * This is the whole reactivity story: a mutation reloads a resource, the
- * resource emits, and every region bound to it redraws — no full-page reload,
+ * resource emits, and every region bound to it redraws; no full-page reload,
  * and no view having to know which other views care.
  */
 function live(resources, render, { reserve = 0, skeleton } = {}) {
@@ -894,7 +895,7 @@ function liveState(keys, render) {
  * Every destination in the sidebar: its group, its icon, the scope its view
  * needs to render at all, and the tabs inside it.
  *
- * A principal that lacks the scope never sees the destination — a CONTRIBUTOR
+ * A principal that lacks the scope never sees the destination; a CONTRIBUTOR
  * gets Overview, Extensions, Tracked and Untracked and nothing else. Hiding is
  * cosmetic and must be read that way: the server checks the same scope on every
  * endpoint behind every destination, and the integration suite asserts the
@@ -939,8 +940,8 @@ const NAV = [
     scope: "runs:read",
     // Chapters first, and that ordering is the default landing tab: the question
     // asked of this page far more often than any other is "what is about to go
-    // up, and in what order". Tasks is the same rows keyed on queue mechanics —
-    // one click away, and where incident work still happens.
+    // up, and in what order". Tasks is the same rows keyed on queue mechanics;
+ // one click away, and where incident work still happens.
     tabs: [
       ["chapters", "Chapters"],
       ["tasks", "Tasks"],
@@ -1066,6 +1067,14 @@ const NAV = [
     blurb: "Scoped per-client credentials.",
   },
   {
+    id: "permissions",
+    label: "Permissions",
+    group: "Admin",
+    icon: "permissions",
+    owner: true,
+    blurb: "What each role may do on this deployment.",
+  },
+  {
     id: "audit",
     label: "Audit",
     group: "Admin",
@@ -1088,7 +1097,7 @@ const NAV = [
     blurb: "The things that used to need a shell on the host.",
   },
   // Two views that live in their own ES modules (dashboard/sysops.js and
-  // dashboard/docs.js). They are loaded on demand — see `lazyView` — so this
+  // dashboard/docs.js). They are loaded on demand, see `lazyView`, so this
   // file stays a classic script while they stay modules.
   {
     id: "maintenance",
@@ -1124,7 +1133,7 @@ const visibleNav = () => NAV.filter(navAllowed);
  *
  * The URL is the whole view state, so every view is linkable and the back button
  * works without any history bookkeeping of our own. A tab is told from a param
- * by checking the section's own tab ids first — ids are uuids and extension
+ * by checking the section's own tab ids first; ids are uuids and extension
  * names, tab ids are a closed set of kebab words, so there is nothing to
  * disambiguate in practice.
  */
@@ -1202,7 +1211,7 @@ function resolveRoute() {
   // Land on the first destination this principal can use rather than assuming
   // Overview: a narrowly-scoped credential may not hold stats:read, and
   // defaulting to a view that 403s is the exact failure this gating removes.
-  // Falling through rather than returning is deliberate — the fallback needs its
+  // Falling through rather than returning is deliberate; the fallback needs its
   // default tab filled in too, or the first URL of the session is a hash that
   // names no tab and does not match the one the view actually renders.
   const fellBack = !entry;
@@ -1314,8 +1323,8 @@ const loginWithToken = (event) =>
 /**
  * Ask for an emailed sign-in link.
  *
- * The server answers the same way whether or not the address has an account —
- * otherwise this endpoint would tell an anonymous caller who has one — so the
+ * The server answers the same way whether or not the address has an account,
+ * otherwise this endpoint would tell an anonymous caller who has one, so the
  * confirmation here is deliberately non-committal, and the button is left
  * disabled afterwards so a second click does not look like a way to find out.
  */
@@ -1381,7 +1390,7 @@ async function redeemMagicToken(token) {
  */
 function promptForPasswordIfMissing(session) {
   if (session.hasPassword !== false || !store.userId) return;
-  toast("Signed in with an email link — set a password to stop needing one.", true);
+  toast("Signed in with an email link; set a password to stop needing one.", true);
   passwordDialog({ id: store.userId, email: store.email ?? store.actor }, null);
 }
 
@@ -1410,7 +1419,7 @@ function renderIdentity() {
   badge.className = `badge ${role ? role.toLowerCase() : ""}`.trim();
   $("profile-detail").textContent =
     `${store.email ?? store.actor ?? "signed in"}${store.kind === "root" ? " · break-glass admin token" : ""}` +
-    `${role ? ` — ${ROLE_BLURB[role] ?? ""}` : ""}`;
+    `${role ? `: ${ROLE_BLURB[role] ?? ""}` : ""}`;
 }
 
 // -------------------------------------------------------------- header summary
@@ -1464,17 +1473,17 @@ function renderSummary() {
   const workers = stats?.workers ?? {};
   const active = workers.ACTIVE ?? 0;
   const total = Object.values(workers).reduce((sum, n) => sum + n, 0);
-  $("sum-workers").textContent = stats ? `${active}/${total}` : "—";
+  $("sum-workers").textContent = stats ? `${active}/${total}` : "-";
 
   const jobs = stats?.jobs ?? {};
   const inFlight = IN_FLIGHT_JOB_STATES.reduce((sum, state) => sum + (jobs[state] ?? 0), 0);
-  $("sum-jobs").textContent = stats ? String(inFlight) : "—";
+  $("sum-jobs").textContent = stats ? String(inFlight) : "-";
 
   const queued = (stats?.uploadTasks ?? [])
     .filter((t) => t.state === "PENDING" || t.state === "LEASED")
     .reduce((sum, t) => sum + t.count, 0);
   const queueNode = $("sum-queue");
-  queueNode.textContent = stats ? String(queued) : "—";
+  queueNode.textContent = stats ? String(queued) : "-";
   queueNode.className = `summary-n${stats && (stats.quarantined ?? 0) > 0 ? " bad" : ""}`;
 
   const run = data?.lastRun ?? null;
@@ -1482,16 +1491,16 @@ function renderSummary() {
     ? `${run.extension} · ${String(run.state).toLowerCase()} · ${ago(run.updatedAt ?? run.createdAt)}`
     : can("runs:read")
       ? "none yet"
-      : "—";
+      : "-";
 
   // Outstanding failures are the one number in the header that is a problem
   // rather than a fact, so the count also lands on the Errors destination as a
   // badge. It counts what nobody has dealt with yet, NOT every failure on
-  // record: a badge that kept nagging about failures the operator had already
-  // cleared would teach them to ignore the badge.
+  // record: a badge that nagged about failures the operator had already cleared
+  // would teach them to ignore the badge.
   //
   // Only redrawn when it has actually changed: this runs on every poll, and
-  // rebuilding the sidebar takes the keyboard focus with it — a ten-second timer
+  // rebuilding the sidebar takes the keyboard focus with it; a ten-second timer
   // that steals focus mid-Tab makes the whole menu unusable without a mouse.
   const outstanding = navBadgeCount(stats);
   if (outstanding !== lastNavBadge) {
@@ -1703,7 +1712,7 @@ const moduleHost = () => ({
   toast,
   can,
   // `confirm` is deliberately NOT passed. The module views call it
-  // synchronously — `if (!confirm(msg)) return;` — and this shell's
+  // synchronously, `if (!confirm(msg)) return;`, and this shell's
   // `confirmDialog` is a promise, which is always truthy: handing it over would
   // turn every confirmation in those views into a no-op that always proceeds.
   // Their own fallback is `window.confirm`, which actually blocks.
@@ -1714,7 +1723,7 @@ const moduleHost = () => ({
  * A view that lives in its own module, fetched the first time it is opened.
  *
  * `import()` works from a classic script, which is the whole reason this file can
- * stay one — the modules stay modules, this stays drivable under jsdom, and
+ * stay one; the modules stay modules, this stays drivable under jsdom, and
  * neither has to become the other. The cost is that the view arrives a frame
  * late, so it gets the same skeleton as any other async region.
  */
@@ -1934,7 +1943,7 @@ async function boot() {
   }
 
   // The session cookie is HttpOnly, so the only way to know whether we are
-  // signed in — and as whom — is to ask the API.
+  // signed in, and as whom, is to ask the API.
   let me;
   try {
     me = await api("/session", { allow401: true });
@@ -1945,10 +1954,10 @@ async function boot() {
   }
   await showApp(me);
   renderRoute();
-  // Not the dialog this time — a returning session has already been told once,
+  // Not the dialog this time; a returning session has already been told once,
   // and a modal on every page load is a thing people learn to dismiss.
   if (me.hasPassword === false) {
-    toast("This account has no password — it can only sign in by email link.", false);
+    toast("This account has no password; it can only sign in by email link.", false);
   }
 }
 
@@ -1958,15 +1967,15 @@ async function boot() {
 //
 // Each view is `render(route) -> Node`. Anything that fetches goes through a
 // Resource created here, so navigating away tears its subscription down, and
-// anything that mutates reloads the resources it affected — which is what makes
+// anything that mutates reloads the resources it affected; which is what makes
 // one change show up everywhere it matters without a reload.
 
 // ------------------------------------------------------------------- overview
 
 /**
  * Job states that still owe something, worst first. Anything not on this list
- * (SUCCEEDED, CANCELLED, and any state added later) is settled and folds away
- * — listing the open ones rather than excluding the closed ones means a state
+ * (SUCCEEDED, CANCELLED, and any state added later) is settled and folds away;
+ * listing the open ones rather than excluding the closed ones means a state
  * this dashboard has never heard of surfaces instead of vanishing.
  */
 const OUTSTANDING_JOB_STATES = ["DEAD_LETTER", "RUNNING", "LEASED", "PENDING"];
@@ -2006,7 +2015,7 @@ function outstandingJobsCard(jobs) {
                   ),
                 ),
               )
-            : emptyState("Nothing outstanding — every job has finished."),
+            : emptyState("Nothing outstanding; every job has finished."),
           settled.length
             ? el(
                 "details",
@@ -2069,7 +2078,7 @@ VIEWS.overview = (route) => {
           if (!(await confirmDialog({
             title: "Pause the platform",
             lead: "Nothing will be scheduled and no job will be leased until somebody resumes it explicitly.",
-            points: ["There is no timer to fall back on — an indefinite pause outlives everyone's memory of it."],
+            points: ["There is no timer to fall back on; an indefinite pause outlives everyone's memory of it."],
             confirmLabel: "Pause indefinitely",
           }))) {
             return;
@@ -2140,10 +2149,10 @@ VIEWS.overview = (route) => {
           outstandingJobsCard(data.jobs || {}),
           counts("Workers by status", Object.entries(data.workers || {}), "No worker has ever enrolled."),
           card(
-            "Upload queue — outstanding",
+            "Upload queue: outstanding",
             (data.uploadTasks || []).length
               ? outstandingTasks(data.uploadTasks, {
-                  emptyText: "Nothing outstanding — every queued upload has been published.",
+                  emptyText: "Nothing outstanding; every queued upload has been published.",
                 })
               : emptyState("Nothing has ever been queued for upload."),
           ),
@@ -2253,9 +2262,9 @@ VIEWS.runs = (route) => {
             run.kind,
             chip(run.state),
             // null means no segment has committed an envelope yet, which is not
-            // the same as a run that found nothing — so it reads "—", not "0".
+            // the same as a run that found nothing, so it reads "-", not "0".
             run.chaptersFound == null
-              ? "—"
+              ? "-"
               : el(
                   "span",
                   {},
@@ -2331,12 +2340,12 @@ function runDetail(runId) {
           defs([
             ["Run", el("code", { text: data.id })],
             ["Extension", `${data.extension} @ ${data.extensionVersion}`],
-            ["Bundle", el("code", { text: data.bundleSha256 ?? "—" })],
-            ["Triggered by", data.triggeredBy || "—"],
+            ["Bundle", el("code", { text: data.bundleSha256 ?? "-" })],
+            ["Triggered by", data.triggeredBy || "-"],
             ["Created", fmtTime(data.createdAt)],
             ["Started", fmtTime(data.startedAt)],
             ["Completed", fmtTime(data.completedAt)],
-            ["Error", data.error || "—"],
+            ["Error", data.error || "-"],
           ]),
           row(
             routeLink(routeTo("extensions", data.extension, "overview"), "Open the extension", {
@@ -2353,7 +2362,7 @@ function runDetail(runId) {
               `${job.segmentIndex + 1}/${job.segmentTotal}`,
               chip(job.state),
               `${job.attempt}/${job.maxAttempts}`,
-              job.leaseWorkerId ? el("code", { text: job.leaseWorkerId.slice(0, 8) }) : "—",
+              job.leaseWorkerId ? el("code", { text: job.leaseWorkerId.slice(0, 8) }) : "-",
               fmtTime(job.leaseExpiresAt),
               truncate(job.lastError, 200),
               [
@@ -2391,9 +2400,9 @@ const RUN_CHAPTER_PAGE = 100;
 /**
  * The chapters an extension reported on one run.
  *
- * This is the envelope the worker submitted, read back — not a copy of it. The
- * run/job/segment model above says whether the scrape WORKED; this says what it
- * FOUND, which is the question that used to require a `jsonb` path in psql.
+ * This is the envelope the worker submitted, read back; not a copy of it. The
+ * run/job/segment model above says whether the scrape worked; this says what it
+ * found.
  *
  * Two sets, because an envelope carries two different things and conflating
  * them would misreport both. `updated` is what the extension flagged as new or
@@ -2405,8 +2414,8 @@ const RUN_CHAPTER_PAGE = 100;
 /**
  * Which run's filters are currently in the store. Opening a DIFFERENT run must
  * not inherit the last one's search and page number (page 4 of a run with one
- * page is an empty table), but a redraw of the SAME run — a job cancel refreshes
- * the detail resource — must not wipe what the operator just typed.
+ * page is an empty table), but a redraw of the SAME run, a job cancel refreshes
+ * the detail resource, must not wipe what the operator just typed.
  */
 let runChapterFilterFor = null;
 
@@ -2473,7 +2482,7 @@ function runChaptersCard(runId) {
     el("p", {
       class: "dim small",
       text:
-        "Read straight out of the result envelopes this run's workers submitted — the extension's own " +
+        "Read straight out of the result envelopes this run's workers submitted; the extension's own " +
         "report, in the order it reported it, before the processor decided anything.",
     }),
     live([summary], (data) => runChapterSummary(data, refilter), {
@@ -2504,11 +2513,11 @@ function runChaptersCard(runId) {
                 String(entry.position),
                 c.mdMangaId
                   ? mdTitleLink(c.mdMangaId, c.mangaName || c.mangaId || c.mdMangaId)
-                  : (c.mangaName ?? c.mangaId ?? "—"),
-                c.chapterNumber ?? "—",
-                c.chapterVolume ?? "—",
+                  : (c.mangaName ?? c.mangaId ?? "-"),
+                c.chapterNumber ?? "-",
+                c.chapterVolume ?? "-",
                 truncate(c.chapterTitle, 80),
-                c.chapterLanguage ?? "—",
+                c.chapterLanguage ?? "-",
                 fmtTime(c.chapterTimestamp),
                 String(entry.segmentIndex + 1),
                 [
@@ -2521,7 +2530,7 @@ function runChaptersCard(runId) {
                         text: "Source",
                       })
                     : null,
-                  // Present only once the chapter exists on MangaDex — an
+                  // Present only once the chapter exists on MangaDex; an
                   // envelope reports what the source has, not what we uploaded.
                   c.mdChapterId
                     ? routeLink(routeTo("chapters", c.mdChapterId, null), "On MangaDex", {
@@ -2570,7 +2579,7 @@ function runChapterSummary(data, refilter) {
       el(
         "div",
         { class: "stat" },
-        el("div", { class: "n", text: totals.all == null ? "—" : String(totals.all) }),
+        el("div", { class: "n", text: totals.all == null ? "-" : String(totals.all) }),
         el("div", { class: "k", text: "seen in catalogue" }),
       ),
       el(
@@ -2610,10 +2619,10 @@ function runChapterSummary(data, refilter) {
                 title: "Show only this segment's chapters",
                 onclick: () => refilter({ runChapterSegment: String(segment.segmentIndex) }),
               }),
-              segment.segmentKey ?? "—",
+              segment.segmentKey ?? "-",
               chip(segment.jobState),
               segment.updated == null ? "not reported" : String(segment.updated),
-              segment.all == null ? "—" : String(segment.all),
+              segment.all == null ? "-" : String(segment.all),
               fmtTime(segment.submittedAt),
             ]),
             { empty: "This run has no segments." },
@@ -2630,7 +2639,7 @@ function runChapterSummary(data, refilter) {
             byManga.map((entry) => [
               entry.mdMangaId
                 ? mdTitleLink(entry.mdMangaId, entry.mangaName || entry.mangaId || entry.mdMangaId)
-                : (entry.mangaName ?? entry.mangaId ?? "—"),
+                : (entry.mangaName ?? entry.mangaId ?? "-"),
               String(entry.count),
               [
                 el("button", {
@@ -2661,7 +2670,7 @@ function copyLinkButton(hash) {
       } catch {
         // Falling back to the address bar still gives them something to copy.
         navigate(hash);
-        toast("clipboard blocked — the link is in the address bar", false);
+        toast("clipboard blocked; the link is in the address bar", false);
       }
     },
   });
@@ -2673,7 +2682,7 @@ const UPLOAD_TASK_KINDS = ["UPLOAD", "EDIT", "DELETE", "UNAVAILABLE"];
 const UPLOAD_TASK_STATES = ["PENDING", "LEASED", "DONE", "FAILED", "DEAD_LETTER"];
 
 /**
- * The MangaDex upload queues — the replacement for the legacy `queue_peek` and
+ * The MangaDex upload queues; the replacement for the legacy `queue_peek` and
  * `queue_clear` IPC commands, and for `restart_workers`: nothing here restarts a
  * process, because every unit of work is a durable row that can be requeued.
  */
@@ -2687,7 +2696,7 @@ const UPLOAD_TASK_STATES = ["PENDING", "LEASED", "DONE", "FAILED", "DEAD_LETTER"
  * purge refuses to run without a dry run first.
  *
  * Paging is keyset, not offset. The queue drains while it is being read, so an
- * offset page skips rows that moved and repeats rows that did not — which for a
+ * offset page skips rows that moved and repeats rows that did not; which for a
  * queue view means a task can silently never appear on any page.
  */
 VIEWS.queues = (route) => {
@@ -2707,7 +2716,7 @@ VIEWS.queues = (route) => {
     return q;
   };
 
-  /** The filter as the bulk endpoints take it — same names, no paging keys. */
+  /** The filter as the bulk endpoints take it; same names, no paging keys. */
   const activeFilter = () => {
     const filter = {};
     if (f().queueKind) filter.kind = f().queueKind;
@@ -2783,7 +2792,7 @@ VIEWS.queues = (route) => {
  *
  * Attention before motion before waiting: DEAD_LETTER and FAILED are the two
  * that will not move again without an operator, so they lead. DONE is not on
- * this list at all — see `outstandingTasks`.
+ * this list at all; see `outstandingTasks`.
  */
 const OUTSTANDING_TASK_STATES = ["DEAD_LETTER", "FAILED", "LEASED", "PENDING"];
 
@@ -2804,7 +2813,7 @@ function outstandingDepths(counts) {
  * A real anchor so middle-click and "copy link" still work; the filter is set
  * on the way through because the hash carries a section and tab, not a filter.
  * Opening it in a new tab therefore lands on the unfiltered Tasks list, which
- * is the honest degradation — a wrong filter would be worse than none.
+ * is the honest degradation: a wrong filter would be worse than none.
  */
 function queueDepthTile(entry) {
   return el(
@@ -2821,13 +2830,13 @@ function queueDepthTile(entry) {
 }
 
 /**
- * What the queue still owes, and — folded away — what it has already settled.
+ * What the queue still owes, and (folded away) what it has already settled.
  *
  * DONE is deliberately not a tile. It is both the largest number here and the
  * only one nobody can act on, so a queue that has published forty thousand
  * chapters and has three stuck ones read as a wall of completed work with the
  * problem buried in it. The completed count is still available, one disclosure
- * down, because "did that kind ever go through at all" is a real question — it
+ * down, because "did that kind ever go through at all" is a real question; it
  * is just never the first one.
  */
 function outstandingTasks(counts, { emptyText }) {
@@ -2870,7 +2879,7 @@ function queueDepthPanel() {
         const counts = data.summary ?? [];
         return counts.length
           ? outstandingTasks(counts, {
-              emptyText: "Nothing outstanding — every queued upload has been published.",
+              emptyText: "Nothing outstanding; every queued upload has been published.",
             })
           : emptyState("No upload task has ever been queued.");
       },
@@ -2883,8 +2892,8 @@ function queueDepthPanel() {
  * The queue as chapters: what is about to be published, in the order it will
  * be.
  *
- * The Tasks tab shows the same rows keyed on queue mechanics — dedupe key,
- * attempt count, last error — which is the right view during an incident and
+ * The Tasks tab shows the same rows keyed on queue mechanics, dedupe key,
+ * attempt count, last error, which is the right view during an incident and
  * the wrong one for the question asked far more often: what is going up next,
  * and is any of it wrong? A dedupe key of `1015117|142|en` names a chapter only
  * to someone willing to decode it.
@@ -2934,7 +2943,7 @@ function queueChaptersPanel() {
       ),
     );
 
-  /** An exact-match text facet — the same pair the Tasks tab offers. */
+  /** An exact-match text facet; the same pair the Tasks tab offers. */
   const facet = (id, label, key, placeholder) =>
     el(
       "span",
@@ -2990,7 +2999,7 @@ function queueChaptersPanel() {
         class: "dim small",
         text:
           "PENDING by default, because “what is going to be uploaded” is the question. Rows are in the " +
-          "order the uploader will claim them — earliest due first — which is the same order a reorder " +
+          "order the uploader will claim them, earliest due first, which is the same order a reorder " +
           "on the Tasks tab rewrites.",
       }),
     ),
@@ -3013,9 +3022,9 @@ function queueChaptersPanel() {
                   row_.kind,
                   row_.mdMangaId
                     ? mdTitleLink(row_.mdMangaId, row_.mangaName || row_.mangaId || row_.mdMangaId)
-                    : (row_.mangaName ?? row_.mangaId ?? "—"),
-                  row_.chapterNumber ?? "—",
-                  row_.chapterVolume ?? "—",
+                    : (row_.mangaName ?? row_.mangaId ?? "-"),
+                  row_.chapterNumber ?? "-",
+                  row_.chapterVolume ?? "-",
                   // An EDIT task's interest is what it CHANGES, so show that
                   // rather than the title it happens to be carrying.
                   row_.kind === "EDIT" && row_.editPayload
@@ -3026,7 +3035,7 @@ function queueChaptersPanel() {
                           .join(", "),
                       })
                     : truncate(row_.chapterTitle, 60),
-                  row_.chapterLanguage ?? "—",
+                  row_.chapterLanguage ?? "-",
                   fmtTime(row_.notBefore),
                   chip(row_.state),
                   [
@@ -3056,7 +3065,7 @@ function queueChaptersPanel() {
                         ),
                     }),
                     // The chapter's own page, when it already exists on
-                    // MangaDex — every kind but UPLOAD acts on a live chapter.
+                    // MangaDex; every kind but UPLOAD acts on a live chapter.
                     row_.mdChapterId
                       ? routeLink(routeTo("chapters", row_.mdChapterId, null), "History", {
                           class: "button-link inline",
@@ -3177,7 +3186,7 @@ function queueFilterCard(onChange) {
       }),
     ),
     // Filters over the queued chapter itself. Separated from the row above
-    // because they answer a different question — that one narrows by the state
+    // because they answer a different question; that one narrows by the state
     // of the work, this one by which chapter the work is about, which for an
     // EDIT or UNAVAILABLE row is the only handle an operator has.
     row(
@@ -3218,7 +3227,7 @@ function queueFilterCard(onChange) {
     el("p", {
       class: "dim small",
       text:
-        "Requeueing stale leases only touches tasks whose lease has already expired — a task a live uploader " +
+        "Requeueing stale leases only touches tasks whose lease has already expired; a task a live uploader " +
         "still holds is left alone, and every action here refuses a LEASED row for the same reason.",
     }),
   );
@@ -3243,7 +3252,7 @@ function queueBulkBar(selected, activeFilter, rows, tasks, reload) {
             lead: "The rows are deleted permanently. Nothing is sent to MangaDex.",
             points: [
               "A LEASED row is refused: an uploader is holding it right now.",
-              "A DONE row is refused unless you tick “include completed” — DONE plus its upload log is what stops a chapter being uploaded twice.",
+              "A DONE row is refused unless you tick “include completed”; DONE plus its upload log is what stops a chapter being uploaded twice.",
             ],
             confirmLabel: "Delete them",
           }))
@@ -3555,7 +3564,7 @@ function queueDeferDialog(ids, tasks, done) {
         class: "dim small",
         text:
           "The rows stay queued and become claimable again after the delay. Deferring is how you hold work " +
-          "back without deleting it — the attempt budget is untouched.",
+          "back without deleting it; the attempt budget is untouched.",
       }),
       row(el("label", { class: "inline", for: "defer-amount", text: "Hold for" }), amount, unit),
       el(
@@ -3595,7 +3604,7 @@ function queueDeferDialog(ids, tasks, done) {
 /**
  * The chapter fields worth a labelled input.
  *
- * These are the ones a bad regex or a mis-split chapter actually lands in — the
+ * These are the ones a bad regex or a mis-split chapter actually lands in; the
  * number, the volume, the title, the language. Everything else on the payload
  * (ids, urls, timestamps, the artifact list) is machine-set and is edited in the
  * raw JSON below, where getting it wrong is at least obviously deliberate.
@@ -3615,7 +3624,7 @@ const CHAPTER_FORM_FIELDS = [
  * takes the whole chapter payload. Pause the platform and the queue holds, so a
  * run can be reviewed in full before any of it is sent.
  *
- * Only a PENDING row is editable, and that is enforced server-side — if an
+ * Only a PENDING row is editable, and that is enforced server-side; if an
  * uploader claims this task while the dialog is open the save comes back 409
  * rather than racing it.
  */
@@ -3892,7 +3901,7 @@ function queuePurgeDialog(afterPurge) {
         toast(`${result.deleted ?? 0} row(s) purged`);
         closeModal();
         // Reload the list in place. A full page reload would also work and is
-        // what this did first, but it throws away the operator's filter — which
+        // what this did first, but it throws away the operator's filter; which
         // is the very thing they just purged against and will want to re-check.
         afterPurge();
       }
@@ -3948,7 +3957,7 @@ function queuePurgeDialog(afterPurge) {
               result.capped
                 ? el("p", {
                     class: "dim small",
-                    text: `Capped at ${result.cap} rows per purge — repeat to continue.`,
+                    text: `Capped at ${result.cap} rows per purge; repeat to continue.`,
                   })
                 : null,
               Array.isArray(result.breakdown) && result.breakdown.length
@@ -3988,7 +3997,7 @@ function toLocalInput(value) {
  * a chapter after it is published.
  *
  * Nothing here talks to MangaDex. Every action queues an UploadTask and the
- * page says so — core-uploader is the only process with write credentials, and
+ * page says so; core-uploader is the only process with write credentials, and
  * a dashboard that claimed "deleted" the moment the request returned would be
  * describing something that has not happened yet. The buttons therefore report
  * "queued", link to the queue row, and the detail view shows what MangaDex
@@ -4018,7 +4027,7 @@ VIEWS.chapters = (route) => {
     return q;
   };
 
-  /** The filter as the bulk endpoints take it — same names, no paging keys. */
+  /** The filter as the bulk endpoints take it; same names, no paging keys. */
   const activeFilter = () => {
     const filter = { archive };
     if (f().chapterExtension) filter.extension = f().chapterExtension;
@@ -4088,12 +4097,12 @@ VIEWS.chapters = (route) => {
  * Bring the archives back in line with what MangaDex actually holds.
  *
  * Only on the two archives it can write, because offering it while reading
- * `uploaded` or `edited` would imply it reconciles those, and it does not — it
+ * `uploaded` or `edited` would imply it reconciles those, and it does not; it
  * moves rows *into* unavailable and deleted.
  *
  * Check first, then apply, and never the other way round: the check is the only
  * thing that says how many rows are about to move, and unlike the bulk actions
- * above this one cannot be previewed row by row afterwards — an archived row
+ * above this one cannot be previewed row by row afterwards; an archived row
  * has left `uploaded_chapters`.
  */
 function reconcileCard(archive, reload) {
@@ -4124,7 +4133,7 @@ function reconcileCard(archive, reload) {
           ? el("div", {
               text:
                 `${report.hiddenOnMangadex.length} chapter(s) carry no card but MangaDex will not ` +
-                "serve them — never archived. Queue them unavailable if that is what you want.",
+                "serve them; never archived. Queue them unavailable if that is what you want.",
             })
           : el("span", {}),
       ]),
@@ -4140,8 +4149,8 @@ function reconcileCard(archive, reload) {
         class: "dim small",
         text:
           "These archives record what the workers did as they did it. This rebuilds them from " +
-          "MangaDex itself — the chapters already carrying an unavailable card, and the ones " +
-          "that are gone — so history the tables never captured is recorded too.",
+          "MangaDex itself: the chapters already carrying an unavailable card, and the ones " +
+          "that are gone, so history the tables never captured is recorded too.",
       }),
       el(
         "div",
@@ -4163,7 +4172,7 @@ function reconcileCard(archive, reload) {
           onclick: async (event) => {
             const button = event.currentTarget;
             if (!checked) {
-              toast("Check first — nothing should be written before you have seen the count.", false);
+              toast("Check first; nothing should be written before you have seen the count.", false);
               return;
             }
             const total = checked.unavailableRecorded + checked.deletedRecorded;
@@ -4172,7 +4181,7 @@ function reconcileCard(archive, reload) {
                 title: "Record what MangaDex changed",
                 lead: `${total} chapter(s) will move into the unavailable and deleted archives.`,
                 points: [
-                  "Nothing is sent to MangaDex — this only corrects our record of it.",
+                  "Nothing is sent to MangaDex; this only corrects our record of it.",
                   "Rows that move leave uploaded_chapters, so a chapter lives in exactly one table.",
                   "Chapters already archived keep the date they were first recorded.",
                 ],
@@ -4297,7 +4306,7 @@ function chapterFilterCard(extensions, onChange) {
     "Filter",
     row(
       // The extension list is a resource of its own so the picker offers what
-      // this archive actually holds, with counts — an extension that has never
+      // this archive actually holds, with counts; an extension that has never
       // published is not a useful filter option.
       live(
         [extensions],
@@ -4371,10 +4380,10 @@ function chapterTable(rows, archive, selected, reload) {
           reload();
         },
       }),
-      routeLink(routeTo("chapters", entry.mdChapterId, null), truncate(entry.mangaName || "—", 48)),
+      routeLink(routeTo("chapters", entry.mdChapterId, null), truncate(entry.mangaName || "-", 48)),
       chapterLabel(entry),
-      entry.chapterLanguage || "—",
-      entry.extension || "—",
+      entry.chapterLanguage || "-",
+      entry.extension || "-",
       fmtTime(entry.at),
       [
         el("a", {
@@ -4396,11 +4405,11 @@ function chapterTable(rows, archive, selected, reload) {
   );
 }
 
-/** "Vol. 2 Ch. 12.5 — Title", degrading to whichever parts exist. */
+/** "Vol. 2 Ch. 12.5; Title", degrading to whichever parts exist. */
 function chapterLabel(entry) {
   const number = entry.chapterNumber ? `Ch. ${entry.chapterNumber}` : "Oneshot";
   const volume = entry.chapterVolume ? `Vol. ${entry.chapterVolume} ` : "";
-  return truncate(`${volume}${number}${entry.chapterTitle ? ` — ${entry.chapterTitle}` : ""}`, 72);
+  return truncate(`${volume}${number}${entry.chapterTitle ? `: ${entry.chapterTitle}` : ""}`, 72);
 }
 
 function chapterPager(data, walked, go) {
@@ -4433,7 +4442,7 @@ function chapterPager(data, walked, go) {
  *
  * The live column is the one that decides anything. Our row is a mirror written
  * when the chapter was published and may be days stale, while the operator is
- * about to change a public catalogue entry — so where the two disagree, the
+ * about to change a public catalogue entry; so where the two disagree, the
  * page shows both rather than picking one.
  */
 function chapterDetail(mdChapterId) {
@@ -4462,13 +4471,13 @@ function chapterDetail(mdChapterId) {
             }),
           ),
           defs([
-            ["Series", chapter.mangaName || "—"],
+            ["Series", chapter.mangaName || "-"],
             ["MangaDex chapter", el("code", { text: mdChapterId })],
-            ["MangaDex title", chapter.mdMangaId ? mdTitleLink(chapter.mdMangaId, chapter.mdMangaId) : "—"],
-            ["Group", chapter.mdGroupId ? el("code", { text: chapter.mdGroupId }) : "—"],
-            ["Language", chapter.chapterLanguage || "—"],
-            ["Source chapter id", chapter.chapterId ? el("code", { text: chapter.chapterId }) : "—"],
-            ["Source URL", chapter.chapterUrl || "—"],
+            ["MangaDex title", chapter.mdMangaId ? mdTitleLink(chapter.mdMangaId, chapter.mdMangaId) : "-"],
+            ["Group", chapter.mdGroupId ? el("code", { text: chapter.mdGroupId }) : "-"],
+            ["Language", chapter.chapterLanguage || "-"],
+            ["Source chapter id", chapter.chapterId ? el("code", { text: chapter.chapterId }) : "-"],
+            ["Source URL", chapter.chapterUrl || "-"],
             ["Published by the source", fmtTime(chapter.chapterTimestamp)],
             ["Source expiry", fmtTime(chapter.chapterExpire)],
             ["Uploaded", fmtTime(archives.uploaded)],
@@ -4519,8 +4528,8 @@ function chapterActionsCard(data, detail) {
     el("p", {
       class: "dim small",
       text:
-        "Each of these queues one upload task. core-uploader — the only process holding MangaDex " +
-        "credentials — picks it up within a few seconds and the result appears under Queues.",
+        "Each of these queues one upload task. core-uploader, the only process holding MangaDex " +
+        "credentials, picks it up within a few seconds and the result appears under Queues.",
     }),
     blocked ? el("p", { class: "error", text: blocked }) : null,
     row(
@@ -4564,13 +4573,13 @@ function chapterMangadexCard(data) {
   return card(
     "On MangaDex now",
     defs([
-      ["Volume", md.volume || "—"],
-      ["Chapter", md.chapter || "—"],
-      ["Title", md.title || "—"],
-      ["Language", md.translatedLanguage || "—"],
-      ["External URL", md.externalUrl || "— (none: this chapter has pages)"],
-      ["Groups", (md.groups ?? []).join(", ") || "—"],
-      ["Version", String(md.version ?? "—")],
+      ["Volume", md.volume || "-"],
+      ["Chapter", md.chapter || "-"],
+      ["Title", md.title || "-"],
+      ["Language", md.translatedLanguage || "-"],
+      ["External URL", md.externalUrl || "; (none: this chapter has pages)"],
+      ["Groups", (md.groups ?? []).join(", ") || "-"],
+      ["Version", String(md.version ?? "-")],
       ["Created", fmtTime(md.createdAt)],
     ]),
   );
@@ -4621,7 +4630,7 @@ function chapterEditsCard(data) {
  * Queue an edit of the chapter's MangaDex metadata.
  *
  * Prefilled from what MangaDex currently holds, falling back to our row when it
- * could not be read — and only the fields the operator actually changed are
+ * could not be read; and only the fields the operator actually changed are
  * sent, so an unrelated value cannot be pinned to a stale prefill.
  */
 function chapterEditDialog(data, detail) {
@@ -4657,7 +4666,7 @@ function chapterEditDialog(data, detail) {
         "the moment it runs, because PUT /chapter replaces the whole resource and needs the current " +
         "version.",
     }),
-    field("chapter", "Chapter number", "Blank clears it — a oneshot has no number."),
+    field("chapter", "Chapter number", "Blank clears it; a oneshot has no number."),
     field("volume", "Volume", ""),
     field("title", "Title", ""),
     field("translatedLanguage", "Language", "A MangaDex language code, e.g. en, ja, pt-br."),
@@ -4791,7 +4800,7 @@ function chapterUnavailableDialog(data, detail, already) {
 function previewSrc(mdChapterId, note) {
   const q = new URLSearchParams();
   if (note) q.set("footerNote", note);
-  // Cache-busting is belt-and-braces — the endpoint sends no-store — but an
+  // Cache-busting is belt-and-braces, the endpoint sends no-store, but an
   // `<img>` whose src did not change is not re-fetched at all.
   q.set("t", String(Date.now()));
   return `${API}/chapters/${encodeURIComponent(mdChapterId)}/card.png?${q}`;
@@ -4805,7 +4814,7 @@ function chapterDeleteDialog(data, detail) {
     el("p", {
       text:
         "Deleting removes the chapter from MangaDex outright. Readers lose it, and nothing here can " +
-        "bring it back — the archive row records what was removed, not the pages.",
+        "bring it back; the archive row records what was removed, not the pages.",
     }),
     el("ul", { class: "errors" }, [
       el("li", { text: "Marking it unavailable keeps the entry and explains the takedown instead." }),
@@ -4847,9 +4856,9 @@ function chapterDeleteDialog(data, detail) {
  * apply.
  *
  * The preview is the server's own dry run, and the apply button stays disabled
- * until it has been seen. That is not UI ceremony duplicating a server check —
+ * until it has been seen. That is not UI ceremony duplicating a server check,
  * the server would refuse a live call without `{dryRun: false, confirm: true}`
- * anyway — it is making the safe order the only order the page offers, so the
+ * anyway, it is making the safe order the only order the page offers, so the
  * list of public pages about to change is always read before it changes.
  */
 function chapterBulkDialog({ action, archive, target, targeting, done }) {
@@ -4879,7 +4888,7 @@ function chapterBulkDialog({ action, archive, target, targeting, done }) {
               "Only the fields a set of chapters can share. A title, a chapter number or a source URL " +
               "belongs to one chapter, so those stay on the single-chapter form.",
           }),
-          field("volume", "Volume", "Blank leaves it alone; “-” is not a clear — use the single-chapter form to clear."),
+          field("volume", "Volume", "Blank leaves it alone, and “-” is not a clear; use the single-chapter form to clear."),
           field("translatedLanguage", "Language", "A MangaDex language code, e.g. en, ja, pt-br."),
           field("groups", "Groups", "Comma-separated MangaDex group ids."),
         )
@@ -5013,8 +5022,8 @@ function chapterBulkPreview(result, archive) {
       ["Series", "Chapter", "Language", "Would happen"],
       (result.results ?? []).slice(0, 100).map((item) => [
         truncate(item.mangaName || item.mdChapterId, 40),
-        item.chapterNumber ? `Ch. ${item.chapterNumber}` : "—",
-        item.chapterLanguage || "—",
+        item.chapterNumber ? `Ch. ${item.chapterNumber}` : "-",
+        item.chapterLanguage || "-",
         item.ok ? chip("queued") : el("span", { class: "dim small", text: item.reason ?? item.outcome }),
       ]),
       { empty: `Nothing in the ${archive} archive matched.` },
@@ -5026,7 +5035,7 @@ function chapterBulkPreview(result, archive) {
 }
 
 /**
- * Per-chapter results, reported rather than summarised — a batch where eight
+ * Per-chapter results, reported rather than summarised; a batch where eight
  * chapters queued and two were refused is a success and a partial failure at
  * once, and collapsing that to "ok" loses the only part worth acting on.
  */
@@ -5057,7 +5066,7 @@ function reportChapterBulk(result) {
   );
 }
 
-/** Say what was queued — including that a completed task was reset in place. */
+/** Say what was queued; including that a completed task was reset in place. */
 function reportChapterQueued(result) {
   const parts = [`${result.action} queued`];
   if (result.superseded) parts.push("a previously completed task for this chapter was reused");
@@ -5082,11 +5091,9 @@ const ACTIVITY_WINDOWS = [
  * (including the last error of a job that is still retrying), upload tasks,
  * quarantined submissions, and the audit trail.
  *
- * This is the answer to "what has been happening?" that used to require
- * `docker logs`, and it is worth being precise about what it does and does not
- * replace. Everything here is a durable row, which is why it can be filtered,
- * linked to, and read months later. Process stdout is NOT here — a stack trace
- * from a crash loop, a prisma connection warning — because nothing writes it to
+ * Everything here is a durable row, which is why it can be filtered, linked to,
+ * and read months later. Process stdout is not here, a stack trace from a crash
+ * loop or a prisma connection warning, because nothing writes it to
  * the database. That still lives in `docker logs` on the host.
  */
 VIEWS.activity = () => {
@@ -5149,7 +5156,7 @@ VIEWS.activity = () => {
       el("p", {
         class: "dim small",
         text:
-          "Application events only — container stdout is not captured here and is still read with " +
+          "Application events only; container stdout is not captured here and is still read with " +
           "docker logs on the host.",
       }),
       row(
@@ -5221,7 +5228,7 @@ VIEWS.activity = () => {
                   el("div", { text: entry.subject }),
                   el("div", { class: "dim small", text: entry.kind }),
                 ),
-                truncate(entry.message, 300) || "—",
+                truncate(entry.message, 300) || "-",
                 activityActions(entry),
               ]),
               { empty: "Nothing happened in this window. Widen it, or clear the filters." },
@@ -5261,7 +5268,7 @@ function activityActions(entry) {
  *
  * This view is a to-do list rather than a log: an operator who has read a
  * failure and dealt with it clears the entry and it stops being shown, so what
- * remains is what still needs attention. Nothing is deleted — the row itself is
+ * remains is what still needs attention. Nothing is deleted; the row itself is
  * untouched, "Cleared" lists what was acknowledged and by whom, and Restore puts
  * an entry back. A failure that happens AGAIN reappears on its own, because the
  * acknowledgement is recorded against the failure's timestamp (see
@@ -5311,7 +5318,7 @@ VIEWS.errors = (route) => {
         class: "dim small",
         text:
           "Dead-lettered jobs, failed upload tasks and quarantined submissions in one time-ordered list, so " +
-          "triage starts here instead of in docker logs. Clearing an entry hides it from this list only — the " +
+          "triage starts here instead of in docker logs. Clearing an entry hides it from this list only; the " +
           "job, task or submission is untouched, and anything that fails again comes back.",
       }),
       row(
@@ -5404,7 +5411,7 @@ VIEWS.errors = (route) => {
                         class: "dim small",
                         text:
                           `cleared by ${entry.cleared.by} ${ago(entry.cleared.at)}` +
-                          (entry.cleared.note ? ` — ${entry.cleared.note}` : ""),
+                          (entry.cleared.note ? `: ${entry.cleared.note}` : ""),
                       })
                     : null,
                 ),
@@ -5606,7 +5613,7 @@ function crc32(bytes) {
  *
  * This is what makes "publish an extension directory" possible without a shell:
  * the directory picker hands us the files, and the publish endpoint wants a zip.
- * Store-only keeps it to one page of code with no dependency — the publish path
+ * Store-only keeps it to one page of code with no dependency; the publish path
  * hashes and stores the archive rather than caring how well it compresses, and
  * AdmZip on the server reads stored entries like any other.
  *
@@ -5681,8 +5688,8 @@ function relativeEntries(fileList) {
  *
  * Publishing runs a preflight first and shows the verdict inline. The reason is
  * not convenience: a publish is a code-execution change on every worker that
- * runs this extension, so an operator should be looking at the parsed manifest
- * — name, version, entrypoint, whether it replaces what is live — before they
+ * runs this extension, so an operator should be looking at the parsed manifest,
+ * name, version, entrypoint, whether it replaces what is live, before they
  * confirm, not reading a 422 afterwards.
  */
 function publishCard(extensions) {
@@ -5952,7 +5959,7 @@ function extensionDetail(name, tab) {
                 `${job.segmentIndex + 1}/${job.segmentTotal}`,
                 chip(job.state),
                 `${job.attempt}/${job.maxAttempts}`,
-                job.errorClass || "—",
+                job.errorClass || "-",
                 truncate(job.lastError, 120),
                 fmtTime(job.updatedAt),
               ]),
@@ -5998,8 +6005,8 @@ function extensionDetail(name, tab) {
 /**
  * The detail view's own tab strip.
  *
- * The shell hides the section tabs for a param route — they would navigate away
- * from the thing being read — so a detail view that has sections draws them
+ * The shell hides the section tabs for a param route, they would navigate away
+ * from the thing being read, so a detail view that has sections draws them
  * itself, pointing at `#/extensions/<name>/<tab>`.
  */
 function extensionTabs(name, current) {
@@ -6054,8 +6061,8 @@ function schedulePanel(name) {
     const kind = el(
       "select",
       { id: "sched-kind" },
-      el("option", { value: "UPDATE", text: "update — the ordinary incremental run" }),
-      el("option", { value: "CLEAN", text: "clean — full catalogue, computes removals" }),
+      el("option", { value: "UPDATE", text: "update: the ordinary incremental run" }),
+      el("option", { value: "CLEAN", text: "clean: full catalogue, computes removals" }),
       el("option", { value: "FORCE", text: "force" }),
     );
     const label = el("input", { id: "sched-label", type: "text", maxlength: "80", placeholder: "note (optional)" });
@@ -6108,7 +6115,7 @@ function schedulePanel(name) {
             String(index + 1),
             formatScheduleSlot(slot),
             slot.kind.toLowerCase(),
-            slot.label || "—",
+            slot.label || "-",
             slot.enabled ? "on" : "off",
             [
               gatedButton("extensions:write", {
@@ -6206,7 +6213,7 @@ function schedulePanel(name) {
  * Report what a config save actually stored.
  *
  * `PUT /extensions/:name/config` answers 200 with per-relation counts and a
- * `rejected[]` of rows its constraints refused — a language code outside the
+ * `rejected[]` of rows its constraints refused; a language code outside the
  * MangaDex allowlist, an alias pointing at itself. A 200 therefore means "stored
  * what was valid", not "stored everything", and treating the two alike is how an
  * operator ends up believing an alias is live when the server dropped it.
@@ -6239,7 +6246,7 @@ function renderConfigOutcome(host, result) {
                 text:
                   `${row.option}: ${row.key}` +
                   (row.value === undefined ? "" : ` → ${row.value}`) +
-                  ` — ${row.reason}`,
+                  `: ${row.reason}`,
               }),
             ),
           ),
@@ -6260,7 +6267,7 @@ function renderConfigOutcome(host, result) {
  * One editable row of a key→value(s) relation.
  *
  * Returns its own node plus a `read()`, so the parent can collect the current
- * state without the list having to re-render on every keystroke — re-rendering
+ * state without the list having to re-render on every keystroke; re-rendering
  * is what takes the caret with it.
  */
 function relationRow(spec, initial, onRemove) {
@@ -6303,10 +6310,9 @@ function relationRow(spec, initial, onRemove) {
 /**
  * An editable list for one of the three typed relations.
  *
- * These used to be three keys inside a JSON textarea. They are separate tables
- * with separate constraints — an alias has exactly one master, a language code
- * must be one MangaDex accepts — and a free-text blob could express none of
- * that, so a typo was only discovered when the server rejected the save.
+ * Each is a separate table with its own constraints: an alias has exactly one
+ * master, and a language code must be one MangaDex accepts. A free-text blob
+ * could express neither, so a typo only surfaced when the server rejected it.
  */
 function relationList(spec, initialRows) {
   const rows = [];
@@ -6360,7 +6366,7 @@ function relationList(spec, initialRows) {
  *
  * The whole document still goes over the wire as one PUT, because that endpoint
  * has replace semantics and splitting it into three would make a partial save
- * possible — and `same` and `multi_chapters` decide what gets DELETED from
+ * possible; and `same` and `multi_chapters` decide what gets DELETED from
  * MangaDex, so a half-applied config is worse than a refused one.
  */
 function configPanel(name) {
@@ -6433,7 +6439,7 @@ function configPanel(name) {
             {
               title: "Language overrides",
               blurb:
-                "Map a source language code onto the MangaDex one. Only codes MangaDex accepts are allowed — " +
+                "Map a source language code onto the MangaDex one. Only codes MangaDex accepts are allowed; " +
                 "the same list the server validates against.",
               addLabel: "Add a language",
               empty: "No language overrides.",
@@ -6487,7 +6493,7 @@ function configPanel(name) {
             if (bad > 0) {
               setChildren(
                 status,
-                el("p", { class: "error", text: `${bad} row(s) are not valid — fix them before saving.` }),
+                el("p", { class: "error", text: `${bad} row(s) are not valid; fix them before saving.` }),
               );
               return null;
             }
@@ -6501,7 +6507,7 @@ function configPanel(name) {
 
             // Empty relations are sent as `{}` rather than omitted. The endpoint
             // replaces rather than merges, so an omitted key and an empty one
-            // mean the same thing there — but being explicit is what makes
+            // mean the same thing there; but being explicit is what makes
             // "I deleted every alias" a saveable intention rather than a
             // document that happens to lack a key.
             return { ...rest, same, multi_chapters: multiChapters, custom_language: customLanguage };
@@ -6524,7 +6530,7 @@ function configPanel(name) {
             el("p", {
               class: "dim small",
               text:
-                "Anything the platform does not model — this extension reads it itself, so it stays free-form.",
+                "Anything the platform does not model; this extension reads it itself, so it stays free-form.",
             }),
             passthrough,
             passthroughError,
@@ -6587,7 +6593,7 @@ function versionsPanel(name) {
         class: "dim small",
         text:
           "Yanking a version rolls back what workers fetch. Jobs already pinned to the yanked sha keep " +
-          "running unless you also cancel them — pinning is what makes a run reproducible.",
+          "running unless you also cancel them; pinning is what makes a run reproducible.",
       }),
       live(
         [versions],
@@ -6597,7 +6603,7 @@ function versionsPanel(name) {
             data.versions.map((v) => [
               v.version,
               el("code", { text: v.sha256.slice(0, 12) }),
-              v.sourceCommit ? el("code", { text: v.sourceCommit.slice(0, 12) }) : "—",
+              v.sourceCommit ? el("code", { text: v.sourceCommit.slice(0, 12) }) : "-",
               fmtTime(v.publishedAt),
               chip(v.yanked ? "REVOKED" : "ACTIVE"),
               [
@@ -6613,7 +6619,7 @@ function versionsPanel(name) {
                       lead: "Workers will fall back to the previous non-yanked version on their next lease.",
                       points: [
                         "Jobs already pinned to this sha256 keep running.",
-                        "Nothing is deleted — a yank is reversible by republishing.",
+                        "Nothing is deleted; a yank is reversible by republishing.",
                       ],
                       confirmLabel: "Yank it",
                     });
@@ -6643,7 +6649,7 @@ function versionsPanel(name) {
 
 const TRACKED_PAGE = 50;
 
-/** `externalId,mdMangaId` — the one format the paste box and the export share. */
+/** `externalId,mdMangaId`: the one format the paste box and the export share. */
 /**
  * One line of the paste/export format.
  *
@@ -6683,7 +6689,7 @@ function seriesMapPanel(name) {
  * Its own dialog rather than an inline field, because this is the one edit on
  * this page that silently changes where future chapters land: the series keeps
  * publishing, the uploads just start arriving on a different title. Needs
- * `tracked:write` — `tracked:append` can add a mapping but must not move one,
+ * `tracked:write`: `tracked:append` can add a mapping but must not move one,
  * which is why a contributor sees this button refused rather than absent.
  */
 function repointDialog(name, item, tracked) {
@@ -6817,7 +6823,7 @@ function trackedCard(name, tracked) {
                   if (!(await confirmDialog({
                     title: `Stop tracking ${item.mangaId}`,
                     lead: "Its chapters stop being uploaded from the next run onwards.",
-                    points: ["This does not touch MangaDex — the title and its existing chapters stay."],
+                    points: ["This does not touch MangaDex; the title and its existing chapters stay."],
                     confirmLabel: "Stop tracking it",
                   }))) {
                     return;
@@ -6929,7 +6935,7 @@ function trackedCard(name, tracked) {
           const rows = tracked.data?.tracked ?? [];
           const text = [
             `# publoader tracked map for ${name}`,
-            `# exported ${new Date().toISOString()} — ${rows.length} mapping(s)`,
+            `# exported ${new Date().toISOString()}; ${rows.length} mapping(s)`,
             "# externalId,mdMangaId",
             ...rows.map(mapLine),
             "",
@@ -6947,7 +6953,7 @@ function trackedCard(name, tracked) {
  *
  * The dry run is not optional and not a checkbox. A paste of 200 lines can add,
  * repoint, no-op and fail in the same batch, and repointing a series silently
- * redirects uploads to a different MangaDex title — so the operator confirms
+ * redirects uploads to a different MangaDex title; so the operator confirms
  * against a per-row verdict rather than against their own reading of the paste.
  * "Apply" only exists once a preview has come back.
  */
@@ -7021,7 +7027,7 @@ function bulkCurationCard(name, tracked) {
         ["External id", "MangaDex id", "Outcome", "Detail"],
         summaryData.results.map((result) => [
           result.mangaId,
-          result.mdMangaId || "—",
+          result.mdMangaId || "-",
           el("span", { class: `chip ${OUTCOME_TONE[result.outcome] || ""}`.trim(), text: result.outcome }),
           result.detail || "",
         ]),
@@ -7035,7 +7041,7 @@ function bulkCurationCard(name, tracked) {
             el("button", {
               type: "button",
               class: "primary",
-              text: `Apply — ${summaryData.added} added, ${summaryData.updated} repointed, ${summaryData.removed} removed`,
+              text: `Apply; ${summaryData.added} added, ${summaryData.updated} repointed, ${summaryData.removed} removed`,
               onclick: (event) => onApply(event.currentTarget),
             }),
             el("button", { type: "button", text: "Discard preview", onclick: clear }),
@@ -7045,7 +7051,7 @@ function bulkCurationCard(name, tracked) {
 
   /**
    * The request body for the current mode. Removal takes one external id per
-   * line, so the `#`-comment convention is honoured here too — a contributor who
+   * line, so the `#`-comment convention is honoured here too; a contributor who
    * learned it from the paste box should not find it silently ignored.
    */
   const payload = () =>
@@ -7116,7 +7122,7 @@ function bulkCurationCard(name, tracked) {
     el("p", {
       class: "dim small",
       text:
-        "Paste lines of externalId,mdMangaId — order-insensitive, with # comments and a header row ignored. " +
+        "Paste lines of externalId,mdMangaId; order-insensitive, with # comments and a header row ignored. " +
         "Up to 2000 rows. Nothing is written until you apply a preview.",
     }),
     row(el("label", { class: "inline", for: "bulk-mode", text: "Operation" }), mode),
@@ -7135,7 +7141,7 @@ function bulkCurationCard(name, tracked) {
             text.value = await navigator.clipboard.readText();
             clear();
           } catch {
-            toast("clipboard blocked — paste into the box directly", false);
+            toast("clipboard blocked; paste into the box directly", false);
           }
         },
       }),
@@ -7158,7 +7164,7 @@ function bulkCurationCard(name, tracked) {
 /**
  * The series map across every extension.
  *
- * There is no cross-extension endpoint — the map is addressed per extension — so
+ * There is no cross-extension endpoint, the map is addressed per extension, so
  * this is an index rather than a merged table: it names each extension, counts
  * what it tracks, and links into the map that can actually be edited.
  */
@@ -7193,7 +7199,7 @@ VIEWS.tracked = () => {
           rows.map((r) => [
             r.name,
             r.count === null ? "unreadable" : String(r.count),
-            r.newest ? `${r.newest.mangaId} · ${fmtTime(r.newest.createdAt)}` : "—",
+            r.newest ? `${r.newest.mangaId} · ${fmtTime(r.newest.createdAt)}` : "-",
             [routeLink(routeTo("extensions", r.name, "series-map"), "Open map", { class: "button-link inline" })],
           ]),
           { empty: "No extension is published, so there is no map to curate yet." },
@@ -7209,7 +7215,7 @@ VIEWS.tracked = () => {
  * Pin a worker to a set of extensions, or let it take anything.
  *
  * The stored list is what the lease query filters on, so a change takes effect on
- * that worker's next poll — no re-enrolment, no restart. The empty list means
+ * that worker's next poll; no re-enrolment, no restart. The empty list means
  * "anything", which is right for a dedicated host and wrong for a community one,
  * so the dialog states which of the two you are choosing rather than leaving an
  * empty set of checkboxes to be read either way.
@@ -7255,7 +7261,7 @@ function assignExtensionsDialog(worker, workers) {
           box,
           el("span", { text: name }),
           orphaned.includes(name)
-            ? el("span", { class: "dim small", text: " — no longer published" })
+            ? el("span", { class: "dim small", text: "; no longer published" })
             : null,
         );
       }),
@@ -7269,7 +7275,7 @@ function assignExtensionsDialog(worker, workers) {
         class: "dim small",
         text: `Takes effect on ${worker.name}'s next poll. No restart or re-enrolment.`,
       }),
-      el("label", { class: "assign-row", for: "assign-any" }, anyRadio, el("span", { text: "Anything — take work from every extension" })),
+      el("label", { class: "assign-row", for: "assign-any" }, anyRadio, el("span", { text: "Anything; take work from every extension" })),
       el("label", { class: "assign-row", for: "assign-some" }, someRadio, el("span", { text: "Only the extensions ticked below" })),
       published.length || orphaned.length
         ? checkboxList
@@ -7472,7 +7478,7 @@ const enrollTokens = new Resource("enroll-tokens", () => api("/enroll-tokens"));
 /**
  * Every token minted, and what became of it.
  *
- * The plaintext is deliberately absent — only a hash is stored and it was shown
+ * The plaintext is deliberately absent; only a hash is stored and it was shown
  * once. The useful fact here is the status: a PENDING token is a credential
  * somebody can still enrol a worker with, which is the one an operator may want
  * to withdraw.
@@ -7483,7 +7489,7 @@ function enrollTokenList() {
     el("p", {
       class: "dim small",
       text:
-        "The token itself is never shown again — only its fate. A token stays usable until it is used, " +
+        "The token itself is never shown again; only its fate. A token stays usable until it is used, " +
         "revoked, or expires.",
     }),
     live(
@@ -7494,10 +7500,10 @@ function enrollTokenList() {
           (data.tokens ?? []).map((t) => [
             chip(t.status),
             t.trust,
-            t.note || el("span", { class: "dim", text: "—" }),
+            t.note || el("span", { class: "dim", text: "-" }),
             t.usedByWorkerName
               ? el("span", {}, t.usedByWorkerName)
-              : el("span", { class: "dim", text: "—" }),
+              : el("span", { class: "dim", text: "-" }),
             `${fmtTime(t.createdAt)} (${ago(t.createdAt)})`,
             t.status === "PENDING"
               ? `${fmtTime(t.expiresAt)} (${ago(t.expiresAt)})`
@@ -7513,7 +7519,7 @@ function enrollTokenList() {
                       !(await confirmDialog({
                         title: "Revoke this enrolment token",
                         lead: "Anyone holding it will no longer be able to enrol a worker with it.",
-                        points: ["A host that has already enrolled is unaffected — it holds a permanent token."],
+                        points: ["A host that has already enrolled is unaffected; it holds a permanent token."],
                         confirmLabel: "Revoke it",
                       }))
                     ) {
@@ -7539,19 +7545,19 @@ function showEnrollToken(minted, workerName) {
   // onto a host, and a name nobody published turns "enrol a worker" into a pull
   // failure with no clue that the dashboard invented the tag. WORKER_IMAGE comes
   // from the server so the snippet tracks the deployed release rather than a
-  // constant that goes stale here — which is exactly what this fallback did when
+  // constant that goes stale here; which is exactly what this fallback did when
   // it was a pinned version, quietly handing out an image two releases old.
   // `latest` cannot rot; a version literal in a browser bundle can and did.
   const image = minted.workerImage || "ardax/publoader-worker:latest";
   const snippet = [
-    "# publoader worker — one-time enrolment token",
+    "# publoader worker; one-time enrolment token",
     `# expires ${fmtTime(minted.expiresAt)}; it enrols exactly one worker.`,
     "#",
     "# The token is traded once for a permanent one kept in the named volume.",
     "# Losing that volume means asking the operator for a new enrolment token.",
     "#",
     // The tag below is whatever this deployment was told to advertise, which is
-    // not necessarily the newest release — a core that has not been upgraded in
+    // not necessarily the newest release; a core that has not been upgraded in
     // a while advertises what it knew at the time. Saying so beats a worker host
     // silently starting on an old image because the snippet looked current.
     `# Image below (${image}) is what this control plane advertises.`,
@@ -7580,7 +7586,7 @@ function showEnrollToken(minted, workerName) {
       {},
       el("p", {
         class: "error",
-        text: "Shown once. It is not recoverable — copy it now, and send it over a private channel.",
+        text: "Shown once. It is not recoverable; copy it now, and send it over a private channel.",
       }),
       el("pre", { text: snippet }),
       row(
@@ -7593,7 +7599,7 @@ function showEnrollToken(minted, workerName) {
               await navigator.clipboard.writeText(snippet);
               toast("copied to clipboard");
             } catch {
-              toast("clipboard blocked — select the text manually", false);
+              toast("clipboard blocked; select the text manually", false);
             }
           },
         }),
@@ -7698,7 +7704,7 @@ function untrackedApproveButton(item, refresh) {
         points: [
           `Title: ${item.mangaName}`,
           `Language: ${item.mangaLanguage}`,
-          "It cannot be undone from here — correcting it afterwards means editing the title on MangaDex.",
+          "It cannot be undone from here; correcting it afterwards means editing the title on MangaDex.",
           "Check the details first if the scraper may have picked up a bad name.",
         ],
         confirmLabel: "Create the title",
@@ -7723,7 +7729,7 @@ function untrackedApproveButton(item, refresh) {
  *
  * The scrapers guess a title from a page, and they guess wrong often enough that
  * approving without a chance to correct the name is how a bad title ends up
- * public. So: fix the local row here first, approve second — and for a row whose
+ * public. So: fix the local row here first, approve second; and for a row whose
  * title already exists, push the correction to MangaDex explicitly, behind a
  * confirmation that says out loud that the entry is public.
  */
@@ -7925,7 +7931,7 @@ function untrackedEditCard(item, detail, data) {
         `Title becomes: ${values.mangaName}`,
         `Original language: ${values.mangaLanguage}`,
         `Source link: ${values.mangaUrl}`,
-        "MangaDex keeps its own edit history — this is visible to their staff and cannot be undone from here.",
+        "MangaDex keeps its own edit history; this is visible to their staff and cannot be undone from here.",
       ],
       confirmLabel: "Apply to MangaDex",
     }))) {
@@ -7955,15 +7961,15 @@ function untrackedEditCard(item, detail, data) {
   };
 
   // The SERVER's reason wins. It is computed by the same code that guards the
-  // POST, so it already accounts for cases this file cannot see — a create in
-  // flight, an instance holding no MangaDex credentials, an api-token principal —
-  // and a locally-derived reason that disagreed would either offer a button that
+  // POST, so it already accounts for cases this file cannot see, a create in
+  // flight, an instance holding no MangaDex credentials, an api-token principal,
+ // and a locally-derived reason that disagreed would either offer a button that
   // 403s or hide one that would have worked. The local derivation stays only as a
   // fallback for a build whose GET predates the field.
   const applyReason =
     data.applyBlockedReason ??
     (!item.mdMangaId
-      ? "There is no MangaDex title yet — approve the series first."
+      ? "There is no MangaDex title yet; approve the series first."
       : !canApply
         ? "Pushing a change to the public MangaDex entry is limited to owners and admins. A contributor can " +
           "correct the local row and ask an operator to apply it."
@@ -7971,7 +7977,7 @@ function untrackedEditCard(item, detail, data) {
 
   // Whether this row has already been pushed, and whether anything differs now.
   // Without these the button reads identically on a row applied an hour ago with
-  // nothing outstanding and on one that has never been applied — so the safe move
+  // nothing outstanding and on one that has never been applied; so the safe move
   // looks like pressing it, and the cost of guessing wrong is a redundant public
   // edit to someone else's catalogue under our shared account.
   const applied = data.appliedToMangaDex ?? null;
@@ -8033,8 +8039,8 @@ function untrackedEditCard(item, detail, data) {
             `Applied to MangaDex ${fmtTime(applied.at)} (${ago(applied.at)})` +
             (applied.actor ? ` by ${applied.actor}` : "") +
             (pending.length === 0
-              ? " — nothing differs from the live entry."
-              : ` — ${pending.length} field(s) differ now.`),
+              ? ", nothing differs from the live entry."
+              : `, ${pending.length} field(s) differ now.`),
         })
       : null,
     data.mangadex
@@ -8045,7 +8051,7 @@ function untrackedEditCard(item, detail, data) {
           defs(
             Object.entries(data.mangadex).map(([key, value]) => [
               key,
-              typeof value === "object" && value !== null ? JSON.stringify(value) : String(value ?? "—"),
+              typeof value === "object" && value !== null ? JSON.stringify(value) : String(value ?? "-"),
             ]),
           ),
         )
@@ -8063,9 +8069,9 @@ VIEWS.audit = (route) => (route.param ? auditDetail(route.param) : auditSearch()
  * The audit trail, searchable.
  *
  * Paging back through a fixed number of rows only answers "what happened
- * recently". The questions that actually come up are retrospective — "who
+ * recently". The questions that actually come up are retrospective; "who
  * changed the removal mode?", "when did this series get repointed, and by
- * whom?" — and they need a search that reaches into the detail JSON, which is
+ * whom?"; and they need a search that reaches into the detail JSON, which is
  * where the arguments of every audited action are recorded and the only place
  * they exist.
  */
@@ -8186,7 +8192,7 @@ function auditSearch() {
         class: "dim small",
         text:
           "Search is a case-insensitive substring over the actor, action, subject and the detail JSON, so " +
-          "partial ids and partial action names both work. To open one event, use its Open link — that " +
+          "partial ids and partial action names both work. To open one event, use its Open link; that " +
           "resolves by id however old the event is.",
       }),
     ),
@@ -8222,7 +8228,7 @@ function auditSearch() {
                   },
                 }),
                 event.subject,
-                event.detail ? truncate(JSON.stringify(event.detail), 160) : "—",
+                event.detail ? truncate(JSON.stringify(event.detail), 160) : "-",
                 [routeLink(routeTo("audit", event.id, null), "Open", { class: "button-link inline" })],
               ]),
               { empty: "No event matches these filters." },
@@ -8243,11 +8249,9 @@ function auditSearch() {
 /**
  * One audit event, by id.
  *
- * This is what a copied permalink resolves to. It used to filter the recent page
- * client-side, which could not find an event that had since been pushed off it —
- * and the id was not a searchable field at all, so the answer was always "no
- * matching events". `GET /audit?id=` looks it up by primary key instead, so the
- * age of the event stops mattering.
+ * What a copied permalink resolves to. `GET /audit?id=` looks the event up by
+ * primary key, so its age does not matter and it cannot be pushed off the end
+ * of a page.
  */
 function auditDetail(id) {
   const event = new Resource(`audit:${id}`, async () => {
@@ -8290,7 +8294,7 @@ function auditDetail(id) {
             ["When", `${fmtTime(data.createdAt)} · ${ago(data.createdAt)}`],
             ["Actor", data.actor],
             ["Action", el("code", { text: data.action })],
-            ["Subject", data.subject ? el("code", { text: data.subject }) : "—"],
+            ["Subject", data.subject ? el("code", { text: data.subject }) : "-"],
           ]),
           row(
             el("button", {
@@ -8346,7 +8350,7 @@ VIEWS.system = (route) => {
   /*
    * Is the database schema the one this build expects? The answer used to
    * require `docker compose run migrate status` on the host, and it is read as
-   * "should I be worried?" — so it leads with a verdict rather than with a table
+   * "should I be worried?"; so it leads with a verdict rather than with a table
    * of names.
    */
   const schema = new Resource("schema", () => api("/schema"));
@@ -8378,7 +8382,7 @@ VIEWS.system = (route) => {
                 el("div", {
                   class: "banner",
                   text:
-                    "Migrations are applied by the one-shot `migrate` service at deploy time, not from here — " +
+                    "Migrations are applied by the one-shot `migrate` service at deploy time, not from here; " +
                     "running DDL from the API process is deliberately impossible. See docs/operations.md → " +
                     "Upgrade the core.",
                 }),
@@ -8392,7 +8396,7 @@ VIEWS.system = (route) => {
               m.name,
               el("span", { class: `chip ${m.failed ? "bad" : "ok"}`, text: m.failed ? "failed" : "applied" }),
               fmtTime(m.appliedAt),
-              m.rolledBackAt ? `rolled back ${fmtTime(m.rolledBackAt)}` : "—",
+              m.rolledBackAt ? `rolled back ${fmtTime(m.rolledBackAt)}` : "-",
             ]),
             { empty: "No migration has been recorded." },
           ),
@@ -8417,7 +8421,7 @@ function backupPanel() {
         text:
           "Taking a backup needs the OWNER role. A dump contains every operator password hash, every client " +
           "token hash and the saved MangaDex session, which makes it a credential-theft primitive rather than " +
-          "a read — so it sits at the bar for account administration.",
+          "a read; so it sits at the bar for account administration.",
       }),
     );
   }
@@ -8427,7 +8431,7 @@ function backupPanel() {
       class: "dim small",
       text:
         "Streams a pg_dump of the whole database in custom format (-Fc), the same shape docs/operations.md " +
-        "documents — so a dump taken here and one taken on the host restore identically with pg_restore.",
+        "documents; so a dump taken here and one taken on the host restore identically with pg_restore.",
     }),
     el("div", {
       class: "banner",
@@ -8453,9 +8457,9 @@ function backupPanel() {
 
 /** Assignable roles, most privileged first. Mirrors ASSIGNABLE_ROLES in routes/users.ts. */
 const ROLES = [
-  ["OWNER", "OWNER — full control, including accounts and backups"],
-  ["ADMIN", "ADMIN — full control plane, no account administration"],
-  ["CONTRIBUTOR", "CONTRIBUTOR — series map and untracked triage only"],
+  ["OWNER", "OWNER, full control, including accounts and backups"],
+  ["ADMIN", "ADMIN, full control plane, no account administration"],
+  ["CONTRIBUTOR", "CONTRIBUTOR; series map and untracked triage only"],
 ];
 
 VIEWS.users = (route) => {
@@ -8537,9 +8541,27 @@ VIEWS.users = (route) => {
                   ? el("div", { class: "dim small", text: `discord: ${user.discordUsername}` })
                   : null,
               ),
-              chip(user.role),
+              // "tuned" is worth a glance in the table: an account that is not
+              // simply its role is the one whose access nobody remembers.
+              el(
+                "div",
+                { class: "row tight" },
+                chip(user.role),
+                (user.extraScopes?.length ?? 0) + (user.deniedScopes?.length ?? 0) > 0
+                  ? el("span", {
+                      class: "chip",
+                      text: "tuned",
+                      title: [
+                        user.extraScopes?.length ? `granted: ${user.extraScopes.join(", ")}` : null,
+                        user.deniedScopes?.length ? `denied: ${user.deniedScopes.join(", ")}` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · "),
+                    })
+                  : null,
+              ),
               chip(user.approved ? "approved" : "pending"),
-              // Both can be true — that is the point of linking — so this is a
+              // Both can be true, that is the point of linking, so this is a
               // list, not a ladder. Neither means the account has only ever
               // been reachable by an emailed sign-in link.
               [user.hasPassword ? "password" : null, user.discordId ? "discord" : null]
@@ -8569,7 +8591,7 @@ VIEWS.users = (route) => {
                   : null,
                 roleSelect(user, users),
                 // The recovery path for an invite that never arrived. Only
-                // useful once the account is approved — before that there is
+                // useful once the account is approved; before that there is
                 // nothing for the link to sign them in to.
                 user.approved
                   ? el("button", {
@@ -8584,8 +8606,17 @@ VIEWS.users = (route) => {
                     })
                   : null,
                 el("button", { type: "button", text: "Set password", onclick: () => passwordDialog(user, users) }),
+                // Per-account tuning. Offered for everyone except owners, who
+                // hold every scope regardless of what the lists say.
+                user.role !== "OWNER"
+                  ? el("button", {
+                      type: "button",
+                      text: "Permissions",
+                      onclick: () => userPermissionsDialog(user, users),
+                    })
+                  : null,
                 // The recovery path for a Discord account nobody holds any
-                // more — without it that operator account is stranded.
+                // more; without it that operator account is stranded.
                 user.discordId
                   ? el("button", {
                       type: "button",
@@ -8721,6 +8752,335 @@ function passwordDialog(user, users) {
   );
 }
 
+// ---------------------------------------------------------------- permissions
+
+/**
+ * A checkbox per scope, grouped by area.
+ *
+ * Grouping is not decoration: the flat taxonomy is 21 entries and the question
+ * being answered is nearly always about an area ("may they touch chapters at
+ * all?"), so a flat list makes the reader do the sorting every time. Each box
+ * carries its description as a title, because a checkbox labelled
+ * `tracked:append` alone assumes the reader already knows the answer they came
+ * to look up.
+ *
+ * Returns handles rather than a bare node: the caller needs to read the
+ * selection back and to set it from a preset.
+ */
+function scopePicker(scopes, { selected = [], idPrefix = "scope", onchange } = {}) {
+  const boxes = new Map();
+  const areas = new Map();
+  for (const scope of scopes) {
+    const area = scope.name.split(":")[0];
+    if (!areas.has(area)) areas.set(area, []);
+    areas.get(area).push(scope);
+  }
+  const chosen = new Set(selected);
+
+  const node = el(
+    "div",
+    { class: "grid" },
+    [...areas].map(([area, list]) =>
+      el(
+        "div",
+        { class: "stat" },
+        el("div", { class: "k", text: area }),
+        list.map((scope) => {
+          const id = `${idPrefix}-${scope.name}`;
+          const box = el("input", {
+            type: "checkbox",
+            id,
+            value: scope.name,
+            checked: chosen.has(scope.name),
+            ...(onchange ? { onchange } : {}),
+          });
+          boxes.set(scope.name, box);
+          return el(
+            "div",
+            { class: "row tight", title: scope.description },
+            box,
+            el("label", { class: "inline", for: id, text: scope.name }),
+          );
+        }),
+      ),
+    ),
+  );
+
+  return {
+    node,
+    get: () => [...boxes].filter(([, box]) => box.checked).map(([name]) => name),
+    set: (wanted) => {
+      const set = new Set(wanted);
+      for (const [name, box] of boxes) box.checked = set.has(name);
+      onchange?.();
+    },
+  };
+}
+
+/**
+ * What each role means here.
+ *
+ * The wildcard is shown as itself rather than expanded into 21 boxes: OWNER
+ * holds scopes that do not exist yet, and a checklist would quietly claim
+ * otherwise.
+ */
+VIEWS.permissions = () => {
+  const catalogue = new Resource("permissions", () => api("/permissions"));
+
+  return el(
+    "div",
+    {},
+    card(
+      "Roles",
+      el("p", {
+        class: "dim small",
+        text:
+          "A role's baseline is what every account in it starts with. Changing one takes effect on sessions that " +
+          "are already open, within a few seconds — nobody has to sign in again. Individual accounts can be tuned " +
+          "further from the Users page.",
+      }),
+      live(
+        [catalogue],
+        (data) =>
+          el(
+            "div",
+            {},
+            data.roles.map((role) => rolePanel(role, data, catalogue)),
+          ),
+        {
+          reserve: 400,
+          skeleton: () => el("div", {}, el("div", { class: "skeleton skeleton-line" }), skeletonGrid(6)),
+        },
+      ),
+    ),
+  );
+};
+
+/** One role's editor, or its read-only statement when it is not tunable. */
+function rolePanel(role, data, catalogue) {
+  const heading = el(
+    "div",
+    { class: "row" },
+    el("h3", { text: role.role }),
+    chip(role.custom ? "customised" : role.tunable ? "shipped default" : "fixed"),
+    role.updatedBy ? el("span", { class: "dim small", text: `last changed by ${role.updatedBy}` }) : null,
+  );
+
+  if (!role.tunable) {
+    return el(
+      "div",
+      { class: "stat" },
+      heading,
+      el("p", {
+        class: "dim small",
+        text:
+          "OWNER holds every scope, including ones added by future releases, and cannot be narrowed. It is the " +
+          "role that edits permissions, so leaving it editable would let one mistake lock this deployment out of " +
+          "its own control plane.",
+      }),
+      el("div", { class: "row tight" }, chip("*")),
+    );
+  }
+
+  const picker = scopePicker(data.scopes, { selected: role.scopes, idPrefix: `role-${role.role}` });
+
+  return el(
+    "div",
+    { class: "stat" },
+    heading,
+    row(
+      el("span", { class: "dim small", text: "Presets:" }),
+      Object.entries(data.presets).map(([preset, list]) =>
+        el("button", {
+          type: "button",
+          text: preset,
+          title: list.join(", "),
+          onclick: () => picker.set(list),
+        }),
+      ),
+      el("button", { type: "button", text: "shipped default", onclick: () => picker.set(role.defaults) }),
+      el("button", { type: "button", text: "clear", onclick: () => picker.set([]) }),
+    ),
+    picker.node,
+    row(
+      el("button", {
+        type: "button",
+        class: "primary",
+        text: "Save baseline",
+        onclick: async (event) => {
+          const scopes = picker.get();
+          const removed = role.scopes.filter((s) => s !== "*" && !scopes.includes(s));
+          const confirmed = await confirmDialog({
+            title: `Change what ${role.role} may do`,
+            lead: `Every ${role.role} on this deployment will hold exactly these ${scopes.length} scope(s).`,
+            points: [
+              ...(removed.length ? [`Removed: ${removed.join(", ")}`] : []),
+              ...(scopes.length === 0 ? ["Nobody in this role will be able to do anything."] : []),
+              "Sessions already open pick this up within a few seconds.",
+            ],
+            confirmLabel: "Change the role",
+          });
+          if (!confirmed) return;
+          await act(
+            "permissions.role",
+            () => api(`/permissions/roles/${role.role}`, { method: "PUT", body: { scopes } }),
+            { button: event.currentTarget, refresh: [catalogue] },
+          );
+        },
+      }),
+      role.custom
+        ? el("button", {
+            type: "button",
+            text: "Reset to shipped default",
+            onclick: async (event) => {
+              await act("permissions.role.reset", () => api(`/permissions/roles/${role.role}`, { method: "DELETE" }), {
+                button: event.currentTarget,
+                refresh: [catalogue],
+              });
+            },
+          })
+        : null,
+    ),
+  );
+}
+
+/**
+ * Tune one account on top of its role.
+ *
+ * Grants and denials are separate pickers rather than one tri-state list,
+ * because they answer different questions and denial is the dangerous one:
+ * making an operator pick it out of a shared control would be how somebody
+ * removes an ability they meant to add.
+ */
+function userPermissionsDialog(user, users) {
+  const status = el("p", { class: "field-error" });
+  const body = el("div", {});
+  openModal(`Permissions · ${user.email}`, body);
+
+  void (async () => {
+    const [catalogue, current] = await Promise.all([api("/permissions"), api(`/users/${user.id}/permissions`)]);
+    if (!catalogue || !current) return;
+
+    if (!current.tunable) {
+      setChildren(
+        body,
+        el("p", {
+          text:
+            "This account is an OWNER: it holds every scope by construction and ignores grants and denials. " +
+            "Change its role first if it should be restricted.",
+        }),
+        row(el("button", { type: "button", text: "Close", onclick: closeModal })),
+      );
+      return;
+    }
+
+    const known = new Set(catalogue.scopes.map((s) => s.name));
+    const all = (list, extra) => {
+      const out = new Set();
+      for (const s of list) {
+        if (s === "*") {
+          for (const name of known) out.add(name);
+          continue;
+        }
+        if (!known.has(s)) continue;
+        out.add(s);
+        for (const implied of extra(s)) if (known.has(implied)) out.add(implied);
+      }
+      return [...out];
+    };
+    // Mirrors expandScopes/denialClosure in src/core/api/scopes.ts. A grant
+    // closes downward (a write carries its read); a denial closes upward (
+    // refusing the read has to refuse the write, which would imply it back).
+    const expand = (list) =>
+      all(list, (s) => {
+        const [area, verb] = s.split(":");
+        if (verb === "write") return [`${area}:read`, `${area}:append`];
+        if (verb === "append") return [`${area}:read`];
+        return [];
+      });
+    const refuse = (list) =>
+      all(list, (s) => {
+        const [area, verb] = s.split(":");
+        if (verb === "read") return [`${area}:append`, `${area}:write`];
+        if (verb === "append") return [`${area}:write`];
+        return [];
+      });
+
+    const effective = el("div", { class: "row tight" });
+    const refreshPreview = () => {
+      const granted = [...new Set([...current.baseline, ...grant.get()])];
+      const denied = new Set(refuse(deny.get()));
+      const result = denied.size ? expand(granted).filter((s) => !denied.has(s)) : granted;
+      setChildren(effective, result.length ? result.map((s) => chip(s)) : el("span", { class: "dim", text: "none" }));
+    };
+
+    const grant = scopePicker(catalogue.scopes, {
+      selected: current.extraScopes,
+      idPrefix: "grant",
+      onchange: () => refreshPreview(),
+    });
+    const deny = scopePicker(catalogue.scopes, {
+      selected: current.deniedScopes,
+      idPrefix: "deny",
+      onchange: () => refreshPreview(),
+    });
+
+    setChildren(
+      body,
+      el("p", {
+        class: "dim small",
+        text:
+          `${user.email} is a ${current.role}, which grants: ${current.baseline.join(", ") || "nothing"}. ` +
+          "Everything below is on top of that.",
+      }),
+      el("h3", { text: "Granted beyond the role" }),
+      grant.node,
+      el("h3", { text: "Denied despite the role" }),
+      el("p", {
+        class: "dim small",
+        text: "Denials are applied last and win. This is how you express “an ADMIN, but not bundles”.",
+      }),
+      deny.node,
+      el("h3", { text: "Effective" }),
+      effective,
+      status,
+      row(
+        el("button", {
+          type: "button",
+          class: "primary",
+          text: "Save",
+          onclick: async (event) => {
+            const extraScopes = grant.get();
+            const deniedScopes = deny.get();
+            const both = extraScopes.filter((s) => deniedScopes.includes(s));
+            if (both.length) {
+              status.textContent = `Cannot both grant and deny: ${both.join(", ")}`;
+              return;
+            }
+            status.textContent = "";
+            const saved = await act(
+              "permissions.user",
+              () => api(`/users/${user.id}/permissions`, { method: "PUT", body: { extraScopes, deniedScopes } }),
+              { button: event.currentTarget, refresh: users ? [users] : [] },
+            );
+            if (saved) closeModal();
+          },
+        }),
+        el("button", {
+          type: "button",
+          text: "Clear tuning",
+          onclick: () => {
+            grant.set([]);
+            deny.set([]);
+          },
+        }),
+        el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+      ),
+    );
+    refreshPreview();
+  })();
+}
+
 function sessionsPanel() {
   const sessions = new Resource("sessions", () => api("/sessions"));
   return card(
@@ -8820,7 +9180,7 @@ function signupsPanel() {
 
 /**
  * Scoped per-client credentials (`pa_…`). OWNER-only, because minting a token
- * can grant any scope — the server enforces that on every endpoint here, so a
+ * can grant any scope; the server enforces that on every endpoint here, so a
  * hidden destination is a convenience, not the control.
  *
  * The secret is shown exactly once, in a modal, and there is no endpoint that
@@ -8886,7 +9246,7 @@ VIEWS.tokens = (route) => {
               "div",
               {},
               el("h3", { text: "No client token exists" }),
-              el("p", { text: "Machine clients — the Discord bot, CI, monitoring — each want their own." }),
+              el("p", { text: "Machine clients, the Discord bot, CI, monitoring, each want their own." }),
               el(
                 "div",
                 { class: "retry-row" },
@@ -8908,7 +9268,7 @@ function mintPanel(tokens) {
     el("p", {
       class: "dim small",
       text:
-        "One token per client, carrying only the scopes that client needs — a leaked credential is then " +
+        "One token per client, carrying only the scopes that client needs; a leaked credential is then " +
         "confined to its area. No token can mint another token or manage accounts, however broadly it is scoped.",
     }),
     live(
@@ -9033,7 +9393,7 @@ function showMintedToken(minted) {
       el("p", {
         class: "error",
         text:
-          "Shown once. Nothing can reveal it again — copy it now and hand it over through a private channel. " +
+          "Shown once. Nothing can reveal it again; copy it now and hand it over through a private channel. " +
           "If you lose it, revoke this token and mint another.",
       }),
       el("pre", { text: minted.token }),
@@ -9052,7 +9412,7 @@ function showMintedToken(minted) {
               await navigator.clipboard.writeText(minted.token);
               toast("copied to clipboard");
             } catch {
-              toast("clipboard blocked — select the text manually", false);
+              toast("clipboard blocked; select the text manually", false);
             }
           },
         }),
@@ -9066,7 +9426,7 @@ function showMintedToken(minted) {
 
 /**
  * The signed-in principal's own view of itself: which credential this is, what
- * it may do, and — for a session backed by an account — the two credentials it
+ * it may do, and, for a session backed by an account, the two credentials it
  * can manage for itself without going through the Users view, which an ADMIN
  * cannot open.
  *
@@ -9095,9 +9455,9 @@ async function accountDialog() {
     "div",
     {},
     defs([
-      ["Actor", store.actor ?? "—"],
-      ["Account", store.email ?? "—"],
-      ["Role", store.role ? chip(store.role) : "—"],
+      ["Actor", store.actor ?? "-"],
+      ["Account", store.email ?? "-"],
+      ["Role", store.role ? chip(store.role) : "-"],
       [
         "Credential",
         store.kind === "root"

@@ -94,7 +94,7 @@ export async function collectInventoryMetrics(
   if (now.getTime() - lastArtifactScanMs >= ARTIFACT_SCAN_INTERVAL_MS) {
     lastArtifactScanMs = now.getTime();
     // pg_total_relation_size is catalogue arithmetic (O(1)) and counts TOAST,
-    // which is where artifact bodies actually live — SUM(size) would miss the
+    // which is where artifact bodies actually live; SUM(size) would miss the
     // compression and per-row overhead that fills the disk.
     const rows = await prisma.$queryRawUnsafe<ArtifactSizeRow[]>(
       `SELECT count(*) AS rows, pg_total_relation_size('artifacts') AS bytes FROM artifacts`,

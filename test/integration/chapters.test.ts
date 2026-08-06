@@ -15,7 +15,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  * actions it offers on a chapter that is already on MangaDex.
  *
  * The properties worth proving are the ones that cost real damage when they
- * regress, and every one of them needs a live postgres — the queue's unique
+ * regress, and every one of them needs a live postgres; the queue's unique
  * (kind, dedupe_key) constraint is the system under test:
  *
  *  - an action QUEUES work and never touches MangaDex from the API process;
@@ -27,7 +27,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  *  - the role gate holds: `chapters:write` alone is not enough, so a leaked
  *    machine token cannot unpublish anything;
  *  - and the unavailable card is regenerable, which is the whole reason `force`
- *    exists — without it the uploader treats an archived chapter as done.
+ *    exists; without it the uploader treats an archived chapter as done.
  */
 describe.skipIf(!dbReady())("chapter management endpoints", () => {
   const prisma = testPrisma();
@@ -44,7 +44,7 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
 
   /**
    * server.ts is owned by another module's integrator, so probe first and
-   * register by hand only when these routes are absent — registering twice
+   * register by hand only when these routes are absent; registering twice
    * throws, and skipping when they are wired would test a different server than
    * production runs.
    */
@@ -378,7 +378,7 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
     expect(whileLeased.statusCode).toBe(409);
     expect(whileLeased.json().outcome).toBe("leased");
 
-    // Once it has run, the slot is reusable — otherwise a chapter could be
+    // Once it has run, the slot is reusable; otherwise a chapter could be
     // edited exactly once, ever, because nothing deletes DONE rows.
     await prisma.uploadTask.update({ where: { id: taskId }, data: { state: "DONE", leaseId: null } });
     const again = await app.inject({
@@ -477,7 +477,7 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
     expect((audit.detail as { reason: string }).reason).toBe("duplicate upload");
     expect((audit.detail as { chapter: { chapterTitle: string } }).chapter.chapterTitle).toBeTruthy();
 
-    // The live row is left alone until the uploader succeeds — a queued delete
+    // The live row is left alone until the uploader succeeds; a queued delete
     // that fails must not have already erased our record of the chapter.
     expect(await prisma.uploadedChapter.count()).toBe(1);
   });
@@ -541,7 +541,7 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
         "would_queue",
       ]);
       expect(preview.json().results[0].mangaName).toBe("Test Series");
-      // Not even an audit row — the first call anyone makes is inert.
+      // Not even an audit row; the first call anyone makes is inert.
       expect(await prisma.uploadTask.count()).toBe(0);
       expect(await prisma.auditEvent.count()).toBe(0);
 
@@ -571,7 +571,7 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
       expect(tasks.map((t) => t.dedupeKey).sort()).toEqual([a.mdChapterId, b.mdChapterId].sort());
 
       // Per-chapter rows, so "why was this chapter deleted?" is answerable by
-      // subject — a batch that wrote only a summary would not answer it — plus
+      // subject, a batch that wrote only a summary would not answer it, plus
       // one summary row correlating them.
       const perChapter = await prisma.auditEvent.findMany({ where: { action: "chapter.delete" } });
       expect(perChapter.map((e) => e.subject).sort()).toEqual([a.mdChapterId, b.mdChapterId].sort());

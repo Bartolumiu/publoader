@@ -34,7 +34,7 @@ const server = buildServer(ctx);
  *
  * core-api hosts it because it is the only core service with a GitHub token and
  * egress; core-scheduler runs on the internal `data` network. It is a timer, not
- * a scheduler slot, and its dueness lives in the `settings` table — so replicas,
+ * a scheduler slot, and its dueness lives in the `settings` table; so replicas,
  * restarts and redeploys cannot make it run twice or drift. See
  * docs/operations.md §"Series-map sync".
  */
@@ -68,7 +68,7 @@ const seedOwner = async (): Promise<void> => {
 };
 
 /**
- * Metrics live on a SECOND, internal-only port — never on the public one.
+ * Metrics live on a SECOND, internal-only port; never on the public one.
  *
  * `config.port` is what the Cloudflare tunnel's Public Hostname points at, and
  * cloudflared forwards every path on that hostname. A /metrics route on that

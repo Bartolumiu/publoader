@@ -87,12 +87,12 @@ export interface LinkEmailInput {
   ttlSeconds: number;
   /** Present on INVITE and WELCOME so the recipient knows what they can do. */
   role?: string;
-  /** True when the account still has no password — the link is its only key. */
+  /** True when the account still has no password; the link is its only key. */
   needsPassword: boolean;
 }
 
 const NOT_YOU =
-  "If you did not expect this email, ignore it — the link only works once and expires on its own.";
+  "If you did not expect this email, ignore it; the link only works once and expires on its own.";
 
 /** The one message that matters: a link that signs the recipient in. */
 export function linkEmail(input: LinkEmailInput): OutgoingEmail {
@@ -155,7 +155,7 @@ export function linkEmail(input: LinkEmailInput): OutgoingEmail {
 /**
  * Self-signup landed, but an owner has to approve it before there is anything
  * to sign in to. Sent instead of a link so the request is acknowledged rather
- * than silently swallowed — and so the address is told it was used.
+ * than silently swallowed; and so the address is told it was used.
  */
 export function signupPendingEmail(to: string, dashUrl: string): OutgoingEmail {
   const body: Body = {
@@ -171,7 +171,7 @@ export function signupPendingEmail(to: string, dashUrl: string): OutgoingEmail {
 }
 
 /**
- * A password was set or replaced. Not a link — a notice, so that a password
+ * A password was set or replaced. Not a link; a notice, so that a password
  * change the account holder did not make is visible to them immediately.
  */
 export function passwordChangedEmail(to: string, dashUrl: string): OutgoingEmail {

@@ -1,6 +1,3 @@
-// Not self-registering: server.ts is owned elsewhere, so the integrator wires
-// this module in with `registerChapterRoutes(app, ctx)` next to the other route
-// modules.
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -33,66 +30,39 @@ import {
 import { manualTaskProblems } from "./queues.js";
 
 /**
- * Chapters, as chapters — the three places one can be looked at, and the three
- * things an operator can do to one that is already published.
+ * The three places a chapter can be looked at, and the three things an operator
+ * can do to one that is already published.
  *
- *   1. `GET /runs/:id/chapters`   what an extension FOUND on a given run, read
+ *   1. `GET /runs/:id/chapters`   what an extension found on a given run, read
  *                                 back out of the stored result envelope.
- *   2. `GET /queues/chapters`     what is ABOUT TO BE sent to MangaDex, in the
+ *   2. `GET /queues/chapters`     what is about to be sent to MangaDex, in the
  *                                 order the uploader will claim it.
- *   3. `GET /chapters`            what IS on MangaDex already, plus the
- *                                 archives of what has been edited, marked
- *                                 unavailable or deleted.
+ *   3. `GET /chapters`            what is on MangaDex already, plus the archives
+ *                                 of what has been edited, marked unavailable or
+ *                                 deleted.
  *
- * The rest of the API models this pipeline as runs, jobs, envelopes and queue
- * rows, which is the right model for operating it and the wrong one for reading
- * it: "did mangaplus pick up chapter 142?" was three joins and a `jsonb` path.
- * The first two are pure projections and own no storage — they read the
- * envelope and the queue where those already live, so neither can drift from
- * the thing it describes.
+ * The first two are pure projections and own no storage.
  *
- * The rest of this module is the third one, and the three things an operator
- * can do to a published chapter: edit its metadata, replace it with an
- * "unavailable" card, or delete it outright.
- *
- * WHY THIS IS NOT A MANGADEX CLIENT. Every action here queues an UploadTask and
- * returns. core-uploader is the only process that writes to MangaDex, and that
- * is a property worth more than the immediacy of a synchronous PUT: it is what
- * makes "one open upload session per account" enforceable, what gives every
- * change a retry budget and a dead-letter, and what stops two API replicas from
- * racing each other into a duplicate. The endpoints below therefore answer 202
- * with a task id — "queued", never "done" — and the operator watches the queue.
- *
- * The read side is direct: the four chapter tables answer immediately, and when
- * this instance holds MangaDex credentials the detail view also shows what
- * MangaDex currently says. That live read is the one that matters, because the
- * local row is a mirror that may be days old while the operator is deciding
- * what a public catalogue entry should look like. A MangaDex outage degrades
- * that to `mangadexError` and never makes the row unreadable.
+ * Every mutating route queues an UploadTask and returns 202. core-uploader is
+ * the only process that writes to MangaDex, which is what makes "one open upload
+ * session per account" enforceable, gives every change a retry budget and a
+ * dead-letter, and stops two API replicas racing into a duplicate.
  *
  * Guards, in the order they bite:
  *   1. `chapters:read` to look, `chapters:write` to queue anything.
- *   2. ADMIN-or-above by role on every mutating route — the same
- *      role-plus-scope construction routes/queues.ts uses for hand-enqueueing,
- *      and for the same reason: this reaches a public catalogue, and a
- *      CONTRIBUTOR must not.
+ *   2. ADMIN-or-above by role on every mutating route.
  *   3. A settled queue row for the chapter is superseded; a PENDING or LEASED
- *      one is a 409 naming it. Nothing here can touch work an uploader holds.
- *   4. Deleting needs `confirm: true`, because it is the one action MangaDex
- *      cannot give back.
+ *      one is a 409 naming it.
+ *   4. Deleting needs `confirm: true`.
  */
 
-/** Cap on one page of chapters. */
 const MAX_PAGE = 200;
 const DEFAULT_PAGE = 50;
 
 /**
- * Cap on a page of the two read-only projections below (a run's envelope and
- * the queue). Higher than `MAX_PAGE` because those rows are not archive rows an
- * action can be taken against — a segment may report up to
- * `MAX_CHAPTERS_PER_ENVELOPE` (20 000) and scrolling it is the whole use — and
- * because neither endpoint can mutate anything, so a wide page costs a query
- * rather than a public change.
+ * Cap on a page of the two read-only projections. Higher than `MAX_PAGE` because
+ * those rows are not archive rows an action can be taken against, and neither
+ * endpoint can mutate anything.
  */
 const MAX_PROJECTION_PAGE = 500;
 
@@ -100,13 +70,10 @@ const MAX_PROJECTION_PAGE = 500;
 const MANGA_BREAKDOWN_LIMIT = 200;
 
 /**
- * Hard ceiling on one bulk action.
- *
- * Lower than the 1000 routes/queues.ts allows, and for a reason: that cap bounds
- * a change to queue rows, this one bounds a change to public pages that readers
- * are looking at. Two hundred is a large deliberate action — a whole series, a
- * bad run's worth of uploads — and small enough that the dry run listing every
- * affected chapter is still something a person will actually read.
+ * Hard ceiling on one bulk action. Lower than the 1000 routes/queues.ts allows,
+ * because that cap bounds a change to queue rows and this one bounds a change to
+ * public pages. Small enough that the dry run listing every affected chapter is
+ * still readable.
  */
 const CHAPTER_BULK_CAP = 200;
 
@@ -114,13 +81,9 @@ const MD_CHAPTER_URL = "https://mangadex.org/chapter/";
 const MD_MANGA_URL = "https://mangadex.org/title/";
 
 /**
- * A MangaDex chapter id as it appears in our tables.
- *
- * Not `z.string().uuid()`: chapters migrated from the legacy Mongo collections
- * carry whatever id that database held, and refusing to *display* one because
- * it is not a well-formed uuid would hide exactly the rows most likely to need
- * attention. The charset is still closed, so nothing routable or injectable
- * gets through.
+ * A MangaDex chapter id as it appears in our tables. Not `z.string().uuid()`:
+ * chapters migrated from the legacy Mongo collections carry whatever id that
+ * database held. The charset is still closed.
  */
 const MdChapterId = z
   .string()
@@ -147,9 +110,8 @@ function oneOrMany<T extends readonly [string, ...string[]]>(values: T) {
 }
 
 /**
- * A boolean that may arrive as a query-string word. NOT `z.coerce.boolean()`,
- * which maps the string "false" to TRUE — the wrong direction to be wrong in on
- * a flag that guards a delete.
+ * A boolean that may arrive as a query-string word. Not `z.coerce.boolean()`,
+ * which maps the string "false" to true.
  */
 const Flag = z.preprocess(
   (value) => (typeof value === "string" ? value === "true" || value === "1" : value),
@@ -157,15 +119,10 @@ const Flag = z.preprocess(
 );
 
 /**
- * The fields a chapter edit may change, as MangaDex names them.
- *
- * This is deliberately the same vocabulary as `PUT /chapter/{id}` rather than
- * our column names: what an operator types here is what MangaDex receives, and
- * a translation layer in between is a place for the two to drift. `null` clears
- * a field; omitting it leaves it alone.
- *
- * Lengths mirror the MangaDex API's own limits. They are validated here rather
- * than discovered from a 400 half an hour later, when the task is claimed.
+ * The fields a chapter edit may change, in MangaDex's vocabulary rather than our
+ * column names, so there is no translation layer for the two to drift across.
+ * `null` clears a field; omitting it leaves it alone. Lengths mirror the
+ * MangaDex API's own limits.
  */
 const EditPayload = z
   .object({
@@ -179,10 +136,9 @@ const EditPayload = z
   .strict();
 
 /**
- * What a *bulk* edit may change: the fields a set of chapters can legitimately
- * share. Title, chapter number and external URL are one chapter's identity, and
- * writing one of those across two hundred chapters is not an operation anyone
- * wants — so it is not expressible here rather than merely discouraged.
+ * What a bulk edit may change: the fields a set of chapters can legitimately
+ * share. Title, chapter number and external URL are one chapter's identity, so
+ * they are not expressible here.
  */
 const BulkEditPayload = z
   .object({
@@ -220,23 +176,13 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
     };
 
     /**
-     * Every mutating route is ADMIN-or-above AND closed to api tokens, on top
-     * of `chapters:write` — the same construction, and the same reasoning, as
-     * `requireApplyRole` in routes/ops.ts.
+     * ADMIN-or-above and closed to api tokens, on top of `chapters:write`. The
+     * scope says the credential works on the chapter catalogue; the role says
+     * the principal may change a public one.
      *
-     * The scope says "this credential works on the chapter catalogue"; the role
-     * says "this principal may change a public one". Tokens are refused
-     * outright rather than judged on their role, because `adminAuthHook` gives
-     * every api token `adminRole = "ADMIN"` — a default meaning "not
-     * owner-equivalent", not "vetted human". Judged on the role alone, any
-     * token carrying `chapters:write` could unpublish chapters under the shared
-     * MangaDex account, which is precisely the blast radius scoped tokens exist
-     * to contain. The dashboard is the only caller, so closing this to tokens
-     * costs no capability, and the break-glass ADMIN_TOKEN is a `root`
-     * principal and still gets through.
-     *
-     * An allow-list on the role, not "refuse CONTRIBUTOR": a deny-list on a
-     * role enum grants every role added after it.
+     * Tokens are refused outright because `adminAuthHook` gives every api token
+     * `adminRole = "ADMIN"`. An allow-list on the role, not "refuse
+     * CONTRIBUTOR": a deny-list on a role enum grants every role added later.
      */
     async function requireAdminRole(req: FastifyRequest, reply: FastifyReply): Promise<void> {
       if (req.principal?.kind === "api-token") {
@@ -251,13 +197,10 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
     const chapterParam = z.object({ mdChapterId: MdChapterId });
 
     /**
-     * Find the chapter wherever it is recorded.
-     *
-     * Order matters: `uploaded` is the live mirror and wins, then the two
-     * archives that still describe something on MangaDex (a chapter carrying an
-     * unavailable card is still a published chapter, and an edited one
-     * certainly is), and `deleted` last — a hit there alone means the chapter is
-     * gone, which every action needs to refuse.
+     * Find the chapter wherever it is recorded. Order matters: `uploaded` is the
+     * live mirror and wins, then the two archives that still describe something
+     * on MangaDex, and `deleted` last, since a hit there alone means the chapter
+     * is gone.
      */
     async function locate(
       mdChapterId: string,
@@ -293,15 +236,10 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
     }
 
     /**
-     * Queue one chapter action.
-     *
-     * The payload is built by `chapterToTaskPayload` — the same function the
-     * processor writes its queue rows with — from the stored row, so the queued
-     * work describes the chapter the operator was actually looking at, and the
-     * per-kind sidecars ride along exactly as taskWorkers expects them.
-     * `manualTaskProblems` is the validator routes/queues.ts uses for a
-     * hand-built task: reusing it means a task that would throw on claim is
-     * refused now, and that the two paths cannot drift.
+     * Queue one chapter action. The payload is built by `chapterToTaskPayload`,
+     * the same function the processor writes its queue rows with, and validated
+     * by `manualTaskProblems`, the validator routes/queues.ts uses, so a task
+     * that would throw on claim is refused now and the two paths cannot drift.
      */
     async function queueAction(
       req: FastifyRequest,
@@ -338,8 +276,8 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
 
       const queued = await ctx.uploadTasks.requeueForChapter(opts.kind, dedupeKey, payload);
       if (!queued) {
-        // The slot is held by work that is already queued or in flight. Read the
-        // row only now, and only to name it — never to decide whether to write.
+        // The slot is held by work already queued or in flight. Read the row only
+        // now, and only to name it, never to decide whether to write.
         const existing = (await ctx.uploadTasks.forDedupeKey(dedupeKey)).find(
           (task) => task.kind === opts.kind,
         );
@@ -366,8 +304,7 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
         supersededCompletedTask: queued.superseded,
       });
 
-      // 202: the change is queued, not applied. The uploader may still fail it,
-      // and a client that reports "done" here would be lying.
+      // 202: the change is queued, not applied. The uploader may still fail it.
       return reply.code(202).send({
         ok: true,
         queued: true,
@@ -391,10 +328,8 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
 
     /**
      * How much each segment of a run reported, and which titles it was for.
-     *
      * Segments with no committed envelope come back with null counts rather than
-     * being absent: "3 of 4 segments reported" is what stops a chapter list being
-     * read as the whole picture when it is three quarters of one.
+     * being absent, so a partial picture cannot read as the whole one.
      */
     scope.get(
       "/api/v1/admin/runs/:id/chapters/summary",
@@ -419,8 +354,8 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           set: query.set,
           segments,
           // Named rather than left to the client to sum: the difference between
-          // "found nothing" and "has not reported yet" is the whole point of
-          // this endpoint.
+          // "found nothing" and "has not reported yet" is the point of this
+          // endpoint.
           segmentsTotal: segments.length,
           segmentsReported: reported.length,
           complete: reported.length === segments.length && segments.length > 0,
@@ -442,11 +377,9 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
      * The chapters one run found, in the order the extension reported them.
      *
      * `set=updated` (the default) is what the extension flagged as new or
-     * changed — the set the processor turns into upload and edit tasks.
-     * `set=all` is the optional full-catalogue snapshot, which only some
-     * extensions send and which drives removal detection; it is empty rather
-     * than absent when an extension does not send one, and the summary endpoint
-     * says which case a run is in.
+     * changed. `set=all` is the optional full-catalogue snapshot that drives
+     * removal detection; it is empty rather than absent when an extension does
+     * not send one, and the summary endpoint says which case a run is in.
      */
     scope.get(
       "/api/v1/admin/runs/:id/chapters",
@@ -491,8 +424,8 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           total: page.total,
           limit: query.limit,
           offset: query.offset,
-          // Offset paging is safe here and the reason is worth stating on the
-          // wire: a committed envelope never changes, so page 2 is stable.
+          // Offset paging is safe here: a committed envelope never changes, so
+          // page 2 is stable.
           order: "segmentIndex,position",
         };
       },
@@ -501,16 +434,13 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
     // ------------------------------------------------- queued, in claim order
 
     /**
-     * The upload queue read as chapters rather than as rows: which series, which
-     * chapter, in the order the uploader will claim them.
+     * The upload queue read as chapters rather than as rows.
      *
      * `position` is the place in the claim order across everything matching the
-     * filter, not within the page — so an operator can say "this is 14th" and
-     * mean it. Ordering is `not_before ASC` because that is literally the claim
-     * query's ORDER BY; see the comment on `UploadTaskStore.listChapters`.
+     * filter, not within the page. Ordering is `not_before ASC` because that is
+     * the claim query's ORDER BY; see `UploadTaskStore.listChapters`.
      *
-     * Defaults to PENDING because "what is going to be uploaded" is the
-     * question; pass `state` explicitly to see what has already run or failed.
+     * Defaults to PENDING; pass `state` explicitly to see what has already run.
      */
     scope.get(
       "/api/v1/admin/queues/chapters",
@@ -522,8 +452,8 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
             state: oneOrMany(UPLOAD_TASK_STATES).optional(),
             q: z.string().min(1).max(256).optional(),
             dedupeKey: z.string().min(1).max(256).optional(),
-            // The same two facets `/queues/tasks` takes. Both tabs read one
-            // queue, so a filter has to mean the same thing on either.
+            // The same two facets `/queues/tasks` takes, so a filter means the
+            // same thing on either tab.
             extension: z.string().min(1).max(128).optional(),
             language: z.string().min(1).max(32).optional(),
             limit: z.coerce.number().int().min(1).max(MAX_PROJECTION_PAGE).default(100),
@@ -567,12 +497,8 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
     // ------------------------------------------------------------------ read
 
     /**
-     * One page of an archive, newest first.
-     *
-     * `archive` selects which of the four tables is being read — what is on
-     * MangaDex now (`uploaded`), what was replaced by a card (`unavailable`),
-     * what was removed (`deleted`), and what has been edited since it was
-     * published (`edited`). They share a shape, so they share an endpoint.
+     * One page of an archive, newest first. `archive` selects which of the four
+     * tables is being read; they share a shape, so they share an endpoint.
      */
     /**
      * Bring the archives back in line with what MangaDex actually holds.
@@ -580,13 +506,13 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
      * The one endpoint here that does NOT queue an upload task, and the reason
      * it is allowed to write directly: it changes nothing on MangaDex. It reads
      * the catalogue and corrects our record of it. Queueing would be actively
-     * wrong — every chapter it finds is already unavailable or already gone, so
+     * wrong: every chapter it finds is already unavailable or already gone, so
      * running the workers over them would re-upload cards and re-issue deletes
      * for work MangaDex did on its own.
      *
      * The auth split is deliberate and is the only one in this module. A dry
      * run reads MangaDex and reports, so it sits at `chapters:read` and any
-     * scoped token may run it — that is what makes the state observable from a
+     * scoped token may run it; that is what makes the state observable from a
      * monitoring probe or the bot. Applying moves rows between tables, so it
      * takes the same guard as every other mutating route here: ADMIN-or-above
      * and closed to api tokens.
@@ -599,7 +525,7 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           z.object({
             dryRun: z.boolean().default(true),
             extensions: z.array(z.string().max(64)).max(50).default([]),
-            /** Skip the uploaded_chapters sweep — the slow half, and the only
+            /** Skip the uploaded_chapters sweep: the slow half, and the only
              *  one that can find deletions. */
             skipDeleted: z.boolean().default(false),
           }),
@@ -685,8 +611,6 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
         total: page.total,
         limit: query.limit,
         nextCursor: page.nextCursor,
-        // Named so a client never has to infer it, and so a cursor is obviously
-        // not an offset.
         order: "at,id (descending)",
         // Global rather than filtered, so a narrow filter cannot hide that an
         // extension has three hundred chapters marked unavailable.
@@ -695,7 +619,7 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
       };
     });
 
-    /** Per-extension counts for one archive — the filter picker's contents. */
+    /** Per-extension counts for one archive: the filter picker's contents. */
     scope.get(
       "/api/v1/admin/chapters/extensions",
       { preHandler: requireScope("chapters:read") },
@@ -710,12 +634,8 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
 
     /**
      * One chapter, everywhere it is recorded, plus what MangaDex says now and
-     * anything already queued against it.
-     *
-     * The three together are what an operator needs before touching a public
-     * entry: the row says what we think we published, MangaDex says what is
-     * actually there, and the queue says whether somebody has already asked for
-     * a change that has not landed yet.
+     * anything already queued against it: what we think we published, what is
+     * actually there, and whether a change is already in flight.
      */
     scope.get(
       "/api/v1/admin/chapters/:mdChapterId",
@@ -776,15 +696,9 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
     /**
      * The unavailable card as it would be posted, rendered now.
      *
-     * Built by `unavailableCardOptions` — the same function the uploader calls —
+     * Built by `unavailableCardOptions`, the same function the uploader calls,
      * from the live chapter when MangaDex is readable and from the stored row
-     * otherwise. That shared derivation is the whole point: an operator
-     * approving one image and publishing another would be worse than having no
-     * preview at all.
-     *
-     * Nothing is written and nothing is queued; this renders a PNG and returns
-     * it. `footerNote` and `unavailableAt` are echoed through so the preview can
-     * show exactly the overrides the action would carry.
+     * otherwise. Nothing is written and nothing is queued.
      */
     scope.get(
       "/api/v1/admin/chapters/:mdChapterId/card.png",
@@ -813,9 +727,8 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
         );
         return reply
           .header("content-type", "image/png")
-          // The image is derived from an admin-only record; the server's global
-          // onSend already sets no-store, and this is a second statement of the
-          // same intent for any intermediary that reads only one of them.
+          // The server's global onSend already sets no-store; this restates it
+          // for any intermediary that reads only one of them.
           .header("cache-control", "no-store, private")
           .send(png);
       },
@@ -829,9 +742,8 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
      * The body carries only what should change; the uploader lays it over
      * whatever MangaDex currently holds and sends the whole resource, because
      * `PUT /chapter/{id}` replaces rather than patches. That merge happens at
-     * execution time on purpose — MangaDex's `version` must be the one current
-     * when the write lands, and reading it here would guarantee it was stale by
-     * the time the task ran.
+     * execution time so MangaDex's `version` is the one current when the write
+     * lands.
      *
      * `oldInfo` records what the fields looked like when the operator decided,
      * which is what makes the `edited_chapters` history readable afterwards.
@@ -883,12 +795,10 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
               .code(400)
               .send({ error: `externalUrl scheme ${parsed.protocol} is not allowed (http or https only)` });
           }
-          // The same allowlist the sandbox enforces on the extension, applied to
-          // the operator correcting its output — this URL is published on a
-          // MangaDex entry. A host outside it is a warning rather than a refusal
-          // because a publisher legitimately moves domains, and the person
-          // typing it is the only one who can judge that; the refusal case
-          // (routes/ops.ts, links.raw on a title) is a field we own outright.
+          // A host outside the manifest allowlist warns rather than refuses,
+          // because a publisher legitimately moves domains and only the person
+          // typing it can judge that. The refusal case (routes/ops.ts,
+          // links.raw on a title) is a field we own outright.
           const manifest = await manifestFor(located.row.extension);
           if (manifest && !hostAllowed(url, manifest.allowed_hosts)) {
             warnings.push(
@@ -899,7 +809,7 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           payload.externalUrl = url;
         }
 
-        // What the fields look like now, preferring MangaDex over our mirror —
+        // What the fields look like now, preferring MangaDex over our mirror:
         // the history is only worth keeping if "old" is what was really there.
         const { detail } = await liveChapter(mdChapterId);
         const attrs = detail?.attributes;
@@ -936,17 +846,15 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
     );
 
     /**
-     * Queue "replace this chapter with an unavailable card".
+     * Queue "replace this chapter with an unavailable card": render the card,
+     * attach it as the chapter's only page through an edit session, repoint
+     * `externalUrl` away from the dead publisher link, and archive the row into
+     * `unavailable_chapters`.
      *
-     * What the uploader will do: render the card, attach it as the chapter's
-     * only page through an edit session, repoint `externalUrl` away from the
-     * dead publisher link, and archive the row into `unavailable_chapters`.
-     *
-     * `force` is what makes this repeatable. Without it a chapter that has
-     * already been marked unavailable is a no-op — correct for the automated
-     * pass, useless for an operator replacing a card that says the wrong thing
-     * — so asking again for an already-archived chapter is refused with the
-     * flag it needs, rather than silently doing nothing.
+     * `force` makes this repeatable. Without it an already-carded chapter is a
+     * no-op, which is correct for the automated pass and useless for an operator
+     * replacing a card that says the wrong thing, so it is refused with the flag
+     * it needs rather than silently doing nothing.
      */
     scope.post(
       "/api/v1/admin/chapters/:mdChapterId/unavailable",
@@ -997,16 +905,13 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
     );
 
     /**
-     * Queue a hard delete from MangaDex.
+     * Queue a hard delete from MangaDex: the one irreversible action the
+     * platform takes. Hence `confirm: true`, the admin role, a full audit row,
+     * and an archive write to `deleted_chapters` in the uploader before the live
+     * row is dropped.
      *
-     * The one irreversible action the platform takes, so: `confirm: true`, the
-     * admin role, a full audit row, and — in the uploader — an archive write to
-     * `deleted_chapters` BEFORE the live row is dropped, so the record of what
-     * was removed outlives it.
-     *
-     * Marking a chapter unavailable is nearly always the better answer, because
-     * it keeps the entry and its reading history on MangaDex; that is what the
-     * `alternative` field says out loud on every refusal for want of `confirm`.
+     * Marking a chapter unavailable is nearly always the better answer, which is
+     * what the `alternative` field says on every refusal for want of `confirm`.
      */
     scope.delete(
       "/api/v1/admin/chapters/:mdChapterId",
@@ -1051,31 +956,19 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
     // ----------------------------------------------------------------- bulk
 
     /**
-     * The same three actions over a set of chapters.
+     * The same three actions over a set of chapters, named either by `ids` (an
+     * enumeration the operator built) or by `filter` (a description, which can
+     * match more than whoever wrote it imagined). So:
      *
-     * Two ways to name the set, and they are not symmetrical. `ids` is an
-     * enumeration the operator built by looking at rows; `filter` is a
-     * description, and a description can match more than whoever wrote it
-     * imagined. So:
+     *  - `dryRun` defaults to TRUE. A live run needs `dryRun: false` and
+     *    `confirm: true`, two fields that cannot both be set by accident.
+     *  - The cap is 200 per call, applied inside id resolution, so an over-wide
+     *    filter cannot become an unbounded read on its way to an unbounded write.
      *
-     *  - **`dryRun` defaults to TRUE**, always. The first call anyone makes —
-     *    including a client that forgot the field — writes nothing and reports
-     *    exactly what it would have done, per chapter. A live run needs
-     *    `dryRun: false` AND `confirm: true`, two fields that cannot both be set
-     *    by accident. This is the purge doctrine from routes/queues.ts applied
-     *    to a sharper operation: purge deletes queue rows, this changes public
-     *    pages.
-     *  - **The cap is 200 per call** and is applied inside the id resolution, so
-     *    an over-wide filter cannot become an unbounded read on its way to
-     *    becoming an unbounded write. A truncated set says so and the operator
-     *    calls again.
-     *
-     * The dry run is genuinely predictive: it resolves the same rows, checks the
-     * same refusals (deleted, already-unavailable-without-force, a task already
-     * queued or leased) and reports per-chapter outcomes. It is a preview of
-     * this operation, not an estimate of it. The live path still does not
-     * read-then-write — every insert is the same guarded upsert, and a chapter
-     * whose state changed between the preview and the write comes back refused.
+     * The dry run resolves the same rows and checks the same refusals, so it is
+     * a preview rather than an estimate. The live path still does not
+     * read-then-write: every insert is the same guarded upsert, and a chapter
+     * whose state changed between preview and write comes back refused.
      */
     interface BulkItem {
       mdChapterId: string;
@@ -1141,10 +1034,8 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
 
     /**
      * Locate many chapters at once, by the same archive precedence as `locate`.
-     *
-     * Four queries whatever the size of the set — the per-chapter `locate` would
-     * be four *each*, and a two-hundred-chapter preview would spend eight
-     * hundred round trips deciding what it was going to do.
+     * Four queries whatever the size of the set, where the per-chapter `locate`
+     * would be four each.
      */
     async function locateMany(
       ids: readonly string[],
@@ -1193,9 +1084,9 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
 
       const [located, unavailableRows, queued] = await Promise.all([
         locateMany(ids),
-        // Only needed by the UNAVAILABLE path, where "is a card already posted?"
-        // decides whether `force` is required — and `locate` may have resolved
-        // the same chapter from `uploaded`, which does not answer that.
+        // Only the UNAVAILABLE path needs this: `locate` may have resolved the
+        // chapter from `uploaded`, which does not answer whether a card is
+        // already posted.
         opts.kind === "UNAVAILABLE" ? ctx.chapters.manyByIds("unavailable", ids) : Promise.resolve([]),
         ctx.uploadTasks.forDedupeKeys(ids),
       ]);
@@ -1326,7 +1217,7 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           ...describe(id),
         });
         // Per chapter, so "who changed this one, and why?" stays answerable by
-        // subject — a batch that wrote only a summary row would not answer it.
+        // subject; a batch that wrote only a summary row would not answer it.
         auditRows.push({
           actor: who,
           action: opts.auditAction,
@@ -1380,9 +1271,9 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
         },
       ]);
 
-      // 200, not 202: a batch where eight chapters queued and two were refused
-      // is a success and a partial failure at once, and only the per-chapter
-      // results say which is which.
+      // 200, not 202: a batch where eight chapters queued and two were refused is
+      // a success and a partial failure at once, and only the per-chapter results
+      // say which is which.
       return reply.send({
         ok: true,
         dryRun: false,
@@ -1401,21 +1292,15 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
     }
 
     /**
-     * Bulk edit.
-     *
-     * The fields are deliberately a SUBSET of the single-chapter edit: volume,
+     * Bulk edit. The fields are a subset of the single-chapter edit: volume,
      * language and groups are properties a set of chapters can legitimately
-     * share, while a title, a chapter number and an external URL are that one
-     * chapter's identity. Writing one title across two hundred chapters is not
-     * an operation anybody wants — it is a mistake with a keyboard shortcut — so
-     * the schema does not express it.
+     * share, while title, chapter number and external URL are one chapter's
+     * identity.
      *
-     * `oldInfo` here comes from our own rows rather than a live MangaDex read:
-     * two hundred chapter reads would be slower than the batch itself and would
-     * spend the MangaDex ratelimit the uploader needs. Correctness is unaffected
-     * — the uploader still merges against the live resource when it runs, and
-     * `version` is still read there — only the recorded "old" is our mirror's
-     * view, which is the trade the field is worth.
+     * `oldInfo` comes from our own rows rather than a live MangaDex read: two
+     * hundred chapter reads would be slower than the batch and would spend the
+     * ratelimit the uploader needs. The uploader still merges against the live
+     * resource when it runs, so only the recorded "old" is our mirror's view.
      */
     scope.post(
       "/api/v1/admin/chapters/bulk/edit",
@@ -1479,17 +1364,12 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
     );
 
     /**
-     * Bulk delete — the sharpest thing in this file.
-     *
-     * Nothing extra guards it beyond what the other two have, and that is a
-     * deliberate judgement rather than an oversight: the guards that matter are
-     * already the strongest the codebase has (ADMIN role, no api tokens,
+     * Bulk delete. Nothing extra guards it beyond what the other two have: the
+     * existing guards are already the strongest here (ADMIN role, no api tokens,
      * dry-run-by-default, an explicit confirm, a 200-chapter cap, the whole row
-     * in the audit trail per chapter). Adding a fourth flag here would train
-     * operators to set flags without reading them.
-     *
-     * The dry run is where the safety actually lives: it names every chapter it
-     * would remove, which is the last chance anyone gets.
+     * in the audit trail per chapter), and a fourth flag would train operators to
+     * set flags without reading them. The dry run names every chapter it would
+     * remove.
      */
     scope.post(
       "/api/v1/admin/chapters/bulk/delete",
@@ -1518,13 +1398,10 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
 
     /**
      * Why a mutating call would be refused, or null when it would be accepted.
-     * Returned by the GET so the dashboard can disable a control WITH the
-     * reason, rather than letting an operator discover it from a 403.
+     * Returned by the GET so the dashboard can disable a control with the reason.
      */
     function actionsBlockedReason(req: FastifyRequest, deletedOnly: boolean): string | null {
-      // Mirrors requireAdminRole exactly, api-token clause included. If the two
-      // ever disagree the dashboard offers a button that 403s, which is the
-      // failure this function exists to avoid.
+      // Must mirror requireAdminRole exactly, api-token clause included.
       if (req.principal?.kind === "api-token") return TOKEN_REFUSAL;
       if (req.adminRole !== "OWNER" && req.adminRole !== "ADMIN") return ROLE_REFUSAL;
       if (deletedOnly) return DELETED_REASON;
@@ -1546,7 +1423,7 @@ const TOKEN_REFUSAL =
 
 const DELETED_REASON =
   "this chapter is recorded as deleted from MangaDex, so there is nothing left to change. " +
-  "If MangaDex still has it, the archive row is stale — queue the action from the Queues view by hand.";
+  "If MangaDex still has it, the archive row is stale; queue the action from the Queues view by hand.";
 
 /** Refusal text when the only record of a chapter is its deletion. */
 function goneReason(located: { archive: ChapterArchive; row: ChapterRow }): string | null {

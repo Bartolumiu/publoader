@@ -100,7 +100,7 @@ async function main(): Promise<void> {
           continue;
         }
         // The legacy table held one row per extension, so re-importing must
-        // replace rather than append — otherwise a second import doubles every
+        // replace rather than append; otherwise a second import doubles every
         // schedule instead of restating it.
         await prisma.$transaction([
           prisma.scheduleEntry.deleteMany({ where: { extension } }),

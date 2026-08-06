@@ -8,14 +8,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * by `app.js` at runtime through `import()`, and are handed a `host` object that
  * `app.js` builds. Nothing checked that boundary. The server-side dashboard tests
  * assert the files are *served*; they never execute them, so a view that throws
- * on open, or reads a capability the host does not pass, would ship green — and
+ * on open, or reads a capability the host does not pass, would ship green; and
  * the operator would see the shell's "This view could not be loaded" card with no
  * test having failed. That is the whole gap being closed here.
  *
  * The host below deliberately mirrors `moduleHost()` in app.js EXACTLY, including
  * what it leaves out. `confirm` is the one that matters: app.js does not pass it,
  * because these views call it synchronously (`if (!confirm(msg)) return;`) while
- * the shell's own `confirmDialog` returns a promise, which is always truthy —
+ * the shell's own `confirmDialog` returns a promise, which is always truthy;
  * passing it would turn every confirmation in these views into a no-op that
  * always proceeds. So the omission is load-bearing, and a test that helpfully
  * supplied `confirm` would be testing a host that does not exist.
@@ -25,8 +25,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * DOM access goes through these locals rather than through ambient globals.
  *
  * The `jsdom` environment supplies the real globals at runtime; the reason not to
- * *type* them is that the only ways to do so — adding "dom" to tsconfig's `lib`,
- * or a `/// <reference lib="dom" />` here — apply to the whole program, and the
+ * *type* them is that the only ways to do so, adding "dom" to tsconfig's `lib`,
+ * or a `/// <reference lib="dom" />` here, apply to the whole program, and the
  * DOM's `fetch` signature then conflicts with Node's in `src/cli/admin.ts`.
  * Worse, it would stop the server-side sources failing to compile when they reach
  * for a browser global by mistake, which is a check worth keeping. So the DOM is
@@ -87,7 +87,7 @@ const RESPONSES: Record<string, unknown> = {
 
 const calls: string[] = [];
 
-/** Exactly the keys app.js's moduleHost() provides — no more. */
+/** Exactly the keys app.js's moduleHost() provides; no more. */
 function moduleHost() {
   return {
     el,
@@ -169,7 +169,7 @@ describe("dashboard module views", () => {
   });
 
   it("viewSysops needs no API call to render, so GitHub being down costs nothing", async () => {
-    // Maintenance draws its controls first and fetches only when asked — opening
+    // Maintenance draws its controls first and fetches only when asked; opening
     // the page does not reach out to GitHub, and an unreachable core-api or a
     // missing GITHUB_TOKEN still leaves every other action on the page usable.
     const { viewSysops } = await import("../../src/core/api/dashboard/sysops.js");

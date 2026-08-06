@@ -10,11 +10,11 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
 
 /**
  * The two chapter projections that own no storage: what a run FOUND, and what
- * the queue is ABOUT TO send. The third view — the archives of what is already
- * on MangaDex, and the actions against it — is chapters.test.ts.
+ * the queue is ABOUT TO send. The third view, the archives of what is already
+ * on MangaDex, and the actions against it, is chapters.test.ts.
  *
  * These need a real Postgres, and for a sharper reason than most: both read
- * paths are `jsonb` unnests and window functions over live tables —
+ * paths are `jsonb` unnests and window functions over live tables;
  * `jsonb_array_elements … WITH ORDINALITY` over stored envelopes, and
  * `row_number()` over the claim ordering. A mock would assert that the strings
  * were assembled, not that they answer the question.
@@ -193,8 +193,8 @@ describe.skipIf(!dbReady())("run and queue chapter projections", () => {
     });
     expect(list.statusCode).toBe(200);
     expect(list.json().total).toBe(3);
-    // Segment order first, then the position the extension reported them in —
-    // this is the extension's own ordering, not a sort we imposed.
+    // Segment order first, then the position the extension reported them in;
+ // this is the extension's own ordering, not a sort we imposed.
     expect(list.json().chapters.map((c: { position: number; segmentIndex: number }) => [c.segmentIndex, c.position])).toEqual([
       [0, 1],
       [0, 2],
@@ -314,7 +314,7 @@ describe.skipIf(!dbReady())("run and queue chapter projections", () => {
     const runs = await app.inject({ method: "GET", url: "/api/v1/admin/runs", headers: root });
     const counts = runs.json().runs.map((r: { chaptersFound: number | null }) => r.chaptersFound);
     expect(counts).toContain(2);
-    // The unreported run reads "—", not "0".
+    // The unreported run reads "-", not "0".
     expect(counts).toContain(null);
   });
 

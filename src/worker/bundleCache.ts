@@ -19,8 +19,8 @@ export class BundleExtractionError extends Error {
 /**
  * Content-addressed extension bundle cache.
  *
- * Bundles are immutable by construction — the directory name IS the sha256 of
- * the zip — so a hit needs no revalidation and concurrent workers on the same
+ * Bundles are immutable by construction, the directory name IS the sha256 of
+ * the zip, so a hit needs no revalidation and concurrent workers on the same
  * host can share the tree safely.
  */
 export class BundleCache {

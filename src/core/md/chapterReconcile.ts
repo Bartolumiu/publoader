@@ -9,12 +9,12 @@ import type { MdEntity, MdExtendedApi } from "./client.js";
  * `unavailable_chapters` and `deleted_chapters` are written only by the upload
  * task workers (taskWorkers.ts), at the moment those workers act. That makes
  * them a log of actions rather than a description of the catalogue, and the two
- * come apart whenever the log is incomplete — a database restored without them,
+ * come apart whenever the log is incomplete: a database restored without them,
  * a migration, work done before the tables existed. MangaDex still carries the
  * evidence; nothing here was reading it back.
  *
- * WHAT "MARKED UNAVAILABLE" LOOKS LIKE ON MANGADEX. An external chapter — the
- * only kind this platform publishes — normally has no pages at all: the reader
+ * WHAT "MARKED UNAVAILABLE" LOOKS LIKE ON MANGADEX. An external chapter, the
+ * only kind this platform publishes, normally has no pages at all: the reader
  * follows `externalUrl` to the publisher. Marking one unavailable replaces that
  * with a card, and the card is a page. So:
  *
@@ -23,8 +23,8 @@ import type { MdEntity, MdExtendedApi } from "./client.js";
  *
  * On the live group that separates without a single ambiguous case: 112 carded
  * chapters, every one with exactly one page, against 6108 live ones with none.
- * The `externalUrl` of a carded chapter is no help on its own — the card flow
- * repoints it at the series or domain root rather than clearing it — which is
+ * The `externalUrl` of a carded chapter is no help on its own; the card flow
+ * repoints it at the series or domain root rather than clearing it, which is
  * why the page count is the signal and the URL is not.
  *
  * Two passes, and they are not variations of one thing:
@@ -43,11 +43,11 @@ import type { MdEntity, MdExtendedApi } from "./client.js";
  *
  * Separately reported and never archived: chapters MangaDex itself refuses to
  * serve while they still have no card. That is MangaDex hiding a chapter rather
- * than us having marked it, so it is not an archive row — it is a list of
+ * than us having marked it, so it is not an archive row; it is a list of
  * chapters that arguably want an UNAVAILABLE task, which is an operator's call.
  *
  * Both passes are idempotent. An id already in an archive keeps the timestamp
- * it already has — that instant is when the change was first seen, and a later
+ * it already has: that instant is when the change was first seen, and a later
  * sweep does not know better.
  */
 
@@ -100,7 +100,7 @@ export interface ReconcileReport {
   deletedFound: number;
   deletedRecorded: number;
   /**
-   * Chapters MangaDex will not serve that carry no card of ours — MangaDex
+   * Chapters MangaDex will not serve that carry no card of ours; MangaDex
    * hiding a chapter rather than us having marked it. Never archived: these are
    * candidates for an UNAVAILABLE task, which is an operator's decision.
    */
@@ -239,7 +239,7 @@ export class ChapterReconciler {
       for (const row of rows) {
         // One read per row rather than a batched collection lookup: the page
         // count decides everything here, and only the single-chapter endpoint
-        // is authoritative for both halves of the question — it answers 404 for
+        // is authoritative for both halves of the question: it answers 404 for
         // a deletion, and carries `pages` for a card.
         const detail = await this.deps.md.chapterById(row.mdChapterId);
         if (detail === null) {

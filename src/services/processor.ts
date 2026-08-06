@@ -26,7 +26,7 @@ const log = createLogger("core-processor", config.logLevel);
 const prisma = getPrisma(config.databaseUrl);
 const md = new MdClient(config, prisma, log);
 // The processor is where the update plan is decided, so it is where the
-// per-manga report is sent from — the same point the Python version used.
+// per-manga report is sent from.
 const notifier = DiscordNotifier.fromConfig(config, log);
 const processor = new RunProcessor(prisma, md, log, { notifier });
 const settings = new SettingsStore(prisma);
@@ -40,8 +40,8 @@ process.on("SIGTERM", stop);
 process.on("SIGINT", stop);
 
 // Before the loop, so a port clash fails the deploy instead of leaving the
-// service unmonitored. Serves this process's registry — the upload-task depths
-// published below were previously recorded into a registry nothing could read.
+// service unmonitored. Serves this process's registry, including the
+// upload-task depths published below.
 const metricsServer = await startMetricsServer({
   service: "core-processor",
   log,

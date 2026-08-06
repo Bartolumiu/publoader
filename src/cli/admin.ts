@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `publoader-admin` — operator CLI for the platform control plane.
+ * `publoader-admin`: operator CLI for the platform control plane.
  *
  * Every subcommand is a thin wrapper over an admin API endpoint (see
  * docs/ipc-to-api-mapping.md for the legacy IPC equivalences). The CLI holds no
@@ -54,7 +54,7 @@ type RequestOptions = {
 
 /**
  * One request against the admin API. Non-2xx responses abort the process with
- * the server's error message — an operator running a script wants a non-zero
+ * the server's error message; an operator running a script wants a non-zero
  * exit, not a partially-applied change reported as success.
  */
 async function api<T = unknown>(path: string, opts: RequestOptions = {}): Promise<T> {
@@ -426,7 +426,7 @@ const tracked = program
  * `--namespace` names one of an extension's catalogues (viz has `shonenjump`
  * and `vizmanga`, where the same numeric id under each is a different series).
  * Omitting it means the single flat id space, which is what every extension
- * except viz has — so no existing invocation changes.
+ * except viz has; so no existing invocation changes.
  */
 tracked
   .command("list <extension>")
@@ -634,7 +634,7 @@ chapters
       // card of ours, so they are candidates for an UNAVAILABLE task rather
       // than chapters we have already marked.
       console.error(
-        `  ${res.hiddenOnMangadex.length} live chapter(s) MangaDex will not serve — ` +
+        `  ${res.hiddenOnMangadex.length} live chapter(s) MangaDex will not serve: ` +
           "not archived; queue them unavailable if that is what you want:",
       );
       for (const id of res.hiddenOnMangadex.slice(0, 20)) console.error(`    ${id}`);
@@ -646,7 +646,7 @@ chapters
       `${res.dryRun ? "would record" : "recorded"} ` +
         `${res.unavailableRecorded} unavailable and ${res.deletedRecorded} deleted ` +
         `(found ${res.unavailableFound} / ${res.deletedFound}; the rest were already archived)` +
-        (res.dryRun ? " — re-run with --apply to write" : ""),
+        (res.dryRun ? "; re-run with --apply to write" : ""),
     );
   });
 
@@ -717,8 +717,8 @@ extConfig
       method: "PUT",
       json: { overrideOptions },
     });
-    // A rejected row is not a failed command — the rest of the document landed —
-    // but it must be visible, because a dropped `custom_language` row silently
+    // A rejected row is not a failed command, the rest of the document landed,
+ // but it must be visible, because a dropped `custom_language` row silently
     // stops protecting a language from the chapter-removal pass.
     for (const row of res.rejected) {
       console.error(
@@ -1056,7 +1056,7 @@ bundle
       fail(`${root} does not exist`);
     }
     // The same build+zip the GitHub push webhook runs (core/webhooks/
-    // bundleBuilder.ts), so both publish paths produce identical bytes — and so
+    // bundleBuilder.ts), so both publish paths produce identical bytes; and so
     // an operator gets an immediate, obvious error rather than a 422 after
     // uploading tens of megabytes.
     let built;
@@ -1116,7 +1116,7 @@ tokens
 
 tokens
   .command("list")
-  .description("issued tokens (metadata only — secrets are unrecoverable)")
+  .description("issued tokens (metadata only; secrets are unrecoverable)")
   .action(async () => {
     const res = await api<{ tokens: Record<string, unknown>[] }>("/api/v1/admin/tokens");
     table(res.tokens, [
@@ -1305,11 +1305,11 @@ const errorFeed = program
     console.log("");
     if (opts.cleared === "without" && res.clearedHidden > 0) {
       console.log(
-        `${res.clearedHidden} cleared entr${res.clearedHidden === 1 ? "y" : "ies"} hidden — ` +
+        `${res.clearedHidden} cleared entr${res.clearedHidden === 1 ? "y" : "ies"} hidden; ` +
           "`padmin errors --cleared only` to review, `errors restore` to un-clear.",
       );
     }
-    console.log("Container logs are not aggregated here — use `docker compose logs` on the host.");
+    console.log("Container logs are not aggregated here; use `docker compose logs` on the host.");
   });
 
 errorFeed
@@ -1317,7 +1317,7 @@ errorFeed
   .description("mark failures as read and dealt with, so they drop out of the feed")
   .argument("[id...]", "entry ids, or the leading characters of one (as printed by `padmin errors`)")
   .option("--all", "clear every outstanding failure")
-  .option("--note <text>", "why it is fine — shown to whoever reviews cleared entries")
+  .option("--note <text>", "why it is fine; shown to whoever reviews cleared entries")
   .action(async (ids: string[], opts: { all?: boolean; note?: string }) => {
     // Both at once is a contradiction worth rejecting rather than resolving: it
     // reads as "clear these" and would clear everything.
@@ -1338,7 +1338,7 @@ errorFeed
 
     for (const skip of res.skipped ?? []) console.log(`skipped ${skip.id}: ${skip.reason}`);
     ok(
-      `${res.cleared} failure(s) cleared — hidden from the feed. Nothing else changed: ` +
+      `${res.cleared} failure(s) cleared; hidden from the feed. Nothing else changed: ` +
         "the jobs, tasks and submissions keep their state, anything that fails again reappears, " +
         "and `errors restore` undoes this.",
     );
@@ -1419,6 +1419,144 @@ program
     kv(res.workers);
     console.log("");
     kv({ quarantined: res.quarantined, paused: res.paused });
+  });
+
+// ---- permission tuning ----
+const permissions = program
+  .command("permissions")
+  .description("what each role means here, and per-account grants and denials");
+
+/** Shared by every subcommand below: `--scopes a,b,c`, or empty for none. */
+function scopeList(raw: string | undefined): string[] {
+  if (raw === undefined) return [];
+  return [...new Set(raw.split(",").map((s) => s.trim()).filter(Boolean))];
+}
+
+interface RoleBaselineRow {
+  role: string;
+  scopes: string[];
+  defaults: string[];
+  custom: boolean;
+  tunable: boolean;
+  updatedBy: string | null;
+  updatedAt: string | null;
+}
+
+permissions
+  .command("show")
+  .description("the scope taxonomy and every role's current baseline")
+  .action(async () => {
+    const res = await api<{
+      scopes: { name: string; description: string }[];
+      roles: RoleBaselineRow[];
+      tunableRoles: string[];
+    }>("/api/v1/admin/permissions");
+    console.log("scopes:");
+    const width = Math.max(...res.scopes.map((s) => s.name.length));
+    for (const s of res.scopes) console.log(`  ${s.name.padEnd(width)}  ${s.description}`);
+    console.log("");
+    console.log("roles:");
+    table(res.roles, [
+      { header: "ROLE", get: (r) => r.role },
+      { header: "SOURCE", get: (r) => (r.custom ? "custom" : r.tunable ? "default" : "fixed") },
+      { header: "SCOPES", get: (r) => r.scopes.join(",") },
+      { header: "CHANGED BY", get: (r) => r.updatedBy ?? "-" },
+    ]);
+    console.log("");
+    console.log(`Tunable roles: ${res.tunableRoles.join(", ")}. OWNER is the wildcard by construction.`);
+  });
+
+permissions
+  .command("set-role <role>")
+  .description("redefine a role's baseline (ADMIN | CONTRIBUTOR); replaces the whole list")
+  .requiredOption("--scopes <list>", "comma-separated scopes, or a preset name from `tokens scopes`")
+  .action(async (role: string, opts: { scopes: string }) => {
+    const requested = scopeList(opts.scopes);
+    if (requested.length === 0) fail("--scopes must list at least one scope");
+    // Presets are the least-privilege path, so accept one by name here too.
+    const { presets } = (await api("/api/v1/admin/tokens/scopes")) as {
+      presets: Record<string, string[]>;
+    };
+    const scopes = [...new Set(requested.flatMap((entry) => presets[entry] ?? [entry]))];
+    const res = await api<{ role: string; scopes: string[] }>(
+      `/api/v1/admin/permissions/roles/${encodeURIComponent(role.toUpperCase())}`,
+      { method: "PUT", json: { scopes } },
+    );
+    ok(`${res.role} baseline is now: ${res.scopes.join(", ")}`);
+    console.log("Open sessions pick this up within a few seconds — no re-login needed.");
+  });
+
+permissions
+  .command("reset-role <role>")
+  .description("drop a custom baseline and track the shipped default again")
+  .action(async (role: string) => {
+    const res = await api<{ role: string; scopes: string[] }>(
+      `/api/v1/admin/permissions/roles/${encodeURIComponent(role.toUpperCase())}`,
+      { method: "DELETE" },
+    );
+    ok(`${res.role} is back on the shipped default: ${res.scopes.join(", ")}`);
+  });
+
+permissions
+  .command("user <id>")
+  .description("one account's permissions, and the parts that produced them")
+  .action(async (id: string) => {
+    const res = await api<{
+      email: string;
+      role: string;
+      baseline: string[];
+      extraScopes: string[];
+      deniedScopes: string[];
+      effective: string[];
+      tunable: boolean;
+    }>(`/api/v1/admin/users/${id}/permissions`);
+    kv({
+      email: res.email,
+      role: res.role,
+      baseline: res.baseline.join(",") || "none",
+      granted: res.extraScopes.join(",") || "none",
+      denied: res.deniedScopes.join(",") || "none",
+      effective: res.effective.join(",") || "none",
+    });
+    if (!res.tunable) {
+      console.log("");
+      console.log("This account is an OWNER: it holds every scope and ignores grants and denials.");
+    }
+  });
+
+permissions
+  .command("set-user <id>")
+  .description("grant and deny scopes for one account; both lists are replaced wholesale")
+  .option("--grant <list>", "comma-separated scopes to add on top of the role")
+  .option("--deny <list>", "comma-separated scopes to refuse despite the role")
+  .option("--clear", "remove all tuning and leave the account exactly its role")
+  .action(async (id: string, opts: { grant?: string; deny?: string; clear?: boolean }) => {
+    if (opts.clear && (opts.grant || opts.deny)) {
+      fail("--clear cannot be combined with --grant or --deny");
+    }
+    if (!opts.clear && opts.grant === undefined && opts.deny === undefined) {
+      fail("pass --grant, --deny, or --clear");
+    }
+    // Omitting one list means "leave it as it is", not "empty it" — a command
+    // that only mentions --deny must not silently drop existing grants.
+    const current = await api<{ extraScopes: string[]; deniedScopes: string[] }>(
+      `/api/v1/admin/users/${id}/permissions`,
+    );
+    const json = opts.clear
+      ? { extraScopes: [], deniedScopes: [] }
+      : {
+          extraScopes: opts.grant === undefined ? current.extraScopes : scopeList(opts.grant),
+          deniedScopes: opts.deny === undefined ? current.deniedScopes : scopeList(opts.deny),
+        };
+    const res = await api<{ extraScopes: string[]; deniedScopes: string[]; effective: string[] }>(
+      `/api/v1/admin/users/${id}/permissions`,
+      { method: "PUT", json },
+    );
+    kv({
+      granted: res.extraScopes.join(",") || "none",
+      denied: res.deniedScopes.join(",") || "none",
+      effective: res.effective.join(",") || "none",
+    });
   });
 
 program

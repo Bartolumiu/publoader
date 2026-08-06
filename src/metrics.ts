@@ -18,14 +18,13 @@ const h = (name: string, help: string, labelNames: string[] = [], buckets?: numb
 
 /**
  * A "seconds since last tick" gauge set by the ticking process itself cannot
- * report the failure it exists to report. `publoader_scheduler_lag_seconds`
- * used to be written as `set(0)` at the top of every tick, so it read 0 while
- * the scheduler was healthy — and *also* read 0 forever once the loop wedged,
- * because the only code that could raise it is the code that stopped running.
- * The shape is wrong, not the threshold.
+ * report the failure it exists to report: written as `set(0)` at the top of
+ * every tick it reads 0 while the scheduler is healthy, and reads 0 forever
+ * once the loop wedges, because the only code that could raise it is the code
+ * that stopped running.
  *
- * Recording the tick's *timestamp* moves the subtraction to the scraper, which
- * is still running when the scheduler is not:
+ * Recording the tick's timestamp instead moves the subtraction to the scraper,
+ * which is still running when the scheduler is not:
  *
  *   time() - publoader_scheduler_last_tick_timestamp_seconds > 120
  *
@@ -54,7 +53,7 @@ export const metrics = {
    * REMOVED from the registry, kept as a no-op so the one remaining call site
    * (`core/scheduler/service.ts` tick()) still compiles. Nothing is exported
    * under `publoader_scheduler_lag_seconds` any more, so it cannot mislead a
-   * scrape. Delete this together with that call — see the note above.
+   * scrape. Delete this together with that call; see the note above.
    */
   runsByState: g("publoader_runs", "Runs by state", ["state"]),
   /**

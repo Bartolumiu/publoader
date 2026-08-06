@@ -9,7 +9,7 @@
 # What it proves that unit tests cannot: a real Postgres, real leases expiring
 # in real time, two independent workers competing for jobs over HTTP, and the
 # uploader driving an actual MangaDex-shaped API. Kill worker-a mid-job and
-# watch worker-b pick the job up — that is the failover test in
+# watch worker-b pick the job up; that is the failover test in
 # docs/deployment.md, and it runs here in about two minutes.
 #
 # THIS STACK IS NOT SECURE AND IS NOT MEANT TO BE. The admin token is
@@ -42,7 +42,7 @@ x-core-build: &core-build
     dockerfile: docker/core/Dockerfile
 
 # Everything points at the mock instead of MangaDex. The credentials are
-# nonsense because the mock accepts anything — and because a dev stack that
+# nonsense because the mock accepts anything; and because a dev stack that
 # holds real MangaDex credentials will eventually upload to real MangaDex.
 x-dev-env: &dev-env
   DATABASE_URL: postgresql://publoader:dev@postgres:5432/publoader?schema=public&connection_limit=5
@@ -93,7 +93,7 @@ services:
   # and destroyed constantly, and pushing the schema directly means the stack
   # works before the migration history exists and never needs a shadow
   # database. Production does the opposite (versioned migrations, no schema
-  # inference) — see docker/core/docker-compose.yml.
+  # inference): see docker/core/docker-compose.yml.
   #
   # The partial unique index is then applied by hand because Prisma cannot
   # express it declaratively (see the comment on ResultSubmission in
@@ -123,7 +123,7 @@ services:
 
   # --- mock-md --------------------------------------------------------------
   # Stands in for both api.mangadex.org and auth.mangadex.org. Records every
-  # write so a test can assert what the uploader actually did — GET
+  # write so a test can assert what the uploader actually did; GET
   # /_test/uploads is the assertion surface, POST /_test/seed the fixture one.
   mock-md:
     build:
@@ -180,14 +180,14 @@ services:
       BOOTSTRAP_DIR: /bootstrap
       BOOTSTRAP_WORKERS: a,b
     volumes:
-      # A script, not configuration — no service in any stack mounts a config
+      # A script, not configuration; no service in any stack mounts a config
       # file. Everything configurable is an env var or a Docker secret, and
       # runtime settings live in Postgres.
       - ./bootstrap.mjs:/bootstrap.mjs:ro
       - enroll-tokens:/bootstrap
     # Root because the shared volume is root-owned on creation and this
     # container has to create files in it. It runs for two seconds, writes two
-    # disposable tokens, and exits — the tradeoff is bounded and dev-only.
+    # disposable tokens, and exits; the tradeoff is bounded and dev-only.
     user: root
     command: ["node", "/bootstrap.mjs"]
 
@@ -243,7 +243,7 @@ services:
   # the first is still running, two envelopes racing for the same job. One
   # worker never exercises any of that.
   #
-  # Each has its OWN state volume — sharing one would let them share a worker
+  # Each has its OWN state volume; sharing one would let them share a worker
   # identity, which is precisely the thing the token model forbids.
   worker-a: &dev-worker
     image: publoader/worker:dev

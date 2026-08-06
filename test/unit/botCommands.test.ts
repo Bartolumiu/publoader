@@ -67,7 +67,7 @@ describe("command table", () => {
     expect(new Set(names).size).toBe(names.length);
   });
 
-  it("keeps builder names in step with command names — a mismatch would route to nothing", () => {
+  it("keeps builder names in step with command names; a mismatch would route to nothing", () => {
     for (const command of ALL_COMMANDS) {
       expect(command.builder.toJSON().name).toBe(command.name);
     }
@@ -323,7 +323,7 @@ describe("/schedule", () => {
     });
     const reply = await invoke("schedule", api, {}, "list");
     expect(reply.text).toContain("15:00 UTC daily");
-    expect(reply.text).toContain("01:00 UTC wed `clean` — weekly deep clean");
+    expect(reply.text).toContain("01:00 UTC wed `clean`, weekly deep clean");
     expect(reply.text).toContain("*(override)*");
     expect(reply.text).toContain("01:00 UTC daily `update`");
   });
@@ -605,7 +605,7 @@ describe("/workers", () => {
     expect(reply.text).toContain("heartbeat never");
   });
 
-  it("drains and activates without confirmation — both are reversible", async () => {
+  it("drains and activates without confirmation; both are reversible", async () => {
     const drain = vi.fn().mockResolvedValue({ ok: true, status: "DRAINED" });
     await invoke("workers", fakeApi({ workerAction: drain }), { id: "w1" }, "drain");
     expect(drain).toHaveBeenCalledWith("discord:ardax", "w1", "drain");
@@ -661,7 +661,7 @@ describe("/untracked and /tracked", () => {
     expect((await invoke("untracked", api, { id: "u1", confirm: true }, "approve")).text).toContain("md-uuid");
   });
 
-  it("skips without confirmation — skipping is reversible by re-reporting", async () => {
+  it("skips without confirmation; skipping is reversible by re-reporting", async () => {
     const skipUntracked = vi.fn().mockResolvedValue({ ok: true });
     await invoke("untracked", fakeApi({ skipUntracked }), { id: "u1" }, "skip");
     expect(skipUntracked).toHaveBeenCalledWith("discord:ardax", "u1");
@@ -737,7 +737,7 @@ describe("actorFor", () => {
     expect(actorFor("ardax")).toBe("discord:ardax");
   });
 
-  it("strips anything that could forge a header — the username is untrusted input", () => {
+  it("strips anything that could forge a header; the username is untrusted input", () => {
     // CRLF plus a second header name is the whole attack; neither the newlines
     // nor the colon survive.
     expect(actorFor("ard\r\nx-actor: admin")).toBe("discord:ardx-actoradmin");
@@ -822,7 +822,7 @@ describe("/queue (upload tasks)", () => {
     expect(retryUploadTask).toHaveBeenCalledWith("discord:ardax", "task-1");
   });
 
-  it("refuses to cancel without confirmation — the chapter would never upload", async () => {
+  it("refuses to cancel without confirmation; the chapter would never upload", async () => {
     const cancelUploadTask = vi.fn();
     const reply = await invoke("queue", fakeApi({ cancelUploadTask }), { id: "task-1" }, "cancel");
     expect(cancelUploadTask).not.toHaveBeenCalled();
@@ -964,7 +964,7 @@ describe("/errors", () => {
     const quiet = fakeApi({ errors: vi.fn().mockResolvedValue({ errors: [], clearedHidden: 0 }) });
     expect((await invoke("errors", quiet, {}, "list")).text).toContain("Nothing has failed recently");
 
-    // Same empty list, but four failures were dealt with — an operator deciding
+    // Same empty list, but four failures were dealt with; an operator deciding
     // whether to dig further needs that difference.
     const handled = fakeApi({ errors: vi.fn().mockResolvedValue({ errors: [], clearedHidden: 4 }) });
     const reply = await invoke("errors", handled, {}, "list");
@@ -1042,7 +1042,7 @@ describe("retired pointers stay accurate as endpoints land", () => {
     expect((await invoke("login", fakeApi())).text).toContain("/mdauth clear");
   });
 
-  it("no longer registers queue or mdauth as retired — they are real commands", () => {
+  it("no longer registers queue or mdauth as retired; they are real commands", () => {
     const retiredNames = RETIRED_COMMANDS.map((r) => r.name);
     expect(retiredNames).not.toContain("queue");
     expect(retiredNames).not.toContain("mdauth");

@@ -18,7 +18,7 @@ export class BundleRejectedError extends Error {
  * Content-addressed extension bundles. A bundle is a zip of one extension
  * directory, published by the operator (CLI/admin API) from a known repo
  * commit. Workers download by extension+sha256 and verify the hash before
- * execution — the sha256 in the job spec is the version pin.
+ * execution; the sha256 in the job spec is the version pin.
  */
 export class BundleStore {
   constructor(private readonly prisma: PrismaClient) {}
@@ -29,7 +29,7 @@ export class BundleStore {
     sourceCommit?: string;
     /**
      * Escape hatch for republishing a pre-v2 python bundle (operator-only,
-     * audit-logged at the route). Not for new work — it exists so a rollback
+     * audit-logged at the route). Not for new work; it exists so a rollback
      * to a known-good legacy bundle is possible without a code change.
      */
     allowLegacy?: boolean;
@@ -77,7 +77,7 @@ export class BundleStore {
       },
       // Same extension+version republished with different content: replace,
       // new sha becomes the pin for future jobs (old jobs keep their pin but
-      // can no longer fetch the old bytes — republish under a new version to
+      // can no longer fetch the old bytes; republish under a new version to
       // keep both).
       update: {
         sha256,
@@ -94,7 +94,7 @@ export class BundleStore {
   /**
    * One-time import of the bundle's legacy JSON data files into the database.
    * The DB is the source of truth for runtime config: existing TrackedManga
-   * rows and ExtensionConfig are never overwritten by later publishes — the
+   * rows and ExtensionConfig are never overwritten by later publishes; the
    * files only seed missing state (migration convenience).
    */
   private async seedConfigFromBundle(manifest: Manifest, zipData: Buffer): Promise<void> {
@@ -135,17 +135,15 @@ export class BundleStore {
    * Reconcile the bundle's `manga_id_map.json` against the tracked table.
    *
    * The database is authoritative for the tracked map, but contributors still
-   * add series by editing that file and opening a pull request — so a publish
+   * add series by editing that file and opening a pull request; so a publish
    * has to honour the file without trampling decisions made after it.
    * `source` is what makes that possible:
    *
-   *   - a NEW pair is inserted (this is the contributor workflow, and it works);
+   *   - a new pair is inserted, which is the contributor workflow;
    *   - a pair whose row came from a previous import (`bundle-import`) is
-   *     UPDATED, so correcting a wrong id in git actually takes effect — the
-   *     previous create-only behaviour silently ignored those edits, which is a
-   *     bad thing to discover after opening a PR;
+   *     updated, so correcting a wrong id in git takes effect;
    *   - a row an operator set by hand (`operator:…`) or the title pipeline
-   *     created (`auto`) is LEFT ALONE, because it represents a later, more
+   *     created (`auto`) is left alone, because it represents a later and more
    *     informed decision than the file's.
    *
    * Nothing is ever deleted here: removing a line from the map must not silently
@@ -162,7 +160,7 @@ export class BundleStore {
       where: { extension },
       select: { namespace: true, mangaId: true, mdMangaId: true, source: true },
     });
-    // Keyed on the row identity — (namespace, mangaId) — not on mangaId alone.
+    // Keyed on the row identity, (namespace, mangaId), not on mangaId alone.
     // Keying on the external id by itself is what let viz's two catalogues,
     // which reuse numeric ids, overwrite each other.
     const byPair = new Map(
@@ -262,23 +260,19 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * misread map means either "nothing is tracked" (every series is reported
  * untracked) or, worse, series pointed at the wrong MangaDex title:
  *
- *   {mdMangaId: [externalId, …]}          mangaplus — many external ids per
+ *   {mdMangaId: [externalId, …]}          mangaplus; many external ids per
  *                                         title, one per language edition
- *   {externalId: mdMangaId}               alpha_manga — the forward direction
- *   {namespace: {externalId: mdMangaId}}  viz — TWO catalogues (`shonenjump`,
+ *   {externalId: mdMangaId}               alpha_manga, the forward direction
+ *   {namespace: {externalId: mdMangaId}}  viz, TWO catalogues (`shonenjump`,
  *                                         `vizmanga`) in one extension, where
  *                                         the same numeric id under each is a
  *                                         different series
  *
- * They are told apart by the type of each top-level VALUE (array, string,
+ * They are told apart by the type of each top-level value (array, string,
  * object), per entry rather than for the file as a whole, so a hand-edited file
  * that mixes them still imports. A namespace's contents may themselves be in
  * either flat shape. The MangaDex side is always the uuid; a row where neither
  * side is one is skipped rather than inserted backwards.
- *
- * NOTE: alpha_manga's shape was previously dropped on the floor — the old
- * parser required array values, so `{externalId: mdMangaId}` seeded nothing at
- * all and viz's nested map likewise seeded nothing.
  */
 export function parseMangaIdMapFile(document: unknown): ParsedIdMapRow[] {
   if (!isPlainObject(document)) return [];
@@ -320,10 +314,9 @@ export function parseMangaIdMapFile(document: unknown): ParsedIdMapRow[] {
  * Best-effort check that a node bundle's entrypoint is actually there and
  * actually an ES module with a default export.
  *
- * This is not a parser and does not try to be one — the real validation is
- * that the runner imports the file and refuses it if `default` is not a
- * function. The point is to fail at publish, where an operator is watching,
- * rather than on a worker an hour later.
+ * Not a parser: the real validation is that the runner imports the file and
+ * refuses it if `default` is not a function. This just fails at publish, where
+ * an operator is watching, rather than on a worker an hour later.
  */
 function assertNodeEntrypoint(manifest: Manifest, zipData: Buffer): void {
   let zip: AdmZip;
@@ -361,7 +354,7 @@ function assertNodeEntrypoint(manifest: Manifest, zipData: Buffer): void {
  * A plain `source.includes("export default")` looked sufficient and was not:
  * esbuild rewrites `export default factory` into `export { factory as default }`
  * when it bundles, so every TypeScript extension built through the publish
- * pipeline would have been rejected with "has no default export" — a confusing
+ * pipeline would have been rejected with "has no default export"; a confusing
  * failure for a bundle that is completely correct.
  *
  * This stays a cheap textual check on purpose. The authoritative validation is

@@ -6,7 +6,7 @@
  * This lives here rather than in the CLI because two callers need it: the
  * operator running `publoader-admin bundle publish <dir>` on a laptop, and the
  * GitHub push webhook building a directory it just extracted from a repo
- * archive. Both must produce byte-identical archives for the same input — the
+ * archive. Both must produce byte-identical archives for the same input; the
  * sha256 of this zip is the version pin a worker verifies, so two publish
  * paths that disagree would be two different programs.
  *
@@ -45,7 +45,7 @@ export const ZIP_EXCLUDED = new Set(["__pycache__", ".git", "node_modules", "dis
  * the root.
  *
  * Entries are added in sorted order and with a fixed timestamp so the same
- * directory always produces the same bytes — otherwise the content-addressed
+ * directory always produces the same bytes; otherwise the content-addressed
  * sha256 would change on every rebuild and each webhook delivery would look
  * like a new version of identical code.
  */
@@ -79,30 +79,30 @@ const ZIP_EPOCH = new Date("2020-01-01T00:00:00Z");
 /**
  * A bundle ships ONE self-contained ESM file. When the extension directory has
  * TypeScript sources (or a package.json build script implying a toolchain),
- * esbuild produces that file here, at publish time — never on a worker.
+ * esbuild produces that file here, at publish time; never on a worker.
  * Workers receive pre-built, content-addressed code and have no compiler, no
  * package manager, and no reason to acquire either.
  *
  * `external: []` means dependencies are inlined: what the sha256 pins is the
  * complete program, so a worker's execution cannot be changed by anything
  * resolving differently later. The flip side is that every import must be
- * resolvable from `root` — a node builtin or a relative path. An extension
+ * resolvable from `root`: a node builtin or a relative path. An extension
  * that imports a third-party package cannot be built from a bare repo
  * checkout, which is why the webhook path is limited to dependency-free
  * extensions (see docs/webhooks.md).
  *
- * The build runs in a SUBPROCESS with a timeout, a heap ceiling and no inherited
+ * The build runs in a subprocess with a timeout, a heap ceiling and no inherited
  * environment (core/sysops/buildSandbox.ts). `root` holds source that arrived
- * from a repository or an upload, and it used to be handed to esbuild in this
- * process, holding every credential the service has — including in the one case
- * where esbuild will read a file the sources point it at (`tsconfig.json` with
+ * from a repository or an upload, so running esbuild in this process would give
+ * that source every credential the service holds, including in the one case
+ * where esbuild reads a file the sources point it at (`tsconfig.json` with
  * absolute `compilerOptions.paths`). See that module for the details.
  *
  * absWorkingDir + a relative entry point keeps the output free of absolute
  * paths: esbuild derives both its file comments and its generated symbol names
  * from the path it was given, so building the same commit out of a different
- * temp directory would otherwise produce different bytes — a new sha256 for
- * identical code on every webhook redelivery — and would bake the server's
+ * temp directory would otherwise produce different bytes, a new sha256 for
+ * identical code on every webhook redelivery, and would bake the server's
  * filesystem layout into a published bundle.
  */
 export async function buildEntrypoint(root: string, source: string, outFile: string): Promise<void> {
@@ -144,7 +144,7 @@ export function detectSourceEntrypoint(root: string): string | null {
 /**
  * Stage what actually gets zipped: the built index.mjs, a manifest whose
  * entrypoint points at it, and the declared data files. Source, tests,
- * node_modules and lockfiles are deliberately left behind — a bundle is the
+ * node_modules and lockfiles are deliberately left behind; a bundle is the
  * program, not the project.
  */
 export function stageBuiltBundle(
@@ -184,7 +184,7 @@ export interface BundleManifestHead extends Record<string, unknown> {
 export interface BuiltBundle {
   zipData: Buffer;
   /**
-   * The manifest as it exists *inside* `zipData` — for a built bundle that
+   * The manifest as it exists *inside* `zipData`: for a built bundle that
    * means `entrypoint` already points at index.mjs. Publish this one, not the
    * file on disk, or the manifest and the archive would disagree.
    */

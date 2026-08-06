@@ -3,7 +3,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 /**
  * What a run actually found, read back out of the result envelopes.
  *
- * A worker's envelope is already the durable record of a scrape — it is stored
+ * A worker's envelope is already the durable record of a scrape; it is stored
  * verbatim in `result_submissions.envelope` and the processor reads it to decide
  * what to upload. Nothing else ever exposed it, so "what did mangaplus find this
  * morning?" was a question only answerable by `psql` and a `jsonb` path. This
@@ -16,7 +16,7 @@ import { Prisma, type PrismaClient } from "@prisma/client";
  * envelope stays the single source of truth and paging happens in the database
  * rather than in the API process.
  *
- * `updatedChapters` is what the extension reported as new or changed this run —
+ * `updatedChapters` is what the extension reported as new or changed this run;
  * the set the processor turns into upload and edit tasks. `allChapters` is the
  * optional full catalogue snapshot an extension may also send (it is what drives
  * removal detection), and it is null for extensions that do not send one, which
@@ -48,7 +48,7 @@ export interface RunChapterRow {
   jobId: string;
   segmentIndex: number;
   segmentKey: string | null;
-  /** 1-based position within that segment's array — the extension's own order. */
+  /** 1-based position within that segment's array; the extension's own order. */
   position: number;
   chapter: Record<string, unknown>;
 }
@@ -165,7 +165,7 @@ export class RunChapterStore {
                     THEN jsonb_array_length(rs.envelope -> 'updatedChapters') ELSE 0 END
              ), 0) AS "updated",
              -- NULL when no segment sent a catalogue snapshot, so the column can
-             -- say "—" rather than a zero that reads as "found nothing".
+             -- say "-" rather than a zero that reads as "found nothing".
              sum(
                CASE WHEN jsonb_typeof(rs.envelope -> 'allChapters') = 'array'
                     THEN jsonb_array_length(rs.envelope -> 'allChapters') END
@@ -187,8 +187,8 @@ export class RunChapterStore {
    * Per-title breakdown of one run: how many chapters were found for each
    * series, newest reported first.
    *
-   * This is the shape an operator actually reads a run in — "mangaplus found 41
-   * chapters across 9 titles" — and it is cheap enough to compute on demand
+   * This is the shape an operator actually reads a run in, "mangaplus found 41
+   * chapters across 9 titles", and it is cheap enough to compute on demand
    * because the grouping happens in Postgres over the same unnest the list uses.
    */
   async byManga(

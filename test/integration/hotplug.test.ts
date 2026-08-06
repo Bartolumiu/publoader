@@ -9,7 +9,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
 
 /**
  * Extensions are data to the core, not code: it never imports or executes them.
- * These tests pin the operational consequences of that — an extension can be
+ * These tests pin the operational consequences of that; an extension can be
  * added, removed or rolled back at any moment, and nothing about it can stop the
  * control plane from answering.
  */
@@ -137,7 +137,7 @@ describe.skipIf(!dbReady())("hot-plug extension lifecycle", () => {
     const headers = { authorization: `Bearer ${token}` };
     await triggerRun("sneaky");
 
-    // Disable by the settings flag ALONE, leaving the job PENDING — this is the
+    // Disable by the settings flag ALONE, leaving the job PENDING; this is the
     // state a cancellation sweep could otherwise race with.
     await prisma.disabledExtension.create({ data: { extension: "sneaky" } });
 
@@ -228,7 +228,7 @@ describe.skipIf(!dbReady())("hot-plug extension lifecycle", () => {
   });
 
   it("keeps serving every other extension when one is broken", async () => {
-    // `broken`'s manifest is fine but its code is not — which the core never
+    // `broken`'s manifest is fine but its code is not; which the core never
     // executes, so it cannot be the core's problem. The proof that matters is
     // that a healthy extension is unaffected and the API stays responsive.
     await publish("healthy", "1.0.0");

@@ -12,7 +12,7 @@ export type RunKind = z.infer<typeof RunKind>;
  *
  * `day` (a single weekday) and `days` (a set) both exist because `day` is what
  * every published manifest already says; `days` is what "Saturday and Sunday"
- * needs. Both use Python's `weekday()` numbering — Monday=0 — which is the
+ * needs. Both use Python's `weekday()` numbering, Monday=0, which is the
  * numbering the extensions repo has used since before this platform existed;
  * the conversion to JS's Sunday=0 happens once, in `slots.ts`.
  */
@@ -31,8 +31,8 @@ export type ManifestScheduleEntry = z.infer<typeof ManifestScheduleEntry>;
 
 /**
  * A schedule slot with every optional form resolved: one weekday SET (empty =
- * every day) and an explicit kind. Everything downstream — the scheduler, the
- * API, the CLI table — reads this shape, so `day` vs `days` and the absent-kind
+ * every day) and an explicit kind. Everything downstream, the scheduler, the
+ * API and the CLI table, reads this shape, so `day` vs `days` and the absent-kind
  * default are decided exactly once, here.
  */
 export interface ScheduleSlot {
@@ -64,7 +64,7 @@ export function manifestSchedule(manifest: Pick<Manifest, "schedule">): Schedule
   }));
 }
 
-/** `15:05 UTC daily, update` — the one rendering every surface shows. */
+/** `15:05 UTC daily, update`: the one rendering every surface shows. */
 export const WEEKDAY_NAMES = [
   "Monday",
   "Tuesday",
@@ -86,7 +86,7 @@ export function formatSlot(slot: ScheduleSlot): string {
 
 /**
  * Validated, ENFORCED extension manifest (manifest.json in each extension
- * directory). Extends the format already used by publoader-extensions —
+ * directory). Extends the format already used by publoader-extensions;
  * existing manifests (e.g. mangaplus) validate unchanged.
  */
 export const Manifest = z

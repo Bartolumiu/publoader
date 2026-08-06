@@ -9,7 +9,7 @@
  *
  * The timer is deliberately dumb: it asks "is it due?" often and cheaply, and
  * the answer is a row in `settings`, not a variable in this process. That is
- * what makes a restart, a redeploy or a second replica harmless — see
+ * what makes a restart, a redeploy or a second replica harmless; see
  * `MapSyncService.runIfDue`.
  */
 import type { Logger } from "../../logging.js";

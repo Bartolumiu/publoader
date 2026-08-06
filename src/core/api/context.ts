@@ -21,6 +21,7 @@ import { ExtensionConfigStore } from "../store/extensionConfig.js";
 import { RateLimiter } from "./ratelimit.js";
 import { deriveSigningKey } from "./session.js";
 import { AdminUserStore } from "../store/adminUsers.js";
+import { PermissionStore } from "../store/permissions.js";
 import { LoginTokenStore } from "../store/loginTokens.js";
 import { createMailer, type Mailer } from "../email/mailer.js";
 import { MagicLinkService } from "./magicLink.js";
@@ -54,7 +55,7 @@ export interface AppContext {
    * convention on the API side: the chapter views use it to show what MangaDex
    * currently says and to render a card preview, and every change is queued as
    * an UploadTask instead. core-uploader remains the only process that writes
-   * to MangaDex, which is what keeps "exactly one writer" true — an API replica
+   * to MangaDex, which is what keeps "exactly one writer" true; an API replica
    * behind a load balancer must not be able to open an upload session.
    */
   md?: MdExtendedApi;
@@ -81,6 +82,8 @@ export interface AppContext {
   magicLinkEmailLimiter: RateLimiter;
   /** Dashboard accounts and their revocable sessions. */
   adminUsers: AdminUserStore;
+  /** Role baselines and per-account scope tuning. */
+  permissions: PermissionStore;
   /** Single-use emailed sign-in links. */
   loginTokens: LoginTokenStore;
   /** Transactional email; a refusing stub when no provider is configured. */
@@ -128,6 +131,7 @@ export function buildContext(prisma: PrismaClient, config: Config, log: Logger):
     // "it went to spam, send another", far short of a mailbomb.
     magicLinkEmailLimiter: new RateLimiter(3, 1 / 300),
     adminUsers: new AdminUserStore(prisma),
+    permissions: new PermissionStore(prisma),
     loginTokens,
     mailer,
     magicLinks: new MagicLinkService({ loginTokens, mailer, config, log }),

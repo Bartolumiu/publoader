@@ -2,7 +2,7 @@
  * The Discord transport: gateway connection, slash-command registration, and
  * the mapping from an interaction to a handler in commands.ts.
  *
- * Everything policy-shaped lives elsewhere on purpose — authz.ts decides who
+ * Everything policy-shaped lives elsewhere on purpose; authz.ts decides who
  * may act, commands.ts decides what happens, apiClient.ts talks to the control
  * plane. This file only moves data between discord.js and those three.
  */
@@ -32,7 +32,7 @@ import {
 import type { Logger } from "../logging.js";
 
 /**
- * Exit code for "restarting will not help" — a bad token, or a bot the guild
+ * Exit code for "restarting will not help"; a bad token, or a bot the guild
  * rejects. Matches services/worker.ts so a supervisor can tell a config error
  * from a crash. EX_CONFIG from sysexits.h.
  */
@@ -63,7 +63,7 @@ export class PubloaderBot {
   private readonly discordToken: string;
   /**
    * Users with a command currently executing. A slash command that takes ten
-   * seconds is easy to double-submit, and `/run` twice is two runs — the
+   * seconds is easy to double-submit, and `/run` twice is two runs; the
    * idempotency key only collapses retries of the *same* interaction.
    */
   private readonly inFlight = new Set<string>();
@@ -105,7 +105,7 @@ export class PubloaderBot {
     if (!this.api.looksScoped) {
       this.log.warn(
         { token: this.api.tokenFingerprint },
-        "BOT_API_TOKEN does not look like a scoped pa_ token — if this is the root ADMIN_TOKEN the bot holds full control-plane authority, including bundle publishing",
+        "BOT_API_TOKEN does not look like a scoped pa_ token; if this is the root ADMIN_TOKEN the bot holds full control-plane authority, including bundle publishing",
       );
     }
     try {
@@ -124,11 +124,11 @@ export class PubloaderBot {
       }
       if (err instanceof AdminApiError && err.status === 403) {
         // The token is valid, it just cannot read stats. Every other command
-        // may still work, so refusing to start would be an overreaction — and
+        // may still work, so refusing to start would be an overreaction; and
         // the 403 body has already told the client which scopes it holds.
         this.log.warn(
           { held: err.held, missing: err.scope },
-          "BOT_API_TOKEN is accepted but lacks stats:read, so /status and /ping will fail — add the scope if you want them",
+          "BOT_API_TOKEN is accepted but lacks stats:read, so /status and /ping will fail; add the scope if you want them",
         );
         return;
       }
@@ -137,7 +137,7 @@ export class PubloaderBot {
       // during it.
       this.log.error(
         { err, coreUrl: this.api.baseUrl },
-        "startup self-check could not reach the admin API — starting anyway; commands will report the failure",
+        "startup self-check could not reach the admin API, starting anyway; commands will report the failure",
       );
     }
   }
@@ -149,7 +149,7 @@ export class PubloaderBot {
     } catch (err) {
       // Discord rejecting the credential, or refusing the intents, is a config
       // error dressed as a runtime one. Translating it here is what turns an
-      // opaque restart loop into one line naming the fix — the legacy bot had
+      // opaque restart loop into one line naming the fix; the legacy bot had
       // to hand-write this advice for the same two failures.
       throw translateLoginError(err);
     }
@@ -166,7 +166,7 @@ export class PubloaderBot {
    * Push the command definitions to Discord.
    *
    * Guild-scoped when DISCORD_GUILD_ID is set: guild commands appear instantly,
-   * while global commands can take an hour to propagate — and a control-plane
+   * while global commands can take an hour to propagate; and a control-plane
    * bot has no business exposing its commands in guilds it was not deployed for.
    */
   private async registerCommands(): Promise<void> {
@@ -179,7 +179,7 @@ export class PubloaderBot {
         await this.client.application?.commands.set(body);
         this.log.warn(
           { count: body.length },
-          "registered GLOBAL slash commands because DISCORD_GUILD_ID is unset — propagation is slow and the commands appear in every guild the bot joins",
+          "registered GLOBAL slash commands because DISCORD_GUILD_ID is unset; propagation is slow and the commands appear in every guild the bot joins",
         );
       }
     } catch (err) {
@@ -265,7 +265,7 @@ export class PubloaderBot {
           log.warn({ err }, "could not DM secret material to the invoker");
           await interaction.followUp({
             content:
-              ":warning: I could not DM you (are DMs from server members closed?). Here it is instead — only you can see this message:\n" +
+              ":warning: I could not DM you (are DMs from server members closed?). Here it is instead; only you can see this message:\n" +
               reply.dm,
             flags: MessageFlags.Ephemeral,
           });
@@ -286,7 +286,7 @@ export class PubloaderBot {
 
   /**
    * Extension-name autocomplete. Backed by the published-bundle list, which is
-   * the authority now — the legacy bot listed directories on the scheduler's
+   * the authority now; the legacy bot listed directories on the scheduler's
    * disk, which could offer a name that had never been published.
    */
   private async onAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
@@ -330,14 +330,14 @@ export class PubloaderBot {
 
 /**
  * Map a discord.js login failure onto a fatal config error where that is what
- * it is. Anything else is passed through untouched — a network blip during
+ * it is. Anything else is passed through untouched; a network blip during
  * login should be retried by the supervisor, not declared unfixable.
  */
 export function translateLoginError(err: unknown): unknown {
   const code = (err as { code?: unknown } | null)?.code;
   if (code === DiscordjsErrorCodes.TokenInvalid || code === DiscordjsErrorCodes.TokenMissing) {
     return new FatalBotConfigError(
-      "Discord rejected DISCORD_BOT_TOKEN. Copy it from the Developer Portal under Bot → Reset Token — " +
+      "Discord rejected DISCORD_BOT_TOKEN. Copy it from the Developer Portal under Bot → Reset Token; " +
         "the client secret, public key and OAuth token are different values and none of them work here. " +
         "If the token was recently regenerated, the old one is permanently revoked.",
       { cause: err },
@@ -346,7 +346,7 @@ export function translateLoginError(err: unknown): unknown {
   if (code === DiscordjsErrorCodes.DisallowedIntents) {
     return new FatalBotConfigError(
       "Discord refused the requested gateway intents. This bot asks only for Guilds, which is not privileged, " +
-        "so this means the application is configured unusually — check Bot → Privileged Gateway Intents.",
+        "so this means the application is configured unusually; check Bot → Privileged Gateway Intents.",
       { cause: err },
     );
   }
@@ -375,7 +375,7 @@ function invokerOf(interaction: ChatInputCommandInteraction | AutocompleteIntera
 /**
  * Role ids for the invoking member. `interaction.member` is a full GuildMember
  * when the guild is cached and a raw API member (roles as a string array) when
- * it is not, so both shapes have to work — reading only one of them would make
+ * it is not, so both shapes have to work; reading only one of them would make
  * role-based admin silently fail on an uncached guild.
  */
 function roleIdsOf(member: unknown): string[] {

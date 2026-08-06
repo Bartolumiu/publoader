@@ -20,7 +20,7 @@ export function credentialsPath(statePath: string): string {
 /**
  * On-disk worker identity. This file is the only long-lived secret a worker
  * host holds, so it is written 0600 inside a 0700 directory and replaced
- * atomically — a crash mid-rotation must never leave a truncated token.
+ * atomically; a crash mid-rotation must never leave a truncated token.
  */
 export class CredentialStore {
   private readonly path: string;
@@ -57,8 +57,8 @@ export class CredentialStore {
    * Enrollment spends a single-use token, so a host that enrolls and then
    * cannot persist the result is permanently bricked: every restart re-enrolls
    * with a token the core has already consumed and gets 403 forever. That was a
-   * real failure here — a full disk (ENOSPC) on the first credential write —
-   * and the symptom (endless "invalid, expired, or used enrollment token")
+   * real failure here, a full disk (ENOSPC) on the first credential write,
+ * and the symptom (endless "invalid, expired, or used enrollment token")
    * pointed at the token rather than at the disk. Checking first turns an
    * unrecoverable state into a startup error naming the actual problem.
    */

@@ -186,7 +186,7 @@ export function createGuardedFetch(opts: GuardedFetchOptions): GuardedFetch {
         res = await fetchImpl(url, {
           ...init,
           // Fresh browser headers on EVERY request issued, which includes each
-          // redirect hop and each retry — rotating only on the first attempt
+          // redirect hop and each retry; rotating only on the first attempt
           // leaves a pattern of its own. Anything the extension set still wins.
           headers: withBrowserHeaders(init.headers as never, { document: !isApiLike(url) }),
           method,

@@ -10,7 +10,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  * Linking Discord onto an account that already has a password.
  *
  * The login flow can only attach Discord to an existing account when Discord's
- * *verified* email happens to equal the operator's — which leaves everyone
+ * *verified* email happens to equal the operator's; which leaves everyone
  * whose Discord address differs with no way to hold both credentials. This is
  * that path, and the session is the authorisation, so the addresses need not
  * match.
@@ -130,7 +130,7 @@ describe.skipIf(!dbReady())("linking a Discord account", () => {
     stubDiscord({ id: "d-1", username: "ardax", email: "someone-else@example.com", verified: true });
     await callback(state, [cookie, stateCookie]);
 
-    // 1. Discord, via the login flow — matched on the linked id, not the email.
+    // 1. Discord, via the login flow; matched on the linked id, not the email.
     const start = await app.inject({ method: "GET", url: "/api/v1/admin/oauth/discord/start" });
     const loginState = new URL(start.headers.location as string).searchParams.get("state")!;
     const loginStateCookie = String(start.headers["set-cookie"]).split(";")[0]!;
@@ -187,7 +187,7 @@ describe.skipIf(!dbReady())("linking a Discord account", () => {
     stubDiscord({ id: "d-1", username: "ardax", email: "other@example.com", verified: false });
 
     const res = await callback(state, [cookie, stateCookie]);
-    // Treated as the login it claimed to be — and an unverified email cannot
+    // Treated as the login it claimed to be; and an unverified email cannot
     // claim an account, so nothing is linked to anyone.
     expect(res.statusCode).toBe(403);
     expect((await ctx.adminUsers.byId(id))?.discordId).toBeNull();

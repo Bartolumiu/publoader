@@ -5,14 +5,14 @@ import { loadConfig } from "../../src/config.js";
  * Whitespace around the secrets that are compared byte-for-byte.
  *
  * These three values are typed or pasted into a `.env` by hand on every install,
- * and they are the only config this system compares for exact equality — so they
+ * and they are the only config this system compares for exact equality; so they
  * are the only ones where a stray newline is a login failure rather than a
  * cosmetic difference. It reached production once as "invalid admin token"
  * against a token that was correct, which reads as a rotation problem and sends
  * the operator to re-issue a credential that was never wrong.
  *
  * `env()` already trims when a value arrives via the `_FILE` Docker-secrets
- * convention — `cat`-ing a secret file is the obvious way to get a trailing
+ * convention; `cat`-ing a secret file is the obvious way to get a trailing
  * newline. These tests cover the plain-variable path, which did not.
  */
 describe("secret trimming", () => {
@@ -32,7 +32,7 @@ describe("secret trimming", () => {
 
   it("measures the token's length after trimming, not before", () => {
     // The 16-character floor is a real check, and padding must not be able to
-    // carry a short token over it — nor to push a valid one out of range.
+    // carry a short token over it; nor to push a valid one out of range.
     expect(() => loadConfig({ ADMIN_TOKEN: `short           \n` })).toThrow();
     expect(loadConfig({ ADMIN_TOKEN: `  ${TOKEN}  ` }).adminToken).toBe(TOKEN);
   });

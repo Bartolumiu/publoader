@@ -492,7 +492,7 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     expect(body.dryRun).toBe(true);
 
     // The preview has to answer the question the operator actually asked, which
-    // includes the removals — reporting removed: 0 for a batch that will remove a
+    // includes the removals; reporting removed: 0 for a batch that will remove a
     // row is worse than not previewing at all.
     const byId = Object.fromEntries(
       body.results.map((r: { mangaId: string; outcome: string }) => [r.mangaId, r.outcome]),
@@ -502,8 +502,8 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     expect(byId["goner"]).toBe("removed");
     expect(body).toMatchObject({ added: 1, updated: 1, removed: 1 });
 
-    // Nothing moved. Not the row it would add, and — the part that bites —
-    // not the mapping it would repoint: a preview that repoints for real has
+    // Nothing moved. Not the row it would add, and, the part that bites,
+ // not the mapping it would repoint: a preview that repoints for real has
     // silently sent this series' uploads to a different MangaDex title.
     const after = await prisma.trackedManga.findMany({ orderBy: { mangaId: "asc" } });
     expect(after).toEqual(before);
@@ -514,7 +514,7 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
 
   it("lets a contributor run the batch endpoint without letting it delete anything", async () => {
     // The batch route is guarded by `tracked:append`, so a contributor reaches
-    // it — that is the point of the role. The refusal for a removal therefore
+    // it; that is the point of the role. The refusal for a removal therefore
     // cannot come from the route guard, and lives inside applyBatch instead.
     //
     // Worth its own test because the failure mode is quiet: a batch that both
@@ -618,7 +618,7 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     // correct: the value is pasted, and a paste out of a terminal or password
     // manager routinely carries a trailing newline. The bearer path has always
     // trimmed, so the same token authenticated `curl -H 'Authorization: Bearer'`
-    // while the login form refused it — which sends the operator looking for a
+    // while the login form refused it; which sends the operator looking for a
     // rotation problem that does not exist.
     for (const padded of [`${ADMIN_TOKEN}\n`, ` ${ADMIN_TOKEN}`, `  ${ADMIN_TOKEN}\r\n`]) {
       const res = await app.inject({
@@ -747,7 +747,7 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
   it("names every operator section it can render in the no-script fallback", async () => {
     // Every view is built client-side, so a browser with scripting off sees only
     // the shell. The <noscript> block is what tells that operator which sections
-    // exist — and it is derived from nothing, so it goes stale silently.
+    // exist; and it is derived from nothing, so it goes stale silently.
     //
     // The section labels are read out of the served app.js rather than hard-coded
     // here: the point is that the two halves agree, and pinning the list in the
@@ -765,7 +765,7 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     }
 
     // Credential minting and account administration need the OWNER role, not a
-    // scope — a wildcard api token holds users:admin but is never OWNER. Asserted
+    // scope; a wildcard api token holds users:admin but is never OWNER. Asserted
     // on the id rather than the surrounding syntax, which is what went stale when
     // the registry became objects: the regex above stopped matching anything and
     // the loop silently checked an empty list.
@@ -792,7 +792,7 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     // The SPA builds every view client-side but NOT the shell: the sidebar, the
     // header's live summary row and the modal are in the served HTML so the
     // layout has its final shape before the first response lands. A rename here
-    // is a silent breakage — app.js finds its mount points by id — so the ids
+    // is a silent breakage, app.js finds its mount points by id, so the ids
     // are pinned.
     const page = await app.inject({ method: "GET", url: "/dash" });
     expect(page.statusCode).toBe(200);
@@ -831,7 +831,7 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     expect(page.body).toContain('class="skip-link"');
     expect(page.body).toContain('role="tablist"');
 
-    // Two <main> elements exist — the sign-in layer and the shell — and that is
+    // Two <main> elements exist, the sign-in layer and the shell, and that is
     // only legal because exactly one of them is ever visible. Both must ship
     // hidden, or a scripting-disabled browser sees both.
     expect(page.body).toContain('<main id="login" class="login-layer" hidden>');
@@ -953,7 +953,7 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     expect(second.json().events.map((e: { id: string }) => e.id)).toEqual(newestFirst.slice(5, 10));
 
     // The cursor is the id of the last row of the previous page, and paging with
-    // it must land on exactly the same rows offset would have — that is the whole
+    // it must land on exactly the same rows offset would have; that is the whole
     // claim, since the cursor exists to stay correct while rows are still being
     // written.
     const cursored = await audit(cookie, `?limit=5${mine}&cursor=${first.json().nextCursor}`);

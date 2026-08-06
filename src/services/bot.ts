@@ -5,7 +5,7 @@
  * process is allowed to touch: the legacy bot imported the whole publoader
  * package, spoke to the scheduler over a Unix socket in the same container, and
  * held a Docker socket so it could restart things. This one is an HTTPS client
- * of the admin API and nothing else — no DATABASE_URL, no MangaDex credential,
+ * of the admin API and nothing else; no DATABASE_URL, no MangaDex credential,
  * no docker.sock. Compromising it gets you the scopes on BOT_API_TOKEN.
  */
 import { readFileSync } from "node:fs";
@@ -21,20 +21,20 @@ const log = createLogger("discord-bot", config.logLevel);
 /**
  * Read a secret honouring the `<VAR>_FILE` Docker-secrets convention that
  * config.ts uses for everything else. The bot's two credentials are not in the
- * shared config schema — the schema is loaded by every core service, and a
+ * shared config schema; the schema is loaded by every core service, and a
  * Discord bot token has no business being in the uploader's process memory.
  */
 function secret(name: string): string | undefined {
   const path = process.env[`${name}_FILE`];
   if (path) {
     // A missing secret file is a deployment error, not a "run without it"
-    // signal — let the read throw and take the process down with the path in
+    // signal; let the read throw and take the process down with the path in
     // the message.
     return readFileSync(path, "utf8").trim() || undefined;
   }
   // Quotes are stripped because a token pasted as DISCORD_BOT_TOKEN="MTx…"
   // into an env file arrives with them attached, and Discord's only answer to
-  // that is "Improper token" — a failure the legacy bot had to document.
+  // that is "Improper token"; a failure the legacy bot had to document.
   return process.env[name]?.trim().replace(/^['"]|['"]$/g, "") || undefined;
 }
 
@@ -47,7 +47,7 @@ const discordToken = secret("DISCORD_BOT_TOKEN");
 if (!discordToken) {
   fatal(
     "DISCORD_BOT_TOKEN is not set. Copy the *bot* token from the Discord Developer Portal " +
-      "(Bot → Reset Token) — not the client secret, not the public key.",
+      "(Bot → Reset Token): not the client secret, not the public key.",
   );
 }
 

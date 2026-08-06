@@ -14,7 +14,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  *
  * The unit tests cover the arithmetic of one slot. What only a database can
  * answer is whether an extension carrying FOUR slots actually produces four
- * different runs on the right days — the precedence between manifest and
+ * different runs on the right days: the precedence between manifest and
  * operator rows, the seeding that stops `add` deleting the manifest's schedule,
  * and the run idempotency key that has to separate an update from a clean at
  * the same minute.
@@ -174,7 +174,7 @@ describe.skipIf(!dbReady())("multi-slot schedules", () => {
     expect(body.effective[0]).toMatchObject({ kind: "UPDATE", hour: 15 });
   });
 
-  it("switching every slot off runs nothing — it does not fall back to the manifest", async () => {
+  it("switching every slot off runs nothing; it does not fall back to the manifest", async () => {
     await app.inject({
       method: "PUT",
       url: "/api/v1/admin/schedules/mangaplus",

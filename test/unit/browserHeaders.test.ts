@@ -105,7 +105,7 @@ describe("withBrowserHeaders", () => {
 
 describe("the runner's copy", () => {
   /**
-   * `runner-node/runner.mjs` is self-contained — it imports nothing from dist/,
+   * `runner-node/runner.mjs` is self-contained; it imports nothing from dist/,
    * because it is copied into the worker image on its own. That means it carries
    * a second copy of these profiles, and a second copy is only safe if something
    * fails when they diverge.

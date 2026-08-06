@@ -12,7 +12,7 @@
 # rate limits, and a host-level firewall mistake cannot expose it.
 #
 # Config: copy .env.example to .env in this directory. Docker secrets are
-# supported for every credential — see the note above `secrets:` at the end.
+# supported for every credential; see the note above `secrets:` at the end.
 
 # Without this the project is named after its directory ("core"), which is
 # meaningless in `docker compose ls` and collides with any other stack that
@@ -24,7 +24,7 @@ name: publoader-core
 # is defined once and a service cannot quietly drift from it; per-service
 # comments explain the exceptions.
 x-app-security: &app-security
-  # The image is complete at build time — no service writes to its own
+  # The image is complete at build time; no service writes to its own
   # filesystem. With root-owned code and a non-root runtime user, this turns a
   # code-execution bug into something that cannot persist across a restart.
   read_only: true
@@ -35,7 +35,7 @@ x-app-security: &app-security
   cap_drop:
     - ALL
   security_opt:
-    # Blocks setuid binaries from gaining privileges — nothing here needs to
+    # Blocks setuid binaries from gaining privileges; nothing here needs to
     # change uid after start.
     - no-new-privileges:true
   restart: unless-stopped
@@ -61,7 +61,7 @@ x-core-env: &core-env
   LEASE_POLL_WAIT_SECONDS: ${LEASE_POLL_WAIT_SECONDS:-25}
 
 # MangaDex + Discord credentials. Only the services that actually talk to
-# MangaDex get these — core-api and core-scheduler never do, and a credential
+# MangaDex get these; core-api and core-scheduler never do, and a credential
 # not present in a process cannot leak from it.
 x-md-env: &md-env
   MANGADEX_API_URL: ${MANGADEX_API_URL:-https://api.mangadex.org}
@@ -88,13 +88,13 @@ x-public-dns: &public-dns
 x-core-build: &core-build
   # One image, four services (see docker/core/Dockerfile). Referencing the same
   # `image:` tag everywhere means all four are guaranteed to run the identical
-  # build — a mixed-version control plane is a class of bug that is very hard
+  # build; a mixed-version control plane is a class of bug that is very hard
   # to see.
   #
   # Deliberately NO `build:` here. A server runs this file with nothing beside
   # it but `.env`, and a `build:` section makes compose try to build instead of
   # pull: it resolves the build context relative to this file, finds no source
-  # tree, and fails with `lstat /docker: no such file or directory` — which
+  # tree, and fails with `lstat /docker: no such file or directory`: which
   # names neither the cause nor the fix. To build from source instead, add the
   # override: `-f docker-compose.yml -f docker-compose.build.yml`.
   image: ${PUBLOADER_CORE_IMAGE:-ardax/publoader-core:2.1.5}
@@ -107,7 +107,7 @@ services:
   # persistent volume and the one thing the backup procedure covers.
   #
   # Security posture: attached ONLY to the internal `data` network, so it has
-  # no route to the internet and no route from the tunnel. No host port — a
+  # no route to the internet and no route from the tunnel. No host port; a
   # published 5432 has been the entry point in enough incidents that it is
   # worth stating: if you need psql, use `docker compose exec`, not a port.
   postgres:
@@ -116,7 +116,7 @@ services:
     # matching the app images):
     #   docker pull postgres:16.9-bookworm
     #   docker inspect --format='{{index .RepoDigests 0}}' postgres:16.9-bookworm
-    # then append @sha256:… here. Never change the MAJOR version in place — 16
+    # then append @sha256:… here. Never change the MAJOR version in place; 16
     # to 17 requires a dump/restore (see docs/deployment.md "Upgrading").
     image: postgres:16.9-bookworm
     restart: unless-stopped
@@ -156,7 +156,7 @@ services:
   # the prisma CLI: exactly one short-lived container is ever able to alter the
   # schema, and it is not one that stays online holding credentials.
   #
-  # It is safe to re-run on every `up` — `migrate deploy` applies only
+  # It is safe to re-run on every `up`: `migrate deploy` applies only
   # migrations not yet in the _prisma_migrations table and never generates,
   # resets, or drops anything.
   migrate:
@@ -178,13 +178,13 @@ services:
 
   # --- core-api -------------------------------------------------------------
   # The only service that serves *traffic*, and the only thing workers ever talk
-  # to. (The other three now bind a metrics/health port on the internal network
-  # — see core-scheduler — but nothing routes to them.) Serves two audiences
+  # to. (The other three now bind a metrics/health port on the internal network,
+ # see core-scheduler, but nothing routes to them.) Serves two audiences
   # with strictly separated token types
   # (§8/auth.ts): /api/v1/worker/* for the fleet, /api/v1/admin/* for the
   # operator CLI, Discord bot and dashboard.
   #
-  # Security posture: `expose` only — 8100 is reachable from the compose
+  # Security posture: `expose` only; 8100 is reachable from the compose
   # network (i.e. from cloudflared) and from nowhere else. Publishing it on the
   # host would put the enroll endpoint and the admin API on the host's
   # interfaces, reachable without passing the tunnel's WAF rules.
@@ -205,7 +205,7 @@ services:
       #
       # This does widen what an internet-facing service holds, so to be precise
       # about what has NOT changed: uploading chapters remains core-uploader's
-      # alone — it owns the upload queue and the upload session, and no other
+      # alone; it owns the upload queue and the upload session, and no other
       # process claims from it.
       <<: [*core-env, *md-env]
       PORT: "8100"
@@ -214,10 +214,10 @@ services:
       # hostname, so a /metrics route on the public port would be world-readable
       # (it names every extension, queue depth and worker) the moment an edge
       # rule is missing. 8104 is exposed to the compose network only and nothing
-      # routes to it — the guarantee is structural, not a WAF rule.
+      # routes to it; the guarantee is structural, not a WAF rule.
       METRICS_PORT: "8104"
-      # Bearer token for /api/v1/admin/*. If unset the admin API answers 503 —
-      # it fails closed rather than open. Mint with: openssl rand -base64 48
+      # Bearer token for /api/v1/admin/*. If unset the admin API answers 503;
+ # it fails closed rather than open. Mint with: openssl rand -base64 48
       ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
       # Dashboard sessions (/dash). core-api is the only service that serves
       # browsers, so these live here rather than in the shared anchor. Leave
@@ -231,7 +231,7 @@ services:
       DASH_PUBLIC_URL: ${DASH_PUBLIC_URL:-https://publoader.ardax.dev}
       # The image the enrolment snippet tells a new worker host to run. Defaults
       # to the same release as the core above, so bumping the version in one
-      # place moves the snippet with it — before this was passed, core-api fell
+      # place moves the snippet with it; before this was passed, core-api fell
       # back to a literal in the source and handed out a two-release-old tag.
       PUBLOADER_WORKER_IMAGE: ${PUBLOADER_WORKER_IMAGE:-ardax/publoader-worker:2.1.5}
       # --- GitHub push webhook (core-api only) -----------------------------
@@ -298,7 +298,7 @@ services:
     # Internal only, like core-api's 8100: /metrics is unauthenticated and leaks
     # queue and fleet topology, so it must never be published on the host or
     # routed through the tunnel. Prometheus scrapes it over this compose network
-    # at http://core-scheduler:8101/metrics — put the scraper on the `data`
+    # at http://core-scheduler:8101/metrics; put the scraper on the `data`
     # network (or on `edge` plus an `expose` here) rather than opening a port.
     expose:
       - "8101"
@@ -310,7 +310,7 @@ services:
     # which ages on its own when the loop stops (see src/metrics.ts for why a
     # "seconds since" gauge could not). /healthz only proves the process
     # answers, so it stays the container probe while the stall alert lives in
-    # Prometheus — nothing here restarts on unhealthy, deliberately: autoheal
+    # Prometheus; nothing here restarts on unhealthy, deliberately: autoheal
     # would require mounting docker.sock into the stack, a far bigger risk than
     # the failure it fixes.
     healthcheck:
@@ -363,7 +363,7 @@ services:
   # The ONLY process in the entire system permitted to write to MangaDex.
   # Centralising the upload authority here is what makes it safe to let
   # untrusted workers execute extension code: a worker can fabricate a result,
-  # but it cannot upload — everything passes validation, dedup and the audit
+  # but it cannot upload; everything passes validation, dedup and the audit
   # log before this service acts on it (§8 "residual risks").
   #
   # Exactly ONE replica: the MangaDex upload session is per-account state, and
@@ -378,7 +378,7 @@ services:
       METRICS_PORT: "8103"
       HOST: 0.0.0.0
     # Internal only (see the note on core-scheduler). Scrape
-    # http://core-uploader:8103/metrics from inside the compose network — this
+    # http://core-uploader:8103/metrics from inside the compose network; this
     # is where publoader_upload_tasks{state="DEAD_LETTER"} becomes visible.
     expose:
       - "8103"
@@ -418,8 +418,8 @@ services:
   #     what to run on the host instead.
   #   * NO MangaDex credential. It cannot upload, delete or log in.
   #
-  # It reaches core-api the same way any other client does — over the public
-  # hostname through the tunnel — so it is on `edge` only. Pointing CORE_URL at
+  # It reaches core-api the same way any other client does, over the public
+  # hostname through the tunnel, so it is on `edge` only. Pointing CORE_URL at
   # http://core-api:8100 works too and skips the round trip, but then the bot
   # bypasses the WAF and rate limits that protect the admin API; the default
   # keeps one enforcement path for every client.
@@ -436,11 +436,11 @@ services:
       # The bot token from the Discord Developer Portal (Bot → Reset Token).
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
       CORE_URL: ${CORE_URL:-https://publoader.ardax.dev}
-      # A SCOPED `pa_…` token minted for this client alone — NOT ADMIN_TOKEN.
+      # A SCOPED `pa_…` token minted for this client alone; NOT ADMIN_TOKEN.
       # See docs/bot.md; mint with `publoader-admin tokens create`.
       BOT_API_TOKEN: ${BOT_API_TOKEN:-}
       # Discord-side gating. With DISCORD_ADMIN_USERS or DISCORD_ALLOWED_CHANNELS
-      # unset the bot refuses every state-changing command — it fails closed,
+      # unset the bot refuses every state-changing command; it fails closed,
       # unlike the legacy bot which allowed everyone when unconfigured.
       DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-}
       DISCORD_ADMIN_USERS: ${DISCORD_ADMIN_USERS:-}
@@ -450,8 +450,8 @@ services:
       - edge
     command: ["node", "dist/src/services/bot.js"]
     # An outbound gateway connection, no listening socket, so the image's HTTP
-    # probe cannot apply. A config error (missing or rejected token) exits 78 —
-    # `unless-stopped` still restarts it, so the symptom is a restart loop and
+    # probe cannot apply. A config error (missing or rejected token) exits 78;
+ # `unless-stopped` still restarts it, so the symptom is a restart loop and
     # the diagnosis is the one `fatal` line in `docker compose logs publoader-bot`.
     healthcheck:
       disable: true
@@ -460,18 +460,18 @@ services:
 
   # --- cloudflared ----------------------------------------------------------
   # The single public entrance: https://publoader.ardax.dev -> core-api:8100.
-  # Token-managed, like the legacy stack — the tunnel and its ingress rules are
+  # Token-managed, like the legacy stack; the tunnel and its ingress rules are
   # configured in the Cloudflare Zero Trust dashboard, not in this file.
   #
   # SETUP (Zero Trust > Networks > Tunnels > this tunnel > Public Hostname):
   #   Hostname: publoader.ardax.dev
   #   Service:  http://core-api:8100      ("core-api" resolves on this network)
   #
-  # WAF / rules — these are load-bearing, not optional. Configure in the
+  # WAF / rules; these are load-bearing, not optional. Configure in the
   # Cloudflare dashboard (full rule text in docs/deployment.md):
   #   * BLOCK /healthz and /readyz from the internet. Neither requires
-  #     authentication. /metrics is no longer served on 8100 at all — it lives on
-  #     the internal-only 8104 — so the tunnel cannot reach it even with no rule
+  #     authentication. /metrics is no longer served on 8100 at all, it lives on
+  #     the internal-only 8104, so the tunnel cannot reach it even with no rule
   #     in place; keep a block rule anyway as defence in depth.
   #   * RATE LIMIT /api/v1/worker/enroll hard (a handful per hour per IP). It
   #     is the one unauthenticated write endpoint; the in-process limiter is a
@@ -480,7 +480,7 @@ services:
   #   * Consider Zero Trust Access (service tokens) in front of /api/v1/admin/*
   #     so the admin token is the second factor rather than the only one.
   #
-  # It reaches core-api over `edge` and has NO route to postgres — it is
+  # It reaches core-api over `edge` and has NO route to postgres; it is
   # internet-facing software and gets nothing but the one hop it needs.
   cloudflared:
     # Optional: started only with `--profile tunnel` (the switcher's

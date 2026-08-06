@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# publoader — one entry point for every environment.
+# publoader; one entry point for every environment.
 #
 #   ./scripts/publoader <env> <command> [args...]
 #
@@ -20,7 +20,7 @@
 #   ./scripts/publoader prod psql                # a shell on the database
 #
 # WHY A SCRIPT AND NOT RAW `docker compose`: three things have to agree for two
-# environments to coexist safely — the env file, the compose project name (which
+# environments to coexist safely; the env file, the compose project name (which
 # namespaces containers, networks AND the database volume), and, for staging,
 # the mock-MangaDex override. Getting one of the three wrong is how a staging
 # deploy ends up writing to the production database, so they are set together
@@ -61,13 +61,13 @@ case "$ENVIRONMENT" in
   *) die "unknown environment '$ENVIRONMENT' (expected staging, prod, or dev)" ;;
 esac
 
-[ -f "$ENV_FILE" ] || die "$ENV_FILE not found — copy ${ENV_FILE}.example (see docs/deployment.md) and fill it in"
+[ -f "$ENV_FILE" ] || die "$ENV_FILE not found; copy ${ENV_FILE}.example (see docs/deployment.md) and fill it in"
 
 envval() { grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | tr -d '[:space:]'; }
 
 # Ingress choice lives in the env file, not in whatever flags someone remembers
 # to type: `tunnel` (cloudflared, no open ports), `direct` (Caddy with
-# Let's Encrypt on 80/443), or `none` (internal only — the default).
+# Let's Encrypt on 80/443), or `none` (internal only; the default).
 case "$(envval PUBLOADER_INGRESS)" in
   direct) COMPOSE_FILES+=(-f docker/core/compose.ingress-direct.yml) ;;
   tunnel) PROFILE_ARGS+=(--profile tunnel) ;;
@@ -87,7 +87,7 @@ compose() { docker compose --env-file "$ENV_FILE" "${COMPOSE_FILES[@]}" "${PROFI
 
 # Refuse the classic footgun: a staging env file that points at the real API.
 if [ "$ENVIRONMENT" = staging ] && grep -qE '^MANGADEX_API_URL=https://api\.mangadex\.org' "$ENV_FILE"; then
-  printf 'publoader: WARNING — staging is configured against the REAL MangaDex API.\n' >&2
+  printf 'publoader: WARNING; staging is configured against the REAL MangaDex API.\n' >&2
   printf '           Uploads from staging will be public. Ctrl-C within 5s to stop.\n' >&2
   sleep 5
 fi
@@ -115,14 +115,14 @@ case "$COMMAND" in
     ;;
   rollback)
     TAG="${1:-}"; [ -n "$TAG" ] || die "rollback needs a tag: ./scripts/publoader $ENVIRONMENT rollback 2.0.0"
-    printf 'publoader: rolling %s back to %s (schema is NOT reverted — see docs/operations.md)\n' "$PROJECT" "$TAG"
+    printf 'publoader: rolling %s back to %s (schema is NOT reverted; see docs/operations.md)\n' "$PROJECT" "$TAG"
     PUBLOADER_CORE_IMAGE="ardax/publoader-core:$TAG" compose pull core-api
     PUBLOADER_CORE_IMAGE="ardax/publoader-core:$TAG" compose up -d --no-deps \
       core-api core-scheduler core-processor core-uploader
     ;;
   admin)
     # The operator CLI, inside the network, already holding DATABASE_URL and
-    # ADMIN_TOKEN — so no credential has to be typed on a shell line.
+    # ADMIN_TOKEN; so no credential has to be typed on a shell line.
     compose run --rm --no-deps -e PUBLOADER_API_URL=http://core-api:8100 \
       core-api node dist/src/cli/admin.js "$@"
     ;;

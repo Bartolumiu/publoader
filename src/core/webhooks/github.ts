@@ -2,8 +2,8 @@
  * Pure decision logic for GitHub push webhooks: is this delivery authentic,
  * does it concern a repo we track, and if so which extensions changed.
  *
- * Nothing here does I/O, so every branch — including every reason a delivery is
- * ignored — is directly testable. Ported from the legacy
+ * Nothing here does I/O, so every branch, including every reason a delivery is
+ * ignored, is directly testable. Ported from the legacy
  * publoader/github_webhook.py (`verify_signature` / `slot_for_push`), keeping
  * its rejection reasons: they are echoed back to GitHub so a delivery log entry
  * explains itself without anyone reading server logs.
@@ -44,7 +44,7 @@ export function verifySignature(
  * What a tracked repo means to us.
  *
  * "extensions" is the only role with an action attached: a push publishes new
- * bundles. "core" is acknowledged and does nothing — core is deployed as an
+ * bundles. "core" is acknowledged and does nothing; core is deployed as an
  * image now (see docs/deployment.md), so there is nothing for a running
  * container to pull.
  */
@@ -87,7 +87,7 @@ export interface PushCommit {
  *
  * Without it the platform answers its own commit: the sync writes
  * `src/<extension>/manga_id_map.json`, the push webhook sees a changed path
- * under an extension directory and republishes the bundle — a new sha256 pin
+ * under an extension directory and republishes the bundle; a new sha256 pin
  * every week for a data file the workers do not read from the bundle anyway
  * (`tracked_manga` is delivered on lease). The marker is only trusted for
  * *skipping* work, so a forged one costs nothing an attacker could not get by
@@ -152,7 +152,7 @@ const EXTENSION_PATH_RE = /^src\/([a-z0-9_]+)\//;
  * Which extensions a push touched, from the paths in its commits.
  *
  * `commits` is truncated to 20 entries on large pushes, with `head_commit`
- * always present, so both are read and unioned — missing an extension because
+ * always present, so both are read and unioned; missing an extension because
  * a push was big would silently ship stale code.
  *
  * A removed path still counts as a change: deleting one file from an extension
@@ -165,8 +165,8 @@ const EXTENSION_PATH_RE = /^src\/([a-z0-9_]+)\//;
  * True when EVERY commit in the push is one the series-map sync made.
  *
  * Every, not any: a push that carries our map commit alongside a human's commit
- * still contains code that has to be published. Erring the other way — treating
- * a mixed push as ours — would silently drop a contributor's change, which is a
+ * still contains code that has to be published. Erring the other way, treating
+ * a mixed push as ours, would silently drop a contributor's change, which is a
  * far worse failure than one redundant republish.
  *
  * A push with no commit list at all is not ours: the fallback must be to

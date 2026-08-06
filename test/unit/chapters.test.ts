@@ -14,7 +14,7 @@ import type { Chapter } from "../../src/core/md/types.js";
  * with, and the derivation of what goes on an unavailable card.
  *
  * The card derivation is worth unit-testing precisely because two callers share
- * it — the uploader that posts the image and the endpoint that previews it. If
+ * it; the uploader that posts the image and the endpoint that previews it. If
  * they ever disagreed, an operator would approve one card and publish another,
  * and nobody would find out except a reader.
  */
@@ -68,7 +68,7 @@ describe("chapter cursors", () => {
 
   it("refuses anything it did not issue", () => {
     // A caller that invents a cursor gets a 400 from the route, not a page of
-    // rows from a date it guessed — which is what makes "this is not an offset"
+    // rows from a date it guessed; which is what makes "this is not an offset"
     // enforceable rather than merely documented.
     expect(decodeChapterCursor("not-base64")).toBeNull();
     expect(decodeChapterCursor(Buffer.from("only-one-part").toString("base64url"))).toBeNull();

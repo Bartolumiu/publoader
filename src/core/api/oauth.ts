@@ -19,7 +19,7 @@ import {
  * "Login with Discord" for the operator dashboard.
  *
  * No Discord library: two fetches and a redirect. All state lives in Postgres
- * or in a signed, short-lived cookie — nothing is held in process memory, so
+ * or in a signed, short-lived cookie; nothing is held in process memory, so
  * this works with more than one core-api replica.
  *
  * Nothing from Discord is persisted beyond id, username and email, and neither
@@ -52,7 +52,7 @@ export type DiscordMatch =
  * injected port so the decision table can be unit-tested without a database.
  *
  * Order matters and is deliberate:
- *  1. A linked discordId is the account — email changes on Discord's side
+ *  1. A linked discordId is the account; email changes on Discord's side
  *     must not silently repoint the login.
  *  2. Otherwise a *verified* email matching an existing account links it.
  *     Unverified email is attacker-choosable, so it can never match.
@@ -110,7 +110,7 @@ export async function matchDiscordIdentity(
  * because the two reasons end in opposite places: a login mints a session for
  * whoever comes back, a link attaches that identity to a session that already
  * exists. Encoded into the signed value rather than a second cookie so the
- * HMAC covers the intent too — otherwise a login round-trip could be replayed
+ * HMAC covers the intent too; otherwise a login round-trip could be replayed
  * as a link, or the reverse.
  */
 export type OAuthIntent = { mode: "login" } | { mode: "link"; userId: string };
@@ -196,7 +196,7 @@ export function registerOAuthRoutes(app: FastifyInstance, ctx: AppContext): void
    * This is the direction the login flow cannot cover: it matches an existing
    * account only when Discord's *verified* email happens to equal the account
    * email. Somebody whose Discord address differs from their operator address
-   * has no way to end up with both credentials on one account — this is it.
+   * has no way to end up with both credentials on one account; this is it.
    * Here the session is the authorisation, so the emails need not match.
    */
   app.get("/api/v1/admin/oauth/discord/link", async (req: FastifyRequest, reply: FastifyReply) => {

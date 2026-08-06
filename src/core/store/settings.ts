@@ -50,7 +50,7 @@ export const VALID_REMOVAL_MODES = ["unavailable", "delete"] as const;
 export type RemovalMode = (typeof VALID_REMOVAL_MODES)[number];
 export const DEFAULT_REMOVAL_MODE: RemovalMode = "unavailable";
 
-/** Pause gate, schedule overrides, disabled extensions, removal mode —
+/** Pause gate, schedule overrides, disabled extensions, removal mode;
  * replaces the SQLite state store with the same semantics. */
 export class SettingsStore {
   constructor(private readonly prisma: PrismaClient) {}
@@ -123,8 +123,8 @@ export class SettingsStore {
   /**
    * Whether a per-chapter embed is sent for uploads that SUCCEEDED.
    *
-   * Python sent one either way, which on a normal run means the channel is
-   * almost entirely "Success: True" — and a failure, the only thing anyone
+   * Sending one either way means that on a normal run the channel is
+   * almost entirely "Success: True"; and a failure, the only thing anyone
    * needs to act on, scrolls past between them. Off by default so the channel
    * carries exceptions rather than a transcript; the run-level "Found N
    * chapters" embed already says the work happened.
@@ -146,9 +146,9 @@ export class SettingsStore {
    * Whether the scheduler polls the configured GitHub repos and publishes what
    * changed.
    *
-   * On by default. The push webhook is the fast path, but it fails silently —
-   * an unregistered hook or a dropped delivery just means extensions quietly
-   * stop updating — and polling is the only check that does not depend on
+   * On by default. The push webhook is the fast path, but it fails silently,
+ * an unregistered hook or a dropped delivery just means extensions quietly
+   * stop updating, and polling is the only check that does not depend on
    * anything inbound. Publishing is idempotent, so the two overlapping costs
    * nothing.
    *
@@ -169,7 +169,7 @@ export class SettingsStore {
    * Operator schedule slots, ready for `effectiveSchedules`.
    *
    * An extension appears as a key as soon as it has ANY row, even if every one
-   * of them is switched off — the empty array then means "operator says run
+   * of them is switched off; the empty array then means "operator says run
    * nothing", which is a different answer from the absent key's "no operator
    * opinion, use the manifest".
    */
@@ -208,7 +208,7 @@ export class SettingsStore {
    *
    * The seeding is what makes "add a Wednesday clean" safe. Operator rows
    * replace the manifest wholesale, so without it the first `add` would delete
-   * the daily update the manifest declared — a surprise the operator would only
+   * the daily update the manifest declared: a surprise the operator would only
    * notice a day later, as an extension that stopped updating.
    *
    * Returns `created: false` when an identical slot (same minute, same kind,
@@ -248,7 +248,7 @@ export class SettingsStore {
    * Make this list of slots the whole schedule for the extension.
    *
    * One transaction: an operator who replaces a schedule must never be able to
-   * observe — or have the scheduler observe — the window where the old slots
+   * observe, or have the scheduler observe, the window where the old slots
    * are gone and the new ones are not there yet.
    */
   async replaceScheduleEntries(extension: string, slots: ScheduleSlot[]): Promise<number> {
@@ -324,8 +324,8 @@ export class AuditLog {
    * Several events in one statement.
    *
    * For a bulk operator action the per-subject rows are what keep "why was this
-   * chapter deleted?" answerable — a lookup by `subject` finds nothing if a
-   * batch only writes one summary row — but two hundred sequential inserts
+   * chapter deleted?" answerable, a lookup by `subject` finds nothing if a
+   * batch only writes one summary row, but two hundred sequential inserts
    * inside a request is a cost with no upside.
    */
   async recordMany(

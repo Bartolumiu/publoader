@@ -6,11 +6,10 @@ import type { Chapter } from "./types.js";
  * typed columns of the four chapter tables (uploaded / deleted / unavailable /
  * edited_chapters).
  *
- * Those tables used to hold the whole chapter as an opaque JSONB document. The
- * shape is fixed and known, so the document bought nothing and cost type
- * enforcement, indexability and `chapter->>'x'` in every query. The columns are
- * identical across all four tables and every writer goes through this module,
- * which is what stops the four from drifting apart.
+ * The chapter shape is fixed and known, so it is stored as typed columns rather
+ * than an opaque JSONB document, which costs type enforcement, indexability and
+ * a `chapter->>'x'` in every query. The columns are identical across all four
+ * tables and every writer goes through this module, which stops them drifting.
  *
  * `extra` is the escape hatch and it is deliberately narrow: page-artifact ids,
  * the MangaDex attribute snapshot the unavailable flow keeps, and any key a
@@ -116,7 +115,7 @@ export function chapterToColumns(
 }
 
 /**
- * `uploaded_chapters.extension` is NOT NULL — it is the per-extension canonical
+ * `uploaded_chapters.extension` is NOT NULL; it is the per-extension canonical
  * mirror and the column every lookup of it filters on, so an unattributed row
  * would be invisible to those queries. An empty string is the pre-existing
  * stand-in for "the chapter did not name its extension".
@@ -168,7 +167,7 @@ export function chapterExtras(row: StoredChapterRow): Record<string, unknown> {
 }
 
 /**
- * Tolerant read of a chapter-shaped JSON document — an upload_tasks payload or
+ * Tolerant read of a chapter-shaped JSON document; an upload_tasks payload or
  * a camelCased legacy Mongo document. Unknown keys are ignored here and picked
  * up separately by `residualJsonKeys`; EDIT task rows in particular carry
  * `payload`/`oldInfo` alongside the chapter fields, so the strict ChapterRecord
@@ -205,8 +204,8 @@ export function chapterFromJson(raw: Record<string, unknown>): Chapter {
  * every other key carried through verbatim.
  *
  * Carrying the residue is the point. Task payloads are NOT the canonical
- * chapter shape — EDIT rows need `payload` (the literal MangaDex PUT body) and
- * `oldInfo`, UNAVAILABLE rows need `unavailableAt` — and they are read
+ * chapter shape, EDIT rows need `payload` (the literal MangaDex PUT body) and
+ * `oldInfo`, UNAVAILABLE rows need `unavailableAt`, and they are read
  * tolerantly by `chapterFromJson` plus a direct lookup for those sidecars, not
  * validated against ChapterRecord. Projecting a document down to the chapter
  * keys silently strips the sidecars, which makes an EDIT task unexecutable

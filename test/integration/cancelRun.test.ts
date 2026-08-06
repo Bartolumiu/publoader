@@ -12,8 +12,8 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  *
  *   - `cancel_requested` blocks a re-claim, so an abandoned job cannot be picked
  *     up again after the lease sweeper requeues it;
- *   - the run goes to CANCELLED directly, so `advanceRuns` — which only moves
- *     PENDING/EXECUTING runs — can never carry it into processing.
+ *   - the run goes to CANCELLED directly, so `advanceRuns`, which only moves
+ *     PENDING/EXECUTING runs, can never carry it into processing.
  */
 describe.skipIf(!dbReady())("cancelling a run", () => {
   const prisma = testPrisma();
@@ -94,7 +94,7 @@ describe.skipIf(!dbReady())("cancelling a run", () => {
     const runId = await runWith(2);
     await store.cancelRun(runId);
     await store.advanceRuns();
-    // Not INGESTING, and not DEAD_LETTER either — this was a decision, not a
+    // Not INGESTING, and not DEAD_LETTER either; this was a decision, not a
     // failure, and the state an operator reads should say so.
     expect((await prisma.run.findUniqueOrThrow({ where: { id: runId } })).state).toBe("CANCELLED");
   });

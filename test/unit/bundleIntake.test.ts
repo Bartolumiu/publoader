@@ -25,7 +25,7 @@ import {
  * are the whole point of several of these cases: adm-zip normalises `..` out of
  * an entry name as you add it, so it cannot express a traversal archive at all;
  * and it computes the size fields honestly, so it cannot express an archive that
- * LIES about them — which is the attack the size caps exist for.
+ * LIES about them; which is the attack the size caps exist for.
  */
 
 const STORED = 0;
@@ -174,7 +174,7 @@ describe("extractBundleTree refuses decompression bombs", () => {
   it("refuses an entry that DECLARES an impossible compression ratio", () => {
     // The cheap pre-check: refused on the header alone, nothing decompressed.
     // Declared size stays UNDER the per-entry cap so that the size check cannot
-    // fire first — otherwise this passes without the ratio guard existing.
+    // fire first; otherwise this passes without the ratio guard existing.
     const err = refuses(
       bundle([
         {
@@ -197,7 +197,7 @@ describe("extractBundleTree refuses decompression bombs", () => {
     // the central directory would have written the whole megabyte to disk.
     //
     // Note the compressed size is left HONEST. Understating that instead just
-    // truncates the deflate stream, which is refused as a corrupt archive — a
+    // truncates the deflate stream, which is refused as a corrupt archive; a
     // real refusal, but a different one, and it would not exercise the ceiling.
     const payload = Buffer.alloc(1024 * 1024, 0x41);
     const err = refuses(
@@ -213,7 +213,7 @@ describe("extractBundleTree refuses decompression bombs", () => {
     // so is their weighted average, so the only way the overall check earns its
     // place is against an archive whose declared sizes understate reality. Here
     // one entry declares 10 bytes, inflates to 20 KiB, and stays under both byte
-    // caps — every per-entry gate passes and the total ratio is what refuses it.
+    // caps; every per-entry gate passes and the total ratio is what refuses it.
     const err = refuses(
       bundle([
         { name: "quiet.json", content: Buffer.alloc(20_000, 0x44), method: DEFLATED, declaredSize: 10 },

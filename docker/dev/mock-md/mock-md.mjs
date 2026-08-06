@@ -5,7 +5,7 @@
 // docker/dev never needs a registry, a lockfile, or a build cache to work.
 //
 // It implements only what the processor and uploader actually call (see
-// src/core/md/types.ts MdApi) and it is NOT a faithful MangaDex — it fakes the
+// src/core/md/types.ts MdApi) and it is NOT a faithful MangaDex; it fakes the
 // happy path so a full run can be driven end to end, and records every write
 // so a test can assert on it.
 //
@@ -188,7 +188,7 @@ const server = createServer(async (req, res) => {
   }
 
   // --- reads ----------------------------------------------------------------
-  // GET /chapter — the dedup lookup. Returns seeded chapters filtered by the
+  // GET /chapter; the dedup lookup. Returns seeded chapters filtered by the
   // ids[]/manga/groups params the client sends; empty by default, which is the
   // "nothing uploaded yet" state most tests want.
   if (path === "/chapter" && method === "GET") {
@@ -208,7 +208,7 @@ const server = createServer(async (req, res) => {
       data = ids.map((id) => seeded.manga.find((m) => m.id === id) ?? mockManga(id));
     } else if (title) {
       // The pre-create duplicate search. Substring, case-insensitive, over every
-      // title and alt-title — enough for a test to seed a near-match and prove
+      // title and alt-title; enough for a test to seed a near-match and prove
       // the pipeline refuses to auto-create a duplicate.
       const needle = title.toLowerCase();
       data = seeded.manga.filter((m) =>
@@ -223,7 +223,7 @@ const server = createServer(async (req, res) => {
     return collection(res, data);
   }
 
-  // POST /manga — title draft creation (automated untracked-series pipeline).
+  // POST /manga; title draft creation (automated untracked-series pipeline).
   // The draft is also added to `seeded.manga` so the very next GET /manga/{id}
   // sees it: create-then-correct is one operator flow, not two test cases.
   if (path === "/manga" && method === "POST") {
@@ -235,7 +235,7 @@ const server = createServer(async (req, res) => {
     return json(res, 201, { result: "ok", data: manga });
   }
 
-  // POST /manga/draft/{id}/commit — publish the draft.
+  // POST /manga/draft/{id}/commit; publish the draft.
   if (seg[0] === "manga" && seg[1] === "draft" && seg[3] === "commit" && method === "POST") {
     const draft = recorded.titleDrafts.find((d) => d.id === seg[2]);
     if (!draft) return json(res, 404, { result: "error" });
@@ -243,14 +243,14 @@ const server = createServer(async (req, res) => {
     return json(res, 200, { result: "ok", data: { id: draft.id, type: "manga" } });
   }
 
-  // GET /manga/{id} — one title in full, as the correction flow reads it before
+  // GET /manga/{id}; one title in full, as the correction flow reads it before
   // editing. Unknown ids are synthesised, matching the ids[] lookup above.
   if (seg[0] === "manga" && seg.length === 2 && method === "GET") {
     const found = seeded.manga.find((m) => m.id === seg[1]) ?? mockManga(seg[1]);
     return json(res, 200, { result: "ok", response: "entity", data: found });
   }
 
-  // PUT /manga/{id} — an operator correcting a title this pipeline created.
+  // PUT /manga/{id}; an operator correcting a title this pipeline created.
   // The version check is real, because it is the only part of this write worth
   // faking faithfully: it is what stops two operators overwriting each other,
   // and a client that sends a stale version has a bug the mock should expose.
@@ -283,13 +283,13 @@ const server = createServer(async (req, res) => {
     return ok(res, { data: target });
   }
 
-  // GET /manga/{id}/aggregate — volume backfill.
+  // GET /manga/{id}/aggregate; volume backfill.
   if (seg[0] === "manga" && seg[2] === "aggregate" && method === "GET") {
     return json(res, 200, { result: "ok", volumes: seeded.aggregate[seg[1]] ?? {} });
   }
 
   // --- upload session lifecycle --------------------------------------------
-  // GET /upload — is a session already open? MangaDex 404s when none is, and
+  // GET /upload; is a session already open? MangaDex 404s when none is, and
   // the client is expected to treat that as "no session", not as an error.
   if (path === "/upload" && method === "GET") {
     if (!currentSession) return mdError(res, 404, "no current upload session");
@@ -320,7 +320,7 @@ const server = createServer(async (req, res) => {
     return ok(res, {});
   }
 
-  // POST /upload/{sessionId} — page images (multipart).
+  // POST /upload/{sessionId}; page images (multipart).
   if (seg[0] === "upload" && seg.length === 2 && method === "POST") {
     const raw = await readBody(req);
     if (!currentSession || currentSession.id !== seg[1]) {
@@ -351,7 +351,7 @@ const server = createServer(async (req, res) => {
     return json(res, 200, { result: "ok", errors: [], data });
   }
 
-  // POST /upload/{sessionId}/commit — becomes a chapter.
+  // POST /upload/{sessionId}/commit; becomes a chapter.
   if (seg[0] === "upload" && seg[2] === "commit" && method === "POST") {
     const body = parseJson(await readBody(req)) ?? {};
     if (!currentSession || currentSession.id !== seg[1]) {
@@ -371,7 +371,7 @@ const server = createServer(async (req, res) => {
     recorded.commits.push(commit);
     // The committed chapter becomes visible to subsequent GET /chapter calls,
     // so a second run of the same job sees it and dedups instead of
-    // re-uploading — the property most worth testing end to end.
+    // re-uploading; the property most worth testing end to end.
     seeded.chapters.push(chapterResource(chapterId, commit));
     currentSession = null;
     return json(res, 200, { result: "ok", data: { id: chapterId, type: "chapter" } });
@@ -453,7 +453,7 @@ function chapterResource(id, commit) {
 /**
  * A manga entity with every attribute the platform reads. Defaults stand in for
  * whatever a payload left out, so a title created by POST /manga and a title
- * synthesised for an unknown id have the same shape — including `version`,
+ * synthesised for an unknown id have the same shape; including `version`,
  * without which an edit cannot be attempted at all.
  */
 function mangaResource(id, payload = {}, version = 1) {

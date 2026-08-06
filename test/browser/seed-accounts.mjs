@@ -5,7 +5,7 @@
  * with its own parameters, so writing the column directly through Prisma would
  * store something no login could ever match. Run this after the API is up.
  *
- * The passwords are fixtures shared with verify.mjs — change them in both.
+ * The passwords are fixtures shared with verify.mjs; change them in both.
  */
 const O = process.env.DASH_ORIGIN ?? "http://127.0.0.1:8101";
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? "dev-admin-not-a-secret";

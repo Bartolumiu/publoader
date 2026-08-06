@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 #
 # Core control-plane image. ONE image serves core-api, core-scheduler,
-# core-processor and core-uploader — they are the same code with different
+# core-processor and core-uploader; they are the same code with different
 # entrypoints (see package.json start:*), so a single build, a single digest
 # and a single upgrade step cover the whole control plane.
 #
@@ -15,7 +15,7 @@
 #
 # The digest below is the multi-arch index digest of node:24-bookworm-slim as
 # of 2026-07-29 (it therefore builds on both amd64 and arm64). It goes stale as
-# soon as the tag moves, which is the point — refresh it deliberately, on a
+# soon as the tag moves, which is the point; refresh it deliberately, on a
 # schedule and for CVE fixes, so the change appears in a diff and gets reviewed:
 #
 #   docker pull node:24-bookworm-slim
@@ -66,7 +66,7 @@ COPY package.json pnpm-lock.yaml ./
 # --frozen-lockfile: fail rather than silently resolve a different tree than
 # the one reviewed (§8). This REQUIRES pnpm-lock.yaml to be committed; if the
 # build errors with "no lockfile found", generate it with `pnpm install` in
-# the repo root and commit the result — do not "fix" it by dropping the flag.
+# the repo root and commit the result; do not "fix" it by dropping the flag.
 # NODE_ENV=production would skip devDependencies, and we need tsc/prisma here.
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
     NODE_ENV=development pnpm install --frozen-lockfile
@@ -116,7 +116,7 @@ CMD ["migrate", "deploy"]
 # --- stage: prune -----------------------------------------------------------
 # Strip devDependencies from the installed tree. The prisma client generated in
 # the build stage lives inside the @prisma/client package directory, which is a
-# production dependency and therefore survives the prune — the smoke check
+# production dependency and therefore survives the prune; the smoke check
 # below proves that on every build instead of trusting it.
 FROM build AS prune
 RUN pnpm prune --prod && \
@@ -133,7 +133,7 @@ FROM ${NODE_IMAGE} AS runtime
 
 # Prisma's query engine links against libssl at runtime. Without it Prisma logs
 # "failed to detect the libssl/openssl version to use ... may not work as
-# expected" and falls back to a guess — so install it rather than rely on the
+# expected" and falls back to a guess; so install it rather than rely on the
 # guess being right. ca-certificates is needed for outbound TLS (MangaDex,
 # Discord webhooks, Atlas during a migration).
 RUN apt-get update \
@@ -184,7 +184,7 @@ COPY --chown=root:root package.json ./
 # what makes the "Read the docs" view work in the container (see
 # core/sysops/docsStore.ts; DOCS_PATH overrides the search). An EMPTY or absent
 # directory is reported as "not shipped with this build" rather than as "there is
-# no documentation" — so a build that drops this line degrades honestly, but it
+# no documentation"; so a build that drops this line degrades honestly, but it
 # does drop the feature.
 COPY --chown=root:root docs ./docs
 # Fail here rather than serving an empty docs list in production.
@@ -195,13 +195,13 @@ RUN test -n "$(ls -A ./docs 2>/dev/null)" || (echo "no docs/ in the runtime imag
 # `read_only: true` in compose meaningful rather than decorative.
 USER 10001:10001
 
-# core-api's internal port. `EXPOSE` is documentation plus a hint to tooling —
+# core-api's internal port. `EXPOSE` is documentation plus a hint to tooling;
 # it publishes nothing on the host by itself, and the compose files never map
 # it (the cloudflared tunnel is the only ingress).
 EXPOSE 8100
 
 # Liveness only: /healthz answers as long as the event loop is turning. It says
-# nothing about Postgres — that is /readyz, and a database blip must not cause
+# nothing about Postgres; that is /readyz, and a database blip must not cause
 # an orchestrator to kill an otherwise healthy API.
 # curl/wget are not installed (nothing to smuggle a request out with), so the
 # probe uses node's built-in fetch.

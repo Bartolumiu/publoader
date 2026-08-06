@@ -24,7 +24,7 @@ const tempDir = (): string => mkdtempSync(join(tmpdir(), "webhook-archive-test-"
 
 /**
  * A zip built byte by byte, because adm-zip normalises `..` out of an entry
- * name when you *add* it — so the library cannot be used to construct the
+ * name when you *add* it; so the library cannot be used to construct the
  * malicious archive the zip-slip guard exists for. Stored (uncompressed)
  * entries, which is all the reader needs.
  */
@@ -126,7 +126,7 @@ describe("extractSubtree", () => {
     zip.addFile("src/mangaplus/manifest.json", Buffer.from("{}"));
     zip.addFile("toplevel.txt", Buffer.from("x"));
     // Without the wrapper the first segment is stripped as if it were one, so
-    // nothing matches `src/mangaplus/` — a real GitHub archive always has it.
+    // nothing matches `src/mangaplus/`: a real GitHub archive always has it.
     expect(extractSubtree(zip.toBuffer(), extensionRepoPath("mangaplus"), tempDir())).toBe(0);
   });
 });

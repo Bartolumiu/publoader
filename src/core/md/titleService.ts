@@ -41,21 +41,21 @@ export interface MangaEditPlan {
  *
  *  1. A field that did not change is not sent. MangaDex leaves absent fields
  *     alone, so a title's description, authors, tags and covers survive an edit
- *     from here untouched — which matters most for the case where this pipeline
- *     did not create the title but was pointed at an existing one.
+ *     from here, which matters most when this pipeline did not create the title
+ *     but was pointed at an existing one.
  *
- *  2. A field that IS sent replaces its whole value, so `title` and `links` are
+ *  2. A field that is sent replaces its whole value, so `title` and `links` are
  *     merged from what MangaDex currently holds rather than rebuilt. Sending
  *     `{links: {raw: …}}` at a title that also has an `al` or `mu` link would
- *     delete those links, and nobody asked for that.
+ *     delete those links.
  *
  * The one deliberate deletion: when the title carries exactly one name and the
- * operator corrected the LANGUAGE, the name moves rather than being duplicated.
+ * operator corrected the language, the name moves rather than being duplicated.
  * A single-entry title map is what this pipeline creates (see `createOne`), so
- * that entry is ours to rewrite — leaving it behind would publish the mangled
+ * that entry is ours to rewrite, and leaving it behind would publish the mangled
  * name as an alternative title in a language it was never in. A title with
- * several names is somebody's curation: the correction is added and the rest are
- * kept, with a note saying so.
+ * several names is somebody's curation: the correction is added, the rest kept,
+ * with a note saying so.
  */
 export function mangaEditPayload(current: MdMangaDetail, desired: TitleFields): MangaEditPlan {
   const changes: MangaEditChange[] = [];
@@ -121,7 +121,7 @@ export type ApplyFailure =
 export type ApplyResult =
   | {
       ok: true;
-      /** False when the title already said what the row says — not an error. */
+      /** False when the title already said what the row says; not an error. */
       applied: boolean;
       mdMangaId: string;
       titleUrl: string;
@@ -134,8 +134,8 @@ export type ApplyResult =
  * Automated untracked-series pipeline:
  *   1. the processor persists untracked manga reported by extensions into
  *      `untracked_manga` (state NEW);
- *   2. this service — running in the core uploader (the MD-credential holder)
- *      — creates + commits a MangaDex title for each NEW row when the
+ *   2. this service, running in the core uploader (the MD-credential holder)
+ *      - creates + commits a MangaDex title for each NEW row when the
  *      extension's manifest opts in (`auto_create_titles`), or when an
  *      operator approves it via the admin API;
  *   3. the new mapping lands in `tracked_manga` (the DB-authoritative manga
@@ -219,7 +219,7 @@ export class TitleService {
    * The row is the source of truth for what the title should say, so this reads
    * it fresh: an operator PATCHes, looks at the diff, then applies, and anything
    * cached in between would apply the wrong thing. The write itself is
-   * conditional on the version read in the same call — a concurrent edit loses
+   * conditional on the version read in the same call; a concurrent edit loses
    * the race and is reported rather than overwritten.
    */
   async applyToMangaDex(untrackedId: string, actor: string): Promise<ApplyResult> {
@@ -237,7 +237,7 @@ export class TitleService {
         ok: false,
         reason: "no-md-title",
         error:
-          "this row has no MangaDex title yet, so there is nothing to correct there — " +
+          "this row has no MangaDex title yet, so there is nothing to correct there; " +
           "fix the row and approve it, and the title is created from the corrected values",
       };
     }
@@ -273,7 +273,7 @@ export class TitleService {
       const status = err instanceof MdRequestError ? err.status : undefined;
       // A version conflict is the one failure with a different meaning: the
       // entry moved between the read and the write, so the operator has to look
-      // again before deciding — re-sending the same edit would clobber whatever
+      // again before deciding; re-sending the same edit would clobber whatever
       // that other change was.
       const conflict = status === 409 || (status === 400 && /version/i.test(message));
       await this.prisma.untrackedManga.update({
@@ -291,8 +291,8 @@ export class TitleService {
       };
     }
 
-    // The row carries the CURRENT fact — "this was applied, when, by whom" —
-    // while the audit log keeps the history of each application. Deriving the
+    // The row carries the CURRENT fact, "this was applied, when, by whom",
+ // while the audit log keeps the history of each application. Deriving the
     // fact by scanning the log worked, but it made a routine read depend on log
     // retention, and current state belongs on the row.
     await this.prisma.untrackedManga.update({
@@ -335,7 +335,7 @@ export class TitleService {
       // (bundle re-import, manual tracking) since it was reported.
       // The default namespace: `untracked_manga` has no namespace column, so an
       // auto-created title lands in the extension's flat id space. That is
-      // correct for every extension that has one — see the note on the
+      // correct for every extension that has one; see the note on the
       // TrackedManga.namespace model for what a multi-catalogue extension (viz)
       // still needs before its untracked series can travel this path.
       const already = await this.prisma.trackedManga.findUnique({
@@ -360,7 +360,7 @@ export class TitleService {
       // and "the publisher lists a series we have no mapping for" is a much
       // weaker signal than "this series is not on MangaDex". So when a plausible
       // match exists, refuse to auto-create and hand it to a human with the
-      // candidates attached — mapping an existing title is a two-click job in
+      // candidates attached; mapping an existing title is a two-click job in
       // the dashboard, un-duplicating a catalogue is not.
       if (actor === "auto") {
         const candidates = await this.md.searchManga(row.mangaName, 5);
@@ -375,7 +375,7 @@ export class TitleService {
               lastError:
                 `a MangaDex title already looks like this series ` +
                 `(https://mangadex.org/title/${match.id}). Not auto-creating a ` +
-                `duplicate — map it with \`tracked set\`, or approve this row to ` +
+                `duplicate; map it with \`tracked set\`, or approve this row to ` +
                 `create a new title anyway.`,
             },
           });
@@ -449,7 +449,7 @@ export class TitleService {
       const lines = batch.map(
         ({ row, mdMangaId }) =>
           `**[${row.mangaName}](https://mangadex.org/title/${mdMangaId})** ` +
-          `(${row.mangaLanguage}) — [source](${row.mangaUrl}) · \`${row.extension}\``,
+          `(${row.mangaLanguage}): [source](${row.mangaUrl}) · \`${row.extension}\``,
       );
       await this.notifier.send({
         title: `Created ${created.length} new MangaDex title${created.length === 1 ? "" : "s"}`,

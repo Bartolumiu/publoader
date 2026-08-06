@@ -29,7 +29,7 @@ export type ConsumeResult =
   | { ok: false; reason: ConsumeFailure };
 
 export interface IssuedToken {
-  /** The secret half — goes in the URL and nowhere else, ever. */
+  /** The secret half; goes in the URL and nowhere else, ever. */
   secret: string;
   id: string;
   expiresAt: Date;
@@ -70,7 +70,7 @@ export class LoginTokenStore {
    * the account.
    *
    * The distinction between "unknown" and "used"/"expired" is deliberately
-   * kept — this endpoint is reached by clicking a link the holder already has,
+   * kept; this endpoint is reached by clicking a link the holder already has,
    * so precise feedback helps a locked-out operator and tells an attacker
    * nothing they could not learn by trying.
    */
@@ -96,7 +96,7 @@ export class LoginTokenStore {
     }
 
     // Approval can be withdrawn between sending and clicking; the link must not
-    // outrank it. The token stays consumed — a rejected click still burns it.
+    // outrank it. The token stays consumed; a rejected click still burns it.
     if (!row.user.approved) return { ok: false, reason: "unapproved" };
 
     // Every other link for this account is now stale mail.

@@ -3,7 +3,7 @@
 # Worker-agent image. This is the ONLY image that ever executes third-party
 # extension code, and it is the only one that runs on machines the operator may
 # not fully control. It therefore holds nothing worth stealing: no MangaDex
-# credentials, no database URL, no Discord webhooks — a worker token and the
+# credentials, no database URL, no Discord webhooks; a worker token and the
 # bundle it was handed, and that is the entire blast radius (§8).
 #
 # It is the core image's Node build plus runner-node/, the extension API v2
@@ -16,7 +16,7 @@
 #   docker build -f docker/worker/Dockerfile -t publoader/worker:local .
 #
 # Base pinning: see the long note in docker/core/Dockerfile. This is the SAME
-# digest and must be refreshed together with it — keeping core and worker on
+# digest and must be refreshed together with it; keeping core and worker on
 # one base is deliberate: one CVE sweep, one re-pin, one thing to verify.
 ARG NODE_IMAGE=node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
 ARG PNPM_VERSION=10.12.1
@@ -71,7 +71,7 @@ FROM ${NODE_IMAGE} AS runtime
 
 # Prisma's query engine links against libssl at runtime. Without it Prisma logs
 # "failed to detect the libssl/openssl version to use ... may not work as
-# expected" and falls back to a guess — so install it rather than rely on the
+# expected" and falls back to a guess; so install it rather than rely on the
 # guess being right. ca-certificates is needed for outbound TLS (MangaDex,
 # Discord webhooks, Atlas during a migration).
 RUN apt-get update \
@@ -88,15 +88,15 @@ COPY --from=build --chown=root:root /build/dist ./dist
 COPY --chown=root:root package.json ./
 # The v2 runner. Self-contained: Node built-ins only, no imports from dist/ and
 # no node_modules, because it executes under --permission with a read allowlist
-# that covers this directory, the bundle, and the job workdir — and nothing else.
+# that covers this directory, the bundle, and the job workdir; and nothing else.
 COPY --chown=root:root runner-node ./runner-node
 
 # Writable paths, and only these two:
 #   /var/lib/publoader-worker  persistent agent state (worker token obtained by
-#                              exchanging the enroll token, bundle cache) —
+#                              exchanging the enroll token, bundle cache):
 #                              a named volume in compose.
 #   /tmp                       per-job scratch: unpacked bundles, downloaded
-#                              images, the runner's working directory —
+#                              images, the runner's working directory;
 #                              a tmpfs in compose, so it is wiped between jobs
 #                              and never survives a restart.
 # Everything else is root-owned and read-only to uid 10001, which is what lets
@@ -121,8 +121,8 @@ USER 10001:10001
 
 # Liveness via the heartbeat file services/worker.ts refreshes on every piece of
 # work-related traffic with the core (lease polls while idle, lease renewals
-# while a job runs). A wedged agent — one whose loop stopped turning but whose
-# process is still alive — is the failure `restart: unless-stopped` cannot see,
+# while a job runs). A wedged agent, one whose loop stopped turning but whose
+# process is still alive, is the failure `restart: unless-stopped` cannot see,
 # and this is what catches it.
 #
 # A MISSING file is UNHEALTHY. The previous version exited 0 when the file was

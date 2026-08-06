@@ -10,7 +10,7 @@ import { ExtensionConfigStore } from "../../src/core/store/extensionConfig.js";
 
 /**
  * Control-plane API: enrollment lifecycle, audience separation, revocation,
- * lease flow, envelope ingestion, and bundle pinning — exercised end-to-end
+ * lease flow, envelope ingestion, and bundle pinning; exercised end-to-end
  * through HTTP (fastify inject).
  */
 describe.skipIf(!dbReady())("control-plane API", () => {
@@ -119,7 +119,7 @@ describe.skipIf(!dbReady())("control-plane API", () => {
     // the env var it reads was never passed to core-api at all, so every
     // enrolment snippet handed out a two-release-old image and nothing in the
     // system pointed at why. The assertion is deliberately "not a stale pin"
-    // rather than a specific tag — pinning the expected version here would rot
+    // rather than a specific tag; pinning the expected version here would rot
     // in exactly the same way the thing it tests did.
     const mint = await app.inject({
       method: "POST",
@@ -257,7 +257,7 @@ describe.skipIf(!dbReady())("control-plane API", () => {
   /**
    * viz reuses numeric ids across its `shonenjump` and `vizmanga` catalogues, so
    * the lease has to say which catalogue an id belongs to. The flat shape cannot,
-   * hence the second wire form — and `mangaIdMapNamespaced` so a runner that does
+   * hence the second wire form; and `mangaIdMapNamespaced` so a runner that does
    * not implement it can refuse loudly rather than invert an object-valued map
    * into an empty lookup and report every series as untracked.
    */
@@ -354,7 +354,7 @@ describe.skipIf(!dbReady())("control-plane API", () => {
     });
     expect(submit.json().outcome).toBe("quarantined");
 
-    // The envelope is quarantined and NO canonical state moves — that is the
+    // The envelope is quarantined and NO canonical state moves; that is the
     // part that matters. The job goes back to PENDING rather than straight to
     // DEAD_LETTER: a policy failure is produced by a worker, so a hostile or
     // broken one could otherwise dead-letter every job it managed to lease.
@@ -368,14 +368,14 @@ describe.skipIf(!dbReady())("control-plane API", () => {
 
   /**
    * `custom_language` exists to publish a title in a language the extension's
-   * catalogue does not name — mangaplus reports SPANISH for everything, while
+   * catalogue does not name; mangaplus reports SPANISH for everything, while
    * one title is Latin-American Spanish and is mapped to `es-la`. Validating
    * chapters against the manifest alone rejected every chapter of that title,
    * which reads as a manifest mistake rather than the override working.
    *
    * The three cases below are the whole contract: rejected without a mapping,
-   * accepted with one from the DATABASE, and — the reason the union was left out
-   * originally — never widened by the envelope itself.
+   * accepted with one from the DATABASE, and, the reason the union was left out
+   * originally, never widened by the envelope itself.
    */
   describe("custom_language and the manifest allowlist", () => {
     const envelopeWith = (

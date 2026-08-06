@@ -10,8 +10,8 @@
  * operator repoint is invisible in the repo, so a contributor opens a pull
  * request adding a series that has been tracked for months.
  *
- * Nothing here does I/O, so every decision — including every reason a file is
- * left alone — is directly testable.
+ * Nothing here does I/O, so every decision, including every reason a file is
+ * left alone, is directly testable.
  */
 import { parseMangaIdMapFile, type ParsedIdMapRow } from "../store/bundles.js";
 import { DEFAULT_NAMESPACE } from "../store/trackedManga.js";
@@ -25,7 +25,7 @@ export const DEFAULT_MAP_FILENAME = "manga_id_map.json";
  * alpha_manga is flat+forward, viz is nested+forward.
  */
 export interface MapShape {
-  /** `{namespace: {…}}` — one extension serving more than one catalogue. */
+  /** `{namespace: {…}}`: one extension serving more than one catalogue. */
   nested: boolean;
   /** `forward` is `{externalId: mdId}`; `inverted` is `{mdId: [externalId, …]}`. */
   inner: "forward" | "inverted";
@@ -43,7 +43,7 @@ export const DEFAULT_SHAPE: MapShape = { nested: false, inner: "inverted" };
  *
  * Preserving it is the difference between a diff a contributor can review and a
  * diff that rewrites every line of a file they curated. The judgement is per
- * entry and resolved by majority, because hand-edited files mix shapes — the
+ * entry and resolved by majority, because hand-edited files mix shapes; the
  * same tolerance `parseMangaIdMapFile` already has. Null means "nothing here
  * looks like a map", and the caller must not overwrite on a guess.
  */
@@ -83,7 +83,7 @@ export function detectMapShape(document: unknown): MapShape | null {
  * Nesting is decided by the ROWS, not by `shape.nested`: an extension with a
  * namespaced row must be written nested, because flattening viz's two
  * catalogues into one object is exactly the collision the namespace column
- * exists to prevent — and an extension with none must not be, because the
+ * exists to prevent; and an extension with none must not be, because the
  * alternative is a file with a meaningless `""` key at the top. Only
  * `shape.inner` is taken from the existing file.
  */
@@ -146,7 +146,7 @@ export interface WritePlan {
 
 /**
  * Below this many mappings in the current file, a large proportional shrink is
- * not evidence of anything — going from 3 rows to 1 is a normal edit.
+ * not evidence of anything; going from 3 rows to 1 is a normal edit.
  */
 export const SHRINK_GUARD_MIN_ROWS = 8;
 

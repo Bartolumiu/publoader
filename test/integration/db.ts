@@ -26,7 +26,8 @@ export async function resetDb(prisma: PrismaClient): Promise<void> {
       cleared_errors,
       audit_events, workers, enroll_tokens, untracked_manga, tracked_manga,
       extension_configs, extension_chapter_aliases, extension_multi_chapters,
-      extension_language_maps, login_tokens, admin_sessions, admin_users
+      extension_language_maps, login_tokens, admin_sessions, admin_users,
+      role_permissions
     CASCADE
   `);
 }

@@ -17,7 +17,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 /**
  * Content types the dashboard directory may serve. The allowlist is by
  * EXTENSION, and the file list is discovered from the directory at startup, so
- * splitting the SPA into several modules needs no change here — but a file type
+ * splitting the SPA into several modules needs no change here; but a file type
  * that is not a page, a script or a stylesheet still cannot be served, and no
  * request path is ever joined onto a filesystem path.
  */
@@ -55,7 +55,7 @@ function loadAssets(): Map<string, { body: Buffer; contentType: string }> {
 
   // Read the directory ONCE at startup and serve only what was found then.
   // Requests are matched against this map by exact basename, so a request can
-  // never address a file by path — traversal is not filtered, it is impossible.
+  // never address a file by path; traversal is not filtered, it is impossible.
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (!entry.isFile()) continue;
     const contentType = ASSET_TYPES[extname(entry.name).toLowerCase()];
@@ -80,7 +80,7 @@ function loadAssets(): Map<string, { body: Buffer; contentType: string }> {
  * The dashboard is the site: it answers "/" so publoader.ardax.dev lands on
  * the sign-in page, with /dash kept as an alias.
  *
- * Only exact, enumerated routes are claimed — "/", "/dash", "/dash/*" — so the
+ * Only exact, enumerated routes are claimed, "/", "/dash", "/dash/*", so the
  * dashboard can never shadow /healthz, /readyz, /metrics or the API
  * namespaces. Those are registered separately and remain internal-network
  * paths. In particular there is no root-level wildcard: an unknown top-level

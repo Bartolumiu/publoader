@@ -28,7 +28,7 @@ padmin dead-letter  # what has already given up
 
 Everything in this document can also be done from a browser at
 `https://publoader.ardax.dev/`. It is the same admin API with a login screen,
-so the CLI remains authoritative and the two are interchangeable — every
+so the CLI remains authoritative and the two are interchangeable; every
 dashboard action lands in `padmin audit` exactly like a CLI one.
 
 **Sign in** with your email and password, with an emailed sign-in link, or with
@@ -42,8 +42,8 @@ from **the profile menu → Your account** while you are there, or you will need
 another link next time. You can also attach Discord to the same account from
 that dialog, after which either method signs you in.
 
-If nobody has an account — a fresh database seeds one `OWNER`
-(`DASH_OWNER_EMAIL`) with no credentials — use **"Use the admin token
+If nobody has an account, a fresh database seeds one `OWNER`
+(`DASH_OWNER_EMAIL`) with no credentials, use **"Use the admin token
 instead"** on the login page, then **Users → Set password**. That is the
 bootstrap path and the break-glass path both. (With email configured, the
 seeded owner can also just ask for a link.)
@@ -61,14 +61,14 @@ Users → their row → Delete        # revokes their sessions by cascade
 ```
 
 If you want to keep the account but cut access now, **Revoke** each of their
-live sessions and change their password — a password change on its own does
+live sessions and change their password; a password change on its own does
 *not* invalidate sessions already issued.
 
 To take away only their ability to manage other operators, set them to `ADMIN`.
 Be clear-eyed about what that does and does not contain: an `ADMIN` still has
 full control-plane authority, including publishing bundles, which is code
 execution on every worker. It is not a safe role for someone you no longer
-trust — deletion is.
+trust; deletion is.
 
 ### Approving a new operator
 
@@ -78,7 +78,7 @@ Nothing else happens until you act: they cannot sign in, and no endpoint is
 reachable. Approve from **Users**, or leave it and delete the row.
 
 With self-signup off (the default), an unknown Discord login is refused
-outright. Invite them instead — **Users → Invite** with their email — and they
+outright. Invite them instead, **Users → Invite** with their email, and they
 get in by linking Discord with that same verified email, or by you setting a
 password for them.
 
@@ -94,8 +94,8 @@ Users → Invite → their email, role CONTRIBUTOR
 Users → their row → Set password        # or let them link Discord
 ```
 
-Their dashboard has three sections (Overview, Extensions — with the series map
-under **Extensions → Open** — and Untracked) and nothing else: the tab strip is
+Their dashboard has three sections (Overview, Extensions, with the series map
+under **Extensions → Open**, and Untracked) and nothing else: the tab strip is
 built from the scopes the server says they hold, so there is no tab that 403s.
 
 What to tell them: **add freely, and flag anything that looks already-mapped.**
@@ -111,15 +111,15 @@ revokes their sessions by cascade).
 ### Curate the series map, and preview a paste first
 
 **Extensions → (extension) → Open → Tracked series.** The paste box accepts
-lines of `externalId,mangadexTitleId` — separators can be commas, whitespace,
+lines of `externalId,mangadexTitleId`: separators can be commas, whitespace,
 tabs, semicolons or pipes, `#` comments and a header row are ignored, and the
 two columns may be in either order because the MangaDex id is recognised by its
 UUID shape. **Export** emits exactly that format, so export → edit → paste back
 is the round trip, with no file in git and no shell on the host.
 
 **Always dry-run a paste you did not generate yourself.** The preview reports
-what every line would do — added, updated (with the previous target), unchanged,
-removed, or rejected — and writes nothing, because the store skips its write
+what every line would do, added, updated (with the previous target), unchanged,
+removed, or rejected, and writes nothing, because the store skips its write
 transaction rather than applying and undoing.
 
 ```bash
@@ -137,7 +137,7 @@ it was pointing at. Then re-send with `"dryRun": false`.
 
 A dry run leaves no audit entry, because nothing happened. A real batch records
 `tracked_manga.batch` with the counts. If a paste goes in wrong, the audit
-detail plus `/tmp/before.txt` is what you reconstruct from — there is no undo.
+detail plus `/tmp/before.txt` is what you reconstruct from; there is no undo.
 
 Three further flows are worth calling out because they are easier to get
 wrong in a UI than on a command line.
@@ -149,7 +149,7 @@ you control the machine), a note naming the host, and a TTL.
 
 The token is displayed **once**, inside a ready-made compose snippet with
 `CORE_URL` and `ENROLL_TOKEN` already filled in. Copy it before closing the
-dialog — there is no way to retrieve it, and the only recovery is minting
+dialog; there is no way to retrieve it, and the only recovery is minting
 another and letting the first expire. Send it over a private channel; it is a
 bearer credential until it is spent.
 
@@ -163,7 +163,7 @@ heartbeats.
 synchronously and **cannot be undone from the dashboard**, so it asks for
 confirmation first.
 
-Check the series name, language, and source URL before approving — the common
+Check the series name, language, and source URL before approving; the common
 mistake is approving something that already exists on MangaDex under a
 different name, which produces a duplicate title. When it already exists, use
 **Extensions → Open → Tracked series** to point the external id at the
@@ -172,7 +172,7 @@ existing MangaDex UUID instead, and **Skip** the untracked row.
 On success the toast contains the new `https://mangadex.org/title/<id>` link,
 and the row moves to `TRACKED` with the same link in the table.
 
-### Trigger a run — and what `Clean` means
+### Trigger a run; and what `Clean` means
 
 **Extensions** gives each published bundle three buttons:
 
@@ -184,12 +184,12 @@ and the row moves to `TRACKED` with the same link in the table.
 
 `Clean` is destructive and confirms before firing. A clean run compares the
 full catalogue against what is on MangaDex and can queue **deletions** for
-chapters the extension no longer reports — a source-side outage that hides
+chapters the extension no longer reports; a source-side outage that hides
 chapters therefore looks identical to chapters being removed. Check the
-extension is healthy first — **Runs** tab, or `padmin runs list`.
+extension is healthy first; **Runs** tab, or `padmin runs list`.
 
 Note you cannot pre-pause as a safety net: `POST /runs` returns 409 while the
-platform is paused. The recovery lever is the other way round — if a clean run
+platform is paused. The recovery lever is the other way round; if a clean run
 does queue deletions you did not want, hit **Pause** on the Overview tab
 immediately. The uploader honours the pause gate, so queued upload tasks stop
 before they execute and you can inspect them.
@@ -230,7 +230,7 @@ docker compose logs -f worker-agent
 
 The agent exchanges the token for a permanent worker token, persists it to the
 `worker-state` volume, and starts long-polling. Once it has enrolled, remove
-`ENROLL_TOKEN` from `.env` — it is spent.
+`ENROLL_TOKEN` from `.env`: it is spent.
 
 **3. Confirm** (operator side).
 
@@ -239,7 +239,7 @@ padmin workers list
 ```
 
 `STATUS` should be `ACTIVE` and `HEARTBEAT` under a minute. If the worker never
-appears, the enrolment failed — check `padmin audit` for a
+appears, the enrolment failed; check `padmin audit` for a
 `worker.enroll.rejected` event, which records the source IP and the name that
 was attempted.
 
@@ -259,7 +259,7 @@ Store the returned `workerToken` as `WORKER_TOKEN` in the worker's `.env`. A
 
 ## Drain, revoke, and re-enrol a worker
 
-**Drain** — take a worker out of rotation without interrupting its current job.
+**Drain**: take a worker out of rotation without interrupting its current job.
 Use this for planned maintenance, host reboots, and agent upgrades.
 
 ```bash
@@ -274,7 +274,7 @@ until no job is leased to it, then do your maintenance.
 padmin workers activate <workerId>     # back into rotation
 ```
 
-**Revoke** — permanently invalidate the credential. Use this when a host is
+**Revoke**: permanently invalidate the credential. Use this when a host is
 decommissioned, a token may have leaked, or a community worker is misbehaving.
 
 ```bash
@@ -283,7 +283,7 @@ padmin workers revoke <workerId>
 
 Revocation is immediate: the next request from that token gets 401. Any job it
 holds a lease on keeps that lease until it expires, then the sweeper requeues
-it — so expect a job to be re-run within `LEASE_TTL_SECONDS` (default 300).
+it; so expect a job to be re-run within `LEASE_TTL_SECONDS` (default 300).
 There is no way to un-revoke; re-enrol instead.
 
 **Re-enrol** after revocation or after wiping the worker's state volume:
@@ -296,7 +296,7 @@ docker compose down
 docker volume rm worker_worker-state      # only if the old identity is dead
 # set ENROLL_TOKEN in .env
 docker compose up -d
-# operator: the old worker row is now a zombie — revoke it
+# operator: the old worker row is now a zombie; revoke it
 padmin workers revoke <oldWorkerId>
 ```
 
@@ -340,7 +340,7 @@ padmin pause --minutes 30
 #    (to build from source instead: add -f docker-compose.build.yml)
 docker compose pull
 
-# 3. Migrate + restart. `up -d` reruns `migrate deploy` (idempotent — it applies
+# 3. Migrate + restart. `up -d` reruns `migrate deploy` (idempotent; it applies
 #    only migrations absent from _prisma_migrations) before starting services.
 docker compose up -d
 
@@ -355,13 +355,13 @@ padmin resume
 ```
 
 **If migrate exits non-zero**, no application service starts and the old
-containers keep running until you `up` successfully — the stack fails closed.
+containers keep running until you `up` successfully; the stack fails closed.
 Read `docker compose logs migrate`, fix the migration, retry. Do not run
 `prisma migrate reset` against production; it drops the database.
 
 **Never deploy a single service with `--no-deps`.** All four core services
 declare `depends_on: migrate: service_completed_successfully`, which is what
-makes step 3 safe — and `--no-deps` exists precisely to skip that. Deploying just
+makes step 3 safe; and `--no-deps` exists precisely to skip that. Deploying just
 the API that way starts new code against the old schema, and the failure is not a
 crash on boot: the service comes up healthy and reports healthy, because
 `/healthz` does not consult the schema. Only the endpoints that touch a
@@ -370,7 +370,7 @@ not exist*) in the log. If you need to replace one container, either use plain
 `up -d <service>` (dependencies included, migrate reruns idempotently) or run
 `docker compose run --rm migrate` yourself first.
 
-Either way, confirm the schema afterwards from the dashboard — **System →
+Either way, confirm the schema afterwards from the dashboard; **System →
 Schema**, or:
 
 ```bash
@@ -381,7 +381,7 @@ curl -fsS -H "authorization: Bearer $ADMIN_TOKEN" \
 `current: true` with an empty `pending` is the answer you want. `pending`
 non-empty means running code is ahead of the database. `historyAvailable: false`
 means the database was built by `prisma db push` or restored from a dump rather
-than migrated, so pending migrations cannot be computed — expect that on a dev
+than migrated, so pending migrations cannot be computed; expect that on a dev
 stack, never on production.
 
 **If you deployed one service by hand, use `--force-recreate`.** Observed on this
@@ -394,7 +394,7 @@ symptom is a service that will not start, looping on
 PrismaClientInitializationError: Can't reach database server at `postgres:5432`
 ```
 
-while `docker ps` shows postgres up and healthy — because the two containers are
+while `docker ps` shows postgres up and healthy; because the two containers are
 on networks that cannot see each other. `data` is `internal: true`, so there is
 no route to fall back on. Check with:
 
@@ -407,7 +407,7 @@ docker inspect publoader-prod-core-api-1 \
 Neither `up -d` nor `up -d --force-recreate` reliably repairs it. Plain `up -d`
 does nothing at all, because the service's configuration has not changed and
 compose sees no reason to recreate it. `--force-recreate` recreates in place and
-has been observed *causing* this — once dropping `data`, once dropping `edge`.
+has been observed *causing* this; once dropping `data`, once dropping `edge`.
 What works is removing the container and creating it again:
 
 ```bash
@@ -420,11 +420,11 @@ docker compose -p publoader-prod --env-file docker/core/.env.production \
 Note this is worth checking even when nothing looks wrong: the service reports
 healthy either way, because its health check is local. With `edge` missing,
 cloudflared cannot reach it and the public site is down while every panel says
-the stack is fine. `docker compose config` is the tiebreaker — if it lists both
+the stack is fine. `docker compose config` is the tiebreaker; if it lists both
 networks, the file is right and only the running container is stale.
 
 **Rolling back a core upgrade** is only safe if the migration was additive. If
-it was not, restore from backup (below) — which is why you take one before a
+it was not, restore from backup (below): which is why you take one before a
 schema-changing upgrade.
 
 ---
@@ -452,7 +452,7 @@ padmin workers activate <workerId>
 padmin workers list      # AGENT column shows the new version after a heartbeat
 ```
 
-If you skip the drain, nothing breaks — the agent's in-flight job loses its
+If you skip the drain, nothing breaks; the agent's in-flight job loses its
 lease, the sweeper requeues it, and another worker picks it up. Draining just
 avoids the wasted work.
 
@@ -464,12 +464,12 @@ becomes incompatible, `workers revoke` is the enforcement mechanism.
 
 ## Rotate secrets
 
-> **Unresolved incident — these four secrets are public.**
+> **Unresolved incident; these four secrets are public.**
 >
 > `docker/core/.env.production` and `.env.staging` were tracked and
 > pushed to this repository, which is public. `platform/.gitignore` (as it then was) matched
 > `.env` but not `.env.production`, so neither file was ever ignored. Commit
-> `d472f8d` untracks them and ignores `.env*`, which stops it recurring — it does
+> `d472f8d` untracks them and ignores `.env*`, which stops it recurring; it does
 > **not** unpublish anything. The values remain readable in the history of every
 > pushed commit that touched those files, and must be treated as compromised:
 >
@@ -478,14 +478,14 @@ becomes incompatible, `workers revoke` is the enforcement mechanism.
 > | `ADMIN_TOKEN` | Full admin API access. It is the break-glass credential and outranks every account. |
 > | `SESSION_SECRET` | Forged dashboard sessions as any operator, without a password. |
 > | `POSTGRES_PASSWORD` | The database, if the port is ever reachable. |
-> | `TUNNEL_TOKEN` | Running a Cloudflare tunnel for the hostname — an attacker can serve traffic as publoader.ardax.dev. |
+> | `TUNNEL_TOKEN` | Running a Cloudflare tunnel for the hostname; an attacker can serve traffic as publoader.ardax.dev. |
 >
 > **Status: three of the four are rotated.** `POSTGRES_PASSWORD`, `ADMIN_TOKEN`
 > and `SESSION_SECRET` were replaced on 2026-07-31; the leaked admin token now
 > answers 401 and the leaked database password is refused by the server. The
 > published values for those three are inert.
 >
-> **`TUNNEL_TOKEN` is NOT rotated and cannot be from here** — it is issued by
+> **`TUNNEL_TOKEN` is NOT rotated and cannot be from here**: it is issued by
 > Cloudflare and only the account that owns the tunnel can revoke it. Until it is,
 > anyone who read it can run a tunnel for publoader.ardax.dev. Rotate it in the
 > Cloudflare dashboard (Zero Trust → Networks → Tunnels → the tunnel → refresh
@@ -496,7 +496,7 @@ becomes incompatible, `workers revoke` is the enforcement mechanism.
 > that is now ignored.
 >
 > Purging them from history (`git filter-repo`, or deleting the branch) is worth
-> doing afterwards, but rotation is what actually ends the exposure — assume the
+> doing afterwards, but rotation is what actually ends the exposure; assume the
 > published values were scraped the moment they were pushed.
 
 
@@ -504,7 +504,7 @@ becomes incompatible, `workers revoke` is the enforcement mechanism.
 
 An operator password: **Users → Set password** (owner), or the operator does it
 themselves from their own row. Minimum 12 characters, scrypt-hashed at rest.
-Then revoke their live sessions — a password change does *not* invalidate
+Then revoke their live sessions; a password change does *not* invalidate
 sessions already issued.
 
 To sign *everyone* out there is no single lever: revoke each session under
@@ -514,14 +514,14 @@ To sign *everyone* out there is no single lever: revoke each session under
 psql "$DATABASE_URL" -c "UPDATE admin_sessions SET revoked = true"
 ```
 
-Rotating `SESSION_SECRET` does not log anyone out — it signs the OAuth state
+Rotating `SESSION_SECRET` does not log anyone out; it signs the OAuth state
 cookie only, so rotating it breaks Discord logins that are mid-flight and
 nothing else. Rotating `ADMIN_TOKEN` likewise leaves existing sessions alive,
 including any created with the old token.
 
 ### Worker token
 
-Workers can rotate their own credential without operator involvement — the swap
+Workers can rotate their own credential without operator involvement; the swap
 is atomic and the old token dies with it:
 
 ```bash
@@ -536,7 +536,7 @@ alternative is `workers revoke` + re-enrol, which also changes the worker id.
 ### Admin token
 
 The admin token is held by you and the Discord bot. (The dashboard no longer
-holds a copy — operators sign in with their own accounts, and the token is only
+holds a copy; operators sign in with their own accounts, and the token is only
 its break-glass path.) Rotating it breaks the CLI and the bot until they are
 updated, so do it in this order:
 
@@ -544,7 +544,7 @@ updated, so do it in this order:
 NEW=$(openssl rand -base64 48)
 
 # 1. Update .env: ADMIN_TOKEN=$NEW
-# 2. Restart only core-api — the other services do not read it.
+# 2. Restart only core-api; the other services do not read it.
 docker compose up -d core-api
 # 3. Update your own shell, then the bot's config, then restart it.
 export PUBLOADER_ADMIN_TOKEN=$NEW
@@ -554,13 +554,13 @@ padmin stats
 There is one admin token and no overlap window in v1, so expect a brief period
 where the bot returns errors. Rotate at a quiet time.
 
-If `ADMIN_TOKEN` is unset, the admin API answers 503 — it fails closed. A typo
+If `ADMIN_TOKEN` is unset, the admin API answers 503; it fails closed. A typo
 in `.env` locks you out of the API but does not stop uploads.
 
 ### MangaDex credentials
 
-Only `core-uploader` and `core-processor` hold these. Nothing else in the system
-— and definitely no worker — ever sees them.
+Only `core-uploader` and `core-processor` hold these. Nothing else in the system,
+ and definitely no worker, ever sees them.
 
 ```bash
 padmin pause --minutes 15          # let in-flight uploads finish
@@ -572,7 +572,7 @@ padmin resume
 
 Then revoke the old MangaDex API client in the MangaDex account settings. If
 you are rotating because the credential leaked, revoke **first** and accept the
-downtime — a live stolen credential is worse than a paused queue.
+downtime; a live stolen credential is worse than a paused queue.
 
 ### Database password
 
@@ -595,12 +595,12 @@ padmin dead-letter
 padmin runs show <runId>        # per-job attempt count, lease holder, lastError
 ```
 
-Read the `CLASS` column first — it tells you what kind of problem you have:
+Read the `CLASS` column first; it tells you what kind of problem you have:
 
 | Class | Meaning | What to do |
 |---|---|---|
 | `TRANSIENT` | Retried and kept failing. Site down, rate limited, network. | Fix the cause, then `padmin jobs retry <id>`. |
-| `PERMANENT` | The extension raised something that will not succeed on retry. | Read `lastError`. Usually an extension bug or a site layout change — fix the extension, `bundle publish`, then trigger a fresh run rather than retrying the old job (the old job is pinned to the old bundle sha). |
+| `PERMANENT` | The extension raised something that will not succeed on retry. | Read `lastError`. Usually an extension bug or a site layout change; fix the extension, `bundle publish`, then trigger a fresh run rather than retrying the old job (the old job is pinned to the old bundle sha). |
 | `POLICY` | The worker refused to run it, or the result violated the manifest. | Almost always a manifest problem: `allowed_hosts` missing a domain the extension fetches, a language not declared, wrong `mangadex_group_id`, or a bundle sha the worker could not obtain. Fix and republish. |
 
 **Retry** a dead-lettered job:
@@ -618,7 +618,7 @@ whichever worker claims it next.
 padmin jobs cancel <jobId>
 ```
 
-**A job stuck in `LEASED` or `RUNNING`** is not stuck — it holds a lease that
+**A job stuck in `LEASED` or `RUNNING`** is not stuck; it holds a lease that
 expires. The sweeper (`SWEEP_INTERVAL_SECONDS`, default 30) requeues it once
 `leaseExpiresAt` passes. If you see a job whose `LEASE EXPIRES` is in the past
 and it has not moved after two sweep intervals, the scheduler is not running:
@@ -644,13 +644,13 @@ padmin quarantine
 
 Each row names the worker and the reason. Group them mentally:
 
-**Reasons that mean "manifest is wrong"** — the common case, and not an attack:
+**Reasons that mean "manifest is wrong"**: the common case, and not an attack:
 
-- `host not in allowed_hosts` — the extension fetches a domain the manifest
+- `host not in allowed_hosts`: the extension fetches a domain the manifest
   does not declare. Add it, republish, re-run.
-- `language not in manifest languages` — the extension returned a language the
+- `language not in manifest languages`: the extension returned a language the
   manifest does not list.
-- `mangadexGroupId mismatch` — the extension returned a group id different from
+- `mangadexGroupId mismatch`: the extension returned a group id different from
   the manifest's. Verify which one is correct before "fixing" the manifest;
   uploading under the wrong group is worse than a quarantined result.
 
@@ -659,7 +659,7 @@ Each row names the worker and the reason. Group them mentally:
 - Schema violations (unknown fields, wrong types) from a worker running a
   bundle sha you published. The core and the worker validate against the same
   contract, so a mismatch here means the worker is not producing what the
-  runner shim produces — i.e. it is not running the code you think it is.
+  runner shim produces; i.e. it is not running the code you think it is.
 - Counts over cap, or chapter ids for manga outside the job's segment. The
   runner filters to the segment's manga ids, so seeing others means the filter
   was bypassed.
@@ -677,7 +677,7 @@ Then decide: a `COMMUNITY` worker producing invalid envelopes gets revoked. A
 find it before re-activating.
 
 **Nothing quarantined ever reaches MangaDex.** Quarantine is terminal for that
-submission — the job is retried and re-run rather than the envelope being
+submission; the job is retried and re-run rather than the envelope being
 "fixed". There is no approve-and-commit path, deliberately.
 
 ---
@@ -698,10 +698,10 @@ Read the state first:
 
 | State | Meaning | What to do |
 |---|---|---|
-| `PENDING` | Waiting for an uploader to claim it. `NOT BEFORE` in the future means it is backing off after a failure. | Nothing, unless `NOT BEFORE` is long past and nothing moves — then `core-uploader` is not running. |
+| `PENDING` | Waiting for an uploader to claim it. `NOT BEFORE` in the future means it is backing off after a failure. | Nothing, unless `NOT BEFORE` is long past and nothing moves; then `core-uploader` is not running. |
 | `LEASED` | An uploader is working on it right now. | Nothing. Look at `core-uploader`'s logs if it never leaves this state. |
 | `FAILED` / `DEAD_LETTER` | Retries exhausted, or a permanent MangaDex rejection. `ERROR` says which. | Fix the cause, then `padmin queues retry <id>`. |
-| `DONE` | Finished — or cancelled. A cancelled row says so in `ERROR`. | Nothing. |
+| `DONE` | Finished; or cancelled. A cancelled row says so in `ERROR`. | Nothing. |
 
 **Retry** once the cause is fixed. This clears the attempt counter, so the task
 gets a full budget rather than dead-lettering on the first hiccup:
@@ -711,7 +711,7 @@ padmin queues retry <taskId>
 ```
 
 **Cancel** when the task should never run. There is no `CANCELLED` state, so the
-row is marked `DONE` with an operator note in `lastError` — a bare `DONE` would
+row is marked `DONE` with an operator note in `lastError`: a bare `DONE` would
 be indistinguishable from a chapter that actually uploaded:
 
 ```bash
@@ -735,7 +735,7 @@ reclaims nothing, the queue is fine and the consumer is not: check the pause
 gate (`padmin stats`) before anything else.
 
 **Everything that failed, in one list.** Dead-lettered jobs, failed upload
-tasks, and quarantined submissions merged and time-ordered — the fastest way to
+tasks, and quarantined submissions merged and time-ordered; the fastest way to
 see whether a bad hour was one cause or three:
 
 ```bash
@@ -756,7 +756,7 @@ padmin errors restore 3f9a1c2b           # it was not actually fixed
 Clearing hides, it never deletes: the job, upload task or submission keeps its
 state, `padmin dead-letter` and the Activity feed still show the failure, and the
 `errorsOutstanding` count that drives the dashboard badge is what drops. Anything
-that fails *again* comes back on its own — the acknowledgement is recorded against
+that fails *again* comes back on its own; the acknowledgement is recorded against
 that failure's timestamp, so a cleared-then-retried-then-failed job returns as new
 work rather than staying silenced. The same operation is on the dashboard's Errors
 view, `/errors clear` in Discord, and `POST /api/v1/admin/errors/clear`.
@@ -772,8 +772,8 @@ tails a log file.
 
 ## Kill a run in progress
 
-When a run is doing something wrong — a bad extension build, a mapping mistake,
-an upstream site returning nonsense — stop the whole run rather than its jobs one
+When a run is doing something wrong, a bad extension build, a mapping mistake,
+an upstream site returning nonsense, stop the whole run rather than its jobs one
 at a time:
 
 ```bash
@@ -794,13 +794,13 @@ rather than committed.
 
 **Prefer this to cancelling individual jobs on a partitioned run.** Cancelling
 one segment leaves the others to finish, and the run is then processed from
-incomplete results — which on a CLEAN run means the processor concludes that
+incomplete results; which on a CLEAN run means the processor concludes that
 every chapter the missing segment covered has vanished upstream, and queues it
 for removal. A killed run never reaches the processor at all.
 
 A finished run is refused with 409 rather than "cancelled", because cancelling
 completed work would misreport what happened. The run lands in `CANCELLED`, not
-`DEAD_LETTER` — this was a decision, and the state an operator reads later should
+`DEAD_LETTER`: this was a decision, and the state an operator reads later should
 say so.
 
 ---
@@ -808,7 +808,7 @@ say so.
 ## Queue management
 
 The section above is triage: look at a stuck task, retry it, cancel it. This one
-is the rest of the job — acting on many rows at once, emptying a queue, changing
+is the rest of the job; acting on many rows at once, emptying a queue, changing
 what runs next, and queueing or correcting a chapter by hand. Everything here
 lives under `/api/v1/admin/queues`, needs `runs:write` (`runs:read` to look),
 and is audit-logged with the acting principal.
@@ -845,7 +845,7 @@ curl -fsS "$API/api/v1/admin/queues/tasks?state=FAILED&state=DEAD_LETTER" -H "$A
 # one series' worth: dedupeKey is a case-insensitive substring
 curl -fsS "$API/api/v1/admin/queues/tasks?dedupeKey=1234%7C&attemptMin=3" -H "$AUTH"
 
-# the same queue read as CHAPTERS, numbered in claim order — which series,
+# the same queue read as CHAPTERS, numbered in claim order; which series,
 # which chapter, and what an EDIT is going to change
 curl -fsS "$API/api/v1/admin/queues/chapters?limit=50" -H "$AUTH"
 
@@ -861,8 +861,8 @@ curl -fsS "$API/api/v1/admin/queues/tasks?q=blue%20lock&language=en" -H "$AUTH"
 
 `GET /queues/chapters` is the same rows and the same ordering as
 `/queues/tasks`, projected through the chapter payload. Reach for it when the
-question is *what is about to be published* — a dedupe key of `1015117|142|en`
-identifies a chapter only to someone willing to decode it — and for
+question is *what is about to be published*; a dedupe key of `1015117|142|en`
+identifies a chapter only to someone willing to decode it; and for
 `/queues/tasks` when the question is *what is stuck and why*. It defaults to
 `PENDING`, and its `position` is the place in the whole filtered claim order, so
 "14th" survives paging.
@@ -892,8 +892,8 @@ They read JSONB rather than an indexed column, so they scan; that is fine for an
 operator query on a paged view and is the reason they are not offered as an
 uncapped export.
 
-This list is ordered by `notBefore` — the same ordering `core-uploader` claims
-in — so it answers *what runs next*. `GET /api/v1/admin/upload-tasks` (the older
+This list is ordered by `notBefore`, the same ordering `core-uploader` claims
+in, so it answers *what runs next*. `GET /api/v1/admin/upload-tasks` (the older
 endpoint) orders the same rows by `updatedAt` and answers *what changed last*.
 Both are useful; do not mistake one for the other when checking a reorder.
 
@@ -919,7 +919,7 @@ curl -fsS -X POST "$API/api/v1/admin/queues/retry" -H "$AUTH" \
   -H 'content-type: application/json' \
   -d '{"ids":["<id>","<id>"]}'
 
-# everything that gave up on one queue — a filter is intersected with
+# everything that gave up on one queue; a filter is intersected with
 # FAILED/DEAD_LETTER, so this does not touch pending or completed rows
 curl -fsS -X POST "$API/api/v1/admin/queues/retry" -H "$AUTH" \
   -H 'content-type: application/json' \
@@ -937,7 +937,7 @@ you call again.
 
 ### Remove rows
 
-Remove deletes the row outright — there is no undo and no archive. It needs
+Remove deletes the row outright; there is no undo and no archive. It needs
 `confirm: true`, and it refuses `LEASED` always and `DONE` unless you also pass
 `includeCompleted: true`.
 
@@ -953,7 +953,7 @@ curl -fsS -X POST "$API/api/v1/admin/queues/remove" -H "$AUTH" \
 ```
 
 The response names every row it deleted (id, kind, dedupe key, prior state), and
-so does the audit event — after the statement runs, that log line is the only
+so does the audit event; after the statement runs, that log line is the only
 record those rows ever existed.
 
 **Remove or cancel?** `POST /api/v1/admin/upload-tasks/<id>/cancel` marks the row
@@ -965,8 +965,8 @@ the slot. Prefer **cancel** for "this chapter should never be uploaded" and
 ### Purge a queue
 
 Purge empties a queue by kind and/or state. `dryRun` defaults to **true**, and
-that default is the safety property: a first call — including one from a client
-that forgot the field — reports what would go and writes nothing at all, not even
+that default is the safety property: a first call, including one from a client
+that forgot the field, reports what would go and writes nothing at all, not even
 an audit row.
 
 ```bash
@@ -995,7 +995,7 @@ needs `includeCompleted: true`.
 
 ### Reorder: what runs next
 
-The queue has no priority column. It is ordered by `notBefore` — the claim query
+The queue has no priority column. It is ordered by `notBefore`: the claim query
 reads `WHERE state = 'PENDING' AND not_before <= now() ORDER BY not_before ASC`,
 so that one timestamp is both the readiness gate and the sort key. Reordering is
 therefore just rewriting it, which needs no schema change and leaves exactly one
@@ -1028,7 +1028,7 @@ reorder '{"ids":["<id>"],"mode":"defer","deferSeconds":3600}'
 | `defer` | Each row pushed `deferSeconds` further out, measured from now for a row that is already due. |
 
 `PENDING` only. A `FAILED` or `DEAD_LETTER` row is not in the queue at all, so
-its `notBefore` means nothing until you retry it — reordering one is refused with
+its `notBefore` means nothing until you retry it; reordering one is refused with
 `wrong_state`. The response's `ordered` array is the resulting claim order, so
 you can verify the change rather than trust it.
 
@@ -1054,7 +1054,7 @@ curl -fsS -X POST "$API/api/v1/admin/queues/tasks" -H "$AUTH" \
   }'
 ```
 
-Required fields, by kind — a payload missing them is a 422 listing every problem
+Required fields, by kind; a payload missing them is a 422 listing every problem
 at once, because each one is an error the uploader would otherwise raise *after*
 claiming the task and, for `UPLOAD`, after opening a MangaDex upload session:
 
@@ -1067,13 +1067,13 @@ claiming the task and, for `UPLOAD`, after opening a MangaDex upload session:
 
 The dedupe key is derived by the same rule the processor uses, and page
 artifacts are checked to exist before the row is written. A duplicate is a 409
-naming the task that already holds the slot — that unique `(kind, dedupeKey)`
+naming the task that already holds the slot; that unique `(kind, dedupeKey)`
 constraint is exactly what makes a double upload impossible, so there is no flag
 to override it. If you genuinely need to re-upload a chapter, deal with the
 existing row first (retry it, or remove it and understand the note below).
 
 `UPLOAD` without `imageArtifacts` is legal and produces an external-only
-chapter — the same thing the pipeline creates for a publisher whose pages we do
+chapter; the same thing the pipeline creates for a publisher whose pages we do
 not host. That is rarely what you meant when queueing by hand.
 
 ### Correct a queued task
@@ -1084,7 +1084,7 @@ curl -fsS -X PATCH "$API/api/v1/admin/queues/tasks/<id>" -H "$AUTH" \
   -d '{"chapter":{"chapterTitle":"Fixed"},"notBefore":"2026-08-01T00:00:00Z","maxAttempts":9}'
 ```
 
-`PENDING` only — a leased task is being executed and a `DONE` or dead one is
+`PENDING` only; a leased task is being executed and a `DONE` or dead one is
 history. `chapter` is a shallow merge, so you can fix one field without
 restating the payload; send `null` to clear a field. If the edit changes an
 identity field the dedupe key is recomputed, and a collision with another task's
@@ -1110,7 +1110,7 @@ is required on top of `confirm: true`, and why the response says so out loud.
 
 Delete `DONE` rows when you are pruning old completed work you are certain will
 never be re-derived, or when you deliberately want a chapter reprocessed and have
-checked what that will do. Do not delete them to "clean up the queue" — a `DONE`
+checked what that will do. Do not delete them to "clean up the queue"; a `DONE`
 row costs one row and buys idempotency.
 
 ### What the older endpoints still do
@@ -1139,7 +1139,7 @@ other case: the chapter is on MangaDex, and it is wrong.
 
 Everything here goes through `/api/v1/admin/chapters/*` (Chapters in the
 dashboard), and every action **queues an upload task** rather than calling
-MangaDex — `core-uploader` remains the only process with write credentials, so
+MangaDex; `core-uploader` remains the only process with write credentials, so
 the response is `202` with a task id and the change lands within seconds. Watch
 it under Queues, filtered to that chapter id.
 
@@ -1161,7 +1161,7 @@ curl -s -H "authorization: Bearer $ADMIN_TOKEN" \
 
 `?archive=unavailable|deleted|edited` reads the three history tables with the
 same filters. Paging is by the `nextCursor` the response hands back, never an
-offset — the table grows while it is being read.
+offset; the table grows while it is being read.
 
 Then open one chapter, which is the read worth doing before any change: it shows
 our row, **what MangaDex says right now**, and anything already queued against it.
@@ -1188,7 +1188,7 @@ curl -s -X PATCH -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: appli
 
 The chapter keeps its place on MangaDex; its page becomes the card and the
 publisher link is repointed away from the dead URL. Preview the exact image
-first — the endpoint renders it with the same code the uploader posts:
+first; the endpoint renders it with the same code the uploader posts:
 
 ```bash
 curl -s -H "authorization: Bearer $ADMIN_TOKEN" \
@@ -1214,7 +1214,7 @@ curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: applic
 ### Delete it
 
 The one irreversible action. `confirm: true` is required, the reason goes into
-the audit trail, and the whole row is copied into that audit entry — after the
+the audit trail, and the whole row is copied into that audit entry; after the
 uploader runs, it and `deleted_chapters` are the only records the chapter
 existed. Prefer the unavailable card unless the chapter should never have been
 published at all (a duplicate, a wrong series).
@@ -1227,14 +1227,14 @@ curl -s -X DELETE -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: appl
 
 ### Do it to a whole set
 
-The same three actions take a set of chapters — either a list of ids, or a
+The same three actions take a set of chapters; either a list of ids, or a
 filter (`?archive=`, `extension`, `language`, `mdMangaId`, `chapterNumber`,
 `search`, `since`, `until`). The realistic cases are "this series was licensed,
 take the lot down" and "that run uploaded fifty chapters under the wrong volume".
 
 **Every bulk call is a dry run unless you say otherwise.** With no flags it
 writes nothing, queues nothing, audits nothing, and returns a per-chapter
-prediction — including the chapters it would refuse and why. Read that list;
+prediction; including the chapters it would refuse and why. Read that list;
 it is the last chance anyone gets.
 
 ```bash
@@ -1250,7 +1250,7 @@ curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: applic
   "$API/api/v1/admin/chapters/bulk/unavailable" | jq '{queued, refused, results}'
 ```
 
-A bulk **edit** only takes the fields a set of chapters can legitimately share —
+A bulk **edit** only takes the fields a set of chapters can legitimately share;
 `volume`, `translatedLanguage`, `groups`. A title, a chapter number or a source
 URL belongs to one chapter, so those stay on the single-chapter route rather than
 being available to apply two hundred times by accident.
@@ -1263,7 +1263,7 @@ curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: applic
 
 **200 chapters per call.** A wider filter answers `capped: true`; run it again
 for the rest. The response is a `200` with `queued`, `refused` and a result per
-chapter — a batch is routinely a success and a partial failure at once, and the
+chapter; a batch is routinely a success and a partial failure at once, and the
 per-chapter rows are the part to act on. Each queued chapter also gets its own
 audit event, correlated by a shared `bulk` id, so the history of one chapter
 still explains itself.
@@ -1277,10 +1277,10 @@ first and only then offers to queue.
 
 | Answer | Meaning |
 |---|---|
-| `409 already_queued` | A task of that kind for this chapter is queued and has not run. Look at it under Queues — edit or remove it there rather than stacking a second one. |
+| `409 already_queued` | A task of that kind for this chapter is queued and has not run. Look at it under Queues; edit or remove it there rather than stacking a second one. |
 | `409 leased` | An uploader is executing that action right now. Wait for it and read the result before deciding again. |
 | `409 already_unavailable` | The card is already posted; pass `force: true` to replace it. |
-| `409` naming a deletion | The chapter is recorded as deleted, so there is nothing left to change. If MangaDex still has it, the archive row is stale — queue the task by hand from `/admin/queues/tasks`. |
+| `409` naming a deletion | The chapter is recorded as deleted, so there is nothing left to change. If MangaDex still has it, the archive row is stale; queue the task by hand from `/admin/queues/tasks`. |
 | `403` closed to api tokens | Use the dashboard as a signed-in admin, or the break-glass admin token. |
 | `superseded: true` in a `202` | Normal. A completed task for this chapter was reset in place, because nothing deletes `DONE` rows and the slot is one per (kind, chapter). |
 
@@ -1291,34 +1291,34 @@ first and only then offers to queue.
 `unavailable_chapters` and `deleted_chapters` are written by the upload-task
 workers at the moment those workers act. That makes them a log of actions rather
 than a description of the catalogue, and the two come apart whenever the log is
-incomplete — a database restored without them, a migration, work done before the
+incomplete: a database restored without them, a migration, work done before the
 tables existed. MangaDex still carries the evidence; nothing was reading it back.
 
-**What "marked unavailable" looks like on MangaDex.** An external chapter — the
-only kind this platform publishes — normally has no pages: the reader follows
+**What "marked unavailable" looks like on MangaDex.** An external chapter, the
+only kind this platform publishes, normally has no pages: the reader follows
 `externalUrl` to the publisher. Marking one unavailable replaces that with a
 card, and the card is a page. So:
 
 | MangaDex record | Meaning |
 |---|---|
-| `externalUrl` set, `pages > 0` | carries our card — **marked unavailable** |
+| `externalUrl` set, `pages > 0` | carries our card: **marked unavailable** |
 | `externalUrl` set, `pages == 0` | live; the reader clicks through |
 
 On the live group that separates without a single ambiguous case: 112 carded
 chapters, every one with exactly one page, against 6108 live ones with none. The
-`externalUrl` of a carded chapter is no help on its own — the card flow repoints
-it at the series or domain root rather than clearing it — which is why the page
+`externalUrl` of a carded chapter is no help on its own; the card flow repoints
+it at the series or domain root rather than clearing it, which is why the page
 count is the signal and the URL is not.
 
 `padmin chapters reconcile` rebuilds the archives from that. Two passes, and
 they are not variations of one thing:
 
-- **discover** — walk our groups' chapters on MangaDex and archive the carded
+- **discover**: walk our groups' chapters on MangaDex and archive the carded
   ones. This deliberately does not start from `uploaded_chapters`: on a database
   whose upload history is younger than the catalogue, the carded chapters have
   no row there. Measured on the live deployment, the overlap was zero. The
   archive row is seeded from the MangaDex record itself.
-- **reconcile** — sweep `uploaded_chapters` for rows MangaDex no longer has, and
+- **reconcile**: sweep `uploaded_chapters` for rows MangaDex no longer has, and
   archive those as deleted. Deletions can only be found in this direction: a
   chapter that is gone cannot be enumerated, so our own memory of uploading it
   is the only evidence there was one.
@@ -1331,15 +1331,15 @@ padmin chapters reconcile
 #   mangaplus   4f1de6a2   6220      112   112          24
 #   scanned 155 uploaded row(s)
 #   would record 112 unavailable and 0 deleted (found 112 / 0; the rest were
-#   already archived) — re-run with --apply to write
+#   already archived); re-run with --apply to write
 ```
 
-Read it before applying it. `deleted` is the row that matters — it claims a
+Read it before applying it. `deleted` is the row that matters: it claims a
 chapter is gone forever, so it is only ever recorded on a 404 from the chapter's
 own endpoint and never on a chapter merely missing from a list response.
 
 **MD-HIDDEN is a different thing and is never archived.** Those are chapters
-carrying no card of ours that MangaDex itself refuses to serve — MangaDex hiding
+carrying no card of ours that MangaDex itself refuses to serve; MangaDex hiding
 a chapter rather than us having marked one. They are arguably chapters that
 *want* an `UNAVAILABLE` task, which is an operator's call, so the command lists
 them and stops there.
@@ -1352,7 +1352,7 @@ Applying mirrors what the workers do: upsert the archive row, keep the MangaDex
 snapshot under `extra.mdAttributes`, then drop any `uploaded_chapters` row so a
 chapter lives in exactly one table. Where a chapter still has our row, the
 publisher-side identifiers come from it rather than from MangaDex, which has
-never known about them. It is safe to re-run — an id already archived keeps its
+never known about them. It is safe to re-run: an id already archived keeps its
 original timestamp, because that instant is when the change was first seen and a
 later sweep does not know better. A chapter already recorded as deleted is never
 resurrected as merely unavailable.
@@ -1361,10 +1361,10 @@ resurrected as merely unavailable.
 |---|---|
 | `--apply` | Write. Without it nothing is written. |
 | `--extension <name...>` | Only these extensions. |
-| `--skip-deleted` | Skip the `uploaded_chapters` sweep — the slow half on a large table, and the only pass that can find deletions. |
+| `--skip-deleted` | Skip the `uploaded_chapters` sweep: the slow half on a large table, and the only pass that can find deletions. |
 
-**Who can run it.** The dry run needs `chapters:read`, so any scoped token —
-including the bot's — can ask. `/reconcile` in Discord reports the same counts.
+**Who can run it.** The dry run needs `chapters:read`, so any scoped token,
+including the bot's, can ask. `/reconcile` in Discord reports the same counts.
 Applying takes the same guard as every other mutating chapter route: ADMIN or
 above, and closed to api tokens, so it is the dashboard (Chapters → the
 unavailable or deleted archive → **Reconcile with MangaDex**) or the break-glass
@@ -1372,7 +1372,7 @@ unavailable or deleted archive → **Reconcile with MangaDex**) or the break-gla
 
 **Why this one writes directly** instead of queueing an upload task like every
 other action on a published chapter: it changes nothing on MangaDex. Queueing
-would be actively wrong — every chapter it finds is already carded or already
+would be actively wrong: every chapter it finds is already carded or already
 gone, so running the workers over them would re-upload cards and re-issue
 deletes for work that is already done.
 
@@ -1397,7 +1397,7 @@ The failure mode that creates is a *persistently* bad session: a refresh token
 MangaDex no longer honours survives a restart, and every upload keeps failing to
 authenticate.
 
-Check first — this never prints the tokens themselves:
+Check first; this never prints the tokens themselves:
 
 ```bash
 padmin mangadex auth
@@ -1422,7 +1422,7 @@ uploads may fail once and retry. The action is audit-logged.
 What this does **not** do:
 
 - It does not revoke anything MangaDex-side. If the credential itself leaked,
-  that is a rotation — see "MangaDex credentials" above, and revoke the client
+  that is a rotation; see "MangaDex credentials" above, and revoke the client
   in MangaDex first.
 - It does not change the configured credentials. If those are wrong, clearing
   the session just makes the failure louder.
@@ -1440,7 +1440,7 @@ scoped `pa_…` token carrying only the scopes that client needs, so a leaked
 credential is confined to its area. `ADMIN_TOKEN` is break-glass only and should
 not be a client's day-to-day credential.
 
-**Issue.** Start from a preset — the easy path should also be the
+**Issue.** Start from a preset; the easy path should also be the
 least-privilege one:
 
 ```bash
@@ -1450,7 +1450,7 @@ padmin tokens create --name discord-bot \
 padmin tokens create --name ci-publisher --scopes bundles:write --ttl-days 90
 ```
 
-The secret is printed once and is unrecoverable — the database stores only its
+The secret is printed once and is unrecoverable; the database stores only its
 sha256. Hand it over through a private channel.
 
 **Rotate.** There is no reveal endpoint, so rotation is mint-then-revoke, which
@@ -1475,8 +1475,64 @@ still in use before pulling it.
 
 All of this is also in the dashboard's **Tokens** view, which is OWNER-only:
 minting a token can grant any scope, so it is privilege escalation and stays a
-human, owner-level action. No `pa_…` token — not even one scoped `*` — can mint
+human, owner-level action. No `pa_…` token, not even one scoped `*`, can mint
 another token or touch accounts.
+
+---
+
+## Change what a role or an account may do
+
+Roles ship with a scope baseline, not a fixed law. Two knobs, and reaching for
+the smaller one first is usually right.
+
+**Redefine a role** when the answer should apply to everybody in it:
+
+```bash
+padmin permissions show                    # the taxonomy, and where each role stands
+padmin permissions set-role CONTRIBUTOR \
+  --scopes extensions:read,tracked:read,tracked:append,untracked:write,stats:read
+padmin permissions reset-role CONTRIBUTOR  # back to the shipped default
+```
+
+Only `ADMIN` and `CONTRIBUTOR` are tunable. `OWNER` is the wildcard by
+construction and is the role that edits permissions at all, so narrowing it
+could leave nobody able to widen it again; `ADMIN_TOKEN` is the only thing
+behind it.
+
+Resetting is a delete, not a re-typing of the default: a role with no override
+tracks the shipped default as future releases change it, which is how a new
+scope reaches your admins without you noticing. A role you have redefined does
+**not** pick up new scopes — that is the trade for tuning it at all.
+
+**Tune one account** when the answer is about one person, and inventing a fourth
+role would be worse:
+
+```bash
+padmin permissions user <userId>                       # baseline, grants, denials, effective
+padmin permissions set-user <userId> --deny bundles:write     # an ADMIN who may not publish
+padmin permissions set-user <userId> --grant runs:read        # a contributor who may watch runs
+padmin permissions set-user <userId> --clear                  # exactly their role again
+```
+
+Denials win over grants and over the role. They close **upward**: denying
+`runs:read` also denies `runs:write`, because a write implies the read and would
+hand it straight back. Denying a write leaves the read alone, which is how you
+express "watch but do not touch".
+
+Owners cannot be tuned — they hold everything regardless — and promoting an
+account to `OWNER` clears its tuning rather than parking it, so a later demotion
+cannot resurrect a denial nobody remembers.
+
+**All of it takes effect on sessions that are already open**, within a few
+seconds. You do not need to force anyone to sign in again; if you want them out
+regardless, revoke the session from **Users → Sessions**.
+
+Same operations in the dashboard's **Permissions** view and the **Permissions**
+button on each account row, and from Discord with `/permissions` — though the
+writing half of that needs the OWNER role, which a bot token never has (see
+[bot.md](bot.md#which-scope-unlocks-which-command)). Every change is audited as
+`permissions.role`, `permissions.role.reset` or `permissions.user`, recording
+the before and after.
 
 ---
 
@@ -1486,11 +1542,11 @@ When an extension reports a series that has no `tracked_manga` mapping, the
 processor records an `untracked_manga` row instead of dropping it. What happens
 next depends on the extension's manifest:
 
-- `auto_create_titles: true` — the title service (inside `core-uploader`)
+- `auto_create_titles: true`: the title service (inside `core-uploader`)
   creates and commits the MangaDex title automatically, writes the mapping into
   `tracked_manga`, and announces it to Discord with a
   `https://mangadex.org/title/<id>` link.
-- `auto_create_titles: false` (the default) — the row sits at `NEW` until an
+- `auto_create_titles: false` (the default): the row sits at `NEW` until an
   operator approves or skips it. Nothing is created on MangaDex without you.
 
 ```bash
@@ -1513,17 +1569,17 @@ padmin untracked list --state FAILED  # creation was attempted and failed
 ### Triaging `NEW`
 
 For each row, decide whether the series should exist on MangaDex at all.
-Check `MANGA`, `LANG`, and the source URL first — the common reasons to skip
+Check `MANGA`, `LANG`, and the source URL first; the common reasons to skip
 are a series that already has a MangaDex title under a different name (the
 mapping is missing, not the title), a duplicate the extension emitted under two
 ids, or something the group does not actually translate.
 
 ```bash
-# Already on MangaDex under a different id — map it instead of creating one.
+# Already on MangaDex under a different id; map it instead of creating one.
 padmin tracked set <extension> <externalMangaId> <mdMangaId>
 padmin untracked skip <id>
 
-# Genuinely new — create it now.
+# Genuinely new; create it now.
 padmin untracked approve <id>
 # -> prints the new mdMangaId and its mangadex.org URL
 
@@ -1536,7 +1592,7 @@ it, and returns the `mdMangaId`. It returns 409 if the row is not in `NEW` or
 `FAILED`, and 503 if you hit an API instance without the title service
 configured.
 
-**Approval is not reversible from here.** There is no un-create — deleting a
+**Approval is not reversible from here.** There is no un-create; deleting a
 MangaDex title is a MangaDex-side operation. Read the row before approving.
 
 ### Correct a row before approving it
@@ -1551,7 +1607,7 @@ next run reported it better.
 curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
   "$CORE_URL/api/v1/admin/untracked/$ID" | jq
 
-# Correct any of the three scraped fields. Local only — nothing is sent to
+# Correct any of the three scraped fields. Local only; nothing is sent to
 # MangaDex by this call, ever.
 curl -s -X PATCH -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'content-type: application/json' \
@@ -1563,20 +1619,20 @@ padmin untracked approve $ID
 ```
 
 `PATCH` refuses more than it accepts, because all three fields escape this
-platform — the name becomes a public MangaDex title and a Discord embed, and
+platform; the name becomes a public MangaDex title and a Discord embed, and
 `mangaUrl` becomes `links.raw` on the catalogue entry:
 
 | Refusal | Why |
 |---|---|
 | 400 unknown language | Checked against the MangaDex allowlist (`src/contracts/languages.ts`), not a shape. `PT-BR` is accepted and stored as `pt-br`. |
-| 400 host not allowed | The URL must be in the extension manifest's `allowed_hosts` — the same allowlist the sandbox holds the extension to. |
+| 400 host not allowed | The URL must be in the extension manifest's `allowed_hosts`: the same allowlist the sandbox holds the extension to. |
 | 400 bad scheme / blank name / unknown field | A misspelled field name is an error, not an edit that changed nothing. |
 | 409 row is `CREATING` | A title service instance has claimed it and is calling MangaDex. Wait for it to land. |
 | 409 no published bundle | Without a manifest there is no `allowed_hosts` to check the URL against. Publish or un-yank a bundle first. |
 | 409 duplicate | `(extension, mangaId, mangaLanguage)` is unique; correcting the language collided with another row. Skip one of the two. |
 
 A language outside the extension's manifest `languages` is a **warning**, not a
-refusal — a series' name in its original language is legitimate. The warning
+refusal; a series' name in its original language is legitimate. The warning
 comes back in `warnings[]`.
 
 ### Fix a MangaDex title this pipeline already created
@@ -1592,7 +1648,7 @@ curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 ```
 
 **This needs the ADMIN role, not just `untracked:write`.** A CONTRIBUTOR may
-correct rows all day and is refused here, with the reason in the response —
+correct rows all day and is refused here, with the reason in the response;
 editing a public entry under the platform's shared MangaDex account is a
 different act from fixing a local row. The dashboard disables the control and
 shows the same reason.
@@ -1614,7 +1670,7 @@ What it sends, and what it deliberately does not:
   (`GET` shows the live fields) before deciding, because re-sending would clobber
   their change. It is never retried automatically.
 
-Other answers: 409 `no-md-title` (nothing created yet — approve instead), 409
+Other answers: 409 `no-md-title` (nothing created yet; approve instead), 409
 `title-missing` (deleted or merged on MangaDex), 502 `rejected` (MangaDex
 refused a well-formed edit; its complaint is in `error` and on the row's
 `lastError`), 503 (this API instance holds no MangaDex credentials).
@@ -1622,7 +1678,7 @@ refused a well-formed edit; its complaint is in `error` and on the row's
 `GET /api/v1/admin/untracked/:id` is the whole picture for one row:
 `mangadex` is the live entry, `pendingChanges` is exactly what an apply would
 send, and `appliedToMangaDex` is the last apply (who and when, from the audit
-log — `untracked.edit` and `untracked.mangadex_apply` are both recorded against
+log; `untracked.edit` and `untracked.mangadex_apply` are both recorded against
 the row id, so `padmin audit search --subject $ID` is the history). A MangaDex
 outage degrades this to `mangadex: null` plus `mangadexError` rather than
 failing the request: correcting the local row does not need MangaDex.
@@ -1631,12 +1687,12 @@ failing the request: correcting the local row does not need MangaDex.
 
 `lastError` is the MangaDex API's complaint. The usual causes:
 
-- **Validation rejected the draft** — a missing or malformed field in the
+- **Validation rejected the draft**: a missing or malformed field in the
   manifest's `title_defaults` (original language, content rating, status). Fix
   the manifest, republish, then approve. Approving a `FAILED` row resets its
   attempt budget.
-- **Rate limited or transient 5xx** — just approve again.
-- **Duplicate title** — MangaDex already has it. Map it by hand with
+- **Rate limited or transient 5xx**, just approve again.
+- **Duplicate title**, MangaDex already has it. Map it by hand with
   `tracked set` and then `untracked skip`.
 
 ```bash
@@ -1648,7 +1704,7 @@ padmin untracked approve <id>       # retries with a fresh attempt budget
 
 `CREATING` is a CAS claim held by one title-service instance. If a row has sat
 there for more than a few minutes, the uploader died mid-creation. Check
-whether the title actually got made on MangaDex before doing anything else — if
+whether the title actually got made on MangaDex before doing anything else; if
 it did, map it with `tracked set` and skip the row, or you will create a
 duplicate.
 
@@ -1667,7 +1723,7 @@ padmin tracked list <extension> | tail -1     # expect thousands, not zero
 
 If that count is zero or implausibly low, the bundle's config seed did not land
 (see `docs/migration-guide.md` stage 3a). **`padmin pause` immediately** if any
-affected extension has `auto_create_titles: true` — otherwise the title service
+affected extension has `auto_create_titles: true`: otherwise the title service
 will start creating hundreds of duplicate MangaDex titles, and cleaning that up
 is manual and slow. Fix the tracking data, then skip the bogus rows in bulk
 before resuming.
@@ -1679,24 +1735,24 @@ before resuming.
 The two data files behave **differently**, and the difference decides whether
 editing one in git does anything at all on a live deployment.
 
-**`manga_id_map.json` is reconciled on every publish** — so the contributor
+**`manga_id_map.json` is reconciled on every publish**: so the contributor
 workflow (edit the file, open a PR, merge) does reach the database. Per row:
 
 | Change in git | Effect on the database |
 | --- | --- |
 | A new `(namespace, mangaId)` pair | inserted |
 | A corrected MangaDex id, on a row that came from a previous import | updated |
-| A different id on a row an **operator** set, or the title pipeline auto-created | preserved — git does not win |
-| A line removed | nothing — a series is never untracked by deletion |
+| A different id on a row an **operator** set, or the title pipeline auto-created | preserved; git does not win |
+| A line removed | nothing; a series is never untracked by deletion |
 
 The `source` column draws that line. A row set by an operator is a later and
 better-informed decision than the file, and dropping a line from the map must not
-silently stop a series being tracked — untracking is an explicit action
+silently stop a series being tracked; untracking is an explicit action
 (dashboard, `padmin tracked remove`, or the bot).
 
 **`override_options.json` is seed data**, imported only when an extension has no
-configuration at all. Once any of it exists — a config row, an alias, a
-multi-chapter entry, a language mapping — republishing does nothing, so editing
+configuration at all. Once any of it exists, a config row, an alias, a
+multi-chapter entry, a language mapping, republishing does nothing, so editing
 this file on a live deployment changes nothing. Use `ext-config` below.
 
 ```bash
@@ -1709,7 +1765,7 @@ padmin ext-config set <extension> ./overrides.json
 padmin ext-config get ext-a | padmin ext-config set ext-b   # or from stdin
 ```
 
-`ext-config set` **replaces** the whole document — it is not a merge. Get it,
+`ext-config set` **replaces** the whole document; it is not a merge. Get it,
 edit it, set it back:
 
 ```bash
@@ -1728,7 +1784,7 @@ that title are allowed to carry that language even though the extension's
 manifest does not declare it. mangaplus reports `SPANISH` for everything, so the
 one title that is actually Latin-American Spanish is mapped to `es-la` here.
 
-The map is read from the **database**, never from the worker's envelope — a
+The map is read from the **database**, never from the worker's envelope; a
 worker cannot vote on which languages it may publish. So a chapter rejected as
 
 ```
@@ -1746,7 +1802,7 @@ Brazilian-Portuguese chapters from the removal pass.
 
 By default the channel gets **failures only** for individual chapters. Python
 sent an embed per chapter either way, which on a normal run is almost entirely
-`Success: True` — and the one failure worth acting on scrolls past between them.
+`Success: True`: and the one failure worth acting on scrolls past between them.
 The run-level embeds (`Reading data from …`, `Found N chapters for …`, the
 untracked-series list) already report that the work happened.
 
@@ -1757,8 +1813,8 @@ curl -sX POST $CORE/api/v1/admin/webhook-verbosity \
   -d '{"uploadSuccesses": true}'          # back to the Python firehose
 ```
 
-Failure embeds are not switchable, and they carry the reason in the description
-— a failure notification that does not say why is one you cannot act on.
+Failure embeds are not switchable, and they carry the reason in the description;
+ a failure notification that does not say why is one you cannot act on.
 
 ---
 
@@ -1766,15 +1822,15 @@ Failure embeds are not switchable, and they carry the reason in the description
 
 Two paths keep the fleet current, and they overlap on purpose:
 
-1. **The push webhook** — fires within seconds of a push, carrying the exact
+1. **The push webhook**: fires within seconds of a push, carrying the exact
    commit. This is the fast path.
-2. **A poll every 15 minutes** — the scheduler asks each repo in
+2. **A poll every 15 minutes**: the scheduler asks each repo in
    `GITHUB_EXTENSIONS_REPOS` for its HEAD and publishes anything that changed.
 
 The poll exists because the webhook fails *silently*: an unregistered hook, a
 revoked secret or a dropped delivery all look identical to "nobody pushed", and
 the first symptom is a run producing stale results days later. Publishing is
-idempotent — an unchanged tree hashes the same and returns `unchanged` — so the
+idempotent, an unchanged tree hashes the same and returns `unchanged`, so the
 two overlapping costs nothing.
 
 The poll discovers extensions by directory (`src/<name>/manifest.json`), so an
@@ -1802,7 +1858,7 @@ extensions repos go stale. Every title the pipeline auto-creates and every
 mapping an operator repoints is invisible in git, so a contributor reads the
 file, sees a series missing, and opens a pull request adding something that has
 been tracked for months. A mapping deliberately *removed* from the database is
-worse — the file still has it, so the next publish seeds it straight back.
+worse; the file still has it, so the next publish seeds it straight back.
 
 Once a week core-api writes the table back:
 
@@ -1815,7 +1871,7 @@ padmin maps sync --extension mangaplus --extension viz
 | | |
 | --- | --- |
 | **Where it runs** | core-api. It is the only core service with a GitHub token and egress; core-scheduler sits on the internal `data` network. |
-| **When** | Every `MAP_SYNC_INTERVAL_HOURS` (default 168 = weekly), tracked by the `map_sync_last_run` row in `settings` — so restarts, redeploys and a second replica cannot make it run twice. |
+| **When** | Every `MAP_SYNC_INTERVAL_HOURS` (default 168 = weekly), tracked by the `map_sync_last_run` row in `settings`: so restarts, redeploys and a second replica cannot make it run twice. |
 | **Not on deploy** | The first boot after enabling it only *arms* the timer. The first automatic commit is one interval later. |
 | **Needs** | `GITHUB_TOKEN` with **Contents: write** on the repos in `GITHUB_EXTENSIONS_REPOS`. Without it the feature reports itself off at boot and does nothing. |
 | **Off switch** | `MAP_SYNC_ENABLED=false`. It also skips while the platform is paused (`padmin pause`). |
@@ -1836,7 +1892,7 @@ What it will not do, because it commits unattended:
   ordering is normalised (once), so a week with no changes makes no commit.
 
 Its commits carry `[map-sync]` in the subject, and the push webhook skips a
-delivery whose commits are *all* marked — otherwise the platform would answer
+delivery whose commits are *all* marked; otherwise the platform would answer
 its own data-file commit with a bundle republish every week. A push that mixes
 one of ours with a human's still publishes.
 
@@ -1848,7 +1904,7 @@ curl -s "$PUBLOADER_API_URL/api/v1/admin/audit/search?action=map_sync" \
 ```
 
 Run it manually in any environment that shares the extensions repos with
-another deployment, and leave `MAP_SYNC_ENABLED=false` there — two deployments
+another deployment, and leave `MAP_SYNC_ENABLED=false` there; two deployments
 writing the same files would overwrite each other with whichever database is
 staler.
 
@@ -1862,7 +1918,7 @@ little or nothing succeeding.
 
 ```bash
 # Lease/queue metrics are recorded by the scheduler process, so they are on the
-# scheduler's port — prom-client registries are per-process (see "Which service
+# scheduler's port; prom-client registries are per-process (see "Which service
 # serves which metric" below).
 curl -s http://core-scheduler:8101/metrics | grep -E 'lease_expiries|jobs_requeued|job_queue_depth'
 padmin workers list      # heartbeat ages
@@ -1875,14 +1931,14 @@ Diagnose in this order:
 2. **Are jobs genuinely slower than the lease TTL?** A big extension on a slow
    host can exceed `LEASE_TTL_SECONDS` between renewals. The agent renews
    mid-job; if renewal is failing (network flaky, core overloaded) the lease
-   dies while the work is still running — and the work is then done twice.
+   dies while the work is still running; and the work is then done twice.
    Raise `LEASE_TTL_SECONDS` in the core `.env` and restart `core-api` and
    `core-scheduler`.
 3. **Is the core overloaded?** If `core-api` is returning 429 or 5xx to renew
    calls, every worker's lease expires at once. Check `docker compose logs
    core-api` and the rate-limiter settings.
 4. **Did a network partition just heal?** A batch of leases all expiring
-   together after a connectivity blip is self-correcting — the jobs requeue and
+   together after a connectivity blip is self-correcting; the jobs requeue and
    run. Watch rather than intervene.
 
 **Emergency stop** while you work it out:
@@ -1905,7 +1961,7 @@ padmin resume
 padmin stats                 # confirm
 ```
 
-Pause is stored in Postgres, so every replica honours it immediately — there is
+Pause is stored in Postgres, so every replica honours it immediately; there is
 no per-process state to get out of sync. It gates: new scheduler runs, new job
 leases, and upload-task draining. It does **not** abort in-flight work; a
 chapter mid-upload finishes.
@@ -1921,7 +1977,7 @@ something to MangaDex that you cannot undo.
 The only durable state is the `pgdata` volume. Bundles, artifacts, chapter
 history, queues, and audit all live there.
 
-**Backup** (run on a schedule — daily is reasonable):
+**Backup** (run on a schedule; daily is reasonable):
 
 ```bash
 cd docker/core
@@ -1974,7 +2030,7 @@ padmin dead-letter
 padmin stats
 ```
 
-If every extension is failing, it is not the extension — go to the lease-storm
+If every extension is failing, it is not the extension; go to the lease-storm
 or core-health runbooks instead.
 
 **2. Stop the bleeding.** A broken extension retrying on a schedule wastes
@@ -2006,7 +2062,7 @@ Distinguish three cases:
 
 **4. Check whether it is the site, not us.** Try the source manually. If the
 publisher is down or rate-limiting, the correct action is to leave the
-extension disabled and re-enable later — not to raise `maxAttempts` and hammer
+extension disabled and re-enable later; not to raise `maxAttempts` and hammer
 them.
 
 **5. Fix forward.**
@@ -2053,7 +2109,7 @@ padmin runs show <runId>
 **2. Identify the lease holder.** In `runs show`, note the `WORKER` column and
 the `LEASE EXPIRES` time.
 
-**3. Kill that worker hard.** Not a graceful stop — a graceful stop is a
+**3. Kill that worker hard.** Not a graceful stop; a graceful stop is a
 different (easier) test:
 
 ```bash
@@ -2062,7 +2118,7 @@ docker kill publoader-worker
 ```
 
 **4. Observe the job stay leased and then requeue.** For up to
-`LEASE_TTL_SECONDS` (default 300) nothing happens — this is correct. The core
+`LEASE_TTL_SECONDS` (default 300) nothing happens; this is correct. The core
 cannot distinguish "crashed" from "slow", so it waits for the lease to expire
 rather than double-running the job.
 
@@ -2094,7 +2150,7 @@ padmin workers list
 
 **7. The late-submission case.** If the killed worker had already finished and
 was mid-submit, it may submit after the successor. That envelope must be
-recorded as `SUPERSEDED`, not committed twice —
+recorded as `SUPERSEDED`, not committed twice;
 `publoader_envelopes_superseded_total` increments and
 `publoader_envelopes_committed_total` does not. To force this case, pause the
 worker's network instead of killing it (`docker network disconnect`), let the
@@ -2114,13 +2170,13 @@ network:
 | Service | Metrics port | Public port | Env override |
 |---|---|---|---|
 | `core-api` | 8104 | 8100 (API, dashboard, health) | `METRICS_PORT` / `PORT` |
-| `core-scheduler` | 8101 | — | `METRICS_PORT` |
-| `core-processor` | 8102 | — | `METRICS_PORT` |
-| `core-uploader` | 8103 | — | `METRICS_PORT` |
+| `core-scheduler` | 8101 |; | `METRICS_PORT` |
+| `core-processor` | 8102 |; | `METRICS_PORT` |
+| `core-uploader` | 8103 |; | `METRICS_PORT` |
 
 **`/metrics` is deliberately unreachable from the public hostname.** The
 Cloudflare tunnel's Public Hostname maps `publoader.ardax.dev` to a single
-origin — `core-api:8100` — and cloudflared forwards *every* path on that
+origin, `core-api:8100`, and cloudflared forwards *every* path on that
 hostname. So `/metrics` is not served on 8100 at all: it lives on 8104, which
 nothing routes to. That makes the guarantee structural rather than a WAF rule
 someone can forget; `https://publoader.ardax.dev/metrics` returns 404 from the
@@ -2129,7 +2185,7 @@ path (`docker/core/ingress/Caddyfile`) 404s it too.
 
 `/healthz` and `/readyz` remain on the public port because the container
 healthcheck and compose `depends_on` use them, and they return only
-`{"ok":true}` / `{"ok":false,"reason":"database unreachable"}` — a boolean and a
+`{"ok":true}` / `{"ok":false,"reason":"database unreachable"}`: a boolean and a
 fixed string, no topology.
 
 Nothing is authenticated, and the compose file uses `expose:`, never `ports:`,
@@ -2141,7 +2197,7 @@ scrape_configs:
   - job_name: publoader
     static_configs:
       - targets:
-          - core-api:8104        # NOT 8100 — metrics are on the internal port
+          - core-api:8104        # NOT 8100; metrics are on the internal port
           - core-scheduler:8101
           - core-processor:8102
           - core-uploader:8103
@@ -2158,7 +2214,7 @@ returns a *missing* series, not a zero.
 
 | Recorded by | Metrics |
 |---|---|
-| `core-api` | `envelopes_*`, `jobs_succeeded_total`, `jobs_requeued_total`, `job_duration_seconds` — everything driven by an inbound worker request |
+| `core-api` | `envelopes_*`, `jobs_succeeded_total`, `jobs_requeued_total`, `job_duration_seconds`: everything driven by an inbound worker request |
 | `core-scheduler` | `scheduler_last_tick_timestamp_seconds`, `job_queue_depth`, `dead_letter_jobs`, `oldest_pending_job_age_seconds`, `runs`, `oldest_ingesting_run_age_seconds`, `result_submissions`, `artifact_rows`, `artifact_bytes`, `workers`, `jobs_created_total`, `lease_expiries_total`, `jobs_requeued_total`, `jobs_dead_letter_total`, `upload_tasks` |
 | `core-uploader` | `md_uploads_total`, `upload_tasks` (its own live view of the queue it drains) |
 | `core-processor` | `upload_tasks` (the queue it fills) |
@@ -2166,11 +2222,11 @@ returns a *missing* series, not a zero.
 Two consequences worth knowing before you write a query:
 
 - `upload_tasks` is published by three processes. Aggregate with
-  `max by (kind, state) (publoader_upload_tasks)` — summing triple-counts.
+  `max by (kind, state) (publoader_upload_tasks)`: summing triple-counts.
 - `jobs_requeued_total` is incremented in two processes for two different
   reasons (`reason="lease_expired"` by the scheduler, transient failures by the
   API), so `sum without (instance, job) (...)` is the fleet-wide number.
-- `publoader_jobs_leased_total` is declared but **never incremented** — no lease
+- `publoader_jobs_leased_total` is declared but **never incremented**: no lease
   route records it. Treat it as absent, and use `publoader_job_queue_depth` and
   `publoader_jobs_succeeded_total` instead.
 
@@ -2181,7 +2237,7 @@ Metric names are defined in `src/metrics.ts`.
 | Metric | Labels | Watch for |
 |---|---|---|
 | `publoader_jobs_created_total` | extension, kind | Flat when it should not be = scheduler is not ticking. |
-| `publoader_jobs_leased_total` | extension | **Never incremented** — declared but no call site records it. Use `publoader_oldest_pending_job_age_seconds` to see "no one is claiming". |
+| `publoader_jobs_leased_total` | extension | **Never incremented**: declared but no call site records it. Use `publoader_oldest_pending_job_age_seconds` to see "no one is claiming". |
 | `publoader_jobs_succeeded_total` | extension | The success signal. |
 | `publoader_jobs_requeued_total` | extension, reason | Rising = retry churn. |
 | `publoader_jobs_dead_letter_total` | extension | Any increase deserves a look. |
@@ -2199,19 +2255,19 @@ goes missing when a queue empties and never sticks at a stale value.
 
 | Metric | Labels | Watch for |
 |---|---|---|
-| `publoader_scheduler_last_tick_timestamp_seconds` | — | Unix time of the last **completed** scheduler tick. **The single best liveness signal for the control plane** — alert on `time() - <metric>`, never on a "seconds since" gauge (see below). |
+| `publoader_scheduler_last_tick_timestamp_seconds` |; | Unix time of the last **completed** scheduler tick. **The single best liveness signal for the control plane**: alert on `time() - <metric>`, never on a "seconds since" gauge (see below). |
 | `publoader_job_queue_depth` | state | `PENDING` growing without bound = not enough worker capacity. |
-| `publoader_dead_letter_jobs` | — | Jobs sitting in `DEAD_LETTER` right now. The `_total` counter says it happened once; this says it is still unfixed. |
-| `publoader_oldest_pending_job_age_seconds` | — | Age of the oldest *due* job. Better than depth: a small queue that never drains is still broken. |
+| `publoader_dead_letter_jobs` |; | Jobs sitting in `DEAD_LETTER` right now. The `_total` counter says it happened once; this says it is still unfixed. |
+| `publoader_oldest_pending_job_age_seconds` |; | Age of the oldest *due* job. Better than depth: a small queue that never drains is still broken. |
 | `publoader_runs` | state | `INGESTING` piling up = `core-processor` is down, paused, or stuck on MangaDex. |
-| `publoader_oldest_ingesting_run_age_seconds` | — | How long the oldest such run has waited. Non-zero and climbing = processing has stopped. |
+| `publoader_oldest_ingesting_run_age_seconds` |; | How long the oldest such run has waited. Non-zero and climbing = processing has stopped. |
 | `publoader_result_submissions` | state | `QUARANTINED` is the security-relevant depth; `RECEIVED` growing = envelopes arriving but not committing. |
 | `publoader_upload_tasks` | kind, state | `DEAD_LETTER` non-zero = uploads failing permanently; `PENDING` flat and non-zero = uploader stalled. |
-| `publoader_artifact_rows` / `publoader_artifact_bytes` | — | Artifact table growth (bytes includes TOAST, i.e. the real disk cost). Refreshed every 5 minutes. Unbounded growth = retention is not pruning. |
+| `publoader_artifact_rows` / `publoader_artifact_bytes` |; | Artifact table growth (bytes includes TOAST, i.e. the real disk cost). Refreshed every 5 minutes. Unbounded growth = retention is not pruning. |
 | `publoader_workers` | status | `ACTIVE` dropping = fleet shrinking. |
 
 **Why there is no `publoader_scheduler_lag_seconds` any more.** It was set to 0
-at the top of every tick, so it read 0 when the scheduler was healthy — and
+at the top of every tick, so it read 0 when the scheduler was healthy; and
 also read 0 forever once the loop wedged, because the only code that could
 raise it was the code that had stopped running. A process cannot be trusted to
 report its own absence; record a timestamp and let the scraper do the
@@ -2219,7 +2275,7 @@ subtraction.
 
 ### Histogram
 
-`publoader_job_duration_seconds{extension}` — lease-to-submit. Buckets 10s to
+`publoader_job_duration_seconds{extension}`: lease-to-submit. Buckets 10s to
 1h. A p95 approaching `LEASE_TTL_SECONDS` predicts lease-expiry storms before
 they happen.
 
@@ -2227,23 +2283,23 @@ they happen.
 
 Every expression below reads a metric that a scraper can actually reach today,
 on the port listed in "Which service serves which metric". Thresholds are
-starting points; the shapes are not — each one is chosen so that the *absence*
-of a working service still fires.
+starting points, but the shapes are not: each one is chosen so that the
+*absence* of a working service still fires.
 
 | Metric | Expression | What it means | First action |
 |---|---|---|---|
 | `publoader_scheduler_last_tick_timestamp_seconds` | `time() - publoader_scheduler_last_tick_timestamp_seconds > 120` or `absent(...)` for 5m | The clock has stopped: nothing is scheduled, no lease is swept, no retry backs off. Everything else follows from this. | `docker compose logs --tail 200 core-scheduler`; restart it if the loop is wedged rather than erroring. |
-| `up` (scrape target) | `up{job="publoader"} == 0` for 5m | A core service is gone or cannot be scraped — including the scheduler, whose stall alert would otherwise go quiet with it. | `docker compose ps`; check the container's healthcheck and last log lines. |
+| `up` (scrape target) | `up{job="publoader"} == 0` for 5m | A core service is gone or cannot be scraped; including the scheduler, whose stall alert would otherwise go quiet with it. | `docker compose ps`; check the container's healthcheck and last log lines. |
 | `publoader_dead_letter_jobs` | `publoader_dead_letter_jobs > 0` for 15m | Work has permanently failed and is sitting there; no retry will pick it up. | `padmin dead-letter` to see what and why, then `padmin retry` after fixing the cause. |
 | `publoader_oldest_pending_job_age_seconds` | `publoader_oldest_pending_job_age_seconds > 1800` | A due job has waited 30m: no worker is claiming, or the fleet is too small. | `padmin workers list`; check `publoader_workers{status="ACTIVE"}` and worker logs. |
 | `publoader_workers` | `sum(publoader_workers{status="ACTIVE"}) == 0` for 10m | No capacity at all. | Check worker hosts (`docker compose ps` there); heartbeat ages via `padmin workers list`. |
-| `publoader_oldest_ingesting_run_age_seconds` | `publoader_oldest_ingesting_run_age_seconds > 1800` | Runs finished executing but nothing is processing them — `core-processor` down, paused, or stuck on MangaDex. | `padmin stats` (is it paused?), then `docker compose logs --tail 200 core-processor`. |
+| `publoader_oldest_ingesting_run_age_seconds` | `publoader_oldest_ingesting_run_age_seconds > 1800` | Runs finished executing but nothing is processing them; `core-processor` down, paused, or stuck on MangaDex. | `padmin stats` (is it paused?), then `docker compose logs --tail 200 core-processor`. |
 | `publoader_result_submissions` | `publoader_result_submissions{state="QUARANTINED"} > 0` | **Security signal.** A worker submitted data that failed validation and it is still held. | `padmin quarantine`; identify the worker and revoke it if the pattern repeats. |
 | `publoader_envelopes_quarantined_total` | `increase(publoader_envelopes_quarantined_total[15m]) > 10` | A worker is submitting garbage at volume, right now. | `padmin quarantine`, then `padmin workers revoke <id>`. |
 | `publoader_upload_tasks` | `max by (kind) (publoader_upload_tasks{state="DEAD_LETTER"}) > 0` | Chapters that will never be posted without intervention. | `padmin upload-tasks --state DEAD_LETTER`; fix the cause and requeue. |
 | `publoader_upload_tasks` | `min_over_time(max(publoader_upload_tasks{state="PENDING"})[30m:]) > 0` | The upload queue has not drained to empty in 30m: the uploader is stalled or paused. | `padmin stats` (paused?), then `docker compose logs --tail 200 core-uploader`. |
 | `publoader_md_uploads_total` | `increase(publoader_md_uploads_total{outcome="failure"}[15m]) > 5` | Credential expired, MangaDex down, or a bad payload. | Uploader logs; `padmin pause` if it is posting bad data. |
-| `publoader_lease_expiries_total` | `rate(publoader_lease_expiries_total[15m]) > rate(publoader_jobs_succeeded_total[15m])` | More jobs are timing out than completing — lease churn. | Compare `publoader_job_duration_seconds` p95 against `LEASE_TTL_SECONDS`. |
+| `publoader_lease_expiries_total` | `rate(publoader_lease_expiries_total[15m]) > rate(publoader_jobs_succeeded_total[15m])` | More jobs are timing out than completing; lease churn. | Compare `publoader_job_duration_seconds` p95 against `LEASE_TTL_SECONDS`. |
 | `publoader_job_duration_seconds` | `histogram_quantile(0.95, sum by (le) (rate(publoader_job_duration_seconds_bucket[1h]))) > 0.8 * LEASE_TTL_SECONDS` | A lease-expiry storm is forming. | Raise `LEASE_TTL_SECONDS` or split the extension into more segments. |
 | `publoader_artifact_bytes` | `publoader_artifact_bytes > 5e9` | The artifact table is eating the disk that Postgres shares with everything else. | Check expiry pruning; artifacts have `expiresAt` for a reason. |
 
@@ -2255,9 +2311,9 @@ drop the `instance`/`job` labels when comparing them.
 
 All four core services answer both, on the ports above:
 
-- `GET /healthz` — "alive": the process is running and its event loop turns.
+- `GET /healthz`: "alive": the process is running and its event loop turns.
   This is the container healthcheck.
-- `GET /readyz` — "safe to work": Postgres answers. Deliberately **not** the
+- `GET /readyz`: "safe to work": Postgres answers. Deliberately **not** the
   container healthcheck anywhere: a Postgres restart must not cascade into
   killing the whole control plane.
 
@@ -2270,7 +2326,7 @@ core (lease polls while idle, lease renewals while a job runs), and the image's
 HEALTHCHECK fails if it is missing or older than
 `WORKER_HEARTBEAT_MAX_AGE_SECONDS` (default 600). Raise that only if you also
 raised the core's `LEASE_TTL_SECONDS`, since renewals happen every TTL/3.
-`docker` only *reports* the worker unhealthy — nothing restarts on it, because
+`docker` only *reports* the worker unhealthy; nothing restarts on it, because
 an autoheal sidecar would need `docker.sock` mounted on the worker host.
 
 ---
@@ -2279,19 +2335,19 @@ an autoheal sidecar would need `docker.sock` mounted on the worker host.
 
 Print this. Work top to bottom.
 
-1. `padmin stats` — is it paused? are there workers? how deep are the queues?
-2. `padmin dead-letter` — what has already failed?
-3. `padmin quarantine` — is a worker submitting bad data? (security-relevant)
-4. `padmin untracked list --state NEW` — is a flood of series about to have
+1. `padmin stats`, is it paused? are there workers? how deep are the queues?
+2. `padmin dead-letter`, what has already failed?
+3. `padmin quarantine`, is a worker submitting bad data? (security-relevant)
+4. `padmin untracked list --state NEW`, is a flood of series about to have
    MangaDex titles created for it? If yes, `padmin pause` before anything else.
-5. `padmin workers list` — heartbeat ages; is the fleet there?
+5. `padmin workers list`: heartbeat ages; is the fleet there?
 6. `curl -s http://core-scheduler:8101/metrics | grep scheduler_last_tick` vs
-   `date +%s` — is the clock running?
-7. `docker compose ps` — is everything up? did `migrate` exit 0?
+   `date +%s`, is the clock running?
+7. `docker compose ps`, is everything up? did `migrate` exit 0?
 8. `docker compose logs --tail 200 core-api core-scheduler core-uploader`
 9. **If unsure, `padmin pause`.** Stopping is cheap; an incorrect upload to
    MangaDex is not.
-10. `padmin audit --limit 100` — did a human change something just before this started?
+10. `padmin audit --limit 100`: did a human change something just before this started?
 11. Once resolved: `padmin resume`, then verify with `padmin stats` and a spot
     check on MangaDex.
 
@@ -2300,8 +2356,8 @@ Print this. Work top to bottom.
 
 ## Triage from the Activity feed instead of `docker logs`
 
-**Activity** is one timeline over five tables — runs, jobs, upload tasks, result
-submissions, and the audit log — so the first question in an incident ("what
+**Activity** is one timeline over five tables, runs, jobs, upload tasks, result
+submissions, and the audit log, so the first question in an incident ("what
 changed, and what started failing?") is answerable in a browser.
 
 Start wide and narrow down:
@@ -2312,7 +2368,7 @@ Activity → Severity: errors only → Window: last hour
 
 Then filter by extension, or search the subject and message for a dedupe key, a
 manga id, or a fragment of an error string. Every row carries a permalink
-(`Copy link`) that opens the same row for anyone who can sign in — that is what
+(`Copy link`) that opens the same row for anyone who can sign in; that is what
 to paste into an incident channel rather than a screenshot.
 
 Two properties make this the right starting point rather than a summary:
@@ -2331,7 +2387,7 @@ curl -s "$PUBLOADER_API_URL/api/v1/admin/activity?severity=error&hours=6&limit=5
 ```
 
 **What it does not cover.** Every row in Activity is a database row. Container
-stdout is not — a stack trace from a crash loop, a Prisma engine that failed to
+stdout is not; a stack trace from a crash loop, a Prisma engine that failed to
 load, anything a process emitted before it could reach Postgres. None of that is
 written to the database, so no endpoint can serve it:
 
@@ -2367,7 +2423,7 @@ only answerable this way. `since` / `until` take ISO instants, `limit` and
 `offset` page, and the response carries a `total` so you can tell "that is all of
 them" from "that is the first page".
 
-Clicking an action name in the table filters to it — the fastest way to ask
+Clicking an action name in the table filters to it; the fastest way to ask
 "what else did this?".
 
 ---
@@ -2395,7 +2451,7 @@ Read the three fields together:
 Nothing here applies a migration, and that is deliberate: the runtime image
 carries no Prisma CLI, because a long-lived internet-facing service must not
 hold a tool that can rewrite the database. Migrations are applied by the one-shot
-`migrate` compose service — see "Upgrade the core" above. The panel tells you
+`migrate` compose service; see "Upgrade the core" above. The panel tells you
 *whether* you need to, which is the part that used to require a shell.
 
 `current: false` after an upgrade means the `migrate` service did not run or
@@ -2409,7 +2465,7 @@ docker compose logs migrate
 
 ## Take a backup from the dashboard
 
-**System → Database backup → Download backup** streams `pg_dump -Fc` — the same
+**System → Database backup → Download backup** streams `pg_dump -Fc`: the same
 custom format as the scheduled backup in "Backup and restore" above, so a dump
 taken from the browser and one taken on the host restore identically with
 `pg_restore`.
@@ -2418,16 +2474,16 @@ Two things to understand before using it.
 
 **It is gated harder than anything else in the platform**: OWNER role *and*
 `users:admin`. Not because a backup is dangerous to take, but because of what one
-contains — every operator password hash, every client token hash, and the saved
+contains; every operator password hash, every client token hash, and the saved
 MangaDex session. Taking a dump is a credential-theft primitive, so it sits at
 the same bar as account administration. The role requirement is what excludes
 API tokens entirely: `adminAuthHook` never grants a `pa_…` token the OWNER role,
-so **no client credential can dump the database**, however broadly it is scoped
-— not even one minted with `["*"]`. Treat the downloaded file as a secret:
+so **no client credential can dump the database**, however broadly it is scoped;
+ not even one minted with `["*"]`. Treat the downloaded file as a secret:
 encrypt it at rest, and keep it off shared storage.
 
 **It needs `pg_dump` in the container, and the shipped image has it.** The core
-runtime image installs `postgresql-client-16` from PGDG — specifically 16, because
+runtime image installs `postgresql-client-16` from PGDG; specifically 16, because
 Debian bookworm ships client 15 and `pg_dump` refuses to dump a *newer* server
 ("aborting because of server version mismatch"), so Debian's default package
 would give you a button that always fails against Postgres 16.9. If you build a
@@ -2457,7 +2513,7 @@ Four things used to need a shell on the core host. They are all on the dashboard
 **Check GitHub for changes** compares the commit each live bundle was built from
 (`bundles.source_commit`) against the default-branch HEAD of every repo in
 `GITHUB_EXTENSIONS_REPOS`, and **Fetch and publish** builds and publishes the ones
-that are behind — the same download, the same esbuild step and the same
+that are behind; the same download, the same esbuild step and the same
 `BundleStore.publish` the push webhook runs, so a bundle published by this button
 and one published by a push to the same commit are byte-identical.
 
@@ -2481,7 +2537,7 @@ them means "nothing to do":
 | `true` | HEAD has moved. `changedPaths` lists what changed under `src/<extension>/`; an empty list with HEAD moved means the repo advanced but this extension did not, so publishing would republish identical bytes. |
 | `null` | **The question could not be answered.** `reason` says why: no `GITHUB_TOKEN` for a private repo, GitHub unreachable or rate-limited, the commit force-pushed away, or a bundle published from a local directory with no `source_commit` at all. |
 
-`available: false` at the top level means the same thing for every extension —
+`available: false` at the top level means the same thing for every extension;
 `GITHUB_EXTENSIONS_REPOS` unset, or none of the repos could be reached. It is
 never reported as "everything is current", because an operator who is told that
 does not look again.
@@ -2492,7 +2548,7 @@ published. Every publish is audited with the acting operator and
 `detail.via = "sysops-github-sync"`.
 
 Anonymous GitHub reads are limited to 60/hour, so `GITHUB_TOKEN` is worth setting
-even when every repo is public — without it, a few refreshes exhaust the budget
+even when every repo is public; without it, a few refreshes exhaust the budget
 and the panel starts answering `null` for everything.
 
 ### Restart a service
@@ -2504,7 +2560,7 @@ and the panel starts answering `null` for everything.
 > disconnects from Postgres and exits 0. Something else has to start it again. Our
 > compose files give every core service `restart: unless-stopped`, which does
 > exactly that. A service started with `docker run` and no `--restart`, or from a
-> compose file without a restart policy, **will stay down** — the button is a stop
+> compose file without a restart policy, **will stay down**: the button is a stop
 > button there. Set `SYSOPS_RESTART_ENABLED=false` in such a deployment and the
 > endpoint refuses with a 503 explaining why, instead of taking the platform down.
 
@@ -2532,7 +2588,7 @@ see the still-fresh request and exit again, looping for as long as the TTL.
 Restart latency is therefore up to one loop pass: about 30s for the scheduler
 (`SCHEDULER_INTERVAL_SECONDS`) and 15s for the processor. The uploader checks
 between iterations rather than mid-drain, so it finishes the queues it is
-currently draining before exiting — with a deep upload backlog that can be
+currently draining before exiting; with a deep upload backlog that can be
 minutes, and that is the right trade: it means the process never exits holding a
 task lease, so no upload is abandoned half-done for the sweeper to reclaim. The
 API answers `202` and exits ~500ms later, so the response reaches the browser;
@@ -2547,7 +2603,7 @@ sysops.restart`).
 Two paths, both ending in the same builder and the same publish:
 
 ```bash
-# from any repo/ref — a fork, a contributor's branch, a new source
+# from any repo/ref; a fork, a contributor's branch, a new source
 curl -sX POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
   -d '{"repo":"someone/their-extensions","ref":"main"}' \
   https://publoader.ardax.dev/api/v1/admin/sysops/extensions/install-github | jq
@@ -2562,10 +2618,10 @@ curl -sX POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: applicat
 The zip may contain a built extension (`manifest.json` + `index.mjs`) or the
 TypeScript source (`manifest.json` + `index.ts` / `src/`), which is built here with
 the same esbuild invocation the webhook uses. Zipping the folder itself rather
-than its contents is fine — the wrapper directory is unwrapped. A pre-v2 python
+than its contents is fine; the wrapper directory is unwrapped. A pre-v2 python
 bundle is refused with the porting message, as everywhere else. Everything an
 uploaded or fetched archive is checked for before any of that happens is in
-§"What bundle intake does and does not protect against" below — read it before
+§"What bundle intake does and does not protect against" below; read it before
 handing anyone `bundles:write`.
 
 For `install-github`, the ref is resolved to a real commit sha before anything is
@@ -2580,7 +2636,7 @@ Both answer `isLatest`, which is the question that actually matters:
 ```
 
 `isLatest: false` means the bundle was stored but something published more
-recently is still what every new run pins — re-uploading last week's folder does
+recently is still what every new run pins; re-uploading last week's folder does
 that. `latest` names what is live instead.
 
 ### Read the docs
@@ -2593,7 +2649,7 @@ guessing which branch the host has. `DOCS_PATH` overrides where the API looks.
 `GET /api/v1/admin/docs` lists what shipped and `GET /api/v1/admin/docs/<name>`
 returns one document's markdown, both behind `stats:read`. Names are validated
 against the shipped directory listing, and anything with a path separator, a
-leading dot or `..` is refused — the endpoint is a file reader exposed to the
+leading dot or `..` is refused; the endpoint is a file reader exposed to the
 internet, and traversal is the risk it is built around.
 
 If the list comes back `available: false`, the docs were not copied into the image
@@ -2605,8 +2661,8 @@ build.
 
 ## What bundle intake does and does not protect against
 
-Both install paths — the zip an operator uploads and the archive fetched from
-GitHub — go through one intake (`src/core/sysops/bundleIntake.ts`)
+Both install paths, the zip an operator uploads and the archive fetched from
+GitHub, go through one intake (`src/core/sysops/bundleIntake.ts`)
 before anything is written to disk or built. A repository is not treated as more
 trustworthy than an upload: the zipball is written by anyone who can push to that
 repo and arrives over the network.
@@ -2615,16 +2671,16 @@ repo and arrives over the network.
 
 | Class | What is refused |
 |---|---|
-| Decompression bombs | Per-file cap (10 MB), total cap (50 MB), entry count (2,000 in the extension, 20,000 in the archive), and a 200:1 ratio ceiling. Bytes are counted **as they are decompressed** — `zlib` is given a hard output ceiling, so an entry that declares 12 bytes and expands to 8 GB aborts mid-inflate. The declared sizes in the archive are checked first only because a cheap refusal is better than an expensive one; they are never believed. |
+| Decompression bombs | Per-file cap (10 MB), total cap (50 MB), entry count (2,000 in the extension, 20,000 in the archive), and a 200:1 ratio ceiling. Bytes are counted **as they are decompressed**: `zlib` is given a hard output ceiling, so an entry that declares 12 bytes and expands to 8 GB aborts mid-inflate. The declared sizes in the archive are checked first only because a cheap refusal is better than an expensive one; they are never believed. |
 | Nested archives | Refused by extension and by magic bytes (zip, gzip, bzip2, xz, 7z, rar, zstd, tar). A bundle has no reason to contain one, and one inside another defeats the ratio accounting. |
 | Zip slip / traversal | Names are normalised (backslashes, percent-encoding, `.` and `..` segments) before any path is built; absolute paths and drive letters are refused rather than stripped; the resolved path is re-checked against the extraction root immediately before the write. |
-| Symlinks and special files | Refused from the unix mode in the archive, not from the name — a symlink entry looks exactly like a small text file whose contents are a path, and honouring one is how an "extraction" writes somewhere else. |
+| Symlinks and special files | Refused from the unix mode in the archive, not from the name; a symlink entry looks exactly like a small text file whose contents are a path, and honouring one is how an "extraction" writes somewhere else. |
 | Executables | An extension is source and data: only `.mjs`, `.js`, `.ts`, `.json`, `.proto`, `.md`, `.txt` and the paths the manifest declares in `data_files` are accepted, and every file is additionally sniffed for ELF/Mach-O/PE/wasm/dex magic and for a shebang. `manga_id_map.json` containing an ELF header is refused. |
 | Archive permissions | Never preserved. Everything is written `0600` into a `mkdtemp` directory (`0700`), so nothing extracted is executable and nothing else on the host can read it. An entry marked executable is refused outright. |
 | Dependency expectations | `node_modules/`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock` and dotfiles (`.npmrc`, `.git/`) are refused **with an explanation**, because nothing here installs dependencies and silently ignoring them would publish a bundle whose imports cannot resolve. |
-| Lifecycle scripts | No package manager is ever invoked — not npm, not pnpm, not yarn. There is no code path from intake to a lifecycle script, which is the only real guarantee that a `scripts.postinstall` in an uploaded `package.json` stays inert. A test asserts the sentinel file it would create does not appear. |
+| Lifecycle scripts | No package manager is ever invoked; not npm, not pnpm, not yarn. There is no code path from intake to a lifecycle script, which is the only real guarantee that a `scripts.postinstall` in an uploaded `package.json` stays inert. A test asserts the sentinel file it would create does not appear. |
 | Third-party imports | A bare import fails the build with `dependency X cannot be resolved; extensions must be dependency-free or vendored`. Nothing is fetched. |
-| Build resource abuse | esbuild runs in a subprocess with a 30s wall clock, a 256 MB heap ceiling, its own process group (so a timeout kills esbuild's Go child too), cwd set to the extraction directory, and **no inherited environment** — this process holds `DATABASE_URL`, `ADMIN_TOKEN`, `GITHUB_TOKEN` and the MangaDex credentials, and none of it belongs near a build of code someone uploaded. |
+| Build resource abuse | esbuild runs in a subprocess with a 30s wall clock, a 256 MB heap ceiling, its own process group (so a timeout kills esbuild's Go child too), cwd set to the extraction directory, and **no inherited environment**: this process holds `DATABASE_URL`, `ADMIN_TOKEN`, `GITHUB_TOKEN` and the MangaDex credentials, and none of it belongs near a build of code someone uploaded. |
 
 Every accepted and every refused archive is audited with its sha256, byte size,
 entry count and (for a refusal) the reason and the refusal code:
@@ -2637,7 +2693,7 @@ curl -sH "Authorization: Bearer $ADMIN_TOKEN" \
 
 Two limits live on the endpoint rather than in the intake: the request body is
 capped at 8 MiB (a real extension is tens of kilobytes), and publishing is
-rate-limited **per credential** — six bursts, refilling one every two minutes —
+rate-limited **per credential**, six bursts, refilling one every two minutes,
 so a leaked `bundles:write` token cannot be used to grind the builder.
 
 ### What it does not stop
@@ -2662,7 +2718,7 @@ allowed to do:
   (§"Quarantine triage" above).
 
 So the realistic residual risk from a malicious-but-well-formed extension is that
-it scrapes within its declared hosts and fabricates results — which is a
+it scrapes within its declared hosts and fabricates results; which is a
 quarantine and review problem, not an intake one.
 
 Two practical consequences:
@@ -2675,8 +2731,8 @@ Two practical consequences:
   and is deliberately not implemented: it would mean a scanner dependency and a
   signature database inside the control plane, which is a larger commitment than
   it looks. The hook point is the intake's accepted-archive path in
-  `install-upload` — the archive bytes and their sha256 are already in hand there
-  — so adding a scan later is a local change and not a redesign.
+  `install-upload`, the archive bytes and their sha256 are already in hand there,
+ so adding a scan later is a local change and not a redesign.
 
 ---
 

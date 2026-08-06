@@ -1,15 +1,15 @@
 import { z } from "zod";
 
 /**
- * Extension API v2 — the TypeScript extension contract (publoader_api ^2.0.0).
+ * Extension API v2; the TypeScript extension contract (publoader_api ^2.0.0).
  *
- * Replaces the Python class contract entirely. Design changes from v1:
+ * Design changes from v1:
  *  - ONE entrypoint method (`collect`) instead of five methods + six
  *    attributes: identity (name, group id, languages) and configuration
  *    (tracked map, override options, schedule) come from the manifest and the
- *    database — the extension no longer duplicates them.
+ *    database; the extension no longer duplicates them.
  *  - Extensions are pure data producers: they receive a sandboxed context and
- *    return chapters/manga. No filesystem, no process, no ambient network —
+ *    return chapters/manga. No filesystem, no process, no ambient network;
  *    `ctx.fetch` is the only sanctioned I/O and it enforces the manifest's
  *    allowed_hosts before any packet leaves.
  *  - Bundles ship a single self-contained ESM file (built with esbuild at
@@ -37,9 +37,8 @@ export const ChapterInput = z
     chapterId: z.string().max(512),
     chapterUrl: z.string().max(2048),
     mangaId: z.string().max(512),
-    /** MangaDex title id; omit/null when unknown — the runner resolves it
-     * from the platform's tracked map, and unresolved chapters are dropped
-     * exactly like v1's `md_manga_id is None` filter. */
+    /** MangaDex title id. Omit or null when unknown: the runner resolves it
+     * from the platform's tracked map, and unresolved chapters are dropped. */
     mdMangaId: z.string().uuid().nullable().default(null),
     mangaName: z.string().max(1024).nullable().default(null),
     mangaUrl: z.string().max(2048).nullable().default(null),
@@ -84,7 +83,7 @@ export interface CollectInput {
 }
 
 export interface ExtensionContext {
-  /** The extension's manifest (validated copy — read-only). */
+  /** The extension's manifest (validated copy; read-only). */
   readonly manifest: Readonly<Record<string, unknown>>;
   /**
    * External manga id -> MangaDex title id, from the platform's

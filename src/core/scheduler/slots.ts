@@ -7,7 +7,7 @@ export interface EffectiveSchedule extends ScheduleSlot {
 }
 
 /**
- * Effective schedules: manifest defaults replaced by operator rows — the same
+ * Effective schedules: manifest defaults replaced by operator rows; the same
  * precedence the legacy scheduler applied to schedule.json + SQLite, now over
  * LISTS of slots rather than one slot each.
  *

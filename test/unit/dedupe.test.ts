@@ -87,7 +87,7 @@ describe("checkChapterUrlSame", () => {
     expect(checkChapterUrlSame("https://site.com/c/1", null)).toBe(false);
   });
 
-  it("parses paths the way urllib does, not the way new URL() does", () => {
+  it("parses paths permissively, not the way new URL() does", () => {
     expect(urlPath("not-a-real-url")).toBe("not-a-real-url");
     expect(urlPath("https://site.com/a/b?q=1#f")).toBe("/a/b");
     expect(urlPath("https://site.com/a/b;p=1")).toBe("/a/b");

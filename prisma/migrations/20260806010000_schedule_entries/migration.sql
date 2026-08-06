@@ -2,7 +2,7 @@
 --
 -- `schedule_overrides` was keyed by extension, so an extension had exactly one
 -- override: one time, and at most one weekday. That made the two schedules an
--- operator actually wants — a daily update AND a weekly CLEAN — mutually
+-- operator actually wants, a daily update AND a weekly CLEAN, mutually
 -- exclusive. `schedule_entries` is keyed by row instead, carries a weekday SET
 -- rather than a single optional day, and carries the run kind, so "Wednesday
 -- 01:00, clean" and "every day 15:00, update" are two rows that do not compete.

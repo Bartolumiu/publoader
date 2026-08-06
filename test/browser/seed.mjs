@@ -107,7 +107,7 @@ await prisma.worker.upsert({
 });
 
 // Enough audit history that a permalink to the oldest row is genuinely off the
-// first page at limit=25 — which is the case the old client-side filter could
+// first page at limit=25; which is the case the old client-side filter could
 // never resolve.
 const existing = await prisma.auditEvent.count();
 if (existing < 60) {

@@ -5,13 +5,13 @@ import type { Logger } from "../../logging.js";
 /**
  * Transactional email, via the Resend SDK.
  *
- * Only one thing is sent from this control plane — a sign-in link — and it is a
+ * Only one thing is sent from this control plane, a sign-in link, and it is a
  * credential in transit, so this module stays deliberately thin: one call, no
  * template service, nothing about the message held anywhere but the recipient's
  * inbox.
  *
  * Email is treated as a *fallible* channel, never a silent one. The SDK does
- * not throw on an API error — it resolves `{data, error}` — so the single most
+ * not throw on an API error, it resolves `{data, error}`, so the single most
  * important thing here is that `error` is checked and turned into a rejection.
  * A mailer that returned normally on a failed send would make "your invite is
  * on the way" a lie the sender never hears about.
@@ -21,7 +21,7 @@ import type { Logger } from "../../logging.js";
  * How long we are willing to wait. The SDK exposes no timeout and Node's fetch
  * imposes no response deadline, so without this an invite request could hang on
  * a stalled connection for as long as the socket stays open. Racing does not
- * cancel the underlying request — it frees the *caller*, which is what an owner
+ * cancel the underlying request; it frees the *caller*, which is what an owner
  * clicking "invite" actually needs.
  */
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -34,7 +34,7 @@ export interface OutgoingEmail {
   text: string;
   /**
    * Retry-dedupe key, honoured by Resend for 24h. Shaped `<event>/<entity>`.
-   * Note that it must vary per *token*, not per user — two deliberate "resend
+   * Note that it must vary per *token*, not per user; two deliberate "resend
    * my link" clicks are two different emails and both must arrive.
    */
   idempotencyKey?: string;
@@ -49,7 +49,7 @@ export interface Mailer {
 
 /**
  * The one SDK surface this module uses. Narrowed to a structural type so a test
- * can supply a stand-in without a network, an API key, or module mocking —
+ * can supply a stand-in without a network, an API key, or module mocking;
  * and so anything else the SDK grows stays out of the auth path.
  */
 export type EmailSender = Pick<Resend["emails"], "send">;
@@ -114,7 +114,7 @@ export class ResendMailer implements Mailer {
     // resolved promise carrying `error`, not a rejection.
     if (result.error) {
       // Resend's `name` and `message` are provider-authored and safe to log,
-      // but neither is echoed to an unauthenticated caller — the routes decide
+      // but neither is echoed to an unauthenticated caller; the routes decide
       // that, not this layer.
       const { name, message, statusCode } = result.error;
       throw new Error(
@@ -123,7 +123,7 @@ export class ResendMailer implements Mailer {
     }
 
     // The SDK's response is a discriminated union, so ruling out `error` above
-    // is what makes `data` present here — no defensive fallback needed.
+    // is what makes `data` present here; no defensive fallback needed.
     return result.data.id;
   }
 }

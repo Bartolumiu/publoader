@@ -9,7 +9,7 @@ legacy data; the decommission step is separate and comes last.
 
 The two systems can safely coexist because the platform scheduler starts
 **paused**. The only thing that must never happen is both systems uploading the
-same chapters at once — which is why stage 5 pauses legacy *before* unpausing
+same chapters at once; which is why stage 5 pauses legacy *before* unpausing
 the platform, with a delta migration in between.
 
 Path conventions below: `$REPO` is your publoader checkout,
@@ -18,7 +18,7 @@ Path conventions below: `$REPO` is your publoader checkout,
 
 ---
 
-## Stage 0 — Prerequisites and backups
+## Stage 0; Prerequisites and backups
 
 Do not skip this. Stage 5 is the only irreversible-ish step and its rollback
 depends on these artifacts existing.
@@ -31,7 +31,7 @@ mongodump --uri="$MONGODB_URI" --db="$MONGODB_DB_NAME" \
   --gzip --archive="$HOME/publoader-backup-$(date +%F).archive.gz"
 ```
 
-Verify it is restorable before proceeding — an untested backup is not a backup:
+Verify it is restorable before proceeding; an untested backup is not a backup:
 
 ```bash
 mongorestore --uri="$MONGODB_URI" --gzip \
@@ -50,7 +50,7 @@ sqlite3 "$LEGACY/resources/publoader.db" \
 **Record the current state** so you can compare after cutover:
 
 ```bash
-# Collection counts — you will check these against the migration report.
+# Collection counts; you will check these against the migration report.
 mongosh "$MONGODB_URI" --quiet --eval '
   ["uploaded","uploaded_ids","edited","unavailable",
    "to_upload","to_edit","to_delete","to_unavailable"]
@@ -66,12 +66,12 @@ mongosh "$MONGODB_URI" --quiet --eval '
 - [ ] A Cloudflare tunnel token for `publoader.ardax.dev`
 - [ ] A checkout of the extensions repos (public and private) at the commit you
       intend to publish
-- [ ] Somewhere to run at least one worker host — ideally two, so you can test
+- [ ] Somewhere to run at least one worker host; ideally two, so you can test
       failover (see `docs/operations.md`)
 
 ---
 
-## Stage 1 — Stand up Postgres and the core
+## Stage 1; Stand up Postgres and the core
 
 Full detail is in `docs/deployment.md`; the short version:
 
@@ -98,8 +98,8 @@ node $REPO/dist/src/cli/admin.js pause     # indefinite
 node $REPO/dist/src/cli/admin.js stats     # expect paused: true
 ```
 
-(If you have not built locally, run the CLI from the image instead —
-`docker compose run --rm core-api node dist/src/cli/admin.js pause` — and set
+(If you have not built locally, run the CLI from the image instead,
+`docker compose run --rm core-api node dist/src/cli/admin.js pause`, and set
 `PUBLOADER_API_URL=http://core-api:8100` inside the compose network.)
 
 **Verify before moving on:**
@@ -112,7 +112,7 @@ docker compose exec postgres psql -U publoader -d publoader -c '\dt'
 
 ---
 
-## Stage 2 — Migrate the data
+## Stage 2; Migrate the data
 
 Two scripts, both re-runnable. Run them from a core container so they inherit
 `DATABASE_URL` and the compose network. Use `core-processor` as the run target:
@@ -184,12 +184,12 @@ uploaded_ids       48190     48190         0     48190  ok
 images: 1204 fetched (612.3 MiB), 0 missing, 0 over the 20971520-byte cap
 ```
 
-It exits non-zero if `inserted + skipped ≠ source` for any collection — that
+It exits non-zero if `inserted + skipped ≠ source` for any collection; that
 means rows were read but neither written nor deliberately skipped, and you
 should stop and investigate rather than cut over.
 
 It also lists the non-chapter fields it carried through into the task payload.
-Nothing is dropped — an `EDIT` task cannot execute without its `payload` (the
+Nothing is dropped; an `EDIT` task cannot execute without its `payload` (the
 literal MangaDex PUT body) and an `UNAVAILABLE` task reads `unavailableAt`, so
 anything that is not a chapter field rides along verbatim. Read the list once as
 a sanity check that the queues look like you expect.
@@ -210,12 +210,12 @@ This imports the legacy `schedule_overrides` table (each row becoming one
 `schedule_entries` slot: same time, kind `UPDATE`, its optional `day` becoming a
 one-element weekday set), `disabled_extensions`, and the two settings
 the platform honours (`chapter_removal_mode`, `pause_until`). `run_history` is
-deliberately **not** imported — the platform's `runs` table carries state,
+deliberately **not** imported; the platform's `runs` table carries state,
 bundle pins and segments that the legacy rows cannot supply. Keep the SQLite
 file as your historical record.
 
 > `pause_until` is imported. If legacy was paused when you snapshotted, the
-> platform will come up paused too — which is what you want at this stage, but
+> platform will come up paused too; which is what you want at this stage, but
 > remember it at stage 5.
 
 **Verify:**
@@ -235,13 +235,13 @@ Compare against the counts you recorded in stage 0.
 
 ---
 
-## Stage 3 — Publish extension bundles (and seed the config tables)
+## Stage 3; Publish extension bundles (and seed the config tables)
 
 The platform does not read extensions from a shared volume. Each extension is
 published once as a content-addressed zip; jobs then pin a specific sha256.
 
 **This stage also migrates the JSON config files.** `manga_id_map.json` and
-`override_options.json` are no longer read at runtime — the database is the
+`override_options.json` are no longer read at runtime; the database is the
 config authority. Publishing a bundle **seeds** those files into
 `tracked_manga` and `extension_configs`. The Mongo migrator does **not** touch
 them; this is the only path that imports them.
@@ -259,7 +259,7 @@ node $REPO/dist/src/cli/admin.js bundle publish ./src/mangaplus \
 The CLI validates that `manifest.json` exists and declares `name` and `version`
 before uploading, and the server re-validates the manifest against the zod
 schema and runs the publish-time static scan. A rejected bundle is a real
-problem with the manifest, not a transport error — read the 422 message.
+problem with the manifest, not a transport error; read the 422 message.
 
 Publish from **both** extension repos (public and private). Then:
 
@@ -276,7 +276,7 @@ Extensions that were disabled in SQLite carry over from stage 2b; confirm the
 
 ### 3a. Verify the config seed
 
-**Seeding runs on every publish, but it is create-only — it never overwrites.**
+**Seeding runs on every publish, but it is create-only; it never overwrites.**
 A mapping an operator fixed by hand survives a republish carrying stale JSON;
 new external ids in the file *are* added. `extension_configs` is created once
 and never touched again. The practical consequences, both worth internalising:
@@ -301,7 +301,7 @@ node $REPO/dist/src/cli/admin.js tracked list mangaplus | tail -1
 These must match. If the database count is lower, the usual causes are a
 `data_files` entry in `manifest.json` pointing at a different filename, or
 duplicate external ids in the JSON (which collapse onto the
-`(extension, mangaId)` unique constraint — legitimate, but worth knowing about).
+`(extension, mangaId)` unique constraint; legitimate, but worth knowing about).
 
 Then the override options:
 
@@ -327,7 +327,7 @@ nothing on a deployment that has already published once.
 
 ---
 
-## Stage 4 — Shadow phase
+## Stage 4; Shadow phase
 
 **Legacy keeps running and keeps uploading. The platform stays paused.** The
 goal is to prove the platform produces the same decisions as legacy, without
@@ -361,7 +361,7 @@ node $REPO/dist/src/cli/admin.js workers list
 
 A `FORCE` run scrapes without the "already uploaded" short-circuit, which is
 exactly what you want for comparison. It creates `upload_tasks` rows but does
-not upload them — the platform is paused, so `core-uploader` is not draining
+not upload them; the platform is paused, so `core-uploader` is not draining
 the queue.
 
 ```bash
@@ -369,7 +369,7 @@ node $REPO/dist/src/cli/admin.js runs trigger mangaplus --kind FORCE
 ```
 
 > If the platform is paused, `runs trigger` returns 409. For the shadow test,
-> resume briefly, trigger, and pause again — or leave it paused and instead
+> resume briefly, trigger, and pause again; or leave it paused and instead
 > insert the run while paused is lifted only long enough for the scheduler to
 > claim it. The simpler sequence is: `resume`, `runs trigger`, `pause`. The
 > uploader will not have drained a meaningful number of tasks in those seconds,
@@ -386,7 +386,7 @@ node $REPO/dist/src/cli/admin.js runs show <runId>
 This is the actual gate. Check all four:
 
 1. **Quarantine is empty.** `admin.js quarantine`. Any entry means the worker
-   submitted something that failed schema or policy validation — a manifest
+   submitted something that failed schema or policy validation; a manifest
    `allowed_hosts` mismatch, a language not declared in the manifest, or a
    wrong group id. Fix the manifest, republish, re-run. Do not proceed with
    entries here.
@@ -409,7 +409,7 @@ This is the actual gate. Check all four:
    ```
 
    A `FORCE` run on an extension legacy has been keeping current should queue
-   **few or no** `UPLOAD` tasks — the migrated `uploaded_chapters` history
+   **few or no** `UPLOAD` tasks; the migrated `uploaded_chapters` history
    makes the processor's dedup skip them. A flood of UPLOAD tasks for chapters
    already on MangaDex means the history migration did not land correctly:
    stop, and check `uploaded_chapters` counts against Mongo.
@@ -426,7 +426,7 @@ This is the actual gate. Check all four:
    ```
 
    Every series the extension reported that has no `tracked_manga` mapping
-   lands here as `NEW`. A handful is expected — genuinely new series the
+   lands here as `NEW`. A handful is expected; genuinely new series the
    publisher added. **A flood is a symptom**, not a feature: it almost always
    means the stage-3 seed did not land, so the platform thinks nothing is
    tracked. Stop and re-check `tracked list` counts before going further.
@@ -434,11 +434,11 @@ This is the actual gate. Check all four:
    If the manifest sets `auto_create_titles`, rows move to `CREATED`/`TRACKED`
    on their own once the platform is unpaused, and titles get created on
    MangaDex. **During the shadow phase the platform is paused, so nothing is
-   created** — which is the point. Review the list, `untracked skip` anything
+   created**: which is the point. Review the list, `untracked skip` anything
    that should not exist, and only unpause when the remainder looks right.
 
 Run the shadow phase for at least a full scheduling cycle of your busiest
-extension — a day is reasonable. Repeat 4b/4c for two or three different
+extension; a day is reasonable. Repeat 4b/4c for two or three different
 extensions, including one partitionable one, so segmenting gets exercised.
 
 **Rollback at this stage is free:** stop the platform stack. Legacy never
@@ -446,11 +446,11 @@ stopped.
 
 ---
 
-## Stage 5 — Cutover
+## Stage 5; Cutover
 
 Sequence matters. Legacy must be quiet before the platform starts uploading.
 
-**5.1 — Pause legacy.** Over Discord: `/pause` (indefinite). Then confirm it
+**5.1; Pause legacy.** Over Discord: `/pause` (indefinite). Then confirm it
 actually stopped:
 
 ```bash
@@ -458,10 +458,10 @@ docker compose -f $LEGACY/docker-compose.yml logs --tail 50 publoader
 ```
 
 Wait for any in-flight extension run to finish and for the four worker queues
-to stop draining. Legacy has no lease concept — a half-finished upload is
+to stop draining. Legacy has no lease concept; a half-finished upload is
 finished by the process that started it, so give it time rather than killing it.
 
-**5.2 — Stop legacy uploads entirely.** Once quiet:
+**5.2; Stop legacy uploads entirely.** Once quiet:
 
 ```bash
 docker compose -f $LEGACY/docker-compose.yml stop publoader
@@ -471,7 +471,7 @@ Leave `publoader-bot` and `publoader-dash` running if you want them; they only
 read. Stop them too if their `/run` commands could be used by someone who has
 not read this document.
 
-**5.3 — Delta migration.** Legacy has been uploading since stage 2. Re-run both
+**5.3; Delta migration.** Legacy has been uploading since stage 2. Re-run both
 scripts to pick up everything new. Use `--refresh` this time so history rows
 that legacy *updated in place* (edits, changed metadata) are rewritten rather
 than skipped:
@@ -487,10 +487,10 @@ docker compose run --rm --no-deps -v "$LEGACY/resources:/legacy:ro" \
   core-processor node dist/src/cli/import-sqlite.js /legacy/publoader.db
 ```
 
-Check the report exits 0. The `skipped` column will now be large — that is the
+Check the report exits 0. The `skipped` column will now be large; that is the
 already-migrated bulk, and it is correct.
 
-**5.4 — Clear the imported pause.** Stage 5.3 re-imported `pause_until` from
+**5.4; Clear the imported pause.** Stage 5.3 re-imported `pause_until` from
 SQLite, and you paused legacy in 5.1, so the platform is now paused by that
 setting as well as by yours:
 
@@ -499,7 +499,7 @@ node $REPO/dist/src/cli/admin.js resume
 node $REPO/dist/src/cli/admin.js stats     # paused: false
 ```
 
-**5.5 — Watch the first hour.** The migrated `upload_tasks` queue drains
+**5.5; Watch the first hour.** The migrated `upload_tasks` queue drains
 immediately once resumed. This is the highest-risk window in the whole
 migration, because it is the first time the platform writes to MangaDex.
 
@@ -509,17 +509,17 @@ watch -n 30 "node $REPO/dist/src/cli/admin.js stats"
 
 Check on MangaDex directly that the first few chapters uploaded correctly
 (right manga, right number, right language, right group). If anything is wrong:
-`pause` immediately — that stops the uploader within one poll interval — then
+`pause` immediately, that stops the uploader within one poll interval, then
 work out what happened before resuming.
 
-**5.6 — Keep legacy stopped but present.** Do not `docker compose down -v` and
+**5.6; Keep legacy stopped but present.** Do not `docker compose down -v` and
 do not delete `$LEGACY`. Leave the containers stopped, the volumes intact, and
 Mongo untouched for **at least two weeks** of normal operation. That is your
 rollback.
 
 ---
 
-## Stage 6 — Rollback
+## Stage 6; Rollback
 
 Rollback is straightforward for anything that goes wrong **before** the
 platform has uploaded much, and gets progressively more manual after that.
@@ -534,8 +534,8 @@ docker compose -f $LEGACY/docker-compose.yml start publoader
 # then unpause legacy over Discord: /resume
 ```
 
-Leave `core-api` running if workers are enrolled — draining them cleanly is
-nicer than letting their requests fail — but nothing will be scheduled.
+Leave `core-api` running if workers are enrolled, draining them cleanly is
+nicer than letting their requests fail, but nothing will be scheduled.
 
 **The reverse-sync caveat.** There is no automated Postgres → Mongo migration,
 and there will not be one. Anything the platform uploaded after cutover exists
@@ -546,7 +546,7 @@ only in Postgres:
 - `upload_tasks` in any state
 
 Legacy does not know about these. If you restart legacy without reconciling,
-it will see those chapters as **not yet uploaded** and will re-upload them —
+it will see those chapters as **not yet uploaded** and will re-upload them;
 MangaDex-side deduplication catches most of it, but not all, and you will get
 duplicate chapters.
 
@@ -586,7 +586,7 @@ MangaDex afterwards. That is a worse position than fixing forward.
 
 ---
 
-## Stage 7 — Decommission checklist
+## Stage 7; Decommission checklist
 
 Only after the platform has run cleanly for at least two weeks and you have a
 current Postgres backup.
@@ -595,7 +595,7 @@ current Postgres backup.
       copy of pre-migration history.
 - [ ] **Final `publoader.db` snapshot**, archived alongside it.
 - [ ] **Migrate the Discord bot** to the admin API. Until this is done the bot
-      is talking to a stopped scheduler. See `docs/ipc-to-api-mapping.md` — note
+      is talking to a stopped scheduler. See `docs/ipc-to-api-mapping.md`: note
       the gaps section, some commands need new endpoints first.
 - [ ] **Retire `publoader-dash`.** There is nothing to migrate: the platform
       ships its own dashboard, served by `core-api` at the domain root, and it
@@ -619,7 +619,7 @@ current Postgres backup.
 - [ ] **Stop maintaining the JSON config files.** `manga_id_map.json` and
       `override_options.json` are seed data only; after the first publish the
       database wins and edits to the files do nothing. Either delete them from
-      the extensions repos or add a header comment saying so — a file that
+      the extensions repos or add a header comment saying so; a file that
       looks live but is not will eventually cost someone an afternoon. Export
       the current truth first if you want a copy in the repo:
       `admin.js tracked list <ext>` and `admin.js ext-config get <ext>`.
@@ -628,7 +628,7 @@ current Postgres backup.
       containers execute is exactly the supply-chain path the bundle pipeline
       removes.
 - [ ] **Retire `config.ini`.** All configuration is environment/Docker-secret
-      driven. Rotate every credential it contained — it has been on disk in a
+      driven. Rotate every credential it contained; it has been on disk in a
       bind mount, and the `pull` command's GitHub PAT in particular should be
       revoked outright since the bundle pipeline does not need it.
 - [ ] **Revoke the MangaDex session** the legacy stack held (`mdauth.json`) and
