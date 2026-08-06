@@ -8,7 +8,7 @@ import { join } from "node:path";
  * The contract is deliberately narrow: the file is created at process start and
  * refreshed whenever the agent completes a piece of *work-related* traffic with
  * the core. Missing therefore means "the process never got going", and stale
- * means "the agent is running but no longer working" — the one failure mode
+ * means "the agent is running but no longer working"; the one failure mode
  * `restart: unless-stopped` cannot see.
  */
 

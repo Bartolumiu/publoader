@@ -2,7 +2,7 @@
  * The "Read the docs" view: the repository's own documentation, in the dashboard.
  *
  * The reason this exists is that every other panel answers a question with a
- * number, and the answers an operator needs at 03:00 are prose — "what does
+ * number, and the answers an operator needs at 03:00 are prose; "what does
  * draining a worker actually do", "how do I restore a backup". Sending them to
  * GitHub for that assumes they have the repo, the network and the right branch;
  * the container already has the exact documents that match the code it is
@@ -19,7 +19,7 @@ const CSRF_HEADER = "x-requested-with";
 const CSRF_VALUE = "publoader-dash";
 
 /**
- * Which document is open, remembered across tab switches — the shell rebuilds a
+ * Which document is open, remembered across tab switches; the shell rebuilds a
  * view from scratch every time it is selected, and losing the operator's place
  * in deployment.md because they glanced at Overview would be its own small
  * annoyance.

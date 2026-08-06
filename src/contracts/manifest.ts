@@ -4,7 +4,7 @@ export const EXTENSION_NAME_RE = /^[a-z0-9_]+$/;
 
 /**
  * Validated, ENFORCED extension manifest (manifest.json in each extension
- * directory). Extends the format already used by publoader-extensions —
+ * directory). Extends the format already used by publoader-extensions;
  * existing manifests (e.g. mangaplus) validate unchanged.
  */
 export const Manifest = z

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * `publoader-admin` — operator CLI for the platform control plane.
+ * `publoader-admin`: operator CLI for the platform control plane.
  *
  * Every subcommand is a thin wrapper over an admin API endpoint (see
  * docs/ipc-to-api-mapping.md for the legacy IPC equivalences). The CLI holds no
@@ -54,7 +54,7 @@ type RequestOptions = {
 
 /**
  * One request against the admin API. Non-2xx responses abort the process with
- * the server's error message — an operator running a script wants a non-zero
+ * the server's error message; an operator running a script wants a non-zero
  * exit, not a partially-applied change reported as success.
  */
 async function api<T = unknown>(path: string, opts: RequestOptions = {}): Promise<T> {
@@ -426,7 +426,7 @@ const tracked = program
  * `--namespace` names one of an extension's catalogues (viz has `shonenjump`
  * and `vizmanga`, where the same numeric id under each is a different series).
  * Omitting it means the single flat id space, which is what every extension
- * except viz has — so no existing invocation changes.
+ * except viz has; so no existing invocation changes.
  */
 tracked
   .command("list <extension>")
@@ -634,7 +634,7 @@ chapters
       // card of ours, so they are candidates for an UNAVAILABLE task rather
       // than chapters we have already marked.
       console.error(
-        `  ${res.hiddenOnMangadex.length} live chapter(s) MangaDex will not serve — ` +
+        `  ${res.hiddenOnMangadex.length} live chapter(s) MangaDex will not serve: ` +
           "not archived; queue them unavailable if that is what you want:",
       );
       for (const id of res.hiddenOnMangadex.slice(0, 20)) console.error(`    ${id}`);
@@ -646,7 +646,7 @@ chapters
       `${res.dryRun ? "would record" : "recorded"} ` +
         `${res.unavailableRecorded} unavailable and ${res.deletedRecorded} deleted ` +
         `(found ${res.unavailableFound} / ${res.deletedFound}; the rest were already archived)` +
-        (res.dryRun ? " — re-run with --apply to write" : ""),
+        (res.dryRun ? "; re-run with --apply to write" : ""),
     );
   });
 
@@ -717,8 +717,8 @@ extConfig
       method: "PUT",
       json: { overrideOptions },
     });
-    // A rejected row is not a failed command — the rest of the document landed —
-    // but it must be visible, because a dropped `custom_language` row silently
+    // A rejected row is not a failed command, the rest of the document landed,
+ // but it must be visible, because a dropped `custom_language` row silently
     // stops protecting a language from the chapter-removal pass.
     for (const row of res.rejected) {
       console.error(
@@ -882,7 +882,7 @@ bundle
       fail(`${root} does not exist`);
     }
     // The same build+zip the GitHub push webhook runs (core/webhooks/
-    // bundleBuilder.ts), so both publish paths produce identical bytes — and so
+    // bundleBuilder.ts), so both publish paths produce identical bytes; and so
     // an operator gets an immediate, obvious error rather than a 422 after
     // uploading tens of megabytes.
     let built;
@@ -942,7 +942,7 @@ tokens
 
 tokens
   .command("list")
-  .description("issued tokens (metadata only — secrets are unrecoverable)")
+  .description("issued tokens (metadata only; secrets are unrecoverable)")
   .action(async () => {
     const res = await api<{ tokens: Record<string, unknown>[] }>("/api/v1/admin/tokens");
     table(res.tokens, [
@@ -1131,11 +1131,11 @@ const errorFeed = program
     console.log("");
     if (opts.cleared === "without" && res.clearedHidden > 0) {
       console.log(
-        `${res.clearedHidden} cleared entr${res.clearedHidden === 1 ? "y" : "ies"} hidden — ` +
+        `${res.clearedHidden} cleared entr${res.clearedHidden === 1 ? "y" : "ies"} hidden; ` +
           "`padmin errors --cleared only` to review, `errors restore` to un-clear.",
       );
     }
-    console.log("Container logs are not aggregated here — use `docker compose logs` on the host.");
+    console.log("Container logs are not aggregated here; use `docker compose logs` on the host.");
   });
 
 errorFeed
@@ -1143,7 +1143,7 @@ errorFeed
   .description("mark failures as read and dealt with, so they drop out of the feed")
   .argument("[id...]", "entry ids, or the leading characters of one (as printed by `padmin errors`)")
   .option("--all", "clear every outstanding failure")
-  .option("--note <text>", "why it is fine — shown to whoever reviews cleared entries")
+  .option("--note <text>", "why it is fine; shown to whoever reviews cleared entries")
   .action(async (ids: string[], opts: { all?: boolean; note?: string }) => {
     // Both at once is a contradiction worth rejecting rather than resolving: it
     // reads as "clear these" and would clear everything.
@@ -1164,7 +1164,7 @@ errorFeed
 
     for (const skip of res.skipped ?? []) console.log(`skipped ${skip.id}: ${skip.reason}`);
     ok(
-      `${res.cleared} failure(s) cleared — hidden from the feed. Nothing else changed: ` +
+      `${res.cleared} failure(s) cleared; hidden from the feed. Nothing else changed: ` +
         "the jobs, tasks and submissions keep their state, anything that fails again reappears, " +
         "and `errors restore` undoes this.",
     );

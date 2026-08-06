@@ -55,7 +55,7 @@ export interface AppContext {
    * convention on the API side: the chapter views use it to show what MangaDex
    * currently says and to render a card preview, and every change is queued as
    * an UploadTask instead. core-uploader remains the only process that writes
-   * to MangaDex, which is what keeps "exactly one writer" true — an API replica
+   * to MangaDex, which is what keeps "exactly one writer" true; an API replica
    * behind a load balancer must not be able to open an upload session.
    */
   md?: MdExtendedApi;

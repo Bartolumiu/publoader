@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * The Errors view, actually rendered — specifically the controls that clear a
+ * The Errors view, actually rendered; specifically the controls that clear a
  * failure once it has been dealt with.
  *
  * Same approach as `dashboardChapters.test.ts`: `dashboard/app.js` is vanilla
@@ -38,7 +38,7 @@ let calls: { url: string; method: string; body: unknown }[] = [];
 /** What `/errors` answers next; tests swap it to simulate a reload. */
 let feed: unknown;
 
-/** Scopes the stubbed principal holds — the gate on the Clear buttons. */
+/** Scopes the stubbed principal holds: the gate on the Clear buttons. */
 let scopes: string[];
 
 function routes(): { match: RegExp; body: unknown }[] {
@@ -248,7 +248,7 @@ describe("dashboard errors view", () => {
 
   it("badges the sidebar with outstanding failures rather than every quarantine", async () => {
     // The stub says quarantined: 3 but errorsOutstanding.total: 2. The badge must
-    // follow the number that respects clearing, or it nags about handled work —
+    // follow the number that respects clearing, or it nags about handled work,
     // so this asserts the exact badge text, not that "2" appears somewhere.
     await settle();
     const badges = [...doc.getElementById("nav").querySelectorAll(".nav-count")];

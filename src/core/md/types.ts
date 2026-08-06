@@ -1,7 +1,7 @@
 import type { ChapterRecord } from "../../contracts/records.js";
 
 /**
- * Internal canonical chapter shape — the platform-side mirror of the Python
+ * Internal canonical chapter shape; the platform-side mirror of the
  * `Chapter` dataclass, and what the processor/uploader pass around.
  *
  * On its way to storage it splits two ways, both via src/core/md/chapterRows.ts:
@@ -50,8 +50,8 @@ export interface MdChapter {
      */
     createdAt: string;
     /**
-     * How many pages MangaDex is hosting for this chapter, and — for the
-     * external chapters this platform publishes — the thing that says whether
+     * How many pages MangaDex is hosting for this chapter, and, for the
+     * external chapters this platform publishes, the thing that says whether
      * it has been marked unavailable.
      *
      * An external chapter normally has NO pages: the reader follows
@@ -93,7 +93,7 @@ export interface MdManga {
 }
 
 /**
- * A single title read in full — what an operator is shown before correcting a
+ * A single title read in full; what an operator is shown before correcting a
  * MangaDex entry, and what an edit needs in order to be safe.
  *
  * `version` is the load-bearing field: MangaDex requires the version it
@@ -129,7 +129,7 @@ export interface MdApi {
   /** GET /manga?ids[]=… lookups. */
   mangaByIds(ids: string[]): Promise<MdManga[]>;
   /**
-   * GET /manga/{id} — one title in full, or null when MangaDex 404s it. Used
+   * GET /manga/{id}; one title in full, or null when MangaDex 404s it. Used
    * before editing a title, both to show an operator what the entry actually
    * says and to read the `version` the edit has to carry.
    */
@@ -175,13 +175,13 @@ export interface MdApi {
   }): Promise<{ id: string; version: number }>;
   commitMangaDraft(mangaId: string, version: number): Promise<boolean>;
   /**
-   * PUT /manga/{id} — correct a title this pipeline is responsible for.
+   * PUT /manga/{id}; correct a title this pipeline is responsible for.
    *
    * `version` is the version read from the title; MangaDex bumps it itself, and
    * rejects the request outright if it is not the current one. `payload` carries
    * ONLY the fields being changed (see `mangaEditPayload` in titleService.ts):
    * an omitted field is left alone, but a field that IS sent replaces its whole
-   * value — so a `title` or `links` object must be the merged result, never just
+   * value; so a `title` or `links` object must be the merged result, never just
    * the one entry being corrected.
    */
   editManga(

@@ -59,7 +59,7 @@ export class ApiTokenStore {
 
   /**
    * Resolve a presented token. Returns null for unknown, revoked, or expired
-   * tokens — the caller cannot distinguish which, on purpose.
+   * tokens; the caller cannot distinguish which, on purpose.
    */
   async authenticate(token: string): Promise<ApiToken | null> {
     const row = await this.prisma.apiToken.findUnique({
@@ -88,7 +88,7 @@ export class ApiTokenStore {
       });
   }
 
-  /** Metadata only — there is no path that returns a token's secret. */
+  /** Metadata only; there is no path that returns a token's secret. */
   async list(): Promise<Omit<ApiToken, "tokenHash">[]> {
     const rows = await this.prisma.apiToken.findMany({ orderBy: { createdAt: "desc" } });
     return rows.map(({ tokenHash: _tokenHash, ...rest }) => rest);

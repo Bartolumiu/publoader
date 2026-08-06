@@ -57,7 +57,7 @@ const probe = `return {
 await page.goto(`${O}/`, 1500);
 await signIn(OWNER);
 
-// The seeded row that already has a MangaDex title — the only one for which the
+// The seeded row that already has a MangaDex title; the only one for which the
 // push is meaningful, so the only one that can prove the role gate.
 const ids = await page.eval(`
   const r = await fetch("/api/v1/admin/untracked?limit=50", { headers: { "x-requested-with": "publoader-dash" } });

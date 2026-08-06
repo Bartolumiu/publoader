@@ -20,7 +20,7 @@ function redirectTo(location: string, status = 302): Response {
   return new Response(null, { status, headers: { location } });
 }
 
-/** No politeness delay and no real sleeping — these tests assert policy, not timing. */
+/** No politeness delay and no real sleeping; these tests assert policy, not timing. */
 const instant = {
   minIntervalMs: 0,
   sleep: async () => {},

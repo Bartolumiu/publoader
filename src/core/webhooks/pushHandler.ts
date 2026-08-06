@@ -80,7 +80,7 @@ export interface PushResult {
  * Publish a bundle for every extension the push touched.
  *
  * One archive is downloaded per delivery and every changed extension is
- * extracted from it — two extensions in one push must not mean two downloads of
+ * extracted from it; two extensions in one push must not mean two downloads of
  * the same tree. A failure is always scoped to the extension that caused it:
  * one unbuildable extension must not stop the others from shipping.
  */
@@ -165,9 +165,9 @@ async function publishOne(
  *
  * The webhook is not the only caller any more: the operator's "fetch latest
  * changes" and "install this extension" actions run the same extract → build →
- * publish path (see routes/sysops.ts). One publish path is the point — two
+ * publish path (see routes/sysops.ts). One publish path is the point; two
  * would be two different programs producing bundles the sha256 pin claims are
- * interchangeable — so the difference between callers is confined to this
+ * interchangeable; so the difference between callers is confined to this
  * struct, which lands in the audit log rather than in the logic.
  */
 export interface PublishAttribution {
@@ -209,7 +209,7 @@ export async function publishExtensionFromArchive(
     } catch (err) {
       if (err instanceof BundleIntakeError && err.code === "subtree_missing") {
         // Every path of the extension was removed by this push. Nothing is taken
-        // out of rotation here — retiring a live extension on the strength of a
+        // out of rotation here; retiring a live extension on the strength of a
         // push payload is not a decision to automate.
         return {
           extension,
@@ -255,7 +255,7 @@ export interface PublishFromArchiveOptions {
 export interface PublishDirectoryOptions {
   /**
    * Name the manifest must declare, when the caller already knows it (a repo
-   * directory name). Null accepts whatever the manifest says — the upload path,
+   * directory name). Null accepts whatever the manifest says; the upload path,
    * where the manifest is the only source of the name.
    */
   expectedName?: string | null;
@@ -334,7 +334,7 @@ export async function publishExtensionDirectory(
     };
   } catch (err) {
     // Only reasons an operator can act on cross the boundary. Anything else is
-    // logged with the error and reported generically — a webhook response is a
+    // logged with the error and reported generically; a webhook response is a
     // public surface once the secret leaks, and a stack trace names paths.
     const detail =
       err instanceof BundleBuildError || err instanceof BundleRejectedError

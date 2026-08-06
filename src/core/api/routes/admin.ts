@@ -18,18 +18,13 @@ import { MANGADEX_LANGUAGES } from "../../../contracts/languages.js";
 import { countOutstandingErrors } from "../../observability/errorFeed.js";
 
 /**
- * The worker image the enrolment snippet tells a new host to run.
+ * The worker image the enrolment snippet tells a new host to run. Set
+ * `PUBLOADER_WORKER_IMAGE` on core-api to pin it; the compose file does,
+ * defaulting to the same release as the core.
  *
- * Set `PUBLOADER_WORKER_IMAGE` on core-api to pin it — the compose file does,
- * defaulting to the same release as the core itself, so the snippet moves with
- * every version bump instead of being a literal somebody has to remember.
- *
- * The fallback is `:latest` deliberately. A hardcoded version here is not a safe
- * default but a slowly-rotting one: this constant said `2.1.1` for three
- * releases while the env var it reads was never passed to core-api at all, so
- * every enrolment snippet handed out an image two versions behind and nothing
- * pointed at the cause. `:latest` can be wrong about immutability; it cannot be
- * wrong about being stale, and it is only reached when nothing is configured.
+ * The fallback is `:latest` deliberately. A hardcoded version here rots
+ * silently: this constant said `2.1.1` for three releases while the env var it
+ * reads was never passed to core-api at all.
  */
 const WORKER_IMAGE = process.env["PUBLOADER_WORKER_IMAGE"] ?? "ardax/publoader-worker:latest";
 import { VALID_REMOVAL_MODES } from "../../store/settings.js";
@@ -40,12 +35,8 @@ import AdmZip from "adm-zip";
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
 
 /**
- * Validate a query string and answer 400, not 500, when it is wrong.
- *
- * A bare `schema.parse` throws a ZodError, which nothing maps, so `?limit=9999`
- * came back as an internal error — a client mistake reported as a server fault.
- * Same helper as routes/ops.ts, routes/queues.ts and routes/sysops.ts; the
- * duplication is theirs and is not worth a shared module for nine lines.
+ * Validate a query string and answer 400, not 500, when it is wrong. Same helper
+ * as routes/ops.ts, routes/queues.ts and routes/sysops.ts.
  */
 function parseOrThrow<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infer<S> {
   const result = schema.safeParse(value);
@@ -60,8 +51,7 @@ function parseOrThrow<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infe
 /**
  * The audit subject for one tracked mapping. The default id space keeps the
  * `extension:mangaId` form every existing audit row uses; a namespaced row adds
- * the catalogue, because `709` alone does not identify a series once viz has
- * two of them.
+ * the catalogue, since `709` alone does not identify a series once viz has two.
  */
 function trackedSubject(extension: string, namespace: string, mangaId: string): string {
   return namespace === DEFAULT_NAMESPACE
@@ -70,9 +60,9 @@ function trackedSubject(extension: string, namespace: string, mangaId: string): 
 }
 
 /**
- * Admin-audience routes. Consumed by the operator CLI, the Discord bot, and
- * the dashboard. Every mutating action is written to the audit log with the
- * acting principal.
+ * Admin-audience routes, consumed by the operator CLI, the Discord bot and the
+ * dashboard. Every mutating action is written to the audit log with the acting
+ * principal.
  */
 export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void {
   app.register(async (scope) => {
@@ -90,13 +80,10 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       }
     });
     /**
-     * Who to blame in the audit log.
-     *
-     * A scoped token is always named, so "which client did this?" is always
-     * answerable; when that client acts for a human (the Discord bot passing
-     * `x-actor: discord:alice`) both identities are recorded. Browser sessions
-     * are named by their account and may NOT claim someone else via the
-     * header — only machine credentials can speak for a third party.
+     * Who to blame in the audit log. A scoped token is always named; when it
+     * acts for a human (the Discord bot passing `x-actor: discord:alice`) both
+     * identities are recorded. Browser sessions are named by their account and
+     * may not claim someone else via the header.
      */
     const actor = (req: FastifyRequest) => {
       const claimed = (req.headers["x-actor"] as string | undefined)?.slice(0, 64);
@@ -123,20 +110,15 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         note: body.note,
       });
       // The image goes out with the token so the dashboard's compose snippet
-      // names a tag that exists. It used to hard-code one that was never
-      // published, which turned "enrol a worker" into a pull failure.
+      // names a tag that exists.
       return { ...token, workerImage: WORKER_IMAGE };
     });
 
     /**
-     * Every enrolment token and what became of it.
-     *
-     * The token itself is never returned — only its hash is stored, and the
-     * plaintext was shown once at mint time. What an operator needs here is the
-     * fate of each one: an unused, unexpired token is a credential somebody can
-     * still enrol with, and that is the thing worth being able to see.
-     *
-     * Status is derived rather than stored, so it cannot drift from the row.
+     * Every enrolment token and what became of it. The token itself is never
+     * returned: only its hash is stored. An unused, unexpired token is a
+     * credential somebody can still enrol with, which is what an operator needs
+     * to see. Status is derived rather than stored, so it cannot drift.
      */
     scope.get("/api/v1/admin/enroll-tokens", { preHandler: requireScope("workers:read") }, async () => {
       const rows = await ctx.prisma.enrollToken.findMany({ orderBy: { createdAt: "desc" }, take: 200 });
@@ -169,11 +151,8 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     });
 
     /**
-     * Withdraw a token that has not been used yet.
-     *
-     * An unused token stays a live credential until it expires, so this is how
-     * an operator takes back one sent to the wrong person without waiting out
-     * its TTL.
+     * Withdraw a token that has not been used yet, for one sent to the wrong
+     * person, without waiting out its TTL.
      */
     scope.post(
       "/api/v1/admin/enroll-tokens/:id/revoke",
@@ -225,12 +204,9 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     }
 
     /**
-     * Change which extensions a worker will be given, at runtime.
-     *
-     * The stored list is what the lease query filters on, so this takes effect
-     * on that worker's very next poll — no re-enrolment, no restart, no
-     * redeploy. An empty list means "anything", which is the right default for
-     * a dedicated worker and the wrong one for a community host.
+     * Change which extensions a worker will be given, at runtime. The stored
+     * list is what the lease query filters on, so this takes effect on that
+     * worker's next poll. An empty list means "anything".
      */
     scope.put(
       "/api/v1/admin/workers/:id/extensions",
@@ -289,11 +265,9 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         orderBy: { createdAt: "desc" },
         take: query.limit,
       });
-      // How much each run actually found, aggregated in ONE statement over the
-      // page being returned. A run's state says whether it worked; this says
-      // whether it was worth running, which is the thing an operator scanning
-      // this list is usually after. `chaptersFound` is null for a run with no
-      // committed envelope yet — distinct from a run that found nothing.
+      // How much each run found, aggregated in one statement over the page being
+      // returned. `chaptersFound` is null for a run with no committed envelope
+      // yet, which is distinct from a run that found nothing.
       const totals = await ctx.runChapters.totalsForRuns(runs.map((run) => run.id));
       return {
         runs: runs.map((run) => {
@@ -315,15 +289,14 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     });
 
     /**
-     * Kill a run in progress: every job it still has outstanding is cancelled,
-     * and workers already executing one abort on their next lease renewal.
+     * Kill a run in progress: every outstanding job is cancelled, and workers
+     * already executing one abort on their next lease renewal.
      *
-     * Deliberately harder-edged than cancelling a job. Cancelling one job of a
+     * Harder-edged than cancelling a job on purpose. Cancelling one job of a
      * partitioned run leaves the others to finish and the run to be processed
-     * from incomplete results — which for a CLEAN run means the processor
-     * concludes that every chapter the missing segment covers has vanished
-     * upstream. Killing the run avoids that entirely: it never reaches the
-     * processor.
+     * from incomplete results, which for a CLEAN run means the processor
+     * concludes every chapter the missing segment covers has vanished upstream.
+     * Killing the run never reaches the processor.
      */
     scope.post("/api/v1/admin/runs/:id/cancel", { preHandler: requireScope("runs:write") }, async (req, reply) => {
       const { id } = req.params as { id: string };
@@ -341,11 +314,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { ok: true, ...outcome };
     });
 
-    /**
-     * The same, for everything unfinished at once — optionally scoped to one
-     * extension. For when something is wrong across the board and cancelling
-     * runs one id at a time is not fast enough.
-     */
+    /** The same for everything unfinished at once, optionally scoped to one extension. */
     scope.post("/api/v1/admin/runs/cancel-all", { preHandler: requireScope("runs:write") }, async (req) => {
       const body = z.object({ extension: z.string().min(1).max(64).optional() }).parse(req.body ?? {});
       const stopped = await ctx.jobs.cancelActiveRuns(body.extension);
@@ -428,11 +397,10 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     });
 
     /**
-     * Unload an extension. Disabling stops scheduling AND stops outstanding
-     * work: queued jobs are cancelled and running ones are told to abort, so
-     * "disabled" means disabled now rather than after the queue drains. The
-     * claim query also refuses disabled extensions, so nothing can slip through
-     * between these two statements.
+     * Unload an extension. Disabling stops scheduling and outstanding work:
+     * queued jobs are cancelled and running ones told to abort, so "disabled"
+     * means now rather than after the queue drains. The claim query also refuses
+     * disabled extensions, so nothing slips through between the two statements.
      */
     scope.post(
       "/api/v1/admin/extensions/:name/disable",
@@ -508,8 +476,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
 
     // ---- webhook verbosity ----
     // Only the successful per-chapter embeds are switchable. Failures are
-    // deliberately not offered as a toggle: there is no reading of this system
-    // in which silently dropping a failed upload is what an operator wanted.
+    // deliberately not offered as a toggle.
     scope.get(
       "/api/v1/admin/webhook-verbosity",
       { preHandler: requireScope("settings:read") },
@@ -545,9 +512,9 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           return reply.code(422).send({ error: "invalid zip" });
         }
         const sourceCommit = (req.headers["x-source-commit"] as string | undefined)?.slice(0, 64);
-        // Republishing a pre-v2 python bundle is deliberately awkward and
-        // always leaves a trace: the header alone is recorded even when the
-        // publish then fails for some other reason.
+        // The header alone is recorded even when the publish then fails for some
+        // other reason, so republishing a pre-v2 python bundle always leaves a
+        // trace.
         const allowLegacy = req.headers["x-allow-legacy-runtime"] === "true";
         if (allowLegacy) {
           await ctx.audit.record(actor(req), "bundle.publish.legacy_runtime_override", "requested", {
@@ -573,13 +540,12 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
             version: bundle.version,
             sha256: bundle.sha256,
             created,
-            // Things worth an operator's attention that are not grounds for
-            // refusing the bundle. Empty on a clean publish.
+            // Worth an operator's attention but not grounds for refusing the
+            // bundle. Empty on a clean publish.
             warnings,
           });
         } catch (err) {
-          // A rejected bundle already carries an operator-readable reason;
-          // wrapping it in "manifest validation failed" would only bury it.
+          // A rejected bundle already carries an operator-readable reason.
           if (err instanceof BundleRejectedError) {
             return reply.code(422).send({ error: err.message });
           }
@@ -592,8 +558,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     scope.get("/api/v1/admin/extensions/:name/tracked", { preHandler: requireScope("tracked:read") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
-      // `namespace` filters to one catalogue; omitting it returns them all,
-      // which is what an operator inspecting an extension wants to see.
+      // `namespace` filters to one catalogue; omitting it returns them all.
       const query = z.object({ namespace: z.string().max(MAX_NAMESPACE_LENGTH).optional() }).parse(req.query ?? {});
       const rows = await ctx.prisma.trackedManga.findMany({
         where: {
@@ -624,7 +589,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       }
       const identity = { extension: name, namespace, mangaId: body.mangaId };
       // Reachable with tracked:append, which must not be able to repoint an
-      // existing series at a different title — that is an edit, and a silent one.
+      // existing series at a different title: that is an edit, and a silent one.
       const existing = await ctx.prisma.trackedManga.findUnique({
         where: { extension_namespace_mangaId: identity },
       });
@@ -652,8 +617,8 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     scope.delete("/api/v1/admin/extensions/:name/tracked/:mangaId", { preHandler: requireScope("tracked:write") }, async (req) => {
       const { name, mangaId } = req.params as { name: string; mangaId: string };
       const query = z.object({ namespace: z.string().max(MAX_NAMESPACE_LENGTH).optional() }).parse(req.query ?? {});
-      // A namespace is a query parameter rather than a second path segment so
-      // the flat-space URL every existing client uses keeps working unchanged.
+      // A query parameter rather than a second path segment, so the flat-space
+      // URL every existing client uses keeps working unchanged.
       const namespace = normaliseNamespace(query.namespace);
       const res = await ctx.prisma.trackedManga.deleteMany({
         where: { extension: name, namespace, mangaId },
@@ -665,13 +630,11 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     /**
      * Bulk curation. `set` adds (or, with tracked:write, repoints) mappings and
      * `remove` deletes them; `text` accepts the pasted `externalId,titleId`
-     * format (or `namespace,externalId,titleId`) so nobody has to build JSON by
-     * hand. Rows are judged individually and reported individually — a
-     * contributor pasting 200 lines needs to know which three were wrong.
+     * format (or `namespace,externalId,titleId`). Rows are judged and reported
+     * individually, so a contributor pasting 200 lines learns which three were
+     * wrong.
      *
-     * `namespace` at the top level is the default for rows that do not name one,
-     * so pasting one catalogue's worth of two-column lines needs no per-line
-     * prefix.
+     * `namespace` at the top level is the default for rows that do not name one.
      */
     scope.post(
       "/api/v1/admin/extensions/:name/tracked/batch",
@@ -729,17 +692,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
 
         const canWrite = hasScope(req.principal!, "tracked:write");
         if (body.dryRun) {
-          // Same judgement, no writes — the store skips its write transaction.
-          //
-          // This used to apply the batch for real and then delete the rows it had
-          // added. That was not a preview. The undo only covered inserts, so a
-          // REPOINTED mapping stayed repointed — previewing a paste could
-          // silently send a series' uploads to a different MangaDex title — and
-          // the update also stamped `source` to the preview's own value, losing
-          // the record of who established the mapping. It additionally made
-          // uncommitted rows briefly visible to the scheduler. (The cleanup
-          // could not itself delete a pre-existing row: it filtered on the ids
-          // it had just added, and a repointed id was never in that set.)
+          // Same judgement, no writes: the store skips its write transaction.
           const preview = await ctx.trackedManga.applyBatch(
             name,
             { set, remove: body.remove },
@@ -764,17 +717,16 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
 
     /**
      * The whole override-options document, reassembled from the three relation
-     * tables and the free-form remainder, so `GET | PUT` still round-trips. The
-     * split is also reported: `same`, `multi_chapters` and `custom_language` are
-     * the modelled ones, `passthrough` is what core does not interpret.
+     * tables and the free-form remainder, so `GET | PUT` round-trips. The split
+     * is reported too: `same`, `multi_chapters` and `custom_language` are the
+     * modelled ones, `passthrough` is what core does not interpret.
      */
     scope.get("/api/v1/admin/extensions/:name/config", { preHandler: requireScope("extensions:read") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
       // The allowlist ships with the payload so the editor validates a language
-      // code against the exact list the write path enforces. A second copy in
-      // the dashboard would drift, and the failure mode of drift here is an
-      // operator being told a valid code is invalid — or worse, the reverse.
+      // code against the exact list the write path enforces; a second copy in the
+      // dashboard would drift.
       return { ...(await ctx.extensionConfig.describe(name)), mangadexLanguages: MANGADEX_LANGUAGES };
     });
 
@@ -782,9 +734,9 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
       const body = z.object({ overrideOptions: z.record(z.unknown()) }).parse(req.body);
-      // Rows the constraints refuse come back as `rejected` rather than as a
-      // 4xx: one unrecognised language code should not discard an otherwise
-      // good document, and the operator needs to be told which row it was.
+      // Rows the constraints refuse come back as `rejected` rather than a 4xx:
+      // one unrecognised language code should not discard an otherwise good
+      // document.
       const result = await ctx.extensionConfig.replace(name, body.overrideOptions);
       await ctx.audit.record(actor(req), "extension_config.set", name, {
         aliases: result.aliases,
@@ -797,13 +749,13 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     });
 
     /**
-     * Run the series-map write-back now instead of waiting for the weekly
-     * timer. Same code path the timer uses, so a dry run is an honest preview.
+     * Run the series-map write-back now instead of waiting for the weekly timer.
+     * Same code path the timer uses, so a dry run is an honest preview.
      *
-     * `tracked:write` rather than `tracked:read`: this publishes the map to a
-     * git repository, and — with `force` — can delete mappings from a file that
-     * contributors read. Even the dry run is gated, because its output lists the
-     * full contents of a private repo's map.
+     * `tracked:write` rather than `tracked:read`: this publishes the map to a git
+     * repository and, with `force`, can delete mappings from a file contributors
+     * read. Even the dry run is gated, because its output lists the full contents
+     * of a private repo's map.
      */
     scope.post("/api/v1/admin/maps/sync", { preHandler: requireScope("tracked:write") }, async (req) => {
       const body = parseOrThrow(
@@ -879,11 +831,11 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     });
 
     /**
-     * Yank a bundle version. `latest()` then resolves to the previous
-     * non-yanked version, so this is how a bad extension release is rolled back
-     * without touching the core or deleting anything. Jobs already pinned to the
-     * yanked sha keep running unless `cancelPinned` is set — pinning is what
-     * makes a run reproducible, so breaking it is opt-in.
+     * Yank a bundle version. `latest()` then resolves to the previous non-yanked
+     * version, so this rolls back a bad extension release without touching the
+     * core or deleting anything. Jobs already pinned to the yanked sha keep
+     * running unless `cancelPinned` is set, since pinning is what makes a run
+     * reproducible.
      */
     scope.post(
       "/api/v1/admin/bundles/:extension/:version/yank",
@@ -953,7 +905,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
          * Failures nobody has dealt with yet, across all three error sources.
          *
          * `quarantined` above is a state count and stays one; this is the triage
-         * number, and the difference is acknowledgements — an operator who has
+         * number, and the difference is acknowledgements; an operator who has
          * cleared the feed sees 0 here while `quarantined` still reports the rows
          * that are, in fact, still quarantined. The dashboard badge uses this one:
          * a badge that kept counting handled failures teaches people to ignore
@@ -967,26 +919,18 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     /**
      * The audit trail, filterable.
      *
-     * `limit` alone made an event id unfindable. The dashboard copies a
-     * permalink for a row, and resolving one meant fetching the most recent page
-     * and scanning it in the browser: any event that had since been pushed off
-     * that page could never be reached, and `id` was not a filter at all. So
-     * `?id=` is the important one here — it is what makes a permalink resolve to
-     * its event however old it is — and the rest are the filters an operator
-     * reaches for next ("everything this actor did last Tuesday").
+     * `?id=` is what makes a dashboard permalink resolve to its event however
+     * old it is; the rest are the filters an operator reaches for next.
      *
-     * Every filter is served by an index that already exists: `id` is the
-     * primary key, `createdAt` and `action` each carry one. The `actor`,
-     * `action` and `subject` substring matches could not use an index whatever
-     * we added, which is why they are bounded by `limit` and the time window
-     * rather than by an index.
+     * `id` is the primary key and `createdAt` and `action` each carry an index.
+     * The `actor`, `action` and `subject` substring matches could not use an
+     * index whatever we added, so they are bounded by `limit` and the time window
+     * instead.
      *
-     * Paging is offered both ways on purpose. `offset` is what a page with a
-     * "page 4 of 40" control needs; `cursor` is the id of the last row of the
-     * previous page and is stable while events are still being written, which
-     * offset is not. Sorting on (createdAt, id) rather than createdAt alone is
-     * what makes the cursor total: two events recorded in the same millisecond
-     * would otherwise be able to swap places between pages.
+     * Paging is offered both ways: `offset` for a "page 4 of 40" control,
+     * `cursor` (the id of the previous page's last row) for stability while
+     * events are still being written. Sorting on (createdAt, id) rather than
+     * createdAt alone is what makes the cursor total.
      */
     scope.get("/api/v1/admin/audit", { preHandler: requireScope("audit:read") }, async (req, reply) => {
       const query = parseOrThrow(
@@ -1023,9 +967,8 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       };
 
       // Keyset paging needs the cursor row's own sort key, so it is read first.
-      // An unknown cursor is a client error rather than an empty page: silently
-      // returning nothing would read as "there is nothing older", which is a
-      // different and wrong answer.
+      // An unknown cursor is a client error rather than an empty page, which
+      // would read as "there is nothing older".
       let keyset: Prisma.AuditEventWhereInput | null = null;
       if (query.cursor) {
         const at = await ctx.prisma.auditEvent.findUnique({
@@ -1058,8 +1001,8 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         total,
         limit: query.limit,
         offset: keyset ? null : query.offset,
-        // Null when this is the last page, so a caller can stop without a
-        // second request that comes back empty.
+        // Null on the last page, so a caller can stop without a second request
+        // that comes back empty.
         nextCursor: events.length === query.limit ? (events[events.length - 1]?.id ?? null) : null,
       };
     });

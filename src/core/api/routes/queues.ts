@@ -1,6 +1,3 @@
-// Not self-registering: server.ts is owned elsewhere, so the integrator wires
-// this module in with `registerQueueRoutes(app, ctx)` next to the other route
-// modules.
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { Prisma, type UploadTaskKind, type UploadTaskState } from "@prisma/client";
 import { z } from "zod";
@@ -23,32 +20,23 @@ import {
 } from "../../store/uploadTasks.js";
 
 /**
- * Full operator control of the four MangaDex upload queues: list, retry,
- * remove, purge, reprioritise, hand-enqueue and correct.
+ * Operator control of the four MangaDex upload queues: list, retry, remove,
+ * purge, reprioritise, hand-enqueue and correct. routes/ops.ts keeps the
+ * incident-triage subset; see docs/operations.md §"Queue management".
  *
- * routes/ops.ts already answers "what is stuck and why" (`GET
- * /admin/upload-tasks`) and offers the two triage verbs an incident needs
- * (retry one, cancel one, requeue stale leases). This module is the rest of the
- * job — the operations that previously meant `psql` on the core container:
- * bulk action, whole-queue purge, changing what runs next, and queueing or
- * fixing a chapter by hand. The older endpoints are deliberately left in place;
- * see docs/operations.md §"Queue management" for which to reach for.
+ * Three invariants run through every handler:
  *
- * Three invariants run through every handler here:
- *
- *  1. LEASED rows are untouchable. A lease means an uploader process is
- *     mid-flight against MangaDex, and there is no way to interrupt that from
- *     here — forcing the row would race that process into a duplicate upload or
- *     a lost result. Every mutating statement's WHERE clause excludes LEASED by
- *     naming the states it accepts, so this holds by construction rather than by
- *     a check that could be forgotten on the next endpoint.
+ *  1. LEASED rows are untouchable. A lease means an uploader is mid-flight
+ *     against MangaDex, and forcing the row would race it into a duplicate
+ *     upload or a lost result. Every mutating statement's WHERE clause excludes
+ *     LEASED by naming the states it accepts, so this holds by construction.
  *  2. No read-then-write. Each mutation is one guarded statement (or one
- *     transaction) whose WHERE names the expected prior state, exactly like
- *     store/jobs.ts. A row that moved underneath the operator produces a refusal
- *     naming its current state, never a clobber.
+ *     transaction) whose WHERE names the expected prior state, like
+ *     store/jobs.ts. A row that moved produces a refusal naming its current
+ *     state, never a clobber.
  *  3. Destruction is explicit. Deletes need `confirm: true`; a purge needs
- *     `dryRun: false` as well; and deleting a DONE row — which is half of the
- *     double-upload guard — needs `includeCompleted: true` on top of both.
+ *     `dryRun: false` as well; and deleting a DONE row needs
+ *     `includeCompleted: true` on top of both.
  */
 
 /** Every mutating handler answers with one of these per requested row. */
@@ -79,12 +67,8 @@ const MAX_CHAPTER_BYTES = 128 * 1024;
 const PURGE_SAMPLE = 20;
 
 /**
- * Validate, answering 400 instead of 500.
- *
- * Same helper as routes/ops.ts, duplicated rather than shared because that
- * module does not export it and is owned elsewhere. A bare `schema.parse`
- * throws a ZodError, which the server's error handler reports as "internal
- * error" — actively misleading for an operator who mistyped a filter.
+ * Validate, answering 400 instead of 500. Same helper as routes/ops.ts,
+ * duplicated because that module does not export it.
  */
 function parseOrThrow<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infer<S> {
   const result = schema.safeParse(value);
@@ -107,11 +91,8 @@ const KindFilter = oneOrMany(UPLOAD_TASK_KINDS);
 const StateFilter = oneOrMany(UPLOAD_TASK_STATES);
 
 /**
- * A boolean that may arrive as a query-string word.
- *
- * NOT `z.coerce.boolean()`: that is `Boolean(value)`, so the string "false"
- * coerces to TRUE — which on a `confirm` flag guarding a permanent delete is the
- * exact wrong direction to be wrong in.
+ * A boolean that may arrive as a query-string word. Not `z.coerce.boolean()`,
+ * which is `Boolean(value)`, so the string "false" coerces to true.
  */
 const Flag = z.preprocess(
   (value) => (typeof value === "string" ? value === "true" || value === "1" : value),
@@ -125,13 +106,10 @@ const FilterShape = {
   dedupeKey: z.string().min(1).max(256).optional(),
   attemptMin: z.coerce.number().int().min(0).max(1000).optional(),
   attemptMax: z.coerce.number().int().min(0).max(1000).optional(),
-  // Predicates over the queued chapter payload rather than a column. They
-  // matter most on the kinds whose dedupe key is a bare MangaDex UUID — "every
-  // pending UNAVAILABLE for mangaplus" is expressible here and nowhere else,
-  // and because they live in `FilterShape` they narrow the bulk verbs
-  // (retry / remove / purge / reorder) exactly as they narrow the list.
-  // Same three names `/queues/chapters` takes, so a filter an operator built on
-  // one tab means the same thing pasted into the other.
+  // Predicates over the queued chapter payload rather than a column. Because
+  // they live in `FilterShape` they narrow the bulk verbs (retry / remove /
+  // purge / reorder) exactly as they narrow the list, and they are the same
+  // three names `/queues/chapters` takes.
   extension: z.string().min(1).max(128).optional(),
   language: z.string().min(1).max(32).optional(),
   /** Case-insensitive substring over series, title, number, or either MD id. */
@@ -154,14 +132,12 @@ function toFilter(query: z.infer<typeof FilterSchema>): UploadTaskFilter {
 }
 
 /**
- * The states a filter-driven bulk action may actually select.
- *
- * A filter names a *set*, not specific rows, so intersecting it with what the
- * operation can legally touch is the correct reading of the operator's intent:
- * "retry the failed UPLOADs" is what `{filter: {kind: "UPLOAD"}}` on the retry
- * endpoint means, and returning four hundred "this row is DONE" refusals is
- * not. An explicit `{ids: […]}` is the opposite case and is never narrowed —
- * there the operator named a row and deserves to be told why it was refused.
+ * The states a filter-driven bulk action may actually select. A filter names a
+ * set, so intersecting it with what the operation can legally touch is the
+ * correct reading of intent: "retry the failed UPLOADs" is what
+ * `{filter: {kind: "UPLOAD"}}` means on the retry endpoint. An explicit
+ * `{ids: […]}` is never narrowed, since there the operator named a row and
+ * deserves to be told why it was refused.
  */
 function narrowStates(
   requested: readonly UploadTaskState[] | undefined,
@@ -185,12 +161,11 @@ const ChapterPayload = z
   .passthrough();
 
 /**
- * What would stop `taskWorkers.execute` from running this task at all.
- *
- * Exported and pure so the rules can be unit-tested against the worker they
- * mirror: each message below corresponds to a `TaskError` that would otherwise
- * be discovered after the task was queued, claimed, and — for UPLOAD — after a
- * MangaDex upload session was already open.
+ * What would stop `taskWorkers.execute` from running this task at all. Exported
+ * and pure so the rules can be unit-tested against the worker they mirror: each
+ * message corresponds to a `TaskError` that would otherwise be discovered after
+ * the task was queued and claimed, and for UPLOAD after a MangaDex upload
+ * session was already open.
  */
 export function manualTaskProblems(
   kind: UploadTaskKind,
@@ -232,15 +207,10 @@ export function manualTaskProblems(
 }
 
 /**
- * Second-stage guard for hand-enqueueing a task.
- *
- * This is the sharpest tool in the module: it can put a real MangaDex upload in
- * front of the uploader, which is a write to a third-party service that cannot
- * be taken back. `runs:write` alone is not the right bar — the Discord bot holds
- * scopes in that family — so it sits at ADMIN-or-above by role, the same
- * role-plus-scope construction routes/ops.ts uses for the database backup. A
- * CONTRIBUTOR is excluded twice over (the role here, and `runs:write` which
- * `scopesForRole` never grants them).
+ * Second-stage guard for hand-enqueueing a task, which can put a real MangaDex
+ * upload in front of the uploader. `runs:write` alone is not the right bar since
+ * the Discord bot holds scopes in that family, so this sits at ADMIN-or-above by
+ * role.
  */
 async function requireAdminRole(req: FastifyRequest, reply: FastifyReply): Promise<void> {
   if (req.adminRole !== "OWNER" && req.adminRole !== "ADMIN") {
@@ -285,11 +255,8 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
 
     /**
      * Turn "these ids were asked for, these changed" into one result per
-     * requested id.
-     *
-     * The state lookup happens only for ids the guarded statement did NOT
-     * change, and only to explain the refusal — never to decide whether to
-     * write, which is what would make this a read-then-write.
+     * requested id. The state lookup happens only for ids the guarded statement
+     * did not change, and only to explain the refusal.
      */
     async function explain(
       ids: readonly string[],
@@ -334,8 +301,7 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
 
     /**
      * Depth per kind and state, on its own. The list endpoint returns the same
-     * summary, but the Overview panel wants only this and should not pay for a
-     * page of rows to get it.
+     * summary, but the Overview panel should not pay for a page of rows to get it.
      */
     scope.get("/api/v1/admin/queues", { preHandler: requireScope("runs:read") }, async () => {
       const summary = await ctx.uploadTasks.depths();
@@ -350,15 +316,14 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
     /**
      * The queue in the order it will drain, filtered, with a total and a cursor.
      *
-     * Ordering is `not_before ASC` because that is what the claim query does —
-     * this list is "what runs next", which is the question a reorder is checked
-     * against. (routes/ops.ts orders the same rows by `updated_at DESC`, which
-     * answers "what changed last"; both are useful and they are not
-     * interchangeable.) The summary is global rather than filtered so a narrow
-     * filter cannot hide a queue that is backing up.
+     * Ordering is `not_before ASC` because that is what the claim query does, so
+     * this list is "what runs next", which is what a reorder is checked against.
+     * routes/ops.ts orders the same rows by `updated_at DESC`, which answers
+     * "what changed last"; the two are not interchangeable. The summary is
+     * global rather than filtered so a narrow filter cannot hide a queue that is
+     * backing up.
      *
-     * `chapter` is omitted here — it is large and worker-supplied. Fetch one row
-     * for it.
+     * `chapter` is omitted here; fetch one row for it.
      */
     scope.get("/api/v1/admin/queues/tasks", { preHandler: requireScope("runs:read") }, async (req) => {
       const query = parseOrThrow(
@@ -395,14 +360,13 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
         total: page.total,
         limit: query.limit,
         nextCursor: page.nextCursor,
-        // Named so a client never has to infer it: this is the claim order, and
-        // it is what `POST /queues/reorder` rewrites.
+        // The claim order, and what `POST /queues/reorder` rewrites.
         order: "notBefore,createdAt,id",
         summary,
       };
     });
 
-    /** One row, `chapter` payload included — the detail and edit view. */
+    /** One row, `chapter` payload included: the detail and edit view. */
     scope.get(
       "/api/v1/admin/queues/tasks/:id",
       { preHandler: requireScope("runs:read") },
@@ -435,8 +399,8 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
 
     /**
      * Requeue one task the uploader gave up on. Mirrors
-     * `POST /admin/upload-tasks/:id/retry` in routes/ops.ts exactly; it exists
-     * here so a client can use one base path for every queue verb.
+     * `POST /admin/upload-tasks/:id/retry` in routes/ops.ts; it exists here so a
+     * client can use one base path for every queue verb.
      */
     scope.post(
       "/api/v1/admin/queues/tasks/:id/retry",
@@ -452,13 +416,10 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
     );
 
     /**
-     * Bulk requeue, by id list or by filter.
-     *
-     * Always 200 with one result per requested id, even when some were refused:
-     * a select-all over two hundred rows where three are leased is a success
-     * with three skips, and `changed` says how many actually moved. Callers
-     * that want a hard failure on a single row should use the single-id route,
-     * which answers 409.
+     * Bulk requeue, by id list or by filter. Always 200 with one result per
+     * requested id, even when some were refused; `changed` says how many moved.
+     * Callers wanting a hard failure on a single row should use the single-id
+     * route, which answers 409.
      */
     scope.post("/api/v1/admin/queues/retry", { preHandler: requireScope("runs:write") }, async (req) => {
       const body = parseOrThrow(RetryBody, req.body ?? {});
@@ -511,15 +472,11 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
       });
 
     /**
-     * The warning that goes with deleting a DONE row.
-     *
      * A DONE upload task plus its `upload_logs` rows are what make reprocessing
-     * idempotent: the unique (kind, dedupe_key) constraint is why a re-run's
-     * `enqueue` is a no-op, and the `COMMITTED` upload log is why an uploader
-     * that does re-run the chapter recognises it. Deleting the row removes the
-     * first of those two, so the next run for that series will enqueue the
-     * chapter again, and only the upload-log check stands between that and a
-     * duplicate on MangaDex — a check that only exists on the UPLOAD path.
+     * idempotent. Deleting the row removes the first of the two, so the next run
+     * will enqueue the chapter again, and only the upload-log check stands
+     * between that and a duplicate on MangaDex, which exists on the UPLOAD path
+     * alone.
      */
     const COMPLETED_WARNING =
       "deleted DONE rows: the unique (kind, dedupe_key) row is the first half of the " +
@@ -638,16 +595,14 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
     /**
      * Empty a queue, or a state within one.
      *
-     * `dryRun` defaults to TRUE and that default is the safety property: the
-     * first call an operator makes — including one made by a client that forgot
-     * the field entirely — reports what would go and writes nothing at all, not
-     * even an audit row. Deleting takes `dryRun: false` AND `confirm: true`,
-     * two fields that cannot both be set by accident.
+     * `dryRun` defaults to true, and that default is the safety property: the
+     * first call reports what would go and writes nothing, not even an audit
+     * row. Deleting takes `dryRun: false` and `confirm: true`.
      *
      * LEASED rows are never in the set (store/uploadTasks.purge excludes them in
-     * the statement, not from the filter) and DONE rows need
-     * `includeCompleted: true`. A filter that selects only protected states is a
-     * 400 saying so, rather than a cheerful "0 deleted" that hides the reason.
+     * the statement) and DONE rows need `includeCompleted: true`. A filter
+     * selecting only protected states is a 400 saying so, rather than a cheerful
+     * "0 deleted" that hides the reason.
      */
     scope.post("/api/v1/admin/queues/purge", { preHandler: requireScope("runs:write") }, async (req, reply) => {
       const body = parseOrThrow(
@@ -715,9 +670,8 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
       const remaining = await ctx.uploadTasks.countMatching(selected);
       await ctx.audit.record(actor(req), "queue.purge", undefined, {
         // Every filter key, not a hand-listed subset: this record is the only
-        // surviving evidence of a purge, and one that was narrowed by extension
-        // or language must not be audited as the far wider set it would have
-        // been without them.
+        // surviving evidence of a purge, and one narrowed by extension or
+        // language must not be audited as the wider set it would otherwise be.
         filter: Object.fromEntries(
           Object.keys(FilterShape)
             .map((key) => [key, body[key as keyof typeof body]])
@@ -750,15 +704,9 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
     // ---- reorder ----
 
     /**
-     * Change what the uploader picks up next.
-     *
-     * The queue is ordered by `not_before` (the claim query reads
-     * `state = 'PENDING' AND not_before <= now() ORDER BY not_before ASC`), so
-     * position IS that timestamp and every mode here is arithmetic on it. There
-     * is deliberately no priority column: adding one would mean a schema change,
-     * a change to that ORDER BY, and two fields deciding order with no good
-     * answer for a backing-off task that also claims high priority. See the
-     * comment on `UploadTaskStore.reorder`.
+     * Change what the uploader picks up next. The queue is ordered by
+     * `not_before`, so position is that timestamp and every mode is arithmetic
+     * on it. See `UploadTaskStore.reorder` for why there is no priority column.
      *
      *  - `front`    the listed tasks are claimed next, in the order given, and
      *               are due immediately even if the rest of the queue is backing
@@ -784,8 +732,8 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
             message: "mode 'defer' needs deferSeconds",
             path: ["deferSeconds"],
           })
-          // Refused rather than ignored: silently dropping it would answer 200
-          // to a caller who asked for a 60-second push and got a queue jump.
+          // Refused rather than ignored: silently dropping it would answer 200 to
+          // a caller who asked for a 60-second push and got a queue jump.
           .refine((value) => value.mode === "defer" || value.deferSeconds === undefined, {
             message: "deferSeconds only applies to mode 'defer'",
             path: ["deferSeconds"],
@@ -827,20 +775,14 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
     // ---- manual add ----
 
     /**
-     * Queue a task by hand.
+     * Queue a task by hand. This reaches all the way to MangaDex: an UPLOAD row
+     * queued here will create a real chapter under the group in the payload.
+     * Hence ADMIN-or-above on top of `runs:write`, the full payload in the audit
+     * detail, and validation against what `taskWorkers` requires.
      *
-     * This reaches all the way to MangaDex: an UPLOAD row queued here will,
-     * minutes later, create a real chapter under the group in the payload.
-     * Hence ADMIN-or-above by role on top of `runs:write` (see
-     * `requireAdminRole`), the full payload in the audit detail, and validation
-     * against what `taskWorkers` actually requires — a task that would throw
-     * `TaskError` on claim is rejected now, before an upload session is open.
-     *
-     * The dedupe key is derived by `taskDedupeKey`, the same rule the processor
-     * uses, and the insert is the same ON CONFLICT DO NOTHING. A duplicate is a
-     * 409 naming the existing task: that unique constraint is precisely what
-     * makes a double upload impossible, so an operator must not be able to talk
-     * their way past it.
+     * The dedupe key is derived by `taskDedupeKey` and the insert is the same ON
+     * CONFLICT DO NOTHING, so a duplicate is a 409 naming the existing task: that
+     * unique constraint is what makes a double upload impossible.
      */
     scope.post(
       "/api/v1/admin/queues/tasks",
@@ -862,8 +804,8 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
           ? (raw["imageArtifacts"] as string[])
           : [];
         // Built by the same function the processor writes its rows with, so a
-        // hand-made payload is byte-for-byte the shape the uploader expects,
-        // sidecars (`payload`, `oldInfo`, `unavailableAt`) included.
+        // hand-made payload is the shape the uploader expects, sidecars
+        // (`payload`, `oldInfo`, `unavailableAt`) included.
         const payload = chapterToTaskPayload(raw, artifacts);
 
         const problems = manualTaskProblems(kind, payload);
@@ -874,8 +816,8 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
           return reply.code(422).send({ error: "chapter payload cannot be executed", problems });
         }
 
-        // Missing page artifacts would fail the task after the upload session
-        // was open; the queue-time answer is cheaper and reversible.
+        // Missing page artifacts would fail the task after the upload session was
+        // open; the queue-time answer is cheaper and reversible.
         if (artifacts.length > 0) {
           const found = await ctx.prisma.artifact.findMany({
             where: { id: { in: artifacts } },
@@ -892,8 +834,8 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
 
         const dedupeKey = taskDedupeKey(kind, chapterFromJson(payload));
         if (dedupeKey === null) {
-          // Unreachable via manualTaskProblems; kept so a future kind cannot
-          // slip through with no identity at all.
+          // Unreachable via manualTaskProblems; kept so a future kind cannot slip
+          // through with no identity at all.
           return reply.code(422).send({ error: "cannot derive a dedupe key for this chapter" });
         }
 
@@ -932,14 +874,12 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
      * Correct a task that has not run yet: the chapter payload, when it becomes
      * due, and its attempt budget.
      *
-     * PENDING only. A LEASED row is being executed right now, and a DONE or
-     * dead row is history — editing either would describe work that already
-     * happened. `chapter` is a shallow merge so a caller can fix one field
+     * PENDING only. A LEASED row is being executed right now, and a DONE or dead
+     * row is history. `chapter` is a shallow merge so a caller can fix one field
      * without restating the payload; passing `null` for a key clears it.
      *
-     * If the merge changes an identity field the dedupe key is recomputed
-     * (`taskDedupeKey`, the one implementation), and a collision is a 409 rather
-     * than a silent overwrite of a different chapter's slot.
+     * If the merge changes an identity field the dedupe key is recomputed, and a
+     * collision is a 409 rather than a silent overwrite of another chapter's slot.
      */
     scope.patch(
       "/api/v1/admin/queues/tasks/:id",
@@ -973,7 +913,7 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
                   "a task being executed cannot be edited"
                 : `task is ${current.state}; only a PENDING task can be edited` +
                   (current.state === "FAILED" || current.state === "DEAD_LETTER"
-                    ? " — retry it first, which returns it to PENDING"
+                    ? "; retry it first, which returns it to PENDING"
                     : ""),
             state: current.state,
           });
@@ -1012,7 +952,7 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
             expectedUpdatedAt: current.updatedAt,
           });
           if (!ok) {
-            // The row moved between the read and the write — claimed, swept, or
+            // The row moved between the read and the write: claimed, swept, or
             // edited by someone else. Refuse rather than clobber.
             const now = await ctx.uploadTasks.get(id);
             return reply.code(409).send({

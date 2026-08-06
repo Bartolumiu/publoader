@@ -2,7 +2,7 @@
  * Small in-process token-bucket rate limiter, keyed per principal (worker id,
  * or remote address for unauthenticated routes). In-process is sufficient:
  * the API is a single service; if it is ever replicated, move the buckets to
- * Postgres — the interface stays the same.
+ * Postgres; the interface stays the same.
  */
 export class RateLimiter {
   private readonly buckets = new Map<string, { tokens: number; updatedAt: number }>();

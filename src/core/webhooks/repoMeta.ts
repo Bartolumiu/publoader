@@ -4,8 +4,8 @@
  * A push webhook is told what changed. An operator clicking "check GitHub" is
  * not: they have a published bundle carrying a `sourceCommit` and a repo whose
  * current HEAD is unknown, so the comparison has to be made by asking. That is
- * all this module does — resolve a repo's default-branch HEAD, and compare two
- * commits — leaving the archive download and the build to repoArchive.ts and
+ * all this module does, resolve a repo's default-branch HEAD, and compare two
+ * commits, leaving the archive download and the build to repoArchive.ts and
  * bundleBuilder.ts, which already do it for the webhook.
  *
  * Everything is bounded and every failure is a *reason*, never a silent "up to
@@ -118,7 +118,7 @@ export async function readGithubJson(res: Response): Promise<unknown> {
  *
  * The status is the actionable part and the body is not propagated: a GitHub
  * error body echoes request details, and these messages travel to a dashboard.
- * 401/403 and 404 get their own wording because they mean different fixes —
+ * 401/403 and 404 get their own wording because they mean different fixes;
  * "the token is wrong or unset" versus "this repo name is wrong or the token
  * cannot see it".
  */

@@ -107,7 +107,7 @@ for (const [label, present] of [
 
 // Scoped to the bulk bar. Matching by button text across the whole page also
 // catches the per-row Retry and Remove, which are correctly enabled when a row
-// is present — so the unscoped version failed as soon as the queue was not empty.
+// is present; so the unscoped version failed as soon as the queue was not empty.
 const bulkDisabled = await page.eval(`
   const names = ["Retry", "Remove", "Run next", "Run last", "Defer…"];
   const bar = document.querySelector(".bulk-bar");
@@ -173,7 +173,7 @@ console.log("\n=== 2b. reviewing and correcting a queued chapter before upload =
 
 // This is the answer to "can I see and fix a chapter before it goes to MangaDex".
 // The row is PENDING, no upload session has been opened, and PATCH takes the
-// whole payload — so a bad regex or a mis-split chapter is correctable here.
+// whole payload; so a bad regex or a mis-split chapter is correctable here.
 const rowOpened = await page.eval(`
   const b = [...document.querySelectorAll("button")].find((n) => n.textContent.trim() === "Edit" && !n.disabled);
   if (!b) return "no enabled Edit button";
@@ -191,8 +191,8 @@ if (rowOpened === "clicked") {
 
   ok("the edit dialog loads the real chapter payload", (form.json || "").includes("Seeded chapter"), form.json.slice(0, 60));
   ok("chapter number is editable as its own field", form.number !== null, `number=${form.number}`);
-  ok("volume is editable — the split-chapter case", form.volume === true);
-  ok("chapter title is editable — the regex case", form.title !== null, `title=${form.title}`);
+  ok("volume is editable, the split-chapter case", form.volume === true);
+  ok("chapter title is editable, the regex case", form.title !== null, `title=${form.title}`);
   ok("language is editable", form.language !== null, `language=${form.language}`);
 
   // The two editors are one source of truth: typing in a field must reach the

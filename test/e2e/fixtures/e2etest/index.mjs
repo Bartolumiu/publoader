@@ -4,7 +4,7 @@
  * Exercises the real extension contract end-to-end without touching any
  * external site: two chapters for the one tracked manga, plus one untracked
  * manga so the automated title pipeline has something to persist. Also doubles
- * as the failover fixture — if the platform-delivered manga id map contains
+ * as the failover fixture; if the platform-delivered manga id map contains
  * the marker external id "slow", the run outlives several lease renewals so a
  * `docker kill` of the executing worker is observable as a lease expiry.
  *

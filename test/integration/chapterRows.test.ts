@@ -9,8 +9,8 @@ import type { Chapter } from "../../src/core/md/types.js";
 import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
 
 /**
- * The chapter columns against REAL Postgres. The unit tests prove the mapping
- * in isolation; these prove the mapping and the schema agree — timestamp
+ * The chapter columns against real Postgres. The unit tests prove the mapping
+ * in isolation; these prove the mapping and the schema agree on timestamp
  * columns, the NOT NULL extension, and `extra` being SQL NULL rather than JSON
  * null when there is no residue.
  */

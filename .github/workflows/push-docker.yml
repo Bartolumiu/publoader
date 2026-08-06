@@ -6,14 +6,14 @@ name: Publish images
 #
 # Multi-arch is the reason to do this in CI at all. These images were previously
 # built by hand on an arm64 laptop and pushed single-arch, so every x86_64 server
-# rejected them with `exec format error` — a message that names Prisma and has
+# rejected them with `exec format error`: a message that names Prisma and has
 # nothing to do with it. A runner builds both architectures every time.
 
 on:
   push:
     branches: [master]
     # Both spellings, because the repo has used both. Tag `2.1.6` was pushed
-    # against a `v*`-only filter and silently published nothing — no run, no
+    # against a `v*`-only filter and silently published nothing: no run, no
     # failure, just a version that existed in git and never on Docker Hub.
     # `+` here is a filter-pattern quantifier, not a literal.
     tags: ["v*", "[0-9]+.[0-9]+.[0-9]+"]
@@ -46,7 +46,7 @@ jobs:
         id: meta
         # The inputs go through `env:` rather than being interpolated into the
         # script. `workflow_dispatch` needs write access to trigger, so this is
-        # not the usual untrusted-input case — but a value that reaches a shell
+        # not the usual untrusted-input case; but a value that reaches a shell
         # unquoted is worth never writing, and the tag is validated anyway:
         # anything that is not a plain version is dropped rather than pushed.
         env:
@@ -61,7 +61,7 @@ jobs:
             version="$REF_NAME"
           fi
           # A leading `v` is a git-tag convention, not part of the version. It
-          # comes off whichever way the version arrived — a `v2.1.7` tag and a
+          # comes off whichever way the version arrived: a `v2.1.7` tag and a
           # `v2.1.7` typed into the manual run both publish `:2.1.7`, so the
           # image tags stay bare numbers and never fork into two spellings.
           version="${version#v}"

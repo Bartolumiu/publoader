@@ -28,7 +28,7 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  * the docs.
  *
  * Three properties matter more than the happy paths, and each has its own group
- * below. (1) The GitHub check must never report "current" when it does not know —
+ * below. (1) The GitHub check must never report "current" when it does not know;
  * an unreachable API, a missing token and a bundle with no recorded commit are
  * each their own answer. (2) The restart endpoint must write its row and its
  * audit entry and NOT actually exit anything here, so `selfExit` is injected.
@@ -94,7 +94,7 @@ const SLIP_TARGET = join(tmpdir(), "publoader-zip-slip.txt");
  * It has to be crafted rather than built: adm-zip SANITISES `../` out of entry
  * names when it writes an archive, so `zip.addFile("../evil")` produces a
  * harmless `evil` and would test nothing. A real attacker writes the central
- * directory themselves, so the name is patched into the finished bytes — the
+ * directory themselves, so the name is patched into the finished bytes; the
  * placeholder is the same length as the replacement, which keeps every offset in
  * the archive valid.
  */
@@ -175,7 +175,7 @@ describe.skipIf(!dbReady())("operator self-service endpoints", () => {
    * A scratch server carrying only these routes.
    *
    * buildServer already registers them (see server.ts), but with the real GitHub
-   * client and the real archive download — registering them there a second time
+   * client and the real archive download; registering them there a second time
    * would collide, and calling out to api.github.com from a test suite is not an
    * option. So the request pipeline is reproduced here exactly as buildServer
    * builds it: the empty-body-tolerant JSON parser, the raw parser for
@@ -903,7 +903,7 @@ describe.skipIf(!dbReady())("operator self-service endpoints", () => {
       expect(res.statusCode).toBe(422);
       // Refused at intake now (a .py file is not an allowed type at all), so the
       // porting message has to be carried by the refusal rather than by
-      // BundleStore — an operator with a v1 extension must be told to port it,
+      // BundleStore; an operator with a v1 extension must be told to port it,
       // not told that .py is not in an allowlist.
       expect(res.json().code).toBe("python_bundle");
       expect(res.json().error).toMatch(/extension API v2/);
@@ -934,7 +934,7 @@ describe.skipIf(!dbReady())("operator self-service endpoints", () => {
     it("says when the uploaded bundle did not become latest", async () => {
       // `latest()` is the most recently PUBLISHED non-yanked bundle, not the
       // highest version. So re-uploading an older zip after a newer publish is
-      // the case where "published: yes, live: no" is the honest answer — and the
+      // the case where "published: yes, live: no" is the honest answer; and the
       // one an operator hits when they drag in yesterday's folder.
       const older = uploadZip({
         "manifest.json": JSON.stringify(manifest("ordered", "1.0.0")),
@@ -1153,7 +1153,7 @@ describe.skipIf(!dbReady())("operator self-service endpoints", () => {
   /**
    * Traversal is the primary risk of this endpoint: it is a file reader exposed
    * to the internet. Every one of these must be a 404 with no content, and none
-   * may be distinguishable from "no such document" — a different status for a
+   * may be distinguishable from "no such document"; a different status for a
    * malformed name would confirm which files exist.
    */
   describe("docs traversal", () => {

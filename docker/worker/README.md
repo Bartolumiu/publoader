@@ -3,7 +3,7 @@
 A worker scrapes publisher sites and reports what it found. That's all it does.
 
 Publishers rate-limit per source IP, so spreading the scraping across machines is
-the whole point of running one — your IP does the fetching, the operator's core
+the whole point of running one; your IP does the fetching, the operator's core
 does everything else.
 
 You need Docker and an enrolment token. Nothing else: no source checkout, no Node,
@@ -17,7 +17,7 @@ Worth reading before you run somebody else's code on your hardware.
 
 **A worker never holds MangaDex credentials.** It cannot upload, edit or delete
 anything on MangaDex. Only the operator's core does that, from one process. If
-your host is compromised, the attacker gets your worker token — which lets them
+your host is compromised, the attacker gets your worker token; which lets them
 submit scrape results the core will *validate and probably reject*, and nothing
 else.
 
@@ -25,7 +25,7 @@ else.
 it reports goes through an authenticated HTTPS API that checks it.
 
 **Nothing listens.** There is no `ports:` and no `expose:` in the compose file, by
-design — the agent long-polls the core and never accepts a connection. It works
+design; the agent long-polls the core and never accepts a connection. It works
 behind NAT, on a laptop, on a home connection, with no firewall exception and no
 inbound attack surface.
 
@@ -67,7 +67,7 @@ WORKER_NAME=<something you'll recognise in an alert>
 ENROLL_TOKEN=<the token they sent you>
 ```
 
-`CORE_URL` already points at the public deployment. It must be HTTPS — the worker
+`CORE_URL` already points at the public deployment. It must be HTTPS; the worker
 token is a bearer credential sent on every request.
 
 **3. Start it.**
@@ -117,14 +117,14 @@ All optional; the defaults are fine.
 | `PUBLOADER_WORKER_IMAGE` | `ardax/publoader-worker:2.1.5` | Pin an older release or a digest. Multi-arch: works on x86-64 and arm64. |
 | `WORKER_HEARTBEAT_MAX_AGE_SECONDS` | `600` | Only alongside a matching change to the core's `LEASE_TTL_SECONDS`. |
 
-Pin an extension set to this host from the operator's side — Workers → Change.
+Pin an extension set to this host from the operator's side; Workers → Change.
 Takes effect on your next poll; no restart.
 
 ---
 
 ## When it goes wrong
 
-**`exec format error`** — wrong CPU architecture. Use `2.1.1` or later, which is
+**`exec format error`**: wrong CPU architecture. Use `2.1.1` or later, which is
 multi-arch, and check what you actually pulled:
 
 ```bash
@@ -132,19 +132,19 @@ docker image inspect ardax/publoader-worker:2.1.5 --format '{{.Architecture}}'
 ```
 
 Note `.env` overrides the compose default, so `docker compose pull` alone will not
-move you off a bad tag — and Docker caches by tag, so remove the image first.
+move you off a bad tag; and Docker caches by tag, so remove the image first.
 
-**`lstat /docker: no such file or directory`** — the compose files moved to the
+**`lstat /docker: no such file or directory`**: the compose files moved to the
 repository root. Run from `docker/worker/`, not `platform/docker/worker/`, and
 delete the leftover `platform/` directory.
 
-**`invalid or used enrollment token`** — it's single-use and may have expired, or
+**`invalid or used enrollment token`**: it's single-use and may have expired, or
 the volume was deleted after a successful enrolment. Ask for a new one.
 
-**401 on every request** — the worker was revoked, or the state volume is from a
+**401 on every request**: the worker was revoked, or the state volume is from a
 different core. Ask the operator.
 
-**Healthy but never leases a job** — normal if the platform is paused or there is
+**Healthy but never leases a job**: normal if the platform is paused or there is
 no work for the extensions you're pinned to. The operator can see both.
 
 Anything else: `docker compose logs` and send them the output. The agent logs the

@@ -6,11 +6,10 @@ import { renderMetrics } from "../../metrics.js";
  * The metrics/health listener for the worker-style core services
  * (core-scheduler, core-processor, core-uploader).
  *
- * WHY this exists: prom-client's registry is per-process. Every metric those
- * three services record — scheduler ticks, dead-letter depth, upload queue
- * depth — used to live in a registry no one could reach, because only core-api
- * had a socket. The numbers were computed and then thrown away, so a wedged
- * scheduler or a stalled upload queue was undetectable from outside.
+ * prom-client's registry is per-process, so without a socket of their own the
+ * metrics these three record (scheduler ticks, dead-letter depth, upload queue
+ * depth) would be computed and thrown away, leaving a wedged scheduler or a
+ * stalled upload queue undetectable from outside.
  *
  * One implementation, three services, identical route semantics to core-api
  * (src/core/api/server.ts) so an operator does not have to remember which
@@ -20,7 +19,7 @@ import { renderMetrics } from "../../metrics.js";
  *   GET /healthz  "alive": the process is running and its event loop turns.
  *                 This is the container healthcheck.
  *   GET /readyz   "safe to work": Postgres answers. Deliberately NOT the
- *                 container healthcheck — a Postgres restart must not cascade
+ *                 container healthcheck; a Postgres restart must not cascade
  *                 into killing every core service.
  *
  * All three are unauthenticated and must stay on the internal compose network
@@ -39,7 +38,7 @@ export interface MetricsServerOptions {
   log: Logger;
   /** Readiness dependency; `null` means "no database, report alive only". */
   prisma: ReadinessProbe | null;
-  /** Used when METRICS_PORT is unset. Distinct per service — see compose. */
+  /** Used when METRICS_PORT is unset. Distinct per service; see compose. */
   defaultPort: number;
   /** Overrides for tests; production reads HOST/METRICS_PORT. */
   host?: string;
@@ -47,7 +46,7 @@ export interface MetricsServerOptions {
 }
 
 export interface MetricsServer {
-  /** The bound port — resolved, so a test can pass 0 and still connect. */
+  /** The bound port; resolved, so a test can pass 0 and still connect. */
   readonly port: number;
   close(): Promise<void>;
 }

@@ -1,7 +1,7 @@
 name: Platform CI
 
 # The TypeScript platform is now the whole repository, so there is nothing to
-# filter this workflow away from — it runs on every change.
+# filter this workflow away from; it runs on every change.
 #
 # It previously listed `platform/**` alongside the legacy Python tree. When that
 # tree was deleted and the platform moved to the root, removing the stale entry
@@ -35,7 +35,7 @@ env:
 # NOTE: no `defaults:` block. It used to carry `run.working-directory: platform`;
 # when the platform moved to the repository root the value was removed and the
 # empty `run:` key was left behind. `defaults.run` must contain `shell` or
-# `working-directory`, so an empty mapping is an INVALID workflow — every run
+# `working-directory`, so an empty mapping is an INVALID workflow; every run
 # failed in 0s with "workflow file issue", which reads like infrastructure
 # flakiness rather than a syntax error in this file. Same failure shape as the
 # paths filter before it: the stale entry was deleted, not the container.
@@ -139,7 +139,7 @@ jobs:
           --health-retries 10
     env:
       # Lease claims, SKIP LOCKED, and the partial unique commit-marker index
-      # are the system under test — these must run against a real PostgreSQL.
+      # are the system under test; these must run against a real PostgreSQL.
       DATABASE_URL: postgresql://postgres:devpass@localhost:5432/publoader_test
       TEST_DATABASE_URL: postgresql://postgres:devpass@localhost:5432/publoader_test
     steps:
@@ -186,7 +186,7 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      # Build only — publishing is a separate, credentialed workflow. This job
+      # Build only; publishing is a separate, credentialed workflow. This job
       # exists to catch a Dockerfile that no longer builds, which is otherwise
       # only discovered at deploy time.
       - name: Build core image

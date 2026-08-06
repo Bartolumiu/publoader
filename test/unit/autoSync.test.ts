@@ -8,7 +8,7 @@ import { createLogger } from "../../src/logging.js";
  *
  * The behaviours worth pinning are the ones that decide whether an extension
  * silently stops updating: what counts as an extension directory, when the
- * commit is remembered, and — most importantly — that a failed publish is NOT
+ * commit is remembered, and, most importantly, that a failed publish is NOT
  * remembered, because recording it would skip that commit until somebody
  * pushed again.
  */
@@ -116,7 +116,7 @@ describe("github auto-sync", () => {
 
     it("publishes every extension in the repo when the head has moved", async () => {
       // The outcome is built from the BundleStore's own row, so the fake has to
-      // carry `extension` — that is the field the caller keys everything on.
+      // carry `extension`: that is the field the caller keys everything on.
       const publish = vi.fn().mockResolvedValue({
         bundle: { extension: "mangaplus", version: "1.0.0", sha256: "f".repeat(64) },
         created: true,
@@ -161,7 +161,7 @@ describe("github auto-sync", () => {
     });
 
     it("remembers a repo that simply has no extensions in it", async () => {
-      // Nothing to publish is a settled answer, not a failure — re-downloading
+      // Nothing to publish is a settled answer, not a failure; re-downloading
       // every tick to learn it again is pure waste.
       const store = settings();
       const results = await autoSyncExtensions(

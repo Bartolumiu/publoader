@@ -3,25 +3,25 @@ import { randomBytes } from "node:crypto";
 
 /**
  * Integration tests need a real PostgreSQL (SKIP LOCKED and partial unique
- * indexes are the system under test — mocks would prove nothing).
+ * indexes are the system under test; mocks would prove nothing).
  *
  * `TEST_DATABASE_URL` selects the SERVER; the database itself is created fresh
  * per run with a unique name, migrated, and dropped afterwards.
  *
  * Why per-run and not one shared `publoader_test`: `resetDb()` TRUNCATEs every
  * table between tests, so two runs against one database silently wreck each
- * other's rows — and the failures that come out are plausible-looking count
+ * other's rows; and the failures that come out are plausible-looking count
  * mismatches rather than anything that says "something else is writing here".
  * That cost real debugging time. A run now owns its database outright, which
  * also means several suites (or several people) can run at once.
  *
  * Set `TEST_DATABASE_REUSE=1` to keep using the database named in the URL
- * instead — useful when inspecting leftover state after a failure.
+ * instead; useful when inspecting leftover state after a failure.
  */
 export default async function setup(): Promise<() => Promise<void>> {
   // Nothing in a test run may send mail. Inviting an operator now mails a
   // sign-in link, and `loadConfig` falls through to the ambient environment for
-  // anything a test does not override — so a developer with a real key in their
+  // anything a test does not override; so a developer with a real key in their
   // shell would have the suite posting to Resend, from a verified domain, to
   // addresses like `new@example.com`. Those bounce, and bounces are charged to
   // the sending domain's reputation. Blanked here rather than in each test so a

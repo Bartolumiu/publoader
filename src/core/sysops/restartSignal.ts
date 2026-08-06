@@ -2,7 +2,7 @@
  * Restarting a service without the Docker socket.
  *
  * The dashboard needs a "restart the service" button, and the obvious
- * implementation — mount /var/run/docker.sock and call the daemon — is
+ * implementation, mount /var/run/docker.sock and call the daemon, is
  * root-equivalent access to the host handed to an internet-facing process. It is
  * deliberately absent from every compose file and must stay that way.
  *
@@ -14,13 +14,13 @@
  *
  * That covers the API, which can exit itself. The scheduler, processor and
  * uploader are separate processes with no listening socket, so they cannot be
- * asked directly — they poll for the request in this module's `Setting` row and
+ * asked directly; they poll for the request in this module's `Setting` row and
  * exit their own loop when they see one. Two properties make that safe:
  *
  *  - it is TIME-BOUNDED. A request older than RESTART_REQUEST_TTL_MS is ignored,
  *    so a row left behind by a crash cannot restart a service days later;
  *  - it is ACKNOWLEDGED per service. Without that, a service which restarts in
- *    five seconds would come back, still see a fresh request, and exit again —
+ *    five seconds would come back, still see a fresh request, and exit again;
  *    a crash loop lasting as long as the TTL. The ack row records which request
  *    each service has already honoured.
  *
@@ -106,7 +106,7 @@ export function restartApplies(
 
 /**
  * Record a restart request for the services that cannot be signalled directly.
- * The API does not need this for itself — it exits in-process — but a request
+ * The API does not need this for itself, it exits in-process, but a request
  * for `all` writes the row so the other three follow.
  */
 export async function writeRestartRequest(
@@ -120,7 +120,7 @@ export async function writeRestartRequest(
  * The poll a service loop runs: returns the request it should exit for, or null.
  *
  * Calling this marks the request as honoured by `service` BEFORE the caller
- * exits, which is what makes it idempotent — the same request is never obeyed
+ * exits, which is what makes it idempotent; the same request is never obeyed
  * twice by the same service, however fast it comes back. The window between the
  * ack and the exit is not a problem: an ack for a restart that then failed to
  * happen leaves the service running, which is the state the operator can see
@@ -150,7 +150,7 @@ export interface RestartLogger {
  *
  * Wrapped rather than left to each caller for two reasons. Errors are swallowed
  * with a warning, because a database hiccup while reading a *setting* must not
- * take down a service whose actual work is unaffected — the request survives in
+ * take down a service whose actual work is unaffected; the request survives in
  * the row and the next iteration sees it. And the exit is a return value rather
  * than a `process.exit()` here, so each loop leaves through the shutdown path it
  * already has (close the metrics server, disconnect Prisma, log) instead of
@@ -159,7 +159,7 @@ export interface RestartLogger {
  * Where to call it: BEFORE any `continue` in the loop body, in particular the
  * pause gate. A paused service is exactly the one an operator is most likely to
  * be restarting, and a poll placed after the pause check would skip it for as
- * long as the pause lasted — the button would appear to do nothing.
+ * long as the pause lasted; the button would appear to do nothing.
  */
 export async function shouldRestart(
   settings: RestartSettingsStore,

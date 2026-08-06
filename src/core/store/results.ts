@@ -11,8 +11,8 @@ export type IngestOutcome =
  * Result submission persistence + the exactly-once commit marker.
  *
  * A partial unique index (one COMMITTED row per job_id, created in the
- * migration) makes it structurally impossible for two submissions — duplicate,
- * late, or malicious — to both commit for the same job. Everything else keys
+ * migration) makes it structurally impossible for two submissions, duplicate,
+ * late, or malicious, to both commit for the same job. Everything else keys
  * off that invariant.
  */
 export class ResultStore {

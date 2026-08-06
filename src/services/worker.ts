@@ -17,7 +17,7 @@ const extensions = (process.env["WORKER_EXTENSIONS"] ?? "")
  *
  * The worker accepts no inbound connections, so there is nothing to probe over
  * HTTP; the file's freshness is the probe. What it must catch is an agent that
- * is *running but no longer working* — restart-on-exit already handles a crash,
+ * is *running but no longer working*; restart-on-exit already handles a crash,
  * and that is the only thing it handles.
  *
  * Progress is observed where it is observable from this entry point: the
@@ -26,11 +26,10 @@ const extensions = (process.env["WORKER_EXTENSIONS"] ?? "")
  * while a job runs, so between them the loop is covered in both states. If the
  * loop stops turning, both stop and the file goes stale.
  *
- * /api/v1/worker/heartbeat is deliberately EXCLUDED. It is a setInterval that
+ * /api/v1/worker/heartbeat is deliberately excluded. It is a setInterval that
  * keeps firing regardless of what the lease loop is doing, so counting it would
- * make this probe unable to fail — which is exactly the defect this replaces
- * (the old HEALTHCHECK stat'd a file nothing ever wrote and treated missing as
- * healthy, so a wedged worker reported healthy forever).
+ * make this probe unable to fail, and a wedged worker would report healthy
+ * forever.
  */
 const upstreamFetch = globalThis.fetch;
 globalThis.fetch = async (input, init) => {
@@ -63,7 +62,7 @@ agent
     if (err instanceof FatalAuthError) {
       log.fatal(
         { err },
-        "worker credentials are not accepted by the core — an operator must revoke this worker and re-enroll it with a fresh ENROLL_TOKEN",
+        "worker credentials are not accepted by the core; an operator must revoke this worker and re-enroll it with a fresh ENROLL_TOKEN",
       );
       process.exit(78); // EX_CONFIG: restarting will not help
     }

@@ -36,7 +36,7 @@ interface RunnerEnvelope {
 
 /**
  * Spawn the real runner against the real fixture bundle, exactly the way the
- * executor does — including the Node permission flags, so this test also proves
+ * executor does; including the Node permission flags, so this test also proves
  * the sandbox does not block the runner's own work. No network is involved:
  * the fixture never calls ctx.fetch.
  */
@@ -166,7 +166,7 @@ describe("node runner", () => {
     const envelope = await runFixture({ mangaIdMap: { [OTHER_MD_ID]: ["somethingelse"] } });
     expect(envelope.status).toBe("ok");
     expect(envelope.updatedChapters).toEqual([]);
-    // Untracked manga are deliberately still reported — that is how a new
+    // Untracked manga are deliberately still reported; that is how a new
     // series reaches the operator in the first place.
     expect(envelope.untrackedManga).toHaveLength(1);
     expect(envelope.trackedMangadexIds).toEqual([OTHER_MD_ID]);
@@ -181,7 +181,7 @@ describe("node runner", () => {
       mangaIdMap: { [MD_MANGA_ID]: ["m1", "m9"] },
     });
     // m1's chapters resolve fine but belong to another segment, so this
-    // segment contributes nothing — non-overlapping output by construction.
+    // segment contributes nothing; non-overlapping output by construction.
     expect(otherSegment.updatedChapters).toEqual([]);
   });
 
@@ -212,8 +212,8 @@ describe("node runner", () => {
 describe("large envelopes", () => {
   /**
    * The runner writes its envelope to stdout and then calls `process.exit()`.
-   * stdout to a pipe — which is always the case, because the agent captures it —
-   * is asynchronous: past the pipe buffer (~64 KiB) `write()` queues the rest and
+   * stdout to a pipe, which is always the case, because the agent captures it,
+ * is asynchronous: past the pipe buffer (~64 KiB) `write()` queues the rest and
    * returns false, and `process.exit()` discards whatever is still queued.
    *
    * The result was a runner that exited 0 having printed a truncated line the

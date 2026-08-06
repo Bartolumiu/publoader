@@ -7,7 +7,7 @@ import { z } from "zod";
  * MangaDex-side value, and a typo in it is silently destructive: the platform
  * unions `Object.values(custom_language)` into the set of languages allowed to
  * stay on a title (see findExtraChapters in core/processor/dedupe.ts), so
- * "pt_br" instead of "pt-br" does not fail loudly — it just stops protecting
+ * "pt_br" instead of "pt-br" does not fail loudly; it just stops protecting
  * every Brazilian-Portuguese chapter from the removal pass. The allowlist turns
  * that into a rejected write.
  *
@@ -19,7 +19,7 @@ import { z } from "zod";
  *
  * It deliberately does NOT contain the extension-side sentinel `"NULL"` that
  * mangaplus's resolveLanguage returns for "this chapter has no language I can
- * map" — that value must never reach MangaDex, and the extension drops those
+ * map"; that value must never reach MangaDex, and the extension drops those
  * chapters itself.
  */
 export const MANGADEX_LANGUAGES = [

@@ -5,7 +5,7 @@ Mirrors chapters from external manga publishers onto
 
 A per-publisher **extension** discovers what chapters a source currently offers.
 The **control plane** validates that report, compares it against the live MangaDex
-state, and decides what to upload, edit, or remove. One process — and only one —
+state, and decides what to upload, edit, or remove. One process, and only one,
 holds the MangaDex credentials and performs the writes.
 
 ---
@@ -19,7 +19,7 @@ centralised, because MangaDex upload sessions are per-account state, and because
 duplicate upload is a visible mess on a public catalogue.
 
 So the two are split. **Untrusted, credential-free workers** lease jobs, run
-extension code in a sandboxed Node process, and submit one validated document — a
+extension code in a sandboxed Node process, and submit one validated document; a
 result envelope. **The control plane** decides what that document means. Workers
 never write to the database and never talk to MangaDex; their entire blast radius
 is one revocable token and whatever bundle they were handed. Exactly-once is not a
@@ -38,7 +38,7 @@ convention but six layers of enforcement, four of which are database constraints
 │       runner.mjs       │                    │  core-processor  decides work  │
 │       + extension      │      HTTPS only    │  core-uploader   ONLY writer   │
 │                        │                    │                                │
-│  no DB, no MangaDex    │                    │  PostgreSQL — single source    │
+│  no DB, no MangaDex    │                    │  PostgreSQL - single source    │
 │  credential, no        │                    │  of truth: runs, jobs, leases, │
 │  listening socket      │                    │  envelopes, chapters, config   │
 └────────────────────────┘                    └────────────────────────────────┘
@@ -77,7 +77,7 @@ padmin runs list                                     # watch it reach PROCESSED
 curl -s http://127.0.0.1:8200/_test/uploads | jq     # what the uploader did
 ```
 
-The operator dashboard is at <http://127.0.0.1:8100/> — sign in with the admin
+The operator dashboard is at <http://127.0.0.1:8100/>; sign in with the admin
 token via "Use the admin token instead".
 
 Prove the whole thing, including killing a worker mid-job and watching the other
@@ -89,7 +89,7 @@ one finish the run:
 
 Tear it down with `./scripts/publoader dev down -v`.
 
-> The dev stack is deliberately insecure — a fixed admin token, a trivial database
+> The dev stack is deliberately insecure; a fixed admin token, a trivial database
 > password, automated enrollment, loopback-only ports. Never run it on a host that
 > accepts traffic from anywhere else.
 
@@ -99,8 +99,8 @@ Tear it down with `./scripts/publoader dev down -v`.
 
 `scripts/publoader` is the single entry point for all three
 environments. It exists because three things have to agree for two environments to
-coexist safely — the env file, the compose project name (which namespaces
-containers, networks, **and the database volume**), and the ingress overlay — and
+coexist safely, the env file, the compose project name (which namespaces
+containers, networks, **and the database volume**), and the ingress overlay, and
 getting one wrong is how a staging deploy ends up writing to the production
 database.
 
@@ -127,7 +127,7 @@ Published images:
 
 | Image | Runs |
 | --- | --- |
-| `ardax/publoader-core:2.1.5` | `core-api`, `core-scheduler`, `core-processor`, `core-uploader`, and the Discord bot — one image, several entry points |
+| `ardax/publoader-core:2.1.5` | `core-api`, `core-scheduler`, `core-processor`, `core-uploader`, and the Discord bot; one image, several entry points |
 | `ardax/publoader-core-migrate:2.1.5` | The one-shot migration container, the only thing able to alter the schema |
 | `ardax/publoader-worker:2.1.5` | The worker agent and the extension runtime |
 
@@ -196,7 +196,7 @@ into a running platform with `publoader-admin bundle publish`.
 ## Getting help
 
 - **How does something work?** Start with
-  [docs/architecture-guide.md](docs/architecture-guide.md), then the code — the
+  [docs/architecture-guide.md](docs/architecture-guide.md), then the code; the
   comments in `src/core/store/jobs.ts`, `core/api/scopes.ts`, and
   `core/ingest/ingest.ts` carry the reasoning behind the parts that look
   surprising.
@@ -204,6 +204,6 @@ into a running platform with `publoader-admin bundle publish`.
   [docs/operations.md](docs/operations.md), starting with the incident checklist.
 - **Contributing?** [CONTRIBUTING.md](CONTRIBUTING.md) has the branch workflow, the
   definition of done, and the review checklist.
-- **Otherwise** — open an issue, or ask in the operators' Discord channel.
+- **Otherwise**: open an issue, or ask in the operators' Discord channel.
 
 Licensed under the GNU General Public License v3.0. See [LICENSE](LICENSE).

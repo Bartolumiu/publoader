@@ -68,7 +68,7 @@ describe("metrics server", () => {
     expect(ready.status).toBe(200);
   });
 
-  it("fails readiness — but not liveness — when the database is unreachable", async () => {
+  it("fails readiness, but not liveness, when the database is unreachable", async () => {
     const base = await start(unreachable);
 
     expect((await fetch(`${base}/healthz`)).status).toBe(200);
@@ -116,8 +116,8 @@ describe("scheduler tick timestamp", () => {
 
   it("no longer exports the lag gauge that could not report a stall", async () => {
     // The old gauge read 0 both when healthy and when wedged, because only the
-    // code that had stopped running could have raised it. It is gone entirely —
-    // not shimmed — so neither the metric nor a call site for it exists.
+    // code that had stopped running could have raised it. It is gone entirely,
+ // not shimmed, so neither the metric nor a call site for it exists.
     expect("schedulerLagSeconds" in metrics).toBe(false);
     const body = await registry.metrics();
     expect(body).not.toContain("publoader_scheduler_lag_seconds");
@@ -139,7 +139,7 @@ describe("worker heartbeat", () => {
     touchHeartbeat(dir);
     expect(statSync(path).mtimeMs).toBe(stale.getTime());
 
-    // Past the window it must write again — freshness is the whole probe.
+    // Past the window it must write again; freshness is the whole probe.
     touchHeartbeat(dir, Date.now() + 60_000);
     expect(statSync(path).mtimeMs).toBeGreaterThan(stale.getTime());
   });

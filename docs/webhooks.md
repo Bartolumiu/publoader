@@ -9,7 +9,7 @@ by `git pull`ing the repo and re-importing the changed modules in-process.
 
 There is no in-process extension code any more. Workers execute
 content-addressed bundles pinned by sha256, and the scheduler pins each job to
-`BundleStore.latest(extension)` — so the modern equivalent of "pull and reload"
+`BundleStore.latest(extension)`: so the modern equivalent of "pull and reload"
 is "publish a bundle".
 
 > **Read §6 before you configure this.** Publishing from CI is the better
@@ -20,20 +20,20 @@ is "publish a bundle".
 ## 1. What happens, per repo
 
 The mapping is driven by config, and every gate rejects with a reason that is
-echoed in the response body — so a GitHub delivery log entry explains itself
+echoed in the response body; so a GitHub delivery log entry explains itself
 without anyone reading server logs.
 
 | Repo role | Config | A push does |
 |---|---|---|
 | extensions | `GITHUB_EXTENSIONS_REPOS` | Downloads the repo at the pushed sha, builds and publishes a bundle per changed extension |
 | core | `GITHUB_CORE_REPO` | **Nothing.** Answers 200 with "core deploys are image-based" |
-| anything else | — | 202 `untracked repo '<name>'` |
+| anything else |; | 202 `untracked repo '<name>'` |
 
 One delivery is deliberately ignored on top of those rules: a push whose commits
 are **all** marked `[map-sync]`. Those are this platform's own weekly write-back
 of `manga_id_map.json`, and republishing a bundle for them would churn every
 extension's sha256 pin once a week for a data file the workers do not read from
-the bundle. A push mixing one of ours with a human's commit still publishes —
+the bundle. A push mixing one of ours with a human's commit still publishes;
 the test is *every* commit, not any.
 
 Three conditions must all hold before anything is published, ported from the
@@ -51,7 +51,7 @@ legacy `slot_for_push`:
 
 Core is deployed as an image: CI builds `ardax/publoader-core` and
 `./scripts/publoader prod upgrade <tag>` rolls it out. A running container
-cannot and should not rewrite its own code — the image is read-only at runtime
+cannot and should not rewrite its own code; the image is read-only at runtime
 (see `docs/deployment.md` §Upgrading). A push to core is answered 200 with that
 explanation rather than ignored, so the delivery is green and the reason is
 discoverable from GitHub's UI.
@@ -59,8 +59,8 @@ discoverable from GitHub's UI.
 ### Which extensions a push touched
 
 Extension directories live at `src/<extension>/…` in both extensions repos. The
-handler reads `commits[].added`, `.modified` and `.removed`, plus `head_commit`
-— GitHub truncates `commits` to 20 entries on a large push but always sends
+handler reads `commits[].added`, `.modified` and `.removed`, plus `head_commit`:
+ GitHub truncates `commits` to 20 entries on a large push but always sends
 `head_commit`, and missing an extension because a push was big would silently
 leave stale code running.
 
@@ -69,7 +69,7 @@ publishes nothing. A directory name that the manifest schema would reject
 (uppercase, dashes) is ignored too.
 
 Deleting an extension's whole directory does **not** yank it. The delivery
-reports `skipped` and points at `publoader-admin extensions disable <name>` —
+reports `skipped` and points at `publoader-admin extensions disable <name>`:
 taking a live extension out of rotation is not a decision to automate off a
 push.
 
@@ -114,7 +114,7 @@ the `/api/v1/` form for anything new.
 ### Cloudflare
 
 The endpoint must stay reachable. If you have added WAF rules per
-`docs/deployment.md` §WAF rules, make sure none of them blocks `/webhook` — it
+`docs/deployment.md` §WAF rules, make sure none of them blocks `/webhook`: it
 is unauthenticated in the platform's own terms and can look like something worth
 blocking. Do **not** put Cloudflare Access in front of it: GitHub cannot
 complete an interactive login.
@@ -129,7 +129,7 @@ a green delivery immediately. If it does not:
 |---|---|
 | 503 `webhook is not configured` | `GITHUB_WEBHOOK_SECRET` is unset in core-api's environment |
 | 401 `invalid signature` | The secret in GitHub does not match the one in `.env` |
-| 404 | Request never reached core-api — check the tunnel's public hostname and any WAF rule |
+| 404 | Request never reached core-api; check the tunnel's public hostname and any WAF rule |
 
 You can replay it any time with **Recent Deliveries → Redeliver**.
 
@@ -165,12 +165,12 @@ The response body is the diagnostic. Status codes:
 |---|---|
 | 200 | Everything asked for succeeded (or there was nothing to do) |
 | 202 | Deliberately ignored; `ignored` names the reason |
-| 207 | Partial — at least one extension failed or was skipped, the rest published |
+| 207 | Partial; at least one extension failed or was skipped, the rest published |
 | 400 | Empty or unparseable body |
 | 401 | Missing or invalid `X-Hub-Signature-256` |
 | 413 | Body over 5 MiB (checked before parsing) |
 | 429 | Per-IP rate limit |
-| 503 | No `GITHUB_WEBHOOK_SECRET` configured — fails closed |
+| 503 | No `GITHUB_WEBHOOK_SECRET` configured; fails closed |
 
 A push to an extensions repo reports one outcome per extension:
 
@@ -185,18 +185,18 @@ A push to an extensions repo reports one outcome per extension:
 }
 ```
 
-- `published` — a new bundle exists and the next run will use it.
-- `unchanged` — byte-identical to what was already published. Builds are
+- `published`, a new bundle exists and the next run will use it.
+- `unchanged`, byte-identical to what was already published. Builds are
   reproducible, so a redelivery of the same push is a no-op rather than a new
   version of the same code.
-- `failed` — `detail` is the actionable reason. One bad extension never stops the
+- `failed`: `detail` is the actionable reason. One bad extension never stops the
   others.
-- `skipped` — not attempted: the directory is gone at that commit, the
+- `skipped`: not attempted: the directory is gone at that commit, the
   five-extension-per-delivery cap was hit, or the delivery ran out of time.
 
 `detail` deliberately carries only reasons an operator can act on. Anything
 unexpected is logged with the error and reported as
-`publish failed; see core-api logs` — a webhook response is a public surface the
+`publish failed; see core-api logs`: a webhook response is a public surface the
 moment the secret leaks, and stack traces name filesystem paths.
 
 Every publish also writes an audit event, actor `github:<repo>@<short sha>`,
@@ -238,7 +238,7 @@ directory.
 
 The bundle ships one self-contained ESM file, and esbuild inlines everything it
 imports (`external: []`) so the sha256 pins the complete program. The webhook
-builds from a bare repo archive — there is no `node_modules` and no package
+builds from a bare repo archive; there is no `node_modules` and no package
 install step. An extension that imports a third-party package builds fine on an
 operator's laptop (where `pnpm install` has run) and fails here with
 `Could not resolve "<package>"`.
@@ -324,4 +324,4 @@ What you give up:
 - Publishing depends on Actions being up.
 
 If you run CI, use CI. If you do not, the webhook is a reasonable way to avoid
-publishing by hand — set it up, read §5, and know what it costs.
+publishing by hand; set it up, read §5, and know what it costs.

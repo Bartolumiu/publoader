@@ -1,4 +1,4 @@
-# Direct public ingress — the alternative to the Cloudflare tunnel.
+# Direct public ingress; the alternative to the Cloudflare tunnel.
 #
 # Enable by setting PUBLOADER_INGRESS=direct in your env file; the switcher
 # (scripts/publoader) then layers this file in automatically:
@@ -35,7 +35,7 @@ services:
     volumes:
       - ./ingress/Caddyfile:/etc/caddy/Caddyfile:ro
       # Certificates and ACME account keys. Losing this volume means
-      # re-issuing certificates, which Let's Encrypt rate-limits — keep it.
+      # re-issuing certificates, which Let's Encrypt rate-limits; keep it.
       - caddy-data:/data
       - caddy-config:/config
     networks:

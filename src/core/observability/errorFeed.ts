@@ -7,8 +7,8 @@ import type { Prisma, PrismaClient } from "@prisma/client";
  * The feed answers "what is broken right now?" by merging three tables:
  * dead-lettered jobs, failed or dead-lettered upload tasks, and quarantined
  * result submissions. It was read-only, which made it a wall rather than a
- * to-do list: a failure that had been read, understood and fixed — an upstream
- * outage, a bad bundle since replaced — stayed at the top forever, and the only
+ * to-do list: a failure that had been read, understood and fixed (an upstream
+ * outage, a bad bundle since replaced) stayed at the top forever, and the only
  * way to tell "new" from "old and handled" was to remember.
  *
  * Clearing an entry records an acknowledgement in `cleared_errors` and the feed
@@ -53,7 +53,7 @@ const ENUM_TO_SOURCE: Record<ErrorSource, ErrorFeedSource> = {
  * is the number of live acknowledgements. That set is bounded in practice: it
  * only grows by an operator clearing something, and `pruneClearedErrors` (run on
  * every clear) drops the ones whose row no longer exists. The cap is a safety
- * valve for a pathological case, and it fails in the safe direction — the OLDEST
+ * valve for a pathological case, and it fails in the safe direction: the OLDEST
  * acknowledgements stop hiding their entries, so an entry reappears rather than
  * being lost.
  */
@@ -128,7 +128,7 @@ class Acknowledgements {
    * The timestamp compared is the column the feed shows as the failure time,
    * which is the one the acknowledgement was taken against: `updatedAt` for jobs
    * and upload tasks, `createdAt` for submissions. Submission rows never change,
-   * so an acknowledged submission stays cleared — a fresh rejection from the same
+   * so an acknowledged submission stays cleared; a fresh rejection from the same
    * worker is a fresh row with a fresh id.
    *
    * One method per model rather than a generic one over a column name: Prisma's
@@ -166,7 +166,7 @@ export interface ListErrorsOptions {
    * to-do list.
    */
   includeCleared?: boolean;
-  /** Only acknowledged entries — the review list behind the dashboard's toggle. */
+  /** Only acknowledged entries: the review list behind the dashboard's toggle. */
   clearedOnly?: boolean;
 }
 
@@ -277,7 +277,7 @@ async function countCleared(prisma: PrismaClient): Promise<number> {
 /**
  * Outstanding entries, for the dashboard's nav badge and `/stats`.
  *
- * Counts rather than lists, and applies the same exclusion the feed does — a
+ * Counts rather than lists, and applies the same exclusion the feed does; a
  * badge that kept counting failures an operator had already cleared would train
  * them to ignore the badge.
  */
@@ -309,7 +309,7 @@ export interface ClearResult {
 
 /**
  * Shortest id prefix accepted. Long enough that a prefix is a deliberate
- * shorthand rather than a slip that could match half the table — and the tables
+ * shorthand rather than a slip that could match half the table, and the tables
  * that print truncated ids print eight characters.
  */
 const MIN_ID_PREFIX = 4;
@@ -327,7 +327,7 @@ interface Match {
  *
  * Two things are deliberate here. The state filters are the same ones the feed
  * uses, so clearing something that is NOT failing is a reported no-op rather
- * than a silent write — acknowledging a healthy row would hide its NEXT failure.
+ * than a silent write: acknowledging a healthy row would hide its NEXT failure.
  * And matching is by prefix, because every surface that lists errors prints
  * truncated ids: Discord, `padmin errors`, the dashboard's short columns. An
  * operator reading `3f9a1c2b` off a table should be able to type it.
@@ -369,8 +369,8 @@ async function matchSource(
  *
  * Without a source all three tables are asked, because typing
  * `padmin errors clear <id>` or `/errors clear id:<id>` should not require the
- * operator to first classify what kind of thing failed. Ambiguity — a prefix
- * matching two rows, or one id present in two sources — is reported, never
+ * operator to first classify what kind of thing failed. Ambiguity (a prefix
+ * matching two rows, or one id present in two sources) is reported, never
  * guessed: clearing the wrong entry hides a failure nobody has looked at.
  */
 async function resolveMatch(
@@ -394,7 +394,7 @@ async function resolveMatch(
   }
   if (found.length > 1) {
     const detail = found.map((match) => `${match.source} ${match.id.slice(0, 8)}`).join(", ");
-    return { error: `ambiguous: matches ${detail} — use a longer id` };
+    return { error: `ambiguous: matches ${detail}; use a longer id` };
   }
   return found[0]!;
 }
@@ -424,7 +424,7 @@ export async function clearErrors(prisma: PrismaClient, options: ClearOptions): 
 
   if (options.all) {
     // The outstanding feed IS the list to clear, so it is read through the same
-    // path the operator was looking at — clearing cannot acknowledge something
+    // path the operator was looking at; clearing cannot acknowledge something
     // they could not see.
     const { errors } = await listErrors(prisma, { limit: MAX_CLEAR_ALL });
     for (const entry of errors) resolved.push({ ref: { source: entry.source, id: entry.id }, errorAt: entry.at });
@@ -504,7 +504,7 @@ export async function restoreErrors(
 
   // Ids match by prefix here too, for the same reason as clearing: the tables an
   // operator reads them off are truncated. A prefix that matches two
-  // acknowledgements restores both, which is the safe direction to be wrong in —
+  // acknowledgements restores both, which is the safe direction to be wrong in:
   // restoring shows a failure again, it never hides one.
   const usable = (id: string) => id.length >= MIN_ID_PREFIX;
   const conditions: Prisma.ClearedErrorWhereInput[] = [
@@ -524,8 +524,8 @@ export async function restoreErrors(
 /**
  * Drop acknowledgements whose subject no longer exists.
  *
- * Rows do disappear — upload tasks are deleted once drained, and a purge takes
- * jobs with it — and a stranded acknowledgement is dead weight in the exclusion
+ * Rows do disappear (upload tasks are deleted once drained, and a purge takes
+ * jobs with it), and a stranded acknowledgement is dead weight in the exclusion
  * filter every feed read builds. Cheap enough (three anti-joins over a table
  * with tens of rows) to run on every clear, which is the only thing that grows
  * it.
@@ -540,7 +540,7 @@ export async function pruneClearedErrors(prisma: PrismaClient): Promise<number> 
   return deleted;
 }
 
-/** Every acknowledgement, newest first — the audit-ish "what did we mute?" list. */
+/** Every acknowledgement, newest first: the audit-ish "what did we mute?" list. */
 export async function listClearedErrors(
   prisma: PrismaClient,
   limit: number,

@@ -4,7 +4,7 @@
 # Let's Encrypt (HTTP-01), so the only prerequisites are:
 #   1. a DNS A record (and AAAA if the host has IPv6) for PUBLOADER_HOSTNAME
 #      pointing at this host's PUBLIC address, and
-#   2. inbound tcp/80 and tcp/443 reachable from the internet — 80 is not
+#   2. inbound tcp/80 and tcp/443 reachable from the internet; 80 is not
 #      optional, it is how the certificate challenge is answered.
 #
 # Why a proxy at all rather than publishing core-api directly: Discord OAuth

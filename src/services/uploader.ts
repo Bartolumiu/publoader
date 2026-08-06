@@ -15,9 +15,9 @@ import { startMetricsServer } from "../core/observability/metricsServer.js";
 
 /**
  * core-uploader: the only process that talks to MangaDex with write
- * credentials. It drains the UploadTask queues in a fixed order — removals
+ * credentials. It drains the UploadTask queues in a fixed order; removals
  * first, so a chapter that was deleted upstream never races the re-upload of
- * its replacement — and leaves task bookkeeping to UploadTaskStore.
+ * its replacement; and leaves task bookkeeping to UploadTaskStore.
  *
  * Title creation for untracked series lives here for the same reason: this is
  * the only process holding MangaDex write credentials.
@@ -85,7 +85,7 @@ async function publishDepths(): Promise<void> {
 
 // Before the loop, so a port clash fails the deploy instead of leaving the
 // service unmonitored. This endpoint is where `publoader_upload_tasks` becomes
-// scrapeable — a stalled upload queue was previously invisible.
+// scrapeable.
 const metricsServer = await startMetricsServer({
   service: "core-uploader",
   log,
@@ -97,7 +97,7 @@ log.info({ kinds: KIND_ORDER, discord: notifier.enabled }, "core-uploader starte
 
 while (running) {
   // Between iterations, so we are never holding a task lease, and ahead of the
-  // pause gate's `continue` — a paused uploader must still be restartable.
+  // pause gate's `continue`: a paused uploader must still be restartable.
   if (await shouldRestart(settings, "uploader", log)) break;
 
   try {

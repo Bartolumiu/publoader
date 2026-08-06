@@ -9,7 +9,7 @@ export const VALID_REMOVAL_MODES = ["unavailable", "delete"] as const;
 export type RemovalMode = (typeof VALID_REMOVAL_MODES)[number];
 export const DEFAULT_REMOVAL_MODE: RemovalMode = "unavailable";
 
-/** Pause gate, schedule overrides, disabled extensions, removal mode —
+/** Pause gate, schedule overrides, disabled extensions, removal mode;
  * replaces the SQLite state store with the same semantics. */
 export class SettingsStore {
   constructor(private readonly prisma: PrismaClient) {}
@@ -82,8 +82,8 @@ export class SettingsStore {
   /**
    * Whether a per-chapter embed is sent for uploads that SUCCEEDED.
    *
-   * Python sent one either way, which on a normal run means the channel is
-   * almost entirely "Success: True" — and a failure, the only thing anyone
+   * Sending one either way means that on a normal run the channel is
+   * almost entirely "Success: True"; and a failure, the only thing anyone
    * needs to act on, scrolls past between them. Off by default so the channel
    * carries exceptions rather than a transcript; the run-level "Found N
    * chapters" embed already says the work happened.
@@ -105,9 +105,9 @@ export class SettingsStore {
    * Whether the scheduler polls the configured GitHub repos and publishes what
    * changed.
    *
-   * On by default. The push webhook is the fast path, but it fails silently —
-   * an unregistered hook or a dropped delivery just means extensions quietly
-   * stop updating — and polling is the only check that does not depend on
+   * On by default. The push webhook is the fast path, but it fails silently,
+ * an unregistered hook or a dropped delivery just means extensions quietly
+   * stop updating, and polling is the only check that does not depend on
    * anything inbound. Publishing is idempotent, so the two overlapping costs
    * nothing.
    *
@@ -194,8 +194,8 @@ export class AuditLog {
    * Several events in one statement.
    *
    * For a bulk operator action the per-subject rows are what keep "why was this
-   * chapter deleted?" answerable — a lookup by `subject` finds nothing if a
-   * batch only writes one summary row — but two hundred sequential inserts
+   * chapter deleted?" answerable, a lookup by `subject` finds nothing if a
+   * batch only writes one summary row, but two hundred sequential inserts
    * inside a request is a cost with no upside.
    */
   async recordMany(

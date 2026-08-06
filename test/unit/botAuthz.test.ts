@@ -92,7 +92,7 @@ describe("isAdmin", () => {
     expect(isAdmin(config(), invoker({ roleIds: ["599999999999999999"] }))).toBe(false);
   });
 
-  it("is false when nothing is configured — no implicit admin", () => {
+  it("is false when nothing is configured; no implicit admin", () => {
     const empty = config({ adminUserIds: new Set(), adminRoleIds: new Set() });
     expect(isAdmin(empty, invoker({ userId: ADMIN_USER }))).toBe(false);
   });
@@ -138,7 +138,7 @@ describe("authorize: channel gate", () => {
     expect(authorize(open, invoker({ channelId: "any" }), "read").allowed).toBe(true);
   });
 
-  it("refuses writes when no channel list is configured — the legacy bot allowed them", () => {
+  it("refuses writes when no channel list is configured; the legacy bot allowed them", () => {
     // The Python bot's _channel_allowed() returned True on an empty list, so an
     // incomplete .env let every channel control the platform. This is the
     // deliberate break.

@@ -5,19 +5,16 @@ import type { Logger } from "../../logging.js";
 import type { MdApi, MdChapter, MdManga, MdMangaDetail } from "./types.js";
 
 /**
- * MangaDex API client — the TypeScript port of publoader/http/{model,client,
- * oauth}.py plus the pagination helpers in utils/misc.py.
+ * MangaDex API client. Three things it owns:
  *
- * Three things this owns that the Python spread across a singleton session:
  *   1. OAuth password/refresh grants, with the token pair persisted in the
- *      `settings` table instead of mdauth.json, so a restarted (or replaced)
- *      core container resumes the same MangaDex session.
- *   2. A single request gate: every call — authed or not — is spaced by at
- *      least `config.mdRatelimitMs`, and a 429 pushes the gate forward for
- *      everyone rather than only the caller that hit it.
- *   3. Bounded retries. The Python loop could spin indefinitely on connection
- *      errors; here `config.uploadRetry` attempts is a hard ceiling on every
- *      request and exhausting it throws MdRequestError.
+ *      `settings` table, so a restarted or replaced core container resumes the
+ *      same MangaDex session.
+ *   2. A single request gate: every call, authed or not, is spaced by at least
+ *      `config.mdRatelimitMs`, and a 429 pushes the gate forward for everyone
+ *      rather than only the caller that hit it.
+ *   3. Bounded retries. `config.uploadRetry` attempts is a hard ceiling on every
+ *      request, and exhausting it throws MdRequestError.
  */
 
 const USER_AGENT = "publoader/2.0.0";
@@ -34,7 +31,7 @@ const TOKEN_SKEW_SECONDS = 60;
  *
  * Without it MangaDex silently omits the chapters it will not serve, so a
  * lookup of "what does MangaDex have for this series" quietly under-reports and
- * the caller concludes a chapter is missing when it is merely unreadable — for
+ * the caller concludes a chapter is missing when it is merely unreadable; for
  * the processor, that is the difference between leaving a chapter alone and
  * uploading a second copy of it.
  *
@@ -76,7 +73,7 @@ export interface MdEntity {
  * A group's chapters, split by whether MangaDex will serve them.
  *
  * `all` carries the raw entity rather than a mapped `MdChapter` because the
- * caller archives the MangaDex record as it stood — the attributes it needs
+ * caller archives the MangaDex record as it stood: the attributes it needs
  * (`pages`, `readableAt`, `isUnavailable`) are exactly the ones the mapping
  * drops, and once MangaDex stops serving a chapter this snapshot is the only
  * remaining answer to what it looked like.
@@ -164,7 +161,7 @@ export class MdClient implements MdExtendedApi {
   private refreshToken: string | null = null;
   private tokensLoaded = false;
   private authFlight: Promise<void> | null = null;
-  /** Serialises *slot acquisition* only — requests may still overlap in flight. */
+  /** Serialises *slot acquisition* only; requests may still overlap in flight. */
   private gate: Promise<void> = Promise.resolve();
   private nextRequestAt = 0;
 
@@ -330,10 +327,10 @@ export class MdClient implements MdExtendedApi {
       }
 
       // 4xx other than 401/429 will not change on retry.
-      throw new MdRequestError(`${method} ${url} failed — ${lastError}`, status);
+      throw new MdRequestError(`${method} ${url} failed; ${lastError}`, status);
     }
 
-    throw new MdRequestError(`${method} ${url} exhausted ${tries} attempts — ${lastError}`);
+    throw new MdRequestError(`${method} ${url} exhausted ${tries} attempts; ${lastError}`);
   }
 
   // --------------------------------------------------------------------- auth
@@ -363,7 +360,7 @@ export class MdClient implements MdExtendedApi {
     const exp = MdClient.tokenExpiry(token);
     if (exp !== null) return exp - TOKEN_SKEW_SECONDS > Date.now() / 1000;
     // Not a decodable JWT (test doubles, or an upstream format change): trust
-    // it briefly instead of re-authenticating on every request — a 401 still
+    // it briefly instead of re-authenticating on every request; a 401 still
     // forces an immediate refresh through the normal retry path.
     return (
       this.opaqueTokenIssuedAt !== null &&
@@ -415,7 +412,7 @@ export class MdClient implements MdExtendedApi {
   private async authenticate(force: boolean): Promise<void> {
     if (!force && this.tokenUsable(this.accessToken)) return;
 
-    // An opaque (non-JWT) refresh token has no readable expiry — try it anyway
+    // An opaque (non-JWT) refresh token has no readable expiry; try it anyway
     // rather than burning a password grant on every startup.
     const refreshExp = MdClient.tokenExpiry(this.refreshToken);
     const refreshUsable =
@@ -599,7 +596,7 @@ export class MdClient implements MdExtendedApi {
           links !== null && typeof links === "object" && !Array.isArray(links)
             ? (links as Record<string, string>)
             : null,
-        // A title with no readable version cannot be edited safely — 1 is the
+        // A title with no readable version cannot be edited safely; 1 is the
         // value MangaDex assigns a fresh entity, and a wrong guess is refused
         // rather than silently overwriting someone else's edit.
         version: typeof version === "number" ? version : 1,
@@ -675,7 +672,7 @@ export class MdClient implements MdExtendedApi {
   }
 
   /**
-   * GET /manga?title=… — used by the title pipeline to check whether a series
+   * GET /manga?title=…; used by the title pipeline to check whether a series
    * already exists on MangaDex before creating a new entry for it. Creating a
    * duplicate title is the one mistake here that other people have to clean up,
    * so this call is worth making every time.
@@ -706,16 +703,15 @@ export class MdClient implements MdExtendedApi {
   }
 
   /**
-   * Correct an existing title. Mirrors `editChapter` — a PUT carrying the
+   * Correct an existing title. Mirrors `editChapter`: a PUT carrying the
    * version MangaDex currently holds, which it bumps itself.
    *
    * `tries: 1`, unlike every other write here: a rejection is either a version
-   * conflict (someone edited the title between our read and our write, and the
-   * same stale version can never succeed) or a validation error (which will not
-   * change on retry). Replaying either against a public catalogue buys nothing
-   * and risks applying an edit the operator was told had failed. A 4xx becomes
-   * an MdRequestError carrying the status, so the caller can tell "the title
-   * moved under you" apart from "MangaDex refused this".
+   * conflict (the same stale version can never succeed) or a validation error
+   * (which will not change on retry). Replaying either against a public
+   * catalogue risks applying an edit the operator was told had failed. A 4xx
+   * becomes an MdRequestError carrying the status, so the caller can tell "the
+   * title moved under you" from "MangaDex refused this".
    */
   async editManga(
     mangaId: string,
@@ -729,7 +725,7 @@ export class MdClient implements MdExtendedApi {
     return response.status === 200;
   }
 
-  /** Port of fetch_aggregate — returns the `volumes` object, or null on error. */
+  /** Port of fetch_aggregate; returns the `volumes` object, or null on error. */
   async mangaAggregate(mangaId: string, groupId: string): Promise<unknown> {
     const params: Record<string, string | string[]> = {};
     if (groupId) params["groups[]"] = [groupId];
@@ -808,8 +804,8 @@ export class MdClient implements MdExtendedApi {
    * `name`, because MangaDex echoes the filename back as `originalFileName` and
    * the uploader keys page order off it.
    *
-   * Throws when MangaDex reports errors for a request — mirroring
-   * `_images_upload` returning None, which makes the caller retry the batch.
+   * Throws when MangaDex reports errors for a request, which makes the caller
+   * retry the batch.
    */
   async uploadImages(
     sessionId: string,
@@ -940,7 +936,7 @@ export class MdClient implements MdExtendedApi {
     return response.status === 200;
   }
 
-  /** 404 counts as deleted — the chapter is gone either way. */
+  /** 404 counts as deleted; the chapter is gone either way. */
   async deleteChapter(chapterId: string): Promise<boolean> {
     const response = await this.request("DELETE", `${this.config.mdApiUrl}/chapter/${chapterId}`, {
       successfulCodes: [404],

@@ -5,7 +5,7 @@ import { exchangeDiscordCode, matchDiscordIdentity } from "../../src/core/api/oa
 /**
  * The Discord callback's decision table, exercised without a database. The
  * property that matters most is that an *unverified* Discord email can never
- * claim an existing account — that would make account takeover a matter of
+ * claim an existing account; that would make account takeover a matter of
  * setting an email address on a throwaway Discord account.
  */
 describe("matchDiscordIdentity", () => {

@@ -52,7 +52,7 @@ export class IngestService {
 
     const { submission, duplicate } = await this.results.record(envelope, workerId, job.attempt);
     if (duplicate && submission.state !== "RECEIVED") {
-      // Worker retried after we already judged this envelope — idempotent ack.
+      // Worker retried after we already judged this envelope; idempotent ack.
       return this.priorOutcome(submission.state, submission.id, submission.rejectReason);
     }
 
@@ -68,7 +68,7 @@ export class IngestService {
       return { outcome: "superseded", submissionId: submission.id, reason: "stale lease" };
     }
 
-    // Gate 3: worker-reported failure — route through the retry policy.
+    // Gate 3: worker-reported failure; route through the retry policy.
     if (envelope.status === "error") {
       const errorClass = envelope.error?.class ?? "TRANSIENT";
       const disposition = await this.jobs.fail(
@@ -126,7 +126,7 @@ export class IngestService {
    * The rule this function exists to uphold: **every field the downstream
    * pipeline trusts must be checked here**, because a worker is untrusted and
    * this is the only gate between it and canonical state. That is easy to get
-   * subtly wrong — an earlier version validated three fields while the
+   * subtly wrong; an earlier version validated three fields while the
    * processor went on to consume a dozen, and the gap was exploitable: a
    * worker holding one legitimate lease could name any MangaDex title in
    * `mdMangaId`, send `allChapters: []`, and have the processor conclude that
@@ -157,7 +157,7 @@ export class IngestService {
     //
     // The union is required for correctness, not convenience: `custom_language`
     // exists precisely to publish a title in a language the extension's own
-    // catalogue does not name — mangaplus reports SPANISH ("es") for everything,
+    // catalogue does not name; mangaplus reports SPANISH ("es") for everything,
     // while one title is actually Latin-American Spanish and is mapped to
     // "es-la". Validating against the manifest alone rejected every chapter of
     // that title as "not declared by manifest", which reads as a manifest
@@ -184,7 +184,7 @@ export class IngestService {
     }
 
     // The set of MangaDex titles this extension is allowed to speak about.
-    // Authoritative, from the database — the same map the worker was handed on
+    // Authoritative, from the database; the same map the worker was handed on
     // lease, so an honest worker can only ever echo back ids that are in here.
     const tracked = new Set(
       (

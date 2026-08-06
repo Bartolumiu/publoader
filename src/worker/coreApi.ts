@@ -97,7 +97,7 @@ export class CoreApiError extends Error {
     return this.status === 429 || this.status >= 500;
   }
 
-  /** Credentials rejected — the operator has to re-enroll this worker. */
+  /** Credentials rejected; the operator has to re-enroll this worker. */
   get isAuth(): boolean {
     return this.status === 401 || this.status === 403;
   }
@@ -121,7 +121,7 @@ export class BundleIntegrityError extends Error {
 function isRetryable(err: unknown): boolean {
   if (err instanceof CoreNetworkError) return true;
   if (err instanceof CoreApiError) return err.retryable;
-  // A corrupt bundle body is worth one more fetch — the object is immutable
+  // A corrupt bundle body is worth one more fetch; the object is immutable
   // and content-addressed, so a second read can only be right or wrong the
   // same way, and a truncated response is the common cause.
   return err instanceof BundleIntegrityError;
@@ -142,7 +142,7 @@ export interface RetryOptions {
  * lease is a compare-and-set claim, start/renew are lease-CAS operations,
  * artifact upload is content-addressed, and result submission is keyed by
  * `res:<jobId>:<attempt>` with a commit marker that turns replays into
- * SUPERSEDED no-ops. A retry can therefore never double-apply an effect — the
+ * SUPERSEDED no-ops. A retry can therefore never double-apply an effect; the
  * worst case is a wasted round trip.
  */
 export async function withRetry<T>(op: () => Promise<T>, opts: RetryOptions = {}): Promise<T> {
@@ -178,7 +178,7 @@ interface RequestInitLite {
 /**
  * Typed client for the worker-audience half of the core API
  * (src/core/api/routes/worker.ts). Holds the worker's bearer token and nothing
- * else — no MangaDex, Postgres, or Discord credentials ever reach this side.
+ * else; no MangaDex, Postgres, or Discord credentials ever reach this side.
  */
 export class CoreApiClient {
   private token: string | undefined;

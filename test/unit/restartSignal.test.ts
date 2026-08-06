@@ -13,7 +13,7 @@ import {
  *
  * These exist because the original bug in this area was not a wrong answer, it
  * was no call at all: `restartSignal.ts` was complete and correct, and
- * scheduler.ts, processor.ts and uploader.ts contained zero references to it —
+ * scheduler.ts, processor.ts and uploader.ts contained zero references to it;
  * so the dashboard's restart button wrote its row and nothing ever exited. The
  * signal's own semantics (ack-once, TTL, wrong target) are covered in
  * test/integration/sysops.test.ts; what is covered here is the wrapper the
@@ -50,7 +50,7 @@ describe("shouldRestart", () => {
 
     expect(await shouldRestart(store, "scheduler", log)).toBe(true);
     // The operator who pressed the button belongs in the service's own log, not
-    // only in the audit table — this line is what someone reads when asking why
+    // only in the audit table; this line is what someone reads when asking why
     // the scheduler bounced.
     expect(log.info).toHaveBeenCalledWith(
       expect.objectContaining({ target: "scheduler", requestedBy: "user:iam@ardax.dev" }),
@@ -128,8 +128,8 @@ describe("shouldRestart", () => {
 
   it("does not exit when the ack write fails, so the exit is never unrecorded", async () => {
     // Acking before exiting is what makes this idempotent. If the ack cannot be
-    // written, exiting anyway would mean coming back to the same live request —
-    // the crash loop the ack exists to prevent.
+    // written, exiting anyway would mean coming back to the same live request;
+ // the crash loop the ack exists to prevent.
     const { rows } = memoryStore({ [RESTART_REQUEST_KEY]: request("scheduler") });
     const store: RestartSettingsStore = {
       getSetting: async (key) => rows.get(key) ?? null,

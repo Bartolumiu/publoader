@@ -7,7 +7,7 @@ import { InvalidScopesError } from "../../store/apiTokens.js";
 import { SCOPE_PRESETS, SCOPES } from "../scopes.js";
 
 /**
- * Scoped per-client token management. Gated on `users:admin` — the ability to
+ * Scoped per-client token management. Gated on `users:admin`: the ability to
  * mint credentials is the ability to grant any scope, so it belongs with
  * account administration rather than with the areas a token can reach.
  */
@@ -22,7 +22,7 @@ export function registerTokenRoutes(app: FastifyInstance, ctx: AppContext): void
       }),
     );
     scope.addHook("preHandler", requireScope("users:admin"));
-    // Minting a credential can grant any scope, including "*" — so it is
+    // Minting a credential can grant any scope, including "*"; so it is
     // privilege escalation and must stay a human, owner-level action. API
     // tokens are never OWNER, so no token can mint (or widen) another token,
     // however broadly it is scoped.

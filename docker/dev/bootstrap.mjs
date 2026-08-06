@@ -1,7 +1,7 @@
 // Dev-stack bootstrap: mint one enrollment token per worker so
 // `docker compose up` produces a working two-worker fleet with no manual step.
 //
-// Production enrollment is deliberately manual — an operator mints a
+// Production enrollment is deliberately manual; an operator mints a
 // single-use token and hands it to a host they chose to trust (§8). Automating
 // it is acceptable HERE and only here, because this stack is throwaway, is
 // bound to localhost, and its admin token is the literal string "dev-admin-not-a-secret".
@@ -41,7 +41,7 @@ for (const name of WORKERS) {
   const path = `${OUT_DIR}/enroll-${name}`;
   // Enrollment tokens are single-use. If a token file is already here the
   // worker either consumed it (and persisted its real worker token) or has not
-  // started yet — either way, minting a second one would strand the first.
+  // started yet; either way, minting a second one would strand the first.
   if (existsSync(path)) {
     console.log(`bootstrap: ${path} exists, leaving it alone`);
     continue;

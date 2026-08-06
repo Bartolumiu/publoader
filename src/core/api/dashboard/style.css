@@ -1,5 +1,5 @@
 /* ==========================================================================
-   publoader control plane — operator console
+   publoader control plane; operator console
    ==========================================================================
 
    The visual language is borrowed from industrial HMI/SCADA practice (ISA-101
@@ -8,7 +8,7 @@
    dashboards. Four rules carry almost all of it:
 
    1. COLOUR MEANS ABNORMAL. The console is greyscale. Green, amber, red and
-      cyan are spent only on state — running, caution, fault, in-motion. A
+      cyan are spent only on state; running, caution, fault, in-motion. A
       button is not coloured because it is important; it is coloured because it
       commits something. This is why an amber chip in a table of greys is
       findable across a room, and why the previous "blue everywhere" scheme
@@ -21,14 +21,14 @@
 
    3. PANELS ARE FACEPLATES. Square corners, one hairline, a captioned header
       strip, registration ticks in the corners. No shadows, no gradients, no
-      rounded cards floating on a background — a faceplate is fixed to a panel.
+      rounded cards floating on a background; a faceplate is fixed to a panel.
 
    4. DENSITY IS THE POINT. An operator compares rows; whitespace between them
       is distance the eye has to travel. Spacing is tight and on a 4px grid.
 
    Constraints that shaped the file: served under a CSP that forbids other
    origins, so system fonts only and no external assets. Every class here is
-   emitted by app.js / sysops.js / docs.js — see the class contract at the foot
+   emitted by app.js / sysops.js / docs.js; see the class contract at the foot
    of this file before renaming anything.
    ========================================================================== */
 
@@ -36,13 +36,13 @@
    The `hidden` attribute, made to actually hide.
 
    The UA stylesheet implements `hidden` as `[hidden] { display: none }`, at
-   user-agent origin — which loses to ANY author declaration of `display`, since
+   user-agent origin; which loses to ANY author declaration of `display`, since
    the cascade sorts by origin before it looks at specificity. `.login {
    display: grid }` below therefore used to keep the sign-in card painted after
    a successful sign-in, with the app rendering underneath it: the reported "the
    login screen persists after signing in". `el.hidden` read `true` the whole
-   time, and jsdom agreed, because jsdom does not implement origin precedence —
-   only a real engine shows the defect.
+   time, and jsdom agreed, because jsdom does not implement origin precedence;
+ only a real engine shows the defect.
 
    One `!important` rule at author origin fixes the whole class of bug, so
    `hidden` can be trusted anywhere in this file. Keep it first, and keep the
@@ -161,7 +161,7 @@ a {
 }
 
 /*
- * A caveat that has to be read but is not a failure — "3 of 4 segments have
+ * A caveat that has to be read but is not a failure; "3 of 4 segments have
  * reported, so this list is partial". `.error` would be wrong (nothing broke)
  * and `.dim` would be worse: this is the line that decides whether the numbers
  * above it can be trusted, and dimming it hides exactly that.
@@ -316,7 +316,7 @@ th {
   /* Locked to the viewport, with `.content` as the only scroll container, so the
      sidebar and topbar cannot travel with the page. A sticky sidebar inside a
      scrolling document nearly does this, but the sticky element still belongs to
-     a document that moves — momentum scrolling on a trackpad drags it, and its
+     a document that moves; momentum scrolling on a trackpad drags it, and its
      own overflow fights the page's. One non-scrolling shell has neither problem. */
   height: 100dvh;
   overflow: hidden;
@@ -352,7 +352,7 @@ body.nav-collapsed {
   border-bottom: 1px solid var(--line-2);
 }
 
-/* The unit tag. Square, mono, hairline — a stencilled asset label, not a logo. */
+/* The unit tag. Square, mono, hairline; a stencilled asset label, not a logo. */
 .brand {
   display: grid;
   place-items: center;
@@ -421,7 +421,7 @@ body.nav-collapsed {
 
 /* The current destination has to be unmistakable, so it is marked three ways:
    filled, brighter text, and the left bar lit. `aria-current` is the source of
-   truth — the styling keys off it, so the two cannot drift. */
+   truth; the styling keys off it, so the two cannot drift. */
 .nav a[aria-current="page"] {
   background: var(--panel-2);
   border-left-color: var(--accent);
@@ -523,7 +523,7 @@ body.nav-collapsed .sidebar-head {
 
 /* ---- topbar --------------------------------------------------------------
    The annunciator row: the four numbers an operator watches without being
-   asked to look, plus the run/pause lamp. Opaque, not translucent — a value
+   asked to look, plus the run/pause lamp. Opaque, not translucent; a value
    read through a blur of the content scrolling underneath it is a value you
    cannot trust. */
 
@@ -559,7 +559,7 @@ body.nav-collapsed .sidebar-head {
   min-width: 62px;
   border-right: 1px solid var(--line);
   /* Never shrink. A flex item allowed below its content width does not clip, it
-     spills — which on a phone put the run/pause lamp on top of the worker count.
+     spills; which on a phone put the run/pause lamp on top of the worker count.
      Fixed cells overflow `.summary`, which hides them, so a narrow strip loses
      its last reading cleanly instead of printing two on top of each other. */
   flex: 0 0 auto;
@@ -713,7 +713,7 @@ body.nav-collapsed .sidebar-head {
   grid-area: content;
   min-width: 0;
   /* Full width beside the sidebar: no reading-measure cap. The dense tables this
-     dashboard is mostly made of are the reason — a queue or chapter table given
+     dashboard is mostly made of are the reason; a queue or chapter table given
      1280px wraps or scrolls sideways while the display sits empty to its right. */
   width: 100%;
   /* The shell does not scroll, so this is the scroll container. */
@@ -808,7 +808,7 @@ body.nav-collapsed .sidebar-head {
 }
 
 /* ---- controls ------------------------------------------------------------
-   Panel legends. Square, hairline, no fill by default — a button is a switch,
+   Panel legends. Square, hairline, no fill by default; a button is a switch,
    and a switch is not coloured unless throwing it does something. */
 
 button {
@@ -893,8 +893,8 @@ button.ghost:hover:not(:disabled) {
   height: 16px;
 }
 
-/* A control that is running. The label is kept — swapping it for "…" loses the
-   only clue about what is in flight — and a spinner is added beside it. */
+/* A control that is running. The label is kept, swapping it for "…" loses the
+   only clue about what is in flight, and a spinner is added beside it. */
 button[data-pending="true"] {
   color: var(--dim);
   cursor: progress;
@@ -1091,7 +1091,7 @@ input[type="search"] {
   border-width: 0 1px 1px 0;
 }
 
-/* The caption strip. Full-bleed against the panel edge — negative margins pull
+/* The caption strip. Full-bleed against the panel edge; negative margins pull
    it out to the border so it reads as part of the faceplate, not as a heading
    floating inside it. */
 .card > h2 {
@@ -1268,7 +1268,7 @@ td.actions {
 }
 
 /* app.js builds an action cell as `class="actions row tight"`, and `.row` is a
-   flex container — which takes the `<td>` out of table layout, so its bottom
+   flex container; which takes the `<td>` out of table layout, so its bottom
    rule lands at its own height instead of the row's and the hairline under a
    table visibly steps down in the last column. Put the cell back in the table
    and reproduce the gap with margins, which is the one thing flex was buying. */
@@ -1358,7 +1358,7 @@ pre code {
 }
 
 /* The lamp. Square, because a round dot reads as decoration and a square reads
-   as an indicator — every annunciator panel ever built is square. */
+   as an indicator; every annunciator panel ever built is square. */
 .pill::before,
 .chip::before {
   content: "";
@@ -1412,8 +1412,8 @@ pre code {
 }
 
 /* ---- messages -------------------------------------------------------------
-   An alarm line. Full-width, square, and marked at the left edge in its tone —
-   the same gutter the table rows use, so "something is being said about this"
+   An alarm line. Full-width, square, and marked at the left edge in its tone;
+ the same gutter the table rows use, so "something is being said about this"
    is one shape across the console. */
 
 .banner {
@@ -1471,7 +1471,7 @@ ul.errors li {
 
 /* No shimmer: a sweeping gradient is motion, and motion on a console means
    something is happening. A placeholder is the absence of a reading, so it is
-   drawn as one — flat, hatched, and still. */
+   drawn as one; flat, hatched, and still. */
 .skeleton {
   border-radius: var(--radius-sm);
   background: repeating-linear-gradient(
@@ -1627,7 +1627,7 @@ dialog::backdrop {
 
 /* ---- docs ---------------------------------------------------------------
    The one view that is prose rather than instrumentation. It keeps the console
-   chrome — captions, hairlines, the mono for anything quoted — but the body
+   chrome, captions, hairlines, the mono for anything quoted, but the body
    text gets a reading measure and the sans face, because a paragraph set in a
    dense mono column is not readable, whatever the rest of the room looks like. */
 
@@ -1857,7 +1857,7 @@ dialog::backdrop {
   }
 
   /* The sidebar becomes an off-canvas drawer. It stays in the DOM and stays
-     focusable only when open — `inert` is set from app.js alongside the class,
+     focusable only when open; `inert` is set from app.js alongside the class,
      so a closed drawer cannot be tabbed into. */
   .sidebar {
     position: fixed;
@@ -2201,7 +2201,7 @@ dialog::backdrop {
 /* ---- chapter card preview ------------------------------------------------ */
 
 /* The unavailable card is a square 2000x2000 PNG. Constrained by width AND by
-   viewport height so the dialog's buttons stay reachable on a laptop — a
+   viewport height so the dialog's buttons stay reachable on a laptop; a
    preview you have to scroll past to approve is one nobody looks at. */
 .card-preview {
   display: block;
@@ -2235,7 +2235,7 @@ dialog::backdrop {
               topbar-end profile profile-name menu menu-detail menu-item
               content page-head crumb blurb tabs skip-link noscript
    panels     card grid row stat (.n .k) defs scroll banner empty dropzone
-   status     pill chip badge  — tones: ok bad warn busy, plus info/quiet on
+   status     pill chip badge  - tones: ok bad warn busy, plus info/quiet on
               .banner and owner/contributor on .badge
    controls   primary danger ghost icon-button linkish button-link field-error
               actions stack

@@ -72,7 +72,7 @@ export class WorkerStore {
       data: { usedByWorkerId: worker.id },
     });
     if (row.singleUse && consumed.count !== 1) {
-      // Lost the race to another enrollment — roll back our worker.
+      // Lost the race to another enrollment; roll back our worker.
       await this.prisma.worker.delete({ where: { id: worker.id } });
       return null;
     }

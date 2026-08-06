@@ -10,9 +10,9 @@ to touch:
 |---|---|---|
 | Transport | Unix socket to the scheduler, same container | HTTPS to the admin API, any host |
 | Credential | filesystem permissions on the socket | one scoped `pa_…` bearer token |
-| Database | imported the whole `publoader` package | **none** — no `DATABASE_URL`, not on the database network |
-| Docker | mounted `docker.sock` to start/stop/restart | **none** — cannot touch the host |
-| MangaDex | shared the process' MD session | **none** — cannot upload, delete or log in |
+| Database | imported the whole `publoader` package | **none**: no `DATABASE_URL`, not on the database network |
+| Docker | mounted `docker.sock` to start/stop/restart | **none**: cannot touch the host |
+| MangaDex | shared the process' MD session | **none**: cannot upload, delete or log in |
 | Attribution | none | `X-Actor: discord:<username>` on every call, recorded in the audit log |
 | Commands | prefix (`!run`) + slash | slash only |
 
@@ -26,7 +26,7 @@ the rest of this document is mostly about not giving it away.
 2. **Bot** → **Reset Token** → copy it. This is `DISCORD_BOT_TOKEN`. It is shown
    once; regenerating permanently revokes the old one.
 3. Leave every **Privileged Gateway Intent** off. The bot is slash-command only
-   and never reads message content — if you find yourself enabling Message
+   and never reads message content; if you find yourself enabling Message
    Content Intent, something has gone wrong.
 4. **OAuth2 → URL Generator**:
    - Scopes: `bot`, `applications.commands`
@@ -53,14 +53,14 @@ recovered. Put it in `BOT_API_TOKEN`.
 
 ### Do not give the bot `ADMIN_TOKEN`, and do not give it `*`
 
-`ADMIN_TOKEN` is the break-glass credential and resolves to `*` — every scope,
+`ADMIN_TOKEN` is the break-glass credential and resolves to `*`: every scope,
 including `bundles:write` (publish arbitrary code to the fleet) and
 `users:admin` (mint more tokens, delete operator accounts). A token scoped `*`
 is the same thing by another name.
 
 The bot is the component most exposed to other people's input: it sits in a chat
 server, parses arguments typed by humans, and runs on whatever host was
-convenient. Scoping it is not paperwork — it is the difference between "someone
+convenient. Scoping it is not paperwork; it is the difference between "someone
 got the bot's token and could trigger runs" and "someone got the bot's token and
 owns the platform". `/whoami` warns when the token does not look scoped.
 
@@ -128,7 +128,7 @@ a summary of the gating in force, then `discord bot connected`, then
 If the API rejects the token the process logs one `fatal` line naming the
 problem and exits 78 (`EX_CONFIG`, "restarting will not help"). Compose's
 `restart: unless-stopped` will restart it anyway, so the symptom of a bad token
-is a restart loop — read the first `fatal` line, not the last.
+is a restart loop; read the first `fatal` line, not the last.
 
 If the core is merely unreachable at startup the bot starts anyway: an outage is
 exactly when you want the bot online to tell you about it.
@@ -151,7 +151,7 @@ Every command is classified by how much damage it can do:
 | **mutate** | admin **and** allowed channel | `/run`, `/pause`, `/extensions disable`, `/schedule set` |
 | **destructive** | admin, allowed channel, **and** an explicit `confirm: true` | `/run mode:CLEAN`, `/workers revoke`, `/untracked approve`, `/enroll` |
 
-Evaluated in order — guild, then channel, then privilege — so the message you
+Evaluated in order, guild, then channel, then privilege, so the message you
 get back names the outermost problem rather than a symptom of it.
 
 ### It fails closed. The legacy bot failed open.
@@ -175,12 +175,12 @@ useful during setup. This is deliberate and tested
 
 ### Where replies go
 
-Anything operational or secret is **ephemeral** — visible only to the person who
+Anything operational or secret is **ephemeral**: visible only to the person who
 ran it. `/status`, `/ping`, `/run`, `/pause` and `/resume` reply publicly,
 because those are announcements the channel should see.
 
 The one true secret, the worker enrollment token from `/enroll`, is sent by
-**DM** and never posted to a channel at all — not even ephemerally, since an
+**DM** and never posted to a channel at all; not even ephemerally, since an
 ephemeral message still renders in a channel that may be screen-shared. If your
 DMs are closed the bot falls back to the ephemeral reply and says so.
 
@@ -207,10 +207,10 @@ DMs are closed the bot falls back to the ephemeral reply and says so.
 | `/jobs cancel <id>` | mutate | `runs:write` | Cancel one job. |
 | `/jobs retry <id>` | mutate | `runs:write` | Replay a dead-lettered job. |
 | `/dead-letter` | read | `runs:read` | Jobs that exhausted retries or hit a permanent error. |
-| `/quarantine` | read | `runs:read` | Result envelopes rejected by schema or policy validation — the signal a worker is misbehaving. |
+| `/quarantine` | read | `runs:read` | Result envelopes rejected by schema or policy validation; the signal a worker is misbehaving. |
 | `/errors list [limit] [show]` | read | `runs:read` | One merged feed of everything that recently failed: dead-lettered jobs, failed upload tasks, quarantined submissions. The closest thing to the legacy `/logs`. Entries somebody has cleared are hidden by default and counted; `show` switches to including them or to only them. Each row prints the first eight characters of its id, which is what `clear` takes. |
-| `/errors clear [id] [all] [note]` | mutate | `runs:write` | Mark failures as read and dealt with so they leave the list. `id` is a full id or a leading prefix; `all: true` clears everything outstanding. Nothing is deleted — the jobs, tasks and submissions keep their state, and anything that fails again comes back on its own. `note` records why, for whoever reviews cleared entries later. |
-| `/errors restore [id] [all]` | mutate | `runs:write` | Put cleared entries back in the list — the undo, and the way to re-open something that turned out not to be fixed. |
+| `/errors clear [id] [all] [note]` | mutate | `runs:write` | Mark failures as read and dealt with so they leave the list. `id` is a full id or a leading prefix; `all: true` clears everything outstanding. Nothing is deleted; the jobs, tasks and submissions keep their state, and anything that fails again comes back on its own. `note` records why, for whoever reviews cleared entries later. |
+| `/errors restore [id] [all]` | mutate | `runs:write` | Put cleared entries back in the list: the undo, and the way to re-open something that turned out not to be fixed. |
 
 Each `/run` uses the Discord interaction id as its idempotency key, so a
 double-submit or a Discord-side retry cannot produce two runs. The reply says
@@ -227,14 +227,14 @@ double-submit or a Discord-side retry cannot produce two runs. The reply says
 
 ### Upload queue
 
-The uploader's task queue — the legacy `queue peek` / `queue clear` pair, with
+The uploader's task queue; the legacy `queue peek` / `queue clear` pair, with
 the bulk flush deliberately left out.
 
 | Command | Class | Scope | What it does |
 |---|---|---|---|
 | `/queue list [kind] [state] [limit]` | read | `runs:read` | Upload tasks newest first, plus depth totals by kind and state. |
 | `/queue retry <id>` | mutate | `runs:write` | Requeue a `FAILED` or `DEAD_LETTER` task with a fresh attempt budget. |
-| `/queue cancel <id> confirm:true` | destructive | `runs:write` | Abandon a task. **The chapter is never sent to MangaDex.** A `LEASED` task cannot be cancelled — wait for the lease or requeue stale ones first. |
+| `/queue cancel <id> confirm:true` | destructive | `runs:write` | Abandon a task. **The chapter is never sent to MangaDex.** A `LEASED` task cannot be cancelled; wait for the lease or requeue stale ones first. |
 | `/queue requeue-stale` | mutate | `runs:write` | Sweep leases held by a dead uploader back onto the queue, without waiting for its timer. |
 
 There is no bulk flush. The legacy `queue clear` could empty a queue of
@@ -248,7 +248,7 @@ purpose.
 | `/mdauth status` | read | `settings:write` | Whether an access and refresh token are stored, and when the access token goes stale. Never shows the tokens. |
 | `/mdauth clear confirm:true` | destructive | `settings:write` | Forget the stored session so the next MangaDex call re-authenticates from the configured credentials. |
 
-An **expired access token is normal** — it is refreshed on demand, and
+An **expired access token is normal**: it is refreshed on demand, and
 `/mdauth status` says so rather than implying an outage. Only clear the session
 when refreshing itself keeps failing. Clearing does **not** revoke anything on
 MangaDex's side; that is a credential rotation (`docs/operations.md`).
@@ -269,10 +269,10 @@ as the legacy `force_login` without a chat command that handles a password.
 | `/tracked list <extension>` | read | `extensions:read` | The external-id → MangaDex-id mapping. |
 | `/tracked set <extension> <manga-id> <md-manga-id>` | mutate | `extensions:write` | Add or repoint a mapping. |
 | `/tracked remove <extension> <manga-id>` | mutate | `extensions:write` | Stop tracking. Does not touch MangaDex. |
-| `/reconcile [extension]` | read | `chapters:read` | How many chapters are already marked unavailable on MangaDex, or deleted, that the archives do not know about. **Reports only** — applying is closed to api tokens, so recording them is `padmin chapters reconcile --apply` or the dashboard. |
+| `/reconcile [extension]` | read | `chapters:read` | How many chapters are already marked unavailable on MangaDex, or deleted, that the archives do not know about. **Reports only**; applying is closed to api tokens, so recording them is `padmin chapters reconcile --apply` or the dashboard. |
 
 `/extensions list` shows **published bundles**, not files on disk. An extension
-in the repo that was never published does not appear — that is intended.
+in the repo that was never published does not appear; that is intended.
 
 ### Untracked series
 
@@ -325,7 +325,7 @@ plus the renamed `/load`, `/unload`, `/force`, `/clean`, `/history` and
 `/removal`. Each reply says what to do instead.
 
 `/queue` and `/mdauth` used to be on that list and are now real commands (see
-above) — `src/core/api/routes/ops.ts` closed those gaps. `/logs` points
+above): `src/core/api/routes/ops.ts` closed those gaps. `/logs` points
 at `/errors list` for failures and at `docker compose logs` for process output,
 since container logs describe processes rather than platform state.
 
@@ -341,7 +341,7 @@ Full rationale per command: `docs/ipc-to-api-mapping.md`.
 - **Rate limits.** The admin API rate-limits per IP and answers 429; the bot
   reports the wait rather than hammering. Do not script a loop against it.
 - **Logs** are structured JSON on stdout (pino), like every other service.
-  Denied commands log at `warn` with the user, channel and reason — that log is
+  Denied commands log at `warn` with the user, channel and reason; that log is
   the only place a pattern of attempts is visible.
 - **Adding a command.** Add a `BotCommand` to `src/bot/commands.ts`
   with its `sensitivity`, add the API call to `apiClient.ts` with the scope the

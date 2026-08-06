@@ -9,7 +9,7 @@
  * (core/mapsync) and by nothing else.
  *
  * It shares repoMeta.ts's headers, body cap and error vocabulary rather than
- * growing a second one — an operator reading "GITHUB_TOKEN may lack access to
+ * growing a second one; an operator reading "GITHUB_TOKEN may lack access to
  * this repo" should get the same sentence whichever call produced it.
  */
 import {
@@ -156,7 +156,7 @@ export const githubContents: GithubContentsClient = {
     });
     if (res.status === 409 || res.status === 422) {
       // The blob sha we read is stale: someone pushed between the read and the
-      // write. Nothing is retried here — the next run reads the new file and
+      // write. Nothing is retried here; the next run reads the new file and
       // decides again, which is the whole point of making this idempotent.
       throw new GithubApiError(
         `${req.path} in ${repo} changed while it was being written (HTTP ${res.status}); it will be retried on the next sync`,

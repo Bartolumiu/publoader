@@ -27,23 +27,23 @@ Two independently deployed things that only ever meet over HTTPS.
 
 **Core** (`docker/core/`) runs on your host and holds everything
 sensitive: PostgreSQL, the MangaDex account, the Discord webhooks, the admin
-token. Five containers — `postgres`, `core-api`, `core-scheduler`,
-`core-processor`, `core-uploader` — plus a one-shot `migrate` and the
+token. Five containers, `postgres`, `core-api`, `core-scheduler`,
+`core-processor`, `core-uploader`, plus a one-shot `migrate` and the
 `cloudflared` tunnel. Nothing is published on the host; the tunnel is the only
 way in.
 
 **Workers** (`docker/worker/`) run anywhere, including on machines you
 do not control. One container that long-polls the core API for a job, runs an
 extension under Node's permission model, and posts back a result envelope. A worker holds
-a single revocable token and nothing else. It cannot upload to MangaDex — only
+a single revocable token and nothing else. It cannot upload to MangaDex; only
 `core-uploader` can, and only after the result has passed validation, dedup and
 audit. See [security-trust-model.md](security-trust-model.md) for the full trust model.
 
 **There are no configuration files to deploy.** No `config.ini`, no
 `config.json`, and no compose service bind-mounts one. Deployment configuration
-is environment variables (or Docker secrets — `config.ts` reads any `VAR` from
-`VAR_FILE`), and runtime configuration — tracked manga, per-extension override
-options, schedules, pause state — lives in Postgres and is changed through the
+is environment variables (or Docker secrets, `config.ts` reads any `VAR` from
+`VAR_FILE`), and runtime configuration, tracked manga, per-extension override
+options, schedules, pause state; lives in Postgres and is changed through the
 admin API. This is the main operational difference from the legacy stack: there
 is no file on the core host to edit, and nothing to keep in sync across hosts.
 
@@ -60,11 +60,11 @@ repository today; each fails the build loudly if one ever goes missing:
 
 | What | Why | If missing |
 | --- | --- | --- |
-| `pnpm-lock.yaml` | Images install with `--frozen-lockfile` so the dependency tree is the reviewed one | `pnpm install`, commit the lockfile — do not drop the flag |
+| `pnpm-lock.yaml` | Images install with `--frozen-lockfile` so the dependency tree is the reviewed one | `pnpm install`, commit the lockfile; do not drop the flag |
 | `prisma/migrations/` | The `migrate` service runs `prisma migrate deploy`, which applies committed migrations and never infers a schema | `pnpm prisma migrate dev --name init` against a scratch database, commit the result |
 | `runner-node/` | The worker image ships `runner.mjs`, which executes extension API v2 bundles | Part of the worker runtime |
 
-The base image is pinned by digest in all three Dockerfiles — the multi-arch
+The base image is pinned by digest in all three Dockerfiles; the multi-arch
 index digest of `node:24-bookworm-slim` as of 2026-07-29, so builds are
 reproducible on amd64 and arm64 alike. Refresh it deliberately (on a schedule,
 and whenever a base CVE lands) rather than letting a tag drift:
@@ -110,13 +110,13 @@ openssl rand -base64 48   # ADMIN_TOKEN
 ```
 
 plus `MANGADEX_USERNAME` / `MANGADEX_PASSWORD` / `MANGADEX_CLIENT_ID` /
-`MANGADEX_CLIENT_SECRET`, and `TUNNEL_TOKEN` (see the next section — bring the
+`MANGADEX_CLIENT_SECRET`, and `TUNNEL_TOKEN` (see the next section; bring the
 tunnel up first if you would rather not restart later).
 
 `ADMIN_TOKEN` is a root-equivalent credential: it can trigger runs, publish
 bundles, mint worker tokens and revoke workers. If it is unset the entire admin
 API answers 503, which is the intended fail-closed behaviour. For more than a
-single-operator host, use Docker secrets instead — every variable is also
+single-operator host, use Docker secrets instead; every variable is also
 accepted as `<VAR>_FILE`, and the commented `secrets:` block at the bottom of
 `docker-compose.yml` shows the wiring.
 
@@ -129,7 +129,7 @@ docker compose -f docker/core/docker-compose.yml ps
 ```
 
 Expected: `postgres` healthy, `migrate` exited 0, four core services up,
-`cloudflared` up. Startup order is enforced — `migrate` waits for Postgres to
+`cloudflared` up. Startup order is enforced; `migrate` waits for Postgres to
 accept connections, and the four services wait for `migrate` to exit
 successfully, so the stack cannot come up half-migrated.
 
@@ -141,7 +141,7 @@ docker compose -f docker/core/docker-compose.yml exec core-api \
 ```
 
 `/healthz` means the process is alive; `/readyz` additionally means Postgres is
-reachable. Only `/healthz` is the container healthcheck — a database blip must
+reachable. Only `/healthz` is the container healthcheck; a database blip must
 not cause an orchestrator to kill an otherwise healthy API.
 
 ## First run
@@ -154,7 +154,7 @@ export ADMIN_TOKEN='…the value from .env…'
 auth=(-H "authorization: Bearer $ADMIN_TOKEN" -H 'x-actor: your-name')
 ```
 
-`x-actor` is optional but recorded in the audit log — set it to something that
+`x-actor` is optional but recorded in the audit log; set it to something that
 identifies you, because "who paused the platform" is a question you will ask.
 
 Publish an extension bundle. The API expects the zip itself as the body, reads
@@ -173,7 +173,7 @@ there are no config files to deploy alongside it:
 - `manga_id_map.json` in the bundle becomes `TrackedManga` rows (inserted with
   `skipDuplicates`, so re-publishing adds new titles and disturbs nothing).
 - `override_options.json` becomes the extension's `ExtensionConfig` row
-  **create-only** — once it exists, the database wins and a re-publish will not
+  **create-only**: once it exists, the database wins and a re-publish will not
   overwrite operator edits. Change options through the admin API, not by
   editing a bundle.
 
@@ -188,7 +188,7 @@ curl -s "$ADMIN/api/v1/admin/stats"      "${auth[@]}"   # queue depths, fleet
 curl -s "$ADMIN/api/v1/admin/audit"      "${auth[@]}"   # everything so far
 ```
 
-Nothing will run until at least one worker is enrolled — the scheduler will
+Nothing will run until at least one worker is enrolled; the scheduler will
 happily create jobs, and they will sit `PENDING` until a worker leases them.
 Enrol a worker before triggering a run:
 
@@ -221,7 +221,7 @@ internet so that workers on other hosts can reach it, which also means the
 internet can reach it.
 
 **Block the observability endpoints** (Security → WAF → Custom rules). None of
-them requires authentication — that is intentional, because they are meant for
+them requires authentication; that is intentional, because they are meant for
 the internal network only (see `src/core/api/server.ts`), and `/metrics` leaks
 queue depths, fleet size and per-extension failure rates.
 
@@ -242,7 +242,7 @@ queue depths, fleet size and per-extension failure rates.
 → Block
 ```
 
-The dashboard now answers `/` as well as `/dash`, so the root must be allowed —
+The dashboard now answers `/` as well as `/dash`, so the root must be allowed;
 see "Dashboard" below. Those are the only browser-facing paths in the system.
 
 **Rate limit enrollment** (Security → WAF → Rate limiting rules).
@@ -269,7 +269,7 @@ Two settings worth checking while you are in the dashboard:
 - **Do not enable Zero Trust Access on `/api/v1/worker/*`.** Workers
   authenticate with bearer tokens and cannot complete an interactive login. You
   *can* put Access with a service token in front of `/api/v1/admin/*`, and it is
-  a good idea — it makes the admin token the second factor rather than the only
+  a good idea; it makes the admin token the second factor rather than the only
   one.
 - The lease endpoint long-polls for up to `LEASE_POLL_WAIT_SECONDS` (25s by
   default). Keep it comfortably below Cloudflare's ~100s idle timeout; if you
@@ -277,7 +277,7 @@ Two settings worth checking while you are in the dashboard:
 
 ## Dashboard
 
-`core-api` serves the operator dashboard at the domain root — `https://publoader.ardax.dev/`
+`core-api` serves the operator dashboard at the domain root; `https://publoader.ardax.dev/`
 lands on the sign-in page, and `/dash` is kept as an alias. Same origin as the
 API, so there is no second deployment, no CORS, and no build step. The assets
 are static HTML/CSS/JS read once at boot from
@@ -287,7 +287,7 @@ are static HTML/CSS/JS read once at boot from
 Hostname for `publoader.ardax.dev` points at `core-api:8100` and nothing else;
 retire the old dashboard route and container (`docs/migration-guide.md`,
 decommission checklist). Everything the dashboard can do, it does through
-`/api/v1/admin/*` — there is no privileged back channel.
+`/api/v1/admin/*`: there is no privileged back channel.
 
 ### Accounts
 
@@ -308,7 +308,7 @@ credentials yet. It is seeded **without** a password, so first sign-in is:
 
 1. Open `/`, choose "Use the admin token instead", sign in with `ADMIN_TOKEN`.
    (With `RESEND_API_KEY` configured you can instead enter the owner address
-   and click **Email me a sign-in link** — the seeded owner is a real account,
+   and click **Email me a sign-in link**: the seeded owner is a real account,
    so the link reaches it.)
 2. Go to **Users**, click **Set password** on the owner row (minimum 12
    characters, scrypt-hashed at rest).
@@ -364,9 +364,9 @@ SESSION_COOKIE_SECURE=true   # optional; see below
 SESSION_SECRET=$(openssl rand -base64 48)
 ```
 
-`SESSION_SECRET` signs the short-lived OAuth state cookie. It is optional —
+`SESSION_SECRET` signs the short-lived OAuth state cookie. It is optional,
 without it the key is derived from `ADMIN_TOKEN` via HKDF and core-api warns at
-boot — but set it, or rotating `ADMIN_TOKEN` will break in-flight Discord
+boot, but set it, or rotating `ADMIN_TOKEN` will break in-flight Discord
 logins.
 
 The `Secure` cookie attribute is set when the request arrives with
@@ -379,7 +379,7 @@ Create an application at <https://discord.com/developers/applications>, then
 under **OAuth2**:
 
 - **Redirects**: add `https://publoader.ardax.dev/api/v1/admin/oauth/discord/callback`.
-  It must match `DASH_PUBLIC_URL` exactly — Discord compares the string, and a
+  It must match `DASH_PUBLIC_URL` exactly; Discord compares the string, and a
   trailing slash or an `http://` scheme is a different URI.
 - Copy the **Client ID** and **Client Secret**.
 
@@ -395,15 +395,15 @@ either variable blank and the "Sign in with Discord" button does not render.
 
 How a Discord login is matched, in order:
 
-1. **Already linked** — the `discordId` is on an account: sign in. An email
+1. **Already linked**: the `discordId` is on an account: sign in. An email
    change on Discord's side cannot repoint the login.
-2. **Verified email matches an account** — link the Discord id to it and sign
+2. **Verified email matches an account**: link the Discord id to it and sign
    in. *Unverified* email never matches, because it is attacker-choosable.
-3. **Neither** — if `dash_signups_enabled` is on, create an unapproved `ADMIN`
+3. **Neither**: if `dash_signups_enabled` is on, create an unapproved `ADMIN`
    account and show "awaiting approval"; otherwise show "signups are closed".
 
 Self-signup is **off by default**. Turn it on from **Users → Self-signup**, and
-remember that it only creates accounts — an owner still has to approve each one
+remember that it only creates accounts; an owner still has to approve each one
 before it can sign in. With `RESEND_API_KEY` set, the same gate governs signup
 by email address from the sign-in page; approving such an account emails it a
 sign-in link.
@@ -434,15 +434,15 @@ Path:         (leave blank for the whole host, or "dash")
 Policy:       Allow → Emails / IdP group of your operators
 ```
 
-Do **not** put Access in front of `/api/v1/worker/*` — worker agents cannot
+Do **not** put Access in front of `/api/v1/worker/*`: worker agents cannot
 complete an interactive login. Putting it in front of all of `/api/v1/admin/*`
 also breaks the CLI and the bot unless you issue them service tokens.
 
 ### Content security
 
 The assets are served with `default-src 'self'` and no `'unsafe-inline'`, so
-there are no inline scripts, no inline event handlers, and no external origins
-— a tampered asset cannot phone home, and `connect-src 'self'` means it cannot
+there are no inline scripts, no inline event handlers, and no external origins;
+ a tampered asset cannot phone home, and `connect-src 'self'` means it cannot
 exfiltrate what it reads. `frame-ancestors 'none'` plus `X-Frame-Options: DENY`
 blocks clickjacking of the destructive buttons.
 
@@ -454,7 +454,7 @@ tag can set. Bearer clients are exempt and should not send it.
 ### Operational controls need no configuration
 
 Everything an operator does day to day is a database row reachable through the
-admin API, not an environment variable — so none of it needs a redeploy, and
+admin API, not an environment variable; so none of it needs a redeploy, and
 none of it needs a shell on a container:
 
 | Control | Where it lives | Dashboard | CLI |
@@ -470,7 +470,7 @@ none of it needs a shell on a container:
 | Role and account permissions | `role_permissions`, `admin_users.extra_scopes` / `denied_scopes` | Permissions, and Users → Permissions (OWNER only) | `padmin permissions` |
 | Worker fleet | `workers` | Workers | `padmin workers` |
 
-The environment supplies only identity and connectivity — `DATABASE_URL`,
+The environment supplies only identity and connectivity; `DATABASE_URL`,
 `ADMIN_TOKEN`, `SESSION_SECRET`, the MangaDex credentials, the tunnel token.
 Two consequences worth planning around:
 
@@ -483,7 +483,7 @@ Two consequences worth planning around:
 
 Container **logs** are the deliberate exception: they stay with the host log
 driver (`docker compose logs -f core-uploader`). Work runs in containers and on
-remote worker hosts the core cannot read, so there is no log API to expose — the
+remote worker hosts the core cannot read, so there is no log API to expose; the
 Errors view reports platform state instead.
 
 
@@ -522,7 +522,7 @@ The agent exchanges the enroll token for a permanent worker token on first
 boot and persists it to the `worker-state` volume. The enroll token is spent at
 that point and can be removed from `.env`.
 
-**Verify from the core host** — the worker should appear with a recent
+**Verify from the core host**: the worker should appear with a recent
 heartbeat:
 
 ```bash
@@ -537,7 +537,7 @@ behind NAT, on a laptop, or on a home connection with no firewall changes.
 ## Scaling to multiple workers
 
 Throughput is workers, not core services. `core-scheduler` and `core-uploader`
-must each stay at exactly one replica — the scheduler would race itself on slot
+must each stay at exactly one replica; the scheduler would race itself on slot
 creation, and MangaDex upload sessions are per-account state that two uploaders
 would clobber.
 
@@ -545,7 +545,7 @@ To add capacity, repeat the enrollment walkthrough on another host. Each worker
 needs its own enroll token and its own state volume; sharing either means
 sharing an identity, which breaks revocation.
 
-Several workers on one machine work too — copy the compose file, and give each
+Several workers on one machine work too; copy the compose file, and give each
 a distinct project name, `WORKER_NAME` and volume:
 
 ```bash
@@ -572,7 +572,7 @@ docker compose -f docker/core/docker-compose.yml pull
 docker compose -f docker/core/docker-compose.yml up -d
 ```
 
-**From a registry** — set `PUBLOADER_CORE_IMAGE` and `PUBLOADER_MIGRATE_IMAGE`
+**From a registry**: set `PUBLOADER_CORE_IMAGE` and `PUBLOADER_MIGRATE_IMAGE`
 in `.env` to a digest-pinned tag, then:
 
 ```bash
@@ -622,7 +622,7 @@ tolerated; destructive ones are not. In order of preference:
      migrate migrate resolve --applied 20260101120000_partly_applied
    ```
 
-   `migrate resolve` only edits Prisma's bookkeeping — it runs no SQL and fixes
+   `migrate resolve` only edits Prisma's bookkeeping; it runs no SQL and fixes
    no data. Reverting the actual schema change is your job, first.
 
 Never edit a migration that has already been deployed. Prisma checksums them
@@ -636,7 +636,7 @@ volume with the new image, restore.
 Three states, and the difference matters:
 
 ```bash
-# Drain: finish the current job, take no new ones. The polite one — use it
+# Drain: finish the current job, take no new ones. The polite one; use it
 # before rebooting a worker host or rolling the fleet.
 curl -sX POST "$ADMIN/api/v1/admin/workers/$WORKER_ID/drain" "${auth[@]}"
 
@@ -644,14 +644,14 @@ curl -sX POST "$ADMIN/api/v1/admin/workers/$WORKER_ID/drain" "${auth[@]}"
 curl -sX POST "$ADMIN/api/v1/admin/workers/$WORKER_ID/activate" "${auth[@]}"
 
 # Revoke: the token stops working immediately. Use it when a host is
-# compromised, gone, or no longer trusted. Not reversible — the host must
+# compromised, gone, or no longer trusted. Not reversible; the host must
 # re-enroll with a fresh token.
 curl -sX POST "$ADMIN/api/v1/admin/workers/$WORKER_ID/revoke" "${auth[@]}"
 ```
 
 A drained worker gets `204` with `x-publoader-drained` on its next lease poll
 and idles quietly rather than hammering the API. A revoked worker's in-flight
-job is not cancelled by the revocation itself — its result submission will be
+job is not cancelled by the revocation itself; its result submission will be
 rejected, and the lease will expire and be reassigned. To stop the work sooner,
 cancel the job:
 
@@ -688,7 +688,7 @@ curl -sX POST "$DEV/api/v1/admin/runs" "${dev_auth[@]}" \
 # 3. Find who leased it.
 docker compose logs worker-a worker-b | grep -i lease
 
-# 4. Kill the holder mid-job — SIGKILL, no graceful shutdown, exactly like a
+# 4. Kill the holder mid-job; SIGKILL, no graceful shutdown, exactly like a
 #    host losing power.
 docker compose kill worker-a
 
@@ -701,7 +701,7 @@ scheduler logs the expired lease, the job returns to `PENDING`, and `worker-b`
 leases it on its next poll. The job's `attempt` counter increments; it
 dead-letters only after `maxAttempts`.
 
-Then confirm nothing was double-uploaded — the mock records every write, and a
+Then confirm nothing was double-uploaded; the mock records every write, and a
 correct run commits each chapter exactly once:
 
 ```bash
@@ -717,7 +717,7 @@ Postgres is the only durable state. The named volume `pgdata` is the whole
 system: queues, leases, results, artifacts, bundles, chapter history, audit.
 Everything else is rebuildable from the repository.
 
-**Backup** — a custom-format dump, which restores selectively and compresses:
+**Backup**: a custom-format dump, which restores selectively and compresses:
 
 ```bash
 docker compose -f docker/core/docker-compose.yml exec -T postgres \
@@ -726,7 +726,7 @@ docker compose -f docker/core/docker-compose.yml exec -T postgres \
 
 Automate it daily and keep the dumps off this host. Artifacts (page images) are
 stored as bytea, so dumps grow with backlog; if size becomes a problem, dump
-`--exclude-table-data=artifacts` — they are transient and re-fetchable, unlike
+`--exclude-table-data=artifacts`: they are transient and re-fetchable, unlike
 everything else.
 
 **Restore** into an empty database:
@@ -746,7 +746,7 @@ docker compose -f docker/core/docker-compose.yml exec -T postgres \
 docker compose -f docker/core/docker-compose.yml up -d
 ```
 
-Verify the restore before trusting it — the migration history in particular,
+Verify the restore before trusting it; the migration history in particular,
 because that is what decides whether the next deploy tries to re-apply
 everything:
 
@@ -773,7 +773,7 @@ concurrency behaviours can be exercised for real.
 docker compose -f docker/dev/docker-compose.yml up -d --build
 ```
 
-You get: Postgres (tmpfs — `down` really resets), `migrate`, all four core
+You get: Postgres (tmpfs; `down` really resets), `migrate`, all four core
 services, `mock-md`, and two workers that enrol themselves automatically. The
 API is on `127.0.0.1:8100` with the admin token `dev-admin-not-a-secret`; the mock is on
 `127.0.0.1:8200`.
@@ -788,7 +788,7 @@ curl -sX POST http://127.0.0.1:8200/_test/seed -H 'content-type: application/jso
 curl -sX POST http://127.0.0.1:8200/_test/reset
 ```
 
-`_test/uploads` also lists `unrouted` requests — endpoints the client called
+`_test/uploads` also lists `unrouted` requests; endpoints the client called
 that the mock does not implement. Check it first when an e2e test fails
 mysteriously.
 
@@ -798,7 +798,7 @@ traffic from anywhere else.
 
 ## Troubleshooting
 
-**`migrate` exits non-zero, everything else stays down.** Read its logs first —
+**`migrate` exits non-zero, everything else stays down.** Read its logs first;
 this is the designed failure mode, not a bug. `No migration found in
 prisma/migrations` means the prerequisite above was skipped. A checksum
 mismatch means a deployed migration was edited.
@@ -806,7 +806,7 @@ mismatch means a deployed migration was edited.
 **`core-api` is up but `/readyz` returns 503.** Postgres is unreachable. Check
 `docker compose ps postgres` and its logs; usually a wrong `POSTGRES_PASSWORD`
 after a `.env` edit, and note that changing it does *not* change the password
-inside an existing `pgdata` volume — `ALTER USER` for that.
+inside an existing `pgdata` volume; `ALTER USER` for that.
 
 **Every admin call returns 503.** `ADMIN_TOKEN` is unset or shorter than 16
 characters. The admin API fails closed.
@@ -818,7 +818,7 @@ WAF. From the worker host:
 is matching more than intended.
 
 **Enrollment returns 403.** The token was single-use and already spent, or it
-expired, or it was revoked. Mint a fresh one — they are cheap.
+expired, or it was revoked. Mint a fresh one; they are cheap.
 
 **Jobs sit `PENDING` with idle workers.** Either the platform is paused (check
 `paused` in `/api/v1/admin/stats`, resume with
@@ -833,18 +833,18 @@ filter, and check it first if you changed it.
 
 **A service restarts in a loop with `EROFS` or a permissions error.** Something
 is writing outside `/tmp`. That is the `read_only: true` root filesystem working
-as intended — fix the write path rather than removing the flag.
+as intended; fix the write path rather than removing the flag.
 
 **The scheduler seems stuck.** It has no healthcheck (no port, no heartbeat
 file) and autoheal is deliberately absent, because autoheal requires mounting
-`docker.sock` into the stack — a much larger risk than the failure mode it
+`docker.sock` into the stack; a much larger risk than the failure mode it
 fixes. Detect a wedged scheduler with the scheduler-lag metric on
 `/metrics`, and restart it by hand.
 
 ## Discord bot
 
 Optional, and independent of everything above: the stack runs fine without it.
-Full setup, the command reference and the gating model are in `docs/bot.md` —
+Full setup, the command reference and the gating model are in `docs/bot.md`:
 this section is the deployment half.
 
 The `publoader-bot` service runs the same core image with a different
@@ -876,13 +876,13 @@ platform is the scope list on its token.
    ```
 
    That is the `discord-bot` preset plus `settings:write`, which is what makes
-   `/pause` and `/resume` work — the single most useful thing a chat bot does
+   `/pause` and `/resume` work; the single most useful thing a chat bot does
    during an incident. Add `extensions:write`, `workers:write` or
    `enroll:write` if you want the commands they unlock (`docs/bot.md` §2).
 
    **Never put `ADMIN_TOKEN` in `BOT_API_TOKEN`.** `ADMIN_TOKEN` resolves to
-   `*`, which includes `bundles:write` — publishing arbitrary code to the whole
-   worker fleet — and `users:admin`. The token is printed once and cannot be
+   `*`, which includes `bundles:write`, publishing arbitrary code to the whole
+   worker fleet, and `users:admin`. The token is printed once and cannot be
    recovered.
 
 3. Add to `docker/core/.env` (annotated in `.env.example`):
@@ -918,7 +918,7 @@ platform is the scope list on its token.
 ### Rotating the bot's token
 
 Create the replacement, update `BOT_API_TOKEN`, redeploy, then revoke the old
-one — in that order, so the bot is never without a working credential:
+one; in that order, so the bot is never without a working credential:
 
 ```
 ... tokens create --name discord-bot-2 --scopes <same list>
@@ -930,8 +930,8 @@ docker compose -f docker/core/docker-compose.yml up -d publoader-bot
 ### Troubleshooting the bot
 
 **Restart loop, with one `fatal` line about the token.** The API rejected
-`BOT_API_TOKEN` (or it is unset). The process exits 78 — `EX_CONFIG`, meaning
-restarting will not help — but `restart: unless-stopped` restarts it anyway, so
+`BOT_API_TOKEN` (or it is unset). The process exits 78, `EX_CONFIG`, meaning
+restarting will not help, but `restart: unless-stopped` restarts it anyway, so
 read the *first* fatal line rather than the last. Check the token was not
 revoked and that `CORE_URL` points at the right deployment.
 
@@ -941,7 +941,7 @@ client secret, public key and OAuth token are all different values and none of
 them work. Surrounding quotes are stripped automatically.
 
 **Commands do not appear in Discord.** With `DISCORD_GUILD_ID` set they register
-instantly, so this means registration failed — check the log for `failed to
+instantly, so this means registration failed; check the log for `failed to
 register slash commands`, and that the invite included the
 `applications.commands` scope. Without `DISCORD_GUILD_ID` the commands are
 global and can take up to an hour to propagate; the bot warns about this at
@@ -952,7 +952,7 @@ token lacks that grant. The reply also lists the scopes it does hold. Mint a
 replacement with the extra scope (see above) rather than widening to `*`.
 
 **A command answers `:lock:` with a reason.** Discord-side gating, not the API.
-The reason names the variable to set — usually `DISCORD_ADMIN_USERS` or
+The reason names the variable to set; usually `DISCORD_ADMIN_USERS` or
 `DISCORD_ALLOWED_CHANNELS`. See `docs/bot.md` §4.
 
 **The bot cannot reach Discord.** It carries the same public-resolver override
@@ -973,7 +973,7 @@ publoader-admin bundle publish src/mangaplus --source-commit "$(git rev-parse HE
 publoader-admin extensions list
 ```
 
-**From CI** — the recommended arrangement. A GitHub Actions workflow runs that
+**From CI**: the recommended arrangement. A GitHub Actions workflow runs that
 same command with a token minted for nothing else:
 
 ```bash
@@ -984,12 +984,12 @@ The build happens on the runner, which already has a checkout and a package
 manager, and core-api needs no GitHub credential and no compiler. Workflow in
 `docs/webhooks.md` §6.
 
-**From a GitHub push webhook** — the zero-CI option. `POST /webhook` verifies an
+**From a GitHub push webhook**: the zero-CI option. `POST /webhook` verifies an
 HMAC, downloads the repo at the pushed commit, and publishes a bundle per changed
 extension. It puts a GitHub token and esbuild inside core-api, cannot install
 third-party dependencies, and inherits GitHub's ~10-second delivery timeout (so a
 slow-but-successful delivery can be logged red). Set it up only if you have no
-CI, and read `docs/webhooks.md` first — including §6, which argues against it.
+CI, and read `docs/webhooks.md` first; including §6, which argues against it.
 
 Note what none of these do: **core itself is never deployed this way.** A push to
 the core repo is acknowledged and does nothing. Core is an image, rolled out with

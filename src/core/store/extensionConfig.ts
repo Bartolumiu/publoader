@@ -14,8 +14,8 @@ import type { OverrideOptionsLike } from "../processor/dedupe.js";
  *                                                   and it must be a real one)
  *
  * Everything else in the dict is extension-private (mangaplus's title regexes,
- * `num2words`, `no_chapters`, …) and stays in `extension_configs.override_options`
- * — see the model comment in schema.prisma.
+ * `num2words`, `no_chapters`, …) and stays in `extension_configs.override_options`:
+ * see the model comment in schema.prisma.
  *
  * This store is the single call site for all of it: `load` returns the exact
  * `OverrideOptionsLike` shape core/processor/dedupe.ts already consumes, so the
@@ -134,9 +134,9 @@ export class ExtensionConfigStore {
   /**
    * Replace an extension's whole override-options document.
    *
-   * Accepts the legacy dict verbatim — that is what an operator has to hand,
+   * Accepts the legacy dict verbatim; that is what an operator has to hand,
    * what a bundle's override_options.json contains, and what the admin API has
-   * always taken — splits the three modelled relations out into their tables,
+   * always taken; splits the three modelled relations out into their tables,
    * and keeps the rest as the free-form blob.
    *
    * Rows the constraints refuse are reported, not thrown: a document with one

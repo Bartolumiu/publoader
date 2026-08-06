@@ -15,7 +15,7 @@ export const EnvelopeError = z
 
 /**
  * The normalized result a worker submits for one job (whole extension run or
- * one segment). Workers never write to the database — this envelope is the
+ * one segment). Workers never write to the database; this envelope is the
  * ONLY way results enter the system, and it is validated strictly.
  */
 export const ResultEnvelope = z
