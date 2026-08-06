@@ -31,18 +31,13 @@ import {
 /**
  * Turns committed result envelopes into MangaDex work.
  *
- * This is the TypeScript port of `publoader/extension_uploader.py`'s
- * ExtensionUploader.upload_chapters plus the dupe sweep from
- * `publoader/dupes_checker.py`. It runs entirely inside the core: workers
- * never learn MangaDex credentials, they only report what a publisher
- * currently offers, and every upload/edit/delete decision is made here against
- * the live MangaDex state.
+ * Runs entirely inside the core: workers never learn MangaDex credentials, they
+ * only report what a publisher currently offers, and every upload/edit/delete
+ * decision is made here against the live MangaDex state.
  *
- * Idempotency: processing a run twice is harmless and expected. Task
- * enqueueing is ON CONFLICT DO NOTHING on (kind, dedupeKey), bookkeeping is
- * upserts, and the run is only flipped to PROCESSED at the very end. A crash
- * mid-run therefore replays cleanly on the next tick — at worst some tasks are
- * already queued and the second pass is a no-op for them.
+ * Processing a run twice is harmless and expected. Task enqueueing is ON
+ * CONFLICT DO NOTHING on (kind, dedupeKey), bookkeeping is upserts, and the run
+ * only flips to PROCESSED at the end, so a crash mid-run replays cleanly.
  */
 
 interface ClaimedRun {
@@ -58,9 +53,9 @@ export interface MergedResults {
   allChapters: Chapter[] | null;
   untrackedManga: MangaRecord[];
   /**
-   * As reported by the workers. ADVISORY ONLY — the database is the source of
-   * truth for both of these and processRun replaces them before use. A worker
-   * runs a pinned bundle whose view of configuration can be arbitrarily stale.
+   * As reported by the workers. Advisory only: the database is the source of
+   * truth and processRun replaces these before use, because a worker runs a
+   * pinned bundle whose view of configuration can be arbitrarily stale.
    */
   trackedMangadexIds: string[];
   overrideOptions: OverrideOptionsLike;
@@ -84,7 +79,7 @@ export class RunProcessor {
   private readonly tasks: UploadTaskStore;
   private readonly settings: SettingsStore;
   private readonly config: ExtensionConfigStore;
-  /** manga id -> title; the replacement for the manga_data.json local cache. */
+  /** manga id to title. */
   private readonly mangaNames = new Map<string, string>();
   /** Per-run aggregate cache: volume backfill and the dupe sweep share it. */
   private aggregates = new Map<string, unknown>();
@@ -106,15 +101,12 @@ export class RunProcessor {
   }
 
   /**
-   * The per-manga update report the Python version sent.
+   * The per-manga update report, sent where the plan is decided rather than
+   * after a successful upload: a channel that only hears about completed
+   * uploads cannot tell "nothing new" from "the uploader is stuck".
    *
-   * Fired here, where the plan is decided, rather than after a successful
-   * upload — "To Upload" is an intention, and a channel that only hears about
-   * completed uploads cannot tell the difference between "nothing new" and
-   * "the uploader is stuck".
-   *
-   * Failures are swallowed with a warning on purpose: a Discord outage must not
-   * fail a run whose real work (queueing the uploads) already succeeded.
+   * Failures are swallowed with a warning so a Discord outage cannot fail a run
+   * whose real work already succeeded.
    */
   private async reportUpdates(
     extension: string,
@@ -122,8 +114,8 @@ export class RunProcessor {
     decision: { toUpload: Chapter[]; toEdit: { chapter: Chapter }[]; skipped: Chapter[] },
   ): Promise<void> {
     if (!this.notifier?.enabled) return;
-    // Nothing decided means nothing to say; Python sent no embed for a manga it
-    // had no news about, and a per-run heartbeat would drown the channel.
+    // Nothing decided means nothing to say; a per-manga heartbeat would drown
+    // the channel.
     if (decision.toUpload.length === 0 && decision.toEdit.length === 0) return;
 
     try {
@@ -143,11 +135,9 @@ export class RunProcessor {
   }
 
   /**
-   * The three run-level embeds Python sent per extension: the untracked series
-   * it found, and either "Found N chapters" or "No new updates found".
-   *
-   * Swallows failures for the same reason reportUpdates does — a Discord outage
-   * must not fail a run whose real work succeeded.
+   * The run-level embeds per extension: the untracked series it found, and
+   * either "Found N chapters" or "No new updates found". Swallows failures for
+   * the same reason reportUpdates does.
    */
   private async reportRunSummary(
     extension: string,
@@ -194,10 +184,9 @@ export class RunProcessor {
         // Deliberately left in INGESTING: the next tick retries, and every
         // effect this run may already have had is idempotent.
         this.log.error({ err, runId: run.id, extension: run.extension }, "run processing failed");
-        // Python's `Error in extensions.{name}` embed. A run that keeps failing
-        // is otherwise completely silent in Discord — it never reaches the
-        // "Found N chapters" line, so the channel just shows nothing and the
-        // absence reads as "no updates today".
+        // A run that keeps failing is otherwise silent in Discord: it never
+        // reaches the "Found N chapters" line, and the absence reads as "no
+        // updates today".
         await this.reportRunError(run.extension, err);
       }
     }
@@ -270,10 +259,8 @@ export class RunProcessor {
 
     await this.persistUntrackedManga(run.extension, merged.untrackedManga, log);
 
-    // The run-level report Python sent around each extension: what turned up,
-    // and how much of it. Without these the channel only ever hears about
-    // individual uploads, which says nothing on a run that found nothing — the
-    // case where an operator most wants to know the run happened at all.
+    // Without this the channel only hears about individual uploads, which says
+    // nothing on a run that found nothing.
     await this.reportRunSummary(run.extension, merged.untrackedManga, merged.updatedChapters.length);
 
     const updatedByManga = groupByMdManga(merged.updatedChapters);
@@ -284,8 +271,7 @@ export class RunProcessor {
     applyMangaNames(updatedByManga, this.mangaNames);
     if (allByManga) applyMangaNames(allByManga, this.mangaNames);
 
-    // Accumulates every MangaDex chapter seen this run, keyed by manga — the
-    // equivalent of ExtensionUploader.chapters_on_md.
+    // Every MangaDex chapter seen this run, keyed by manga.
     const chaptersOnMdByManga = new Map<string, MdChapter[]>();
     const totals = { upload: 0, edit: 0, skip: 0, remove: 0 };
 
@@ -305,10 +291,8 @@ export class RunProcessor {
         updatedChapters,
         allMangaChapters: allByManga === null ? null : (allByManga.get(mangaId) ?? []),
         chaptersOnMd,
-        // Uploads happen asynchronously off the UploadTask queue, so nothing
-        // has been posted to MangaDex by the time this run is processed. The
-        // Python equivalent (current_uploaded_chapters) was likewise empty
-        // whenever the uploader ran out-of-process.
+        // Uploads happen asynchronously off the UploadTask queue, so nothing has
+        // been posted to MangaDex by the time this run is processed.
         postedMdUpdates: [],
         overrideOptions: merged.overrideOptions,
         languages: merged.languages,
@@ -432,18 +416,15 @@ export class RunProcessor {
   // -- configuration (database is the source of truth) ----------------------
 
   /**
-   * Override options as the operator has them, NOT as the worker reported
-   * them. A worker executes a pinned bundle and its copy of the config can be
-   * arbitrarily old; worse, override options decide what counts as a duplicate
-   * and which languages may stay on MangaDex, so taking them from worker
-   * output would let a compromised worker steer deletions.
+   * Override options as the operator has them, not as the worker reported them.
+   * A worker's copy of the config can be arbitrarily old, and override options
+   * decide what counts as a duplicate and which languages may stay on MangaDex,
+   * so taking them from worker output would let a compromised worker steer
+   * deletions.
    *
-   * The three relations the decision logic reads are typed tables now, so there
-   * is nothing left to validate here: a row that exists is a row the write path
-   * already accepted (an alias with exactly one master, a MangaDex language code
-   * from the allowlist). The previous safeParse-or-drop-everything behaviour
-   * could discard a whole extension's overrides over one bad key, which meant
-   * silently reverting to "no series is exempt from the removal pass".
+   * The three relations the decision logic reads are typed tables, so a row
+   * that exists is one the write path already accepted and nothing needs
+   * validating here.
    */
   private async loadOverrideOptions(extension: string): Promise<OverrideOptionsLike> {
     return this.config.loadForProcessor(extension);
@@ -451,11 +432,11 @@ export class RunProcessor {
 
   /**
    * The tracked MangaDex manga for this extension: everything in tracked_manga
-   * plus whatever the worker reported. The union matters in both directions —
-   * the database may hold titles auto-created after the worker started, and
-   * the worker may know of manga that have not been recorded yet. Anything
-   * missing from this set is treated as untracked and its chapters removed, so
-   * it errs towards including too much.
+   * plus whatever the worker reported. The union matters in both directions:
+   * the database may hold titles auto-created after the worker started, and the
+   * worker may know of manga not recorded yet. Anything missing from this set
+   * is treated as untracked and its chapters removed, so it errs towards
+   * including too much.
    */
   private async authoritativeTrackedIds(
     extension: string,
@@ -525,7 +506,7 @@ export class RunProcessor {
     return aggregate;
   }
 
-  /** _get_manga_data_md: titles for manga ids we have not seen before. */
+  /** Titles for manga ids we have not seen before. */
   private async resolveMangaNames(ids: string[]): Promise<void> {
     const missing = [...new Set(ids)].filter((id) => id && !this.mangaNames.has(id));
     for (let i = 0; i < missing.length; i += 100) {
@@ -538,16 +519,14 @@ export class RunProcessor {
   // -- writes ---------------------------------------------------------------
 
   /**
-   * update_database: the canonical record of what this extension has on
-   * MangaDex. Chapters without an md chapter id are skipped — there is nothing
-   * to key them on, exactly as in Python.
+   * The canonical record of what this extension has on MangaDex. Chapters
+   * without an md chapter id are skipped: there is nothing to key them on.
    */
   private async recordUploaded(chapters: Chapter[], extension: string): Promise<void> {
     for (const chapter of chapters) {
       if (!chapter.mdChapterId) continue;
 
-      // The run's extension is authoritative over whatever the envelope named,
-      // as it was before these fields became columns.
+      // The run's extension is authoritative over whatever the envelope named.
       const columns = { ...uploadedChapterColumns(chapter), extension };
       await this.prisma.uploadedChapter.upsert({
         where: { mdChapterId: chapter.mdChapterId },
@@ -568,10 +547,9 @@ export class RunProcessor {
   }
 
   /**
-   * enqueue_chapter_removal: route chapters that should leave MangaDex to
-   * either the hard-delete queue or the "replace with an unavailable card"
-   * queue, and drop them from the uploaded bookkeeping so nothing re-queues
-   * them later.
+   * Route chapters that should leave MangaDex to either the hard-delete queue
+   * or the "replace with an unavailable card" queue, and drop them from the
+   * uploaded bookkeeping so nothing re-queues them later.
    */
   private async enqueueRemovals(
     mdChapters: MdChapter[],
@@ -605,15 +583,9 @@ export class RunProcessor {
   // -- cleanup passes -------------------------------------------------------
 
   /**
-   * find_untracked_md_manga: chapters published under our group for a manga
-   * the extension no longer tracks.
-   *
-   * Deviation: the Python original compared chapter dicts against a list of
-   * manga ids, so the condition was never true and the pass never removed
-   * anything. The intent — visible in its log message and its call to
-   * enqueue_chapter_removal — is implemented here. In practice the candidate
-   * set is tiny, because every manga reached in this pass came from the
-   * extension's own updates.
+   * Chapters published under our group for a manga the extension no longer
+   * tracks. The candidate set is small in practice, because every manga reached
+   * here came from the extension's own updates.
    */
   private async removeUntrackedManga(
     chaptersOnMdByManga: Map<string, MdChapter[]>,
@@ -639,9 +611,8 @@ export class RunProcessor {
   }
 
   /**
-   * remove_chapters_if_not_external (clean runs only): tracked manga for which
-   * the publisher listed no chapters at all, but which still have chapters on
-   * MangaDex under our group.
+   * Clean runs only: tracked manga for which the publisher listed no chapters
+   * at all, but which still have chapters on MangaDex under our group.
    */
   private async removeMangaWithoutExternalChapters(
     trackedIds: string[],
@@ -671,9 +642,8 @@ export class RunProcessor {
   }
 
   /**
-   * DeleteDuplicatesMD.delete_dupes. Duplicates are always hard-deleted,
-   * whatever the removal mode: an "unavailable" card on a duplicate would
-   * simply leave the duplicate in place.
+   * Duplicates are always hard-deleted, whatever the removal mode: an
+   * "unavailable" card on a duplicate would leave the duplicate in place.
    */
   private async deleteDuplicates(
     run: ClaimedRun,
@@ -698,12 +668,13 @@ export class RunProcessor {
       if (chapterIds.length === 0) continue;
 
       const chapters = await this.md.chaptersByIds([...new Set(chapterIds)]);
-      // The Python aggregate request filtered by the extension's languages;
-      // this client cannot, so the filter is applied to the fetched chapters.
+      // The aggregate request cannot filter by language, so the filter is
+      // applied to the fetched chapters.
       const inLanguage =
         languages.size > 0
           ? chapters.filter((c) => languages.has(c.attributes.translatedLanguage))
           : chapters;
+
 
       const dupes = findDuplicateChapters(inLanguage, { groupId, multiChapters });
       if (dupes.length === 0) continue;
@@ -725,7 +696,7 @@ export class RunProcessor {
  * Segments of one run cover disjoint sets of manga, so their chapter lists
  * concatenate. `allChapters` is the exception: it means "this is everything
  * the publisher has", and a single segment that declined to answer makes the
- * merged view incomplete — which would turn the removal passes into mass
+ * merged view incomplete, which would turn the removal passes into mass
  * deletions. Any null therefore collapses the whole thing to null.
  */
 export function mergeEnvelopes(envelopes: ResultEnvelope[], extension: string): MergedResults {
@@ -773,7 +744,7 @@ export function mergeEnvelopes(envelopes: ResultEnvelope[], extension: string): 
   };
 }
 
-/** _sort_chapters_by_manga: chapters without a MangaDex manga id are dropped. */
+/** Chapters without a MangaDex manga id are dropped. */
 function groupByMdManga(chapters: Chapter[]): Map<string, Chapter[]> {
   const sorted = new Map<string, Chapter[]>();
   for (const chapter of chapters) {
@@ -796,15 +767,12 @@ function applyMangaNames(byManga: Map<string, Chapter[]>, names: Map<string, str
 }
 
 /**
- * The md-chapter -> Chapter conversion from update_expired_chapter_database /
- * mark_chapters_unavailable. `unavailableAt` rides along on the queued JSON
- * for the unavailable worker, which stamps it on the generated chapter card.
+ * The md-chapter to Chapter conversion for removals. `unavailableAt` rides
+ * along on the queued JSON for the unavailable worker, which stamps it on the
+ * generated chapter card.
  *
- * Deviation: Python wrote a 1990-01-01 sentinel into chapter_timestamp and
- * chapter_expire to mean "already expired", because a sweep over the uploaded
- * collection re-read those fields. Removal is queue-driven here and the
- * uploaded row is deleted outright, so the sentinel would only be misleading
- * date data — both fields are null.
+ * `chapterTimestamp` and `chapterExpire` are null: removal is queue-driven and
+ * the uploaded row is deleted outright, so a sentinel date would only mislead.
  */
 export function chapterFromMdChapter(
   mdChapter: MdChapter,

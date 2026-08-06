@@ -1,39 +1,32 @@
 /**
  * Intake for operator- and repository-supplied bundle archives.
  *
- * Every zip that reaches this module is attacker-influenced. An upload is
- * whatever an operator dropped in a browser; a GitHub zipball is whatever
- * anyone who can push to that repo wrote, fetched over the network from
- * codeload. Neither is more trustworthy than the other, so both come through
- * here and nothing else in the publish path decompresses an archive.
+ * Every zip that reaches this module is attacker-influenced: an upload is
+ * whatever an operator dropped in a browser, and a GitHub zipball is whatever
+ * anyone who can push to that repo wrote. Both come through here, and nothing
+ * else in the publish path decompresses an archive.
  *
- * WHAT THIS DEFENDS
+ * What it defends against:
  *
- *  - Zip bombs. Every byte is counted AS IT IS DECOMPRESSED, not read from the
- *    central directory: a declared size is attacker-controlled and routinely
- *    lies. `zlib.inflateRaw` is given a hard `maxOutputLength` equal to the
- *    smaller of the per-entry cap and what is left of the archive budget, so it
- *    aborts mid-inflate instead of allocating gigabytes. The declared sizes are
- *    still checked first, because a cheap refusal beats an expensive one.
- *  - Zip slip. Names are normalised (backslashes, percent-encoding, `.` and `..`
- *    segments) and the resolved path must be inside the extraction root. Link
- *    entries are refused outright from their unix mode bits rather than their
- *    names, because a symlink is how an "extraction" writes somewhere else.
- *  - Executables. An extension is source and data. Files are refused by
- *    extension allowlist AND by magic bytes, so a Mach-O binary named
- *    `manga_id_map.json` does not get through. Archive permissions are never
- *    preserved: everything is written 0600.
- *  - Dependency expectations. `node_modules/` and lockfiles are refused with an
- *    explanation, because nothing here installs dependencies and silently
- *    ignoring them would publish a bundle whose imports cannot resolve.
+ *  - Zip bombs. Bytes are counted as they are decompressed, not read from the
+ *    central directory, since a declared size is attacker-controlled.
+ *    `zlib.inflateRaw` gets a hard `maxOutputLength`, so it aborts mid-inflate
+ *    instead of allocating gigabytes. Declared sizes are still checked first,
+ *    because a cheap refusal beats an expensive one.
+ *  - Zip slip. Names are normalised (backslashes, percent-encoding, `.` and
+ *    `..` segments) and the resolved path must be inside the extraction root.
+ *    Link entries are refused from their unix mode bits rather than their names.
+ *  - Executables. Files are refused by extension allowlist and by magic bytes,
+ *    so a Mach-O binary named `manga_id_map.json` does not get through. Archive
+ *    permissions are never preserved: everything is written 0600.
+ *  - Dependency expectations. `node_modules/` and lockfiles are refused, since
+ *    nothing here installs dependencies and ignoring them would publish a
+ *    bundle whose imports cannot resolve.
  *
- * WHAT THIS DOES NOT DEFEND
- *
- * This stops malformed and hostile ARCHIVES. It cannot stop hostile INTENT in a
- * well-formed extension: code that passes every check here is still code. The
- * control plane never executes it (workers do, under Node's permission model),
- * and ingest validates every result envelope against the manifest — see
- * docs/operations.md §"What bundle intake does and does not protect against".
+ * It cannot stop hostile intent in a well-formed extension. The control plane
+ * never executes it (workers do, under Node's permission model), and ingest
+ * validates every result envelope against the manifest. See docs/operations.md
+ * §"What bundle intake does and does not protect against".
  */
 import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -68,8 +61,8 @@ export type IntakeRefusal =
   /**
    * The requested directory is not in the archive at all. Its own code because
    * it is the one refusal that is not a defect in the archive: it is what a push
-   * that DELETED an extension looks like, and the caller treats it as "skip
-   * this extension" rather than "this archive is hostile".
+   * deleting an extension looks like, so the caller treats it as "skip this
+   * extension" rather than "this archive is hostile".
    */
   | "subtree_missing";
 
@@ -84,9 +77,9 @@ export class BundleIntakeError extends Error {
 }
 
 /**
- * Caps. Deliberately far above any real extension — the largest bundle we ship
- * is tens of kilobytes — and far below what would trouble the core, which runs
- * with a 768 MiB memory limit and a 256 MiB tmpfs.
+ * Caps: far above any real extension (the largest bundle we ship is tens of
+ * kilobytes) and far below what would trouble the core, which runs with a
+ * 768 MiB memory limit and a 256 MiB tmpfs.
  */
 export interface IntakeLimits {
   /** Files accepted from the selected extension directory. */
@@ -110,9 +103,9 @@ export const DEFAULT_INTAKE_LIMITS: IntakeLimits = {
 };
 
 /**
- * Extensions a bundle may contain. Source, data and documentation — nothing
- * that is a program in its own right, and nothing that configures a toolchain.
- * A manifest's `data_files` values are added to this set at extraction time.
+ * Extensions a bundle may contain: source, data and documentation. Nothing that
+ * is a program in its own right, and nothing that configures a toolchain. A
+ * manifest's `data_files` values are added to this set at extraction time.
  */
 export const ALLOWED_EXTENSIONS = new Set([".mjs", ".js", ".ts", ".json", ".proto", ".md", ".txt"]);
 
@@ -145,7 +138,7 @@ const DEPENDENCY_PATHS = new Set([
 /**
  * Leading bytes that mean "this is a program, not source".
  *
- * Checked on the DECOMPRESSED content of every file, because the extension
+ * Checked on the decompressed content of every file, because the extension
  * allowlist only constrains what an attacker names their file. The Mach-O fat
  * magic is also the Java class magic; both are equally unwelcome.
  */
@@ -263,8 +256,8 @@ function open(zipData: Buffer, limits: IntakeLimits): IZipEntry[] {
 /**
  * Repo-relative path of an entry, or null when it is outside what we consider.
  *
- * This is where the traversal decision is made, and it is made on the NAME
- * before any path is built from it:
+ * The traversal decision is made here, on the name, before any path is built
+ * from it:
  *
  *  - backslashes become slashes, so `..\..\x` is not mistaken for a filename;
  *  - percent-encoding is decoded, so `%2e%2e/x` cannot smuggle a `..` past a
@@ -324,12 +317,11 @@ function modeOf(entry: IZipEntry): number | null {
  *
  * The name is not consulted: a symlink entry looks exactly like a small text
  * file whose content is the target path, and honouring it is how an extraction
- * ends up writing through a link into somewhere it was never allowed. Devices,
- * fifos and sockets are refused for the same reason — none of them belongs in a
- * bundle, so the check is "is this S_IFREG?" rather than a list of bad types.
+ * writes through a link into somewhere it was never allowed. Devices, fifos and
+ * sockets are refused for the same reason, so the check is "is this S_IFREG?"
+ * rather than a list of bad types.
  *
- * A zip has no hardlink entry type at all (only the unix mode, which cannot
- * express one), so there is nothing to check for hardlinks beyond this.
+ * A zip has no hardlink entry type at all, so there is nothing more to check.
  */
 function assertPlainFile(entry: IZipEntry, name: string): void {
   const mode = modeOf(entry);
@@ -343,7 +335,7 @@ function assertPlainFile(entry: IZipEntry, name: string): void {
   if ((mode & EXEC_BITS) !== 0) {
     throw new BundleIntakeError(
       "executable_mode",
-      `${name} is marked executable (mode ${(mode & 0o777).toString(8)}); a bundle contains no executables — \`chmod -x\` it and zip again`,
+      `${name} is marked executable (mode ${(mode & 0o777).toString(8)}); a bundle contains no executables; \`chmod -x\` it and zip again`,
     );
   }
 }
@@ -420,11 +412,10 @@ function assertAcceptableContent(name: string, data: Buffer): void {
 /**
  * Decompress one entry with a hard output ceiling.
  *
- * This is the load-bearing bomb defence, and the reason it does not use
- * `entry.getData()`: adm-zip inflates an entry fully into memory and only then
- * could we measure it, which is exactly the allocation we are trying to
- * prevent. `maxOutputLength` makes zlib stop and throw at the limit, so the
- * declared size in the central directory never has to be believed.
+ * The load-bearing bomb defence, and why this does not use `entry.getData()`:
+ * adm-zip inflates an entry fully into memory before it can be measured, which
+ * is the allocation being prevented. `maxOutputLength` makes zlib stop and
+ * throw at the limit, so the declared size never has to be believed.
  */
 function inflateEntry(entry: IZipEntry, name: string, budget: number, limits: IntakeLimits): Buffer {
   const flags = entry.header.flags;
@@ -530,10 +521,9 @@ export function findExtensionRoots(zipData: Buffer, options: IntakeOptions = {})
 /**
  * Validate an archive and write one extension directory into `destDir`.
  *
- * `destDir` must already exist and should come from `mkdtemp` — this writes
- * files 0600 and directories 0700 and never applies the archive's own modes, so
- * the extracted tree is readable only by the service account whatever the zip
- * claimed.
+ * `destDir` must already exist and should come from `mkdtemp`. Files are
+ * written 0600 and directories 0700, and the archive's own modes are never
+ * applied, so the extracted tree is readable only by the service account.
  *
  * Throws BundleIntakeError, whose `code` is the refusal class and whose message
  * is written for the operator who has to fix the zip.
@@ -603,7 +593,7 @@ export function extractBundleTree(
   if (!manifestEntry) {
     throw new BundleIntakeError(
       "no_manifest",
-      `${root || "the archive"}: manifest.json missing or unreadable — a bundle needs one at ` +
+      `${root || "the archive"}: manifest.json missing or unreadable; a bundle needs one at ` +
         "the root of the extension directory",
     );
   }
@@ -625,7 +615,7 @@ export function extractBundleTree(
     if (typeof record.data_files === "object" && record.data_files !== null) {
       for (const value of Object.values(record.data_files as Record<string, unknown>)) {
         // A declared data file widens the allowlist, so it gets the same name
-        // checks as everything else — a data_files entry of "../../etc/passwd"
+        // checks as everything else: a data_files entry of "../../etc/passwd"
         // must not become permission to write there.
         if (typeof value !== "string") continue;
         const declared = normaliseName(value, false);
@@ -674,10 +664,8 @@ export function extractBundleTree(
 /**
  * Write one file, 0600, inside `destRoot`.
  *
- * The resolved-path check is redundant after normaliseName and is here anyway:
- * this is the last line before a write, the cost is one string comparison, and
- * a traversal bug that gets past the name checks is the one bug in this module
- * that would matter.
+ * The resolved-path check is redundant after normaliseName and is kept anyway:
+ * it is the last line before a write and costs one string comparison.
  */
 function writeEntry(destRoot: string, relative: string, name: string, data: Buffer): void {
   const target = resolve(destRoot, relative);

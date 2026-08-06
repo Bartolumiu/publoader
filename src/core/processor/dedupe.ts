@@ -1,16 +1,13 @@
 import type { Chapter, MdChapter, MdManga } from "../md/types.js";
 
 /**
- * Pure decision logic ported from the Python pipeline
- * (`publoader/manga_uploader.py`, `publoader/dupes_checker.py`,
- * `publoader/utils/misc.py`). Nothing in this file performs I/O or touches
- * Prisma — every function takes the data it needs and returns a decision, so
- * the whole duplicate/edit/skip/remove matrix is unit-testable in isolation.
+ * Pure decision logic. Nothing here performs I/O or touches Prisma: every
+ * function takes the data it needs and returns a decision, so the whole
+ * duplicate/edit/skip/remove matrix is unit-testable in isolation.
  *
- * The functions here never mutate their arguments: `decideForManga` works on
- * shallow copies of the chapters it is given and the copies are what appear in
- * the returned buckets (the Python original mutated `md_chapter_id`,
- * `md_manga_id` and `md_group_id` in place and relied on the caller seeing it).
+ * These functions never mutate their arguments. `decideForManga` works on
+ * shallow copies of the chapters it is given, and the copies are what appear in
+ * the returned buckets.
  */
 
 export interface OverrideOptionsLike {
@@ -39,7 +36,7 @@ export interface ChapterEdit {
   mdChapterId: string;
   /** The chapter's MangaDex state before the edit. */
   oldInfo: MdChapterPayload;
-  /** The body to POST — old state with the changed fields overwritten. */
+  /** The body to POST: old state with the changed fields overwritten. */
   payload: MdChapterPayload;
 }
 
@@ -49,8 +46,8 @@ export interface DecideInput {
   /**
    * Every chapter the extension currently lists for this manga, or null when
    * the extension does not publish a full listing. null disables the
-   * "on MangaDex but no longer on the publisher" removal pass entirely — an
-   * empty array does NOT (it means "the publisher has nothing here any more").
+   * "on MangaDex but no longer on the publisher" removal pass entirely; an
+   * empty array does not, and means the publisher has nothing here any more.
    */
   allMangaChapters: Chapter[] | null;
   chaptersOnMd: MdChapter[];
@@ -65,13 +62,12 @@ export interface DecideInput {
 export interface DecideResult {
   toUpload: Chapter[];
   toEdit: ChapterEdit[];
-  /** Duplicates that needed no change — bookkeeping only. */
+  /** Duplicates that needed no change; bookkeeping only. */
   skipped: Chapter[];
   /**
    * Chapters dropped because the `same` override says they were already
-   * uploaded under their master id. Python discarded these silently; they are
-   * surfaced here for observability and are NOT written to bookkeeping (they
-   * carry no mdChapterId, exactly as before).
+   * uploaded under their master id. Surfaced for observability and not written
+   * to bookkeeping, since they carry no mdChapterId.
    */
   skippedDifferentId: Chapter[];
   /** Chapters on MangaDex that no longer belong there. */
@@ -102,10 +98,9 @@ function stripSlashes(value: string): string {
 }
 
 /**
- * The path component of a URL, following Python's `urllib.parse.urlparse`
- * rather than WHATWG `new URL()`: a bare string with no scheme is entirely
- * path (urlparse("not-a-real-url").path === "not-a-real-url"), where `new URL`
- * would throw. Query, fragment and trailing `;params` are stripped.
+ * The path component of a URL, deliberately not WHATWG `new URL()`: a bare
+ * string with no scheme is entirely path, where `new URL` would throw. Query,
+ * fragment and trailing `;params` are stripped.
  */
 export function urlPath(url: string): string {
   let rest = url;
@@ -133,9 +128,9 @@ export function urlPath(url: string): string {
 }
 
 /**
- * check_chapter_url_same: does any slash-separated component of `chapterId`
- * appear as a whole path component of the MangaDex externalUrl? This is how an
- * external chapter link is tied back to the extension's chapter id.
+ * Does any slash-separated component of `chapterId` appear as a whole path
+ * component of the MangaDex externalUrl? This is how an external chapter link
+ * is tied back to the extension's chapter id.
  */
 export function checkChapterUrlSame(
   mdExternalUrl: string | null | undefined,
@@ -143,7 +138,7 @@ export function checkChapterUrlSame(
 ): boolean {
   // Python only guarded the url and raised on a null chapter id; an empty id
   // matched everything (both sides split to [""]). Both are treated as "no
-  // match" here — an id-less chapter can never be identified by its url.
+  // match" here: an id-less chapter can never be identified by its url.
   if (!mdExternalUrl || !chapterId) return false;
 
   const pathSegments = stripSlashes(urlPath(mdExternalUrl)).split("/");
@@ -152,9 +147,9 @@ export function checkChapterUrlSame(
 }
 
 /**
- * format_title: the MangaDex title may sit under "en", or (newer responses)
- * only as a romanised "{lang}-ro" with the English title in altTitles, which
- * is a list of single-key {lang: title} objects.
+ * The MangaDex title may sit under "en", or only as a romanised "{lang}-ro"
+ * with the English title in altTitles, which is a list of single-key
+ * {lang: title} objects.
  */
 export function formatTitle(manga: MdManga): string {
   const attributes = manga.attributes as
@@ -251,16 +246,11 @@ function aggregateVolumes(
 }
 
 /**
- * get_chapter_volumes: fill in `chapterVolume` for chapters that don't carry
- * one, by finding the aggregate volume that lists the chapter's number. Only
- * the integer part of the number is matched ("12.5" -> "12"), the "none"
- * volume is skipped, and leading zeros are stripped ("008" -> "8", "000" ->
- * "0"). Mutates the chapters in place, like the original; the last matching
- * volume wins (Python did not break out of the loop either).
- *
- * Deviation: the Python version only handled the map-shaped `chapters` and,
- * for the array shape, stringified the whole volume object into the volume
- * label. Both aggregate shapes are handled properly here.
+ * Fill in `chapterVolume` for chapters that don't carry one, by finding the
+ * aggregate volume that lists the chapter's number. Only the integer part is
+ * matched ("12.5" to "12"), the "none" volume is skipped, and leading zeros are
+ * stripped ("008" to "8"). Mutates the chapters in place; the last matching
+ * volume wins.
  */
 export function backfillVolumes(chapters: Chapter[], aggregate: unknown): void {
   const volumes = aggregateVolumes(aggregate);
@@ -301,11 +291,7 @@ export function aggregateChapterIds(aggregate: unknown): string[] {
 // Per-manga upload / edit / skip / remove decisions
 // ---------------------------------------------------------------------------
 
-/**
- * Chapter.__eq__ / __hash__ in the Python dataclass compare this tuple, and
- * `start_manga_uploading_process` relies on it when subtracting the uploaded
- * and edited chapters from the skipped set.
- */
+/** Chapter identity, used when subtracting uploaded and edited chapters from the skipped set. */
 function chapterIdentity(chapter: Chapter): string {
   return JSON.stringify([
     chapter.chapterId,
@@ -326,10 +312,10 @@ export function mdChapterMangaId(mdChapter: MdChapter): string | null {
 }
 
 /**
- * _delete_extra_chapters: chapters sitting on MangaDex under our group that
- * either speak a language the extension is not allowed to publish, or whose
- * externalUrl is no longer among the publisher's chapters for this manga.
- * Only meaningful when the extension supplied a full chapter listing.
+ * Chapters on MangaDex under our group that either speak a language the
+ * extension is not allowed to publish, or whose externalUrl is no longer among
+ * the publisher's chapters for this manga. Only meaningful when the extension
+ * supplied a full chapter listing.
  */
 function findExtraChapters(input: DecideInput): MdChapter[] {
   if (input.allMangaChapters === null) return [];
@@ -349,10 +335,10 @@ function findExtraChapters(input: DecideInput): MdChapter[] {
 }
 
 /**
- * _check_for_duplicate_chapter_md_list: is this chapter already on MangaDex?
- * Matched by comparing the MD externalUrl's path components against the
- * extension chapter id. Chapters listed as an alternate id in the `same`
- * override are never matched here — `checkUploadedDifferentId` handles them.
+ * Is this chapter already on MangaDex? Matched by comparing the MD
+ * externalUrl's path components against the extension chapter id. Chapters
+ * listed as an alternate id in the `same` override are never matched here;
+ * `checkUploadedDifferentId` handles them.
  */
 function checkForDuplicate(
   chapter: Chapter,
@@ -408,10 +394,9 @@ function checkUploadedDifferentId(
 }
 
 /**
- * edit_chapter: field-by-field diff of the extension's chapter against the
- * live MangaDex chapter. Returns null when nothing changed, or when the MD
- * externalUrl does not actually contain this chapter's id (a defensive check
- * against a bad url match).
+ * Field-by-field diff of the extension's chapter against the live MangaDex
+ * chapter. Returns null when nothing changed, or when the MD externalUrl does
+ * not contain this chapter's id.
  */
 function buildEdit(
   chapter: Chapter,
@@ -469,11 +454,7 @@ function buildEdit(
   return { chapter, mdChapterId: mdChapter.id, oldInfo, payload };
 }
 
-/**
- * The whole per-manga decision, equivalent to constructing a
- * MangaUploaderProcess and calling start_manga_uploading_process — minus the
- * database writes, which the caller performs.
- */
+/** The whole per-manga decision, minus the database writes the caller performs. */
 export function decideForManga(input: DecideInput): DecideResult {
   const sameChapterIds = new Set(flatten(Object.values(input.overrideOptions.same ?? {})));
 
@@ -548,10 +529,9 @@ function createdAt(mdChapter: MdChapter): string | null {
 }
 
 /**
- * check_chapters: within each group of duplicates the oldest chapter is kept
- * and the rest are queued for deletion. Chapters covered by a `multi_chapters`
- * override are handled separately — one chapter per declared chapter number
- * survives, the remainder are removed.
+ * Within each group of duplicates the oldest chapter is kept and the rest are
+ * queued for deletion. Chapters covered by a `multi_chapters` override are
+ * handled separately: one chapter per declared chapter number survives.
  *
  * Ordering is by `createdAt` when the API supplied it; otherwise the input
  * order is used, which the MangaDex client returns oldest-first.
