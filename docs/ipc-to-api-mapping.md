@@ -46,9 +46,13 @@ Base path for every endpoint below is `/api/v1/admin`. "CLI" is the
 | Legacy IPC | Endpoint | CLI | Dashboard | Notes |
 |---|---|---|---|---|
 | `run` | `POST /runs` | `runs trigger <ext> [--kind]` | Extensions → Run / Force / Clean | `force: true` → `kind: "FORCE"`; `clean: true` → `kind: "CLEAN"`; neither → `UPDATE`. One extension per call; the legacy `extensions: [...]` list becomes N calls. Returns `{runId, created}`; `created: false` means the idempotency key already existed. Returns 409 while paused, matching the legacy paused rejection. |
-| `list_schedule` | `GET /schedules` | `schedules list` | Extensions → Configure → Schedule | Returns `{defaults, overrides}`. `defaults` now comes from each bundle's `manifest.json` rather than `schedule*.json` files on disk. |
-| `set_schedule` | `PUT /schedules/:name` | `schedules set <ext> <hour> <minute> [--day]` | Extensions → Configure → Schedule → Save override | Body `{hour, minute, day?}`. No explicit reschedule step: the scheduler recomputes due slots every tick, so the change takes effect within one `SCHEDULER_INTERVAL_SECONDS`. |
-| `remove_schedule` | `DELETE /schedules/:name` | `schedules remove <ext>` | Extensions → Configure → Schedule → Remove override | Returns `{removed: boolean}`, same "no override existed" semantics. |
+| `list_schedule` | `GET /schedules` | `schedules list` | Extensions → Configure → Schedule | Returns `{defaults, overrides, effective}`, each a `Record<extension, slot[]>`; an extension now has a **list** of slots, not one time. `defaults` comes from each bundle's `manifest.json` rather than `schedule*.json` files on disk. |
+| none | `GET /schedules/:name` | `schedules show <ext>` | Extensions → Configure → Schedule | New. Carries the slot `id`s the mutating calls take. No legacy equivalent: legacy had nothing to identify. |
+| `set_schedule` | `PUT /schedules/:name` | `schedules set <ext> <hour> <minute> [--days] [--kind] [--label]` | Extensions → Configure → Schedule → Replace whole schedule | **Replaces** the whole schedule. Body `{entries: slot[]}`, or a bare slot (the legacy `{hour, minute, day?}` body still means exactly what it always did: this extension's schedule is this one time). No explicit reschedule step: the scheduler recomputes due slots every tick, so the change takes effect within one `SCHEDULER_INTERVAL_SECONDS`. |
+| none | `POST /schedules/:name` | `schedules add <ext> <hour> <minute> [--days] [--kind] [--label]` | Extensions → Configure → Schedule → Add slot | New, and the one an operator usually wants. Appends a slot, seeding the manifest's slots first so adding never silently drops them. |
+| none | `PATCH /schedules/:name/:id` | `schedules enable\|disable <ext> <id>` | Extensions → Configure → Schedule → Switch on/off | New. Stops a slot firing without losing what it said. |
+| none | `DELETE /schedules/:name/:id` | `schedules remove <ext> <id>` | Extensions → Configure → Schedule → Remove | New. Drops one slot. |
+| `remove_schedule` | `DELETE /schedules/:name` | `schedules reset <ext>` | Extensions → Configure → Schedule → Reset to manifest | Renamed from `remove`: with per-slot removal now existing, "remove" had to mean one slot. Returns `{removed: boolean}`, same "no override existed" semantics. |
 | `get_removal_mode` | `GET /removal-mode` | `removal-mode get` | Extensions → Settings | Returns `{mode, validModes}`. The legacy `explicit` / `default` fields are dropped; read `settings` if you need to distinguish. |
 | `set_removal_mode` | `POST /removal-mode` | `removal-mode set <mode>` | Extensions → Settings → Save | Body `{mode}`, validated against `unavailable \| delete`. |
 | `list_extensions` | `GET /extensions` | `extensions list` | Extensions | Source of truth changes: the legacy version scanned `publoader/extensions/src/` on the local disk; this lists **published bundles** with version, sha256, and disabled flag. An extension that exists in the repo but was never published does not appear; that is the intended behaviour. |
@@ -204,9 +208,9 @@ and a slash command). The new bot is slash-only.
 | `extensions` | `/extensions list` | Now lists **published bundles**, not directories on disk. |
 | `load <ext>` | `/extensions enable <extension>` | Renamed. |
 | `unload <ext>` | `/extensions disable <extension>` | Renamed. |
-| `schedule list` | `/schedule list` | Shows manifest defaults and overrides with the effective time. |
-| `schedule set` | `/schedule set` | |
-| `schedule remove` | `/schedule remove` | |
+| `schedule list` | `/schedule list` | Shows every slot each extension has, and whether it came from the manifest or an operator. |
+| `schedule set` | `/schedule set` | Still replaces the whole schedule; `/schedule add` is the additive one. |
+| `schedule remove` | `/schedule remove` | Now takes a slot number from `/schedule show`. `/schedule reset` is the old whole-extension behaviour. |
 | `removal show` | `/removal-mode get` | Renamed. Needs `settings:write`: the GET is guarded by the write scope server-side. |
 | `removal set` | `/removal-mode set` | Renamed. |
 | `history [ext]` | `/runs recent [extension] [limit]` | Renamed. Richer: run state, kind and trigger source. |

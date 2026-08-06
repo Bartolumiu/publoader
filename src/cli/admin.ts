@@ -46,7 +46,7 @@ function qualify(namespace: string | undefined, mangaId: string): string {
 }
 
 type RequestOptions = {
-  method?: "GET" | "POST" | "PUT" | "DELETE";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   json?: unknown;
   raw?: { body: Buffer; contentType: string; headers?: Record<string, string> };
   query?: Record<string, string | number | undefined>;
@@ -783,57 +783,231 @@ untracked
 // ---- schedules ----
 const schedules = program.command("schedules").description("run schedules");
 
+/**
+ * `--days mon,wed` / `--days 0,2` / `--days weekends`.
+ *
+ * Names are accepted because 0=Monday is a footgun the moment anyone reads it
+ * as JavaScript's 0=Sunday: an operator typing `--days 0` for "Sunday" would
+ * silently get Monday, and the run would just look like it had drifted. Names
+ * cannot be misread; the numbers stay for scripts that already speak the
+ * contract.
+ */
+const DAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+
+function parseDays(raw: string | undefined): number[] {
+  if (raw === undefined) return [];
+  const out = new Set<number>();
+  for (const token of raw.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean)) {
+    if (token === "daily" || token === "everyday" || token === "every") return [];
+    if (token === "weekdays") {
+      [0, 1, 2, 3, 4].forEach((d) => out.add(d));
+      continue;
+    }
+    if (token === "weekends") {
+      [5, 6].forEach((d) => out.add(d));
+      continue;
+    }
+    const byName = DAY_NAMES.findIndex((name) => token.length >= 3 && name.startsWith(token));
+    if (byName >= 0) {
+      out.add(byName);
+      continue;
+    }
+    const asNumber = Number(token);
+    if (!Number.isInteger(asNumber) || asNumber < 0 || asNumber > 6) {
+      fail(`--days: "${token}" is not a weekday (mon..sun, weekdays, weekends, or 0-6 with 0=Monday)`);
+    }
+    out.add(asNumber);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+function parseKind(raw: string | undefined): "UPDATE" | "CLEAN" | "FORCE" {
+  const kind = (raw ?? "UPDATE").toUpperCase();
+  if (kind !== "UPDATE" && kind !== "CLEAN" && kind !== "FORCE") {
+    fail("--kind must be one of UPDATE, CLEAN, FORCE");
+  }
+  return kind;
+}
+
+function parseTime(hourRaw: string, minuteRaw: string): { hour: number; minute: number } {
+  const hour = Number(hourRaw);
+  const minute = Number(minuteRaw);
+  if (!Number.isInteger(hour) || hour < 0 || hour > 23) fail("hour must be 0-23");
+  if (!Number.isInteger(minute) || minute < 0 || minute > 59) fail("minute must be 0-59");
+  return { hour, minute };
+}
+
+interface Slot {
+  id?: string;
+  enabled?: boolean;
+  hour: number;
+  minute: number;
+  days: number[];
+  kind: string;
+  label?: string;
+}
+
+function formatSlot(slot: Slot): string {
+  const at = `${String(slot.hour).padStart(2, "0")}:${String(slot.minute).padStart(2, "0")} UTC`;
+  const when =
+    slot.days.length === 0
+      ? "daily"
+      : slot.days.map((d) => (DAY_NAMES[d] ?? `day ${d}`).slice(0, 3)).join(",");
+  return `${at} ${when} ${slot.kind.toLowerCase()}`;
+}
+
+type SlotOpts = { days?: string; kind?: string; label?: string };
+
+function slotBody(hourRaw: string, minuteRaw: string, opts: SlotOpts): Slot {
+  const { hour, minute } = parseTime(hourRaw, minuteRaw);
+  return {
+    hour,
+    minute,
+    days: parseDays(opts.days),
+    kind: parseKind(opts.kind),
+    ...(opts.label ? { label: opts.label } : {}),
+  };
+}
+
+/** The three options `add` and `set` share; declared once so they cannot drift. */
+function withSlotOptions(cmd: Command): Command {
+  return cmd
+    .option("--days <list>", "mon,wed / weekdays / weekends / 0-6 with 0=Monday. Omit for every day")
+    .option("--kind <kind>", "UPDATE (default) | CLEAN | FORCE")
+    .option("--label <text>", 'a note for the listing, e.g. "weekly deep clean"');
+}
+
+type ScheduleList = {
+  defaults: Record<string, Slot[]>;
+  overrides: Record<string, Slot[]>;
+  effective: Record<string, Slot[]>;
+};
+
 schedules
   .command("list")
-  .description("manifest defaults and database overrides")
+  .description("every extension's slots: manifest defaults, operator rows, and what actually runs")
   .action(async () => {
-    const res = await api<{
-      defaults: Record<string, unknown>;
-      overrides: Record<string, unknown>;
-    }>("/api/v1/admin/schedules");
+    const res = await api<ScheduleList>("/api/v1/admin/schedules");
     const names = [...new Set([...Object.keys(res.defaults), ...Object.keys(res.overrides)])].sort();
+    // One row per SLOT, not per extension. An extension with four of them is
+    // the case this command exists for, and collapsing them into one cell would
+    // hide exactly what the operator came to check.
+    const rows = names.flatMap((name) => {
+      const slots = res.overrides[name] ?? res.defaults[name] ?? [];
+      const source = res.overrides[name] ? "operator" : "manifest";
+      if (slots.length === 0) return [{ name, source, slot: null as Slot | null }];
+      return slots.map((slot) => ({ name, source, slot }));
+    });
     table(
-      names,
+      rows,
       [
-        { header: "EXTENSION", get: (n) => n },
-        { header: "MANIFEST DEFAULT", get: (n) => res.defaults[n] ?? "-" },
-        { header: "OVERRIDE", get: (n) => res.overrides[n] ?? "-" },
-        {
-          header: "EFFECTIVE",
-          get: (n) => res.overrides[n] ?? res.defaults[n] ?? "-",
-        },
+        { header: "EXTENSION", get: (r) => r.name },
+        { header: "SOURCE", get: (r) => r.source },
+        { header: "WHEN", get: (r) => (r.slot ? formatSlot(r.slot) : "nothing scheduled") },
+        { header: "LABEL", get: (r) => r.slot?.label ?? "-" },
+        { header: "ON", get: (r) => (r.slot?.enabled === false ? "off" : "yes") },
+        { header: "ID", get: (r) => r.slot?.id ?? "-" },
       ],
       "no schedules configured",
     );
   });
 
 schedules
-  .command("set <extension> <hour> <minute>")
-  .description("override an extension's schedule (UTC)")
-  .option("--day <n>", "restrict to a weekday, 0=Monday .. 6=Sunday")
-  .action(async (extension: string, hourRaw: string, minuteRaw: string, opts: { day?: string }) => {
-    const hour = Number(hourRaw);
-    const minute = Number(minuteRaw);
-    if (!Number.isInteger(hour) || hour < 0 || hour > 23) fail("hour must be 0-23");
-    if (!Number.isInteger(minute) || minute < 0 || minute > 59) fail("minute must be 0-59");
-    const json: Record<string, unknown> = { hour, minute };
-    if (opts.day !== undefined) {
-      const day = Number(opts.day);
-      if (!Number.isInteger(day) || day < 0 || day > 6) fail("--day must be 0-6");
-      json["day"] = day;
-    }
-    await api(`/api/v1/admin/schedules/${extension}`, { method: "PUT", json });
-    ok(`schedule set for ${extension}: ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")} UTC${opts.day !== undefined ? ` on day ${opts.day}` : ""}`);
+  .command("show <extension>")
+  .description("one extension's slots, with the ids the other subcommands take")
+  .action(async (extension: string) => {
+    const res = await api<{ manifest: Slot[]; entries: Slot[]; effective: Slot[]; source: string }>(
+      `/api/v1/admin/schedules/${extension}`,
+    );
+    console.log(
+      `source: ${res.source}` +
+        (res.source === "manifest" ? " (no operator rows; `schedules add` takes over)" : ""),
+    );
+    console.log(`manifest: ${res.manifest.map(formatSlot).join(" | ") || "none"}`);
+    table(
+      res.entries,
+      [
+        { header: "ID", get: (s) => s.id },
+        { header: "WHEN", get: (s) => formatSlot(s) },
+        { header: "LABEL", get: (s) => s.label ?? "-" },
+        { header: "ON", get: (s) => (s.enabled === false ? "off" : "yes") },
+      ],
+      "no operator rows; the manifest schedule above is what runs",
+    );
+  });
+
+withSlotOptions(
+  schedules
+    .command("add <extension> <hour> <minute>")
+    .description("add one slot (UTC), keeping the ones already there"),
+).action(async (extension: string, hourRaw: string, minuteRaw: string, opts: SlotOpts) => {
+  const json = slotBody(hourRaw, minuteRaw, opts);
+  const res = await api<{ id: string; created: boolean; seeded: number }>(
+    `/api/v1/admin/schedules/${extension}`,
+    { method: "POST", json },
+  );
+  if (res.seeded > 0) {
+    ok(`copied ${res.seeded} manifest slot(s) into the database first, so they keep running`);
+  }
+  ok(
+    res.created
+      ? `added for ${extension}: ${formatSlot(json)} (id ${res.id})`
+      : `${extension} already had that exact slot (id ${res.id}); nothing changed`,
+  );
+});
+
+withSlotOptions(
+  schedules
+    .command("set <extension> <hour> <minute>")
+    .description("REPLACE the whole schedule with this single slot (use `add` to keep the others)"),
+).action(async (extension: string, hourRaw: string, minuteRaw: string, opts: SlotOpts) => {
+  const json = slotBody(hourRaw, minuteRaw, opts);
+  await api(`/api/v1/admin/schedules/${extension}`, { method: "PUT", json });
+  ok(`schedule for ${extension} is now exactly: ${formatSlot(json)}`);
+});
+
+schedules
+  .command("disable <extension> <id>")
+  .description("stop one slot firing, keeping it in the list")
+  .action(async (extension: string, id: string) => {
+    await api(`/api/v1/admin/schedules/${extension}/${id}`, {
+      method: "PATCH",
+      json: { enabled: false },
+    });
+    ok(`slot ${id} switched off for ${extension}`);
   });
 
 schedules
-  .command("remove <extension>")
-  .description("drop the override and fall back to the manifest default")
+  .command("enable <extension> <id>")
+  .description("switch a slot back on")
+  .action(async (extension: string, id: string) => {
+    await api(`/api/v1/admin/schedules/${extension}/${id}`, {
+      method: "PATCH",
+      json: { enabled: true },
+    });
+    ok(`slot ${id} switched on for ${extension}`);
+  });
+
+schedules
+  .command("remove <extension> <id>")
+  .description("delete one slot (`schedules show` lists the ids)")
+  .action(async (extension: string, id: string) => {
+    await api(`/api/v1/admin/schedules/${extension}/${id}`, { method: "DELETE" });
+    ok(`slot ${id} removed from ${extension}`);
+  });
+
+schedules
+  .command("reset <extension>")
+  .description("drop every operator slot and fall back to the manifest schedule")
   .action(async (extension: string) => {
     const res = await api<{ removed: boolean }>(`/api/v1/admin/schedules/${extension}`, {
       method: "DELETE",
     });
-    ok(res.removed ? `override removed for ${extension}` : `no override existed for ${extension}`);
+    ok(
+      res.removed
+        ? `${extension} is back on its manifest schedule`
+        : `${extension} had no operator rows`,
+    );
   });
 
 // ---- removal mode ----

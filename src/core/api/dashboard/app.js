@@ -6027,8 +6027,77 @@ function extensionTabs(name, current) {
   );
 }
 
+/**
+ * Weekday labels, Monday first.
+ *
+ * The index IS the contract value (Monday=0, Python's `weekday()`), which the
+ * previous version of this panel got wrong: it listed Sunday first and sent the
+ * array index, so picking "Wednesday" in the UI scheduled Thursday. Keeping the
+ * label list and the wire value in one array is what makes that class of bug
+ * unrepresentable rather than merely fixed.
+ */
+const SCHEDULE_WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+function formatScheduleSlot(slot) {
+  const at = `${String(slot.hour).padStart(2, "0")}:${String(slot.minute).padStart(2, "0")}`;
+  const days = (slot.days || []).length
+    ? slot.days.map((d) => (SCHEDULE_WEEKDAYS[d] || `day ${d}`).slice(0, 3)).join(", ")
+    : "Every day";
+  return `${at} · ${days}`;
+}
+
 function schedulePanel(name) {
-  const schedules = new Resource(`schedules:${name}`, () => api("/schedules", { quiet: true }));
+  const schedules = new Resource(`schedules:${name}`, () =>
+    api(`/schedules/${encodeURIComponent(name)}`, { quiet: true }),
+  );
+
+  /**
+   * The add/replace form. Returned as a node plus a `read()`, so the two
+   * buttons below it cannot disagree about what the operator typed.
+   */
+  const slotForm = () => {
+    const hour = el("input", { id: "sched-hour", type: "number", min: "0", max: "23", value: "3" });
+    const minute = el("input", { id: "sched-minute", type: "number", min: "0", max: "59", value: "0" });
+    const kind = el(
+      "select",
+      { id: "sched-kind" },
+      el("option", { value: "UPDATE", text: "update: the ordinary incremental run" }),
+      el("option", { value: "CLEAN", text: "clean: full catalogue, computes removals" }),
+      el("option", { value: "FORCE", text: "force" }),
+    );
+    const label = el("input", { id: "sched-label", type: "text", maxlength: "80", placeholder: "note (optional)" });
+    // Checkboxes rather than a multi-select: "every day" has to be the visible
+    // resting state, and an empty multi-select reads as "nothing selected yet",
+    // not as "all of them".
+    const dayBoxes = SCHEDULE_WEEKDAYS.map((dayName, index) =>
+      el("label", { class: "inline" }, el("input", { type: "checkbox", value: String(index) }), el("span", { text: dayName.slice(0, 3) })),
+    );
+    const read = () => {
+      const days = dayBoxes
+        .map((box, index) => (box.querySelector("input").checked ? index : null))
+        .filter((d) => d !== null);
+      const body = { hour: Number(hour.value), minute: Number(minute.value), days, kind: kind.value };
+      if (label.value.trim()) body.label = label.value.trim();
+      return body;
+    };
+    const node = el(
+      "div",
+      {},
+      row(
+        el("label", { class: "inline", for: "sched-hour", text: "Hour" }),
+        hour,
+        el("label", { class: "inline", for: "sched-minute", text: "Minute" }),
+        minute,
+        el("label", { class: "inline", for: "sched-kind", text: "Kind" }),
+        kind,
+        el("label", { class: "inline", for: "sched-label", text: "Label" }),
+        label,
+      ),
+      row(el("span", { class: "dim small", text: "Days (none ticked = every day)" }), ...dayBoxes),
+    );
+    return { node, read };
+  };
+
   return el(
     "div",
     {},
@@ -6038,62 +6107,95 @@ function schedulePanel(name) {
       live(
         [schedules],
         (data) => {
-          const override = (data.overrides || {})[name];
-          const fallback = (data.defaults || {})[name];
-          const current = override || fallback || { hour: 3, minute: 0 };
-          const hour = el("input", { id: "sched-hour", type: "number", min: "0", max: "23", value: String(current.hour) });
-          const minute = el("input", {
-            id: "sched-minute",
-            type: "number",
-            min: "0",
-            max: "59",
-            value: String(current.minute),
-          });
-          const day = el(
-            "select",
-            { id: "sched-day" },
-            el("option", { value: "", text: "every day", selected: current.day == null }),
-            ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((label, index) =>
-              el("option", { value: String(index), text: label, selected: current.day === index }),
-            ),
-          );
+          const entries = data.entries || [];
+          const manifest = data.manifest || [];
+          const form = slotForm();
+
+          const rows = entries.map((slot, index) => [
+            String(index + 1),
+            formatScheduleSlot(slot),
+            slot.kind.toLowerCase(),
+            slot.label || "-",
+            slot.enabled ? "on" : "off",
+            [
+              gatedButton("extensions:write", {
+                text: slot.enabled ? "Switch off" : "Switch on",
+                onclick: (event) =>
+                  act(
+                    "schedule.toggle",
+                    () =>
+                      api(`/schedules/${encodeURIComponent(name)}/${encodeURIComponent(slot.id)}`, {
+                        method: "PATCH",
+                        body: { enabled: !slot.enabled },
+                      }),
+                    { button: event.currentTarget, refresh: [schedules] },
+                  ),
+              }),
+              gatedButton("extensions:write", {
+                class: "danger",
+                text: "Remove",
+                onclick: (event) =>
+                  act(
+                    "schedule.remove",
+                    () =>
+                      api(`/schedules/${encodeURIComponent(name)}/${encodeURIComponent(slot.id)}`, {
+                        method: "DELETE",
+                      }),
+                    { button: event.currentTarget, refresh: [schedules] },
+                  ),
+              }),
+            ],
+          ]);
+
           return el(
             "div",
             {},
             el("p", {
               class: "dim small",
-              text: override
-                ? "An override is set; it replaces the manifest schedule."
-                : fallback
-                  ? "Showing the manifest default. Saving creates an override."
-                  : "No manifest schedule; saving creates an override.",
+              text:
+                data.source === "operator"
+                  ? "These slots replace the manifest schedule entirely. Reset to fall back to it."
+                  : manifest.length
+                    ? "Running the manifest schedule. Adding a slot copies these in first, so none of them stop."
+                    : "No manifest schedule and no slots: this extension only runs when triggered by hand.",
             }),
+            el("p", {
+              class: "dim small",
+              text: `Manifest: ${manifest.map((s) => `${formatScheduleSlot(s)} (${s.kind.toLowerCase()})`).join("  |  ") || "none"}`,
+            }),
+            table(["#", "When", "Kind", "Label", "State", ""], rows, {
+              empty: "No slots of its own; the manifest schedule above is what runs.",
+            }),
+            el("h3", { text: "Add a slot" }),
+            form.node,
             row(
-              el("label", { class: "inline", for: "sched-hour", text: "Hour" }),
-              hour,
-              el("label", { class: "inline", for: "sched-minute", text: "Minute" }),
-              minute,
-              el("label", { class: "inline", for: "sched-day", text: "Day" }),
-              day,
               gatedButton("extensions:write", {
                 class: "primary",
-                text: "Save override",
-                onclick: (event) => {
-                  const body = { hour: Number(hour.value), minute: Number(minute.value) };
-                  if (day.value !== "") body.day = Number(day.value);
-                  return act(
-                    "schedule.set",
-                    () => api(`/schedules/${encodeURIComponent(name)}`, { method: "PUT", body }),
+                text: "Add slot",
+                onclick: (event) =>
+                  act(
+                    "schedule.add",
+                    () => api(`/schedules/${encodeURIComponent(name)}`, { method: "POST", body: form.read() }),
                     { button: event.currentTarget, refresh: [schedules] },
-                  );
-                },
+                  ),
               }),
               gatedButton("extensions:write", {
-                text: "Remove override",
-                disabled: !override,
-                title: override ? null : "There is no override to remove",
+                text: "Replace whole schedule",
+                title: "Delete every slot above and keep only this one",
                 onclick: (event) =>
-                  act("schedule.remove", () => api(`/schedules/${encodeURIComponent(name)}`, { method: "DELETE" }), {
+                  act(
+                    "schedule.set",
+                    () => api(`/schedules/${encodeURIComponent(name)}`, { method: "PUT", body: form.read() }),
+                    { button: event.currentTarget, refresh: [schedules] },
+                  ),
+              }),
+              gatedButton("extensions:write", {
+                class: "danger",
+                text: "Reset to manifest",
+                disabled: entries.length === 0,
+                title: entries.length ? null : "There are no slots to reset",
+                onclick: (event) =>
+                  act("schedule.reset", () => api(`/schedules/${encodeURIComponent(name)}`, { method: "DELETE" }), {
                     button: event.currentTarget,
                     refresh: [schedules],
                   }),
@@ -6101,7 +6203,7 @@ function schedulePanel(name) {
             ),
           );
         },
-        { reserve: 120, skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "90px" } }) },
+        { reserve: 200, skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "160px" } }) },
       ),
     ),
   );

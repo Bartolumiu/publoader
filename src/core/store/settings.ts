@@ -1,4 +1,45 @@
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient, ScheduleEntry } from "@prisma/client";
+import type { ScheduleSlot } from "../../contracts/manifest.js";
+
+/** A stored slot: the contract shape plus the two things only a row has. */
+export interface StoredScheduleSlot extends ScheduleSlot {
+  id: string;
+  enabled: boolean;
+}
+
+/** Chronological, so every listing reads like a day's timetable. */
+const scheduleOrder: Prisma.ScheduleEntryOrderByWithRelationInput[] = [
+  { hour: "asc" },
+  { minute: "asc" },
+  { kind: "asc" },
+];
+
+function rowToSlot(row: ScheduleEntry): ScheduleSlot {
+  return {
+    hour: row.hour,
+    minute: row.minute,
+    days: [...row.days].sort((a, b) => a - b),
+    kind: row.kind,
+    ...(row.label !== null ? { label: row.label } : {}),
+  };
+}
+
+function slotToRow(slot: ScheduleSlot) {
+  return {
+    hour: slot.hour,
+    minute: slot.minute,
+    days: slot.days,
+    kind: slot.kind,
+    label: slot.label ?? null,
+  };
+}
+
+function sameDays(a: number[], b: number[]): boolean {
+  if (a.length !== b.length) return false;
+  const left = [...a].sort((x, y) => x - y);
+  const right = [...b].sort((x, y) => x - y);
+  return left.every((value, index) => value === right[index]);
+}
 
 const PAUSE_KEY = "pause_until";
 const REMOVAL_MODE_KEY = "chapter_removal_mode";
@@ -122,33 +163,122 @@ export class SettingsStore {
     await this.setSetting(GITHUB_AUTO_SYNC_KEY, enabled ? "true" : "false");
   }
 
-  // -- schedule overrides --
+  // -- schedule entries --
 
-  async getScheduleOverrides(): Promise<
-    Record<string, { hour: number; minute: number; day?: number }>
-  > {
-    const rows = await this.prisma.scheduleOverride.findMany();
-    const out: Record<string, { hour: number; minute: number; day?: number }> = {};
+  /**
+   * Operator schedule slots, ready for `effectiveSchedules`.
+   *
+   * An extension appears as a key as soon as it has ANY row, even if every one
+   * of them is switched off; the empty array then means "operator says run
+   * nothing", which is a different answer from the absent key's "no operator
+   * opinion, use the manifest".
+   */
+  async getScheduleOverrides(): Promise<Record<string, ScheduleSlot[]>> {
+    const rows = await this.prisma.scheduleEntry.findMany({ orderBy: scheduleOrder });
+    const out: Record<string, ScheduleSlot[]> = {};
     for (const row of rows) {
-      out[row.extension] = {
-        hour: row.hour,
-        minute: row.minute,
-        ...(row.day !== null ? { day: row.day } : {}),
-      };
+      const slots = (out[row.extension] ??= []);
+      if (row.enabled) slots.push(rowToSlot(row));
     }
     return out;
   }
 
-  async upsertSchedule(extension: string, hour: number, minute: number, day?: number): Promise<void> {
-    await this.prisma.scheduleOverride.upsert({
+  /** Every row for one extension, disabled ones included, with their ids. */
+  async listScheduleEntries(extension: string): Promise<StoredScheduleSlot[]> {
+    const rows = await this.prisma.scheduleEntry.findMany({
       where: { extension },
-      create: { extension, hour, minute, day: day ?? null },
-      update: { hour, minute, day: day ?? null },
+      orderBy: scheduleOrder,
     });
+    return rows.map((row) => ({ id: row.id, enabled: row.enabled, ...rowToSlot(row) }));
   }
 
+  /** All rows, grouped, for the fleet-wide listing. */
+  async listAllScheduleEntries(): Promise<Record<string, StoredScheduleSlot[]>> {
+    const rows = await this.prisma.scheduleEntry.findMany({ orderBy: scheduleOrder });
+    const out: Record<string, StoredScheduleSlot[]> = {};
+    for (const row of rows) {
+      (out[row.extension] ??= []).push({ id: row.id, enabled: row.enabled, ...rowToSlot(row) });
+    }
+    return out;
+  }
+
+  /**
+   * Append one slot, seeding from the manifest first if this extension has no
+   * rows yet.
+   *
+   * The seeding is what makes "add a Wednesday clean" safe. Operator rows
+   * replace the manifest wholesale, so without it the first `add` would delete
+   * the daily update the manifest declared: a surprise the operator would only
+   * notice a day later, as an extension that stopped updating.
+   *
+   * Returns `created: false` when an identical slot (same minute, same kind,
+   * same weekdays) is already there, so re-running the command is a no-op
+   * rather than a way to schedule the same run twice.
+   */
+  async addScheduleEntry(
+    extension: string,
+    slot: ScheduleSlot,
+    manifestSlots: ScheduleSlot[] = [],
+  ): Promise<{ id: string; created: boolean; seeded: number }> {
+    const existing = await this.prisma.scheduleEntry.findMany({ where: { extension } });
+    let seeded = 0;
+    if (existing.length === 0 && manifestSlots.length > 0) {
+      await this.prisma.scheduleEntry.createMany({
+        data: manifestSlots.map((s) => ({ extension, ...slotToRow(s) })),
+      });
+      seeded = manifestSlots.length;
+    }
+    const duplicate = (
+      seeded > 0 ? await this.prisma.scheduleEntry.findMany({ where: { extension } }) : existing
+    ).find(
+      (row) =>
+        row.hour === slot.hour &&
+        row.minute === slot.minute &&
+        row.kind === slot.kind &&
+        sameDays(row.days, slot.days),
+    );
+    if (duplicate) return { id: duplicate.id, created: false, seeded };
+    const row = await this.prisma.scheduleEntry.create({
+      data: { extension, ...slotToRow(slot) },
+    });
+    return { id: row.id, created: true, seeded };
+  }
+
+  /**
+   * Make this list of slots the whole schedule for the extension.
+   *
+   * One transaction: an operator who replaces a schedule must never be able to
+   * observe, or have the scheduler observe, the window where the old slots
+   * are gone and the new ones are not there yet.
+   */
+  async replaceScheduleEntries(extension: string, slots: ScheduleSlot[]): Promise<number> {
+    await this.prisma.$transaction([
+      this.prisma.scheduleEntry.deleteMany({ where: { extension } }),
+      this.prisma.scheduleEntry.createMany({
+        data: slots.map((s) => ({ extension, ...slotToRow(s) })),
+      }),
+    ]);
+    return slots.length;
+  }
+
+  /** Drop one slot. Scoped by extension so an id from another one cannot hit. */
+  async removeScheduleEntry(extension: string, id: string): Promise<boolean> {
+    const res = await this.prisma.scheduleEntry.deleteMany({ where: { extension, id } });
+    return res.count > 0;
+  }
+
+  /** Switch one slot on or off without losing what it said. */
+  async setScheduleEntryEnabled(extension: string, id: string, enabled: boolean): Promise<boolean> {
+    const res = await this.prisma.scheduleEntry.updateMany({
+      where: { extension, id },
+      data: { enabled },
+    });
+    return res.count > 0;
+  }
+
+  /** Drop every slot, falling the extension back to its manifest schedule. */
   async removeSchedule(extension: string): Promise<boolean> {
-    const res = await this.prisma.scheduleOverride.deleteMany({ where: { extension } });
+    const res = await this.prisma.scheduleEntry.deleteMany({ where: { extension } });
     return res.count > 0;
   }
 

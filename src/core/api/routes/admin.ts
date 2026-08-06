@@ -13,7 +13,14 @@ import {
   parsePairs,
 } from "../../store/trackedManga.js";
 import { sessionAuthenticator } from "../session.js";
-import { Manifest, EXTENSION_NAME_RE } from "../../../contracts/manifest.js";
+import {
+  Manifest,
+  ManifestScheduleEntry,
+  EXTENSION_NAME_RE,
+  manifestSchedule,
+  normalizeWeekdays,
+  type ScheduleSlot,
+} from "../../../contracts/manifest.js";
 import { MANGADEX_LANGUAGES } from "../../../contracts/languages.js";
 import { countOutstandingErrors } from "../../observability/errorFeed.js";
 
@@ -33,6 +40,28 @@ import { MapSyncService } from "../../mapsync/service.js";
 import AdmZip from "adm-zip";
 
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * One schedule slot on the wire.
+ *
+ * Deliberately the manifest's own entry schema minus `timezone`: an operator
+ * and a manifest are describing the same thing, and letting the two drift is
+ * how you end up with a `days` an extension author can write and an operator
+ * cannot. `timezone` is dropped because it has exactly one legal value and
+ * accepting it here would imply otherwise.
+ */
+const ScheduleSlotInput = ManifestScheduleEntry.omit({ timezone: true });
+
+/** Wire shape into the normalised slot every layer below this one speaks. */
+function toSlot(input: z.infer<typeof ScheduleSlotInput>): ScheduleSlot {
+  return {
+    hour: input.hour,
+    minute: input.minute,
+    days: normalizeWeekdays(input),
+    kind: input.kind,
+    ...(input.label !== undefined ? { label: input.label } : {}),
+  };
+}
 
 /**
  * Validate a query string and answer 400, not 500, when it is wrong. Same helper
@@ -428,36 +457,130 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     );
 
     // ---- schedules ----
-    scope.get("/api/v1/admin/schedules", { preHandler: requireScope("extensions:read") }, async () => {
-      const overrides = await ctx.settings.getScheduleOverrides();
+
+    /**
+     * The manifest schedule of every published extension, normalised.
+     *
+     * Read from the latest bundles rather than a cache: the manifest is the
+     * default an operator is choosing to keep or replace, so it has to be the
+     * manifest that is actually deployed.
+     */
+    const manifestSchedules = async (): Promise<Record<string, ScheduleSlot[]>> => {
       const bundles = await ctx.bundles.listLatest();
-      const defaults: Record<string, unknown> = {};
+      const out: Record<string, ScheduleSlot[]> = {};
       for (const b of bundles) {
         const m = Manifest.safeParse(b.manifest);
-        if (m.success && m.data.schedule) defaults[b.extension] = m.data.schedule;
+        if (!m.success) continue;
+        const slots = manifestSchedule(m.data);
+        if (slots.length > 0) out[b.extension] = slots;
       }
-      return { defaults, overrides };
+      return out;
+    };
+
+    scope.get("/api/v1/admin/schedules", { preHandler: requireScope("extensions:read") }, async () => {
+      const [entries, defaults] = await Promise.all([
+        ctx.settings.listAllScheduleEntries(),
+        manifestSchedules(),
+      ]);
+      // `effective` is computed here rather than left to each caller, because
+      // three surfaces were about to re-derive "rows if any, else manifest,
+      // minus the disabled ones" and a disagreement between them would show as
+      // a dashboard that confidently displays a schedule the scheduler is not
+      // running.
+      const effective: Record<string, ScheduleSlot[]> = {};
+      for (const name of new Set([...Object.keys(defaults), ...Object.keys(entries)])) {
+        const rows = entries[name];
+        effective[name] = rows
+          ? rows.filter((r) => r.enabled).map(({ id: _id, enabled: _enabled, ...slot }) => slot)
+          : (defaults[name] ?? []);
+      }
+      return { defaults, overrides: entries, effective };
     });
 
+    scope.get(
+      "/api/v1/admin/schedules/:name",
+      { preHandler: requireScope("extensions:read") },
+      async (req, reply) => {
+        const { name } = req.params as { name: string };
+        if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
+        const [entries, defaults] = await Promise.all([
+          ctx.settings.listScheduleEntries(name),
+          manifestSchedules(),
+        ]);
+        const manifest = defaults[name] ?? [];
+        const effective =
+          entries.length > 0
+            ? entries.filter((r) => r.enabled).map(({ id: _id, enabled: _enabled, ...slot }) => slot)
+            : manifest;
+        return { extension: name, manifest, entries, effective, source: entries.length > 0 ? "operator" : "manifest" };
+      },
+    );
+
+    /**
+     * Replace the whole schedule.
+     *
+     * Accepts a list, or a single slot for the callers that predate lists:
+     * the old body shape meant exactly "this extension's schedule is this one
+     * time", which is a one-element list and needs no separate handling beyond
+     * being recognised. An empty list is legal and means "run nothing", which
+     * is NOT the same as DELETE (fall back to the manifest).
+     */
     scope.put("/api/v1/admin/schedules/:name", { preHandler: requireScope("extensions:write") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
       const body = z
-        .object({
-          hour: z.number().int().min(0).max(23),
-          minute: z.number().int().min(0).max(59),
-          day: z.number().int().min(0).max(6).optional(),
-        })
+        .union([ScheduleSlotInput, z.object({ entries: z.array(ScheduleSlotInput).max(48) })])
         .parse(req.body);
-      await ctx.settings.upsertSchedule(name, body.hour, body.minute, body.day);
-      await ctx.audit.record(actor(req), "schedule.set", name, body);
-      return { ok: true };
+      const slots = ("entries" in body ? body.entries : [body]).map(toSlot);
+      const count = await ctx.settings.replaceScheduleEntries(name, slots);
+      await ctx.audit.record(actor(req), "schedule.set", name, { entries: slots });
+      return { ok: true, entries: count };
     });
 
+    /** Append one slot, seeding the manifest's slots first if there are none. */
+    scope.post("/api/v1/admin/schedules/:name", { preHandler: requireScope("extensions:write") }, async (req, reply) => {
+      const { name } = req.params as { name: string };
+      if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
+      const slot = toSlot(ScheduleSlotInput.parse(req.body));
+      const defaults = await manifestSchedules();
+      const result = await ctx.settings.addScheduleEntry(name, slot, defaults[name] ?? []);
+      await ctx.audit.record(actor(req), "schedule.add", name, { ...slot, ...result });
+      return { ok: true, ...result };
+    });
+
+    /** Switch one slot on or off, keeping what it said. */
+    scope.patch(
+      "/api/v1/admin/schedules/:name/:id",
+      { preHandler: requireScope("extensions:write") },
+      async (req, reply) => {
+        const { name, id } = req.params as { name: string; id: string };
+        if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
+        const body = z.object({ enabled: z.boolean() }).parse(req.body);
+        const updated = await ctx.settings.setScheduleEntryEnabled(name, id, body.enabled);
+        if (!updated) return reply.code(404).send({ error: "no such schedule entry" });
+        await ctx.audit.record(actor(req), "schedule.toggle", name, { id, enabled: body.enabled });
+        return { ok: true, enabled: body.enabled };
+      },
+    );
+
+    scope.delete(
+      "/api/v1/admin/schedules/:name/:id",
+      { preHandler: requireScope("extensions:write") },
+      async (req, reply) => {
+        const { name, id } = req.params as { name: string; id: string };
+        if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
+        const removed = await ctx.settings.removeScheduleEntry(name, id);
+        if (!removed) return reply.code(404).send({ error: "no such schedule entry" });
+        await ctx.audit.record(actor(req), "schedule.remove", name, { id });
+        return { ok: true, removed };
+      },
+    );
+
+    /** Drop every slot: the extension falls back to its manifest schedule. */
     scope.delete("/api/v1/admin/schedules/:name", { preHandler: requireScope("extensions:write") }, async (req) => {
       const { name } = req.params as { name: string };
       const removed = await ctx.settings.removeSchedule(name);
-      await ctx.audit.record(actor(req), "schedule.remove", name, { removed });
+      await ctx.audit.record(actor(req), "schedule.reset", name, { removed });
       return { ok: true, removed };
     });
 

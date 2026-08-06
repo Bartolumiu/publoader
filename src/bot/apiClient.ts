@@ -178,14 +178,28 @@ export interface ExtensionSummary {
 }
 
 export interface ScheduleEntry {
+  id?: string;
+  enabled?: boolean;
   hour: number;
   minute: number;
-  day?: number | null;
+  /** Monday=0 … Sunday=6. Empty = every day. */
+  days: number[];
+  kind: "UPDATE" | "CLEAN" | "FORCE";
+  label?: string;
 }
 
 export interface Schedules {
-  defaults: Record<string, ScheduleEntry>;
-  overrides: Record<string, ScheduleEntry>;
+  defaults: Record<string, ScheduleEntry[]>;
+  overrides: Record<string, ScheduleEntry[]>;
+  effective: Record<string, ScheduleEntry[]>;
+}
+
+export interface ExtensionSchedule {
+  extension: string;
+  manifest: ScheduleEntry[];
+  entries: ScheduleEntry[];
+  effective: ScheduleEntry[];
+  source: "operator" | "manifest";
 }
 
 export interface QuarantineEntry {
@@ -345,7 +359,7 @@ export type RemovalMode = "unavailable" | "delete";
 export type WorkerAction = "drain" | "activate" | "revoke";
 
 interface RequestSpec {
-  method: "GET" | "POST" | "PUT" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   path: string;
   scope: Scope;
   /** Attributed to this human in the audit log via `x-actor`. */
@@ -838,11 +852,36 @@ export class AdminApiClient {
     });
   }
 
+  extensionSchedule(actor: string, name: string): Promise<ExtensionSchedule> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/admin/schedules/${encodeURIComponent(name)}`,
+      scope: "extensions:read",
+      actor,
+    });
+  }
+
+  /** Append a slot. The API seeds the manifest's slots first when there are none. */
+  addSchedule(
+    actor: string,
+    name: string,
+    entry: Omit<ScheduleEntry, "id" | "enabled">,
+  ): Promise<{ ok: boolean; id: string; created: boolean; seeded: number }> {
+    return this.request({
+      method: "POST",
+      path: `/api/v1/admin/schedules/${encodeURIComponent(name)}`,
+      scope: "extensions:write",
+      actor,
+      json: entry,
+    });
+  }
+
+  /** Replace the whole schedule with this one slot. */
   setSchedule(
     actor: string,
     name: string,
-    entry: { hour: number; minute: number; day?: number },
-  ): Promise<{ ok: boolean }> {
+    entry: Omit<ScheduleEntry, "id" | "enabled">,
+  ): Promise<{ ok: boolean; entries: number }> {
     return this.request({
       method: "PUT",
       path: `/api/v1/admin/schedules/${encodeURIComponent(name)}`,
@@ -852,6 +891,35 @@ export class AdminApiClient {
     });
   }
 
+  setScheduleEnabled(
+    actor: string,
+    name: string,
+    id: string,
+    enabled: boolean,
+  ): Promise<{ ok: boolean; enabled: boolean }> {
+    return this.request({
+      method: "PATCH",
+      path: `/api/v1/admin/schedules/${encodeURIComponent(name)}/${encodeURIComponent(id)}`,
+      scope: "extensions:write",
+      actor,
+      json: { enabled },
+    });
+  }
+
+  removeScheduleEntry(
+    actor: string,
+    name: string,
+    id: string,
+  ): Promise<{ ok: boolean; removed: boolean }> {
+    return this.request({
+      method: "DELETE",
+      path: `/api/v1/admin/schedules/${encodeURIComponent(name)}/${encodeURIComponent(id)}`,
+      scope: "extensions:write",
+      actor,
+    });
+  }
+
+  /** Drop every slot; the extension falls back to its manifest schedule. */
   removeSchedule(actor: string, name: string): Promise<{ ok: boolean; removed: boolean }> {
     return this.request({
       method: "DELETE",

@@ -2,7 +2,10 @@
 /**
  * Import the legacy SQLite state store (`resources/publoader.db`) into Postgres.
  *
- *   schedule_overrides  -> schedule_overrides (upsert, extension is the key)
+ *   schedule_overrides  -> schedule_entries (one slot per legacy row: same time,
+ *                          kind UPDATE, the optional `day` becoming a
+ *                          one-element weekday set; replaces that extension's
+ *                          slots so a re-import restates rather than doubles)
  *   disabled_extensions -> disabled_extensions (insert-if-absent)
  *   settings            -> settings, for the two keys the platform still honours:
  *                          chapter_removal_mode, pause_until
@@ -96,11 +99,21 @@ async function main(): Promise<void> {
           rejected += 1;
           continue;
         }
-        await prisma.scheduleOverride.upsert({
-          where: { extension },
-          create: { extension, hour, minute, day },
-          update: { hour, minute, day },
-        });
+        // The legacy table held one row per extension, so re-importing must
+        // replace rather than append; otherwise a second import doubles every
+        // schedule instead of restating it.
+        await prisma.$transaction([
+          prisma.scheduleEntry.deleteMany({ where: { extension } }),
+          prisma.scheduleEntry.create({
+            data: {
+              extension,
+              hour,
+              minute,
+              days: day === null ? [] : [day],
+              kind: "UPDATE",
+            },
+          }),
+        ]);
         written += 1;
       }
       summary["schedule_overrides"] = `${written} imported, ${rejected} rejected`;

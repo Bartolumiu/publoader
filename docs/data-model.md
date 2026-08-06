@@ -19,7 +19,7 @@ truncation costs you.
 
 | Category | Meaning | Tables |
 | --- | --- | --- |
-| **Canonical** | Irreplaceable. Losing a row loses information no other system holds. | `bundles`, `uploaded_chapters`, `uploaded_ids`, `edited_chapters`, `unavailable_chapters`, `deleted_chapters`, `tracked_manga`, `extension_configs`, `schedule_overrides`, `settings`, `admin_users`, `role_permissions`, `api_tokens`, `audit_events`, `workers`, `disabled_extensions` |
+| **Canonical** | Irreplaceable. Losing a row loses information no other system holds. | `bundles`, `uploaded_chapters`, `uploaded_ids`, `edited_chapters`, `unavailable_chapters`, `deleted_chapters`, `tracked_manga`, `extension_configs`, `schedule_entries`, `settings`, `admin_users`, `role_permissions`, `api_tokens`, `audit_events`, `workers`, `disabled_extensions` |
 | **Derived** | Reconstructable by re-running work. Losing it costs time, not truth. | `runs`, `jobs`, `result_submissions`, `untracked_manga` |
 | **Transient** | Queue and cache rows with a natural end of life. | `upload_tasks`, `artifacts`, `enroll_tokens`, `admin_sessions`, `login_tokens`, `upload_logs` |
 
@@ -466,7 +466,7 @@ and the admin API edits them (`schema.prisma:435-437`).
 | Table | Key | Contents |
 | --- | --- | --- |
 | `extension_configs` | `extension` (pk) | `override_options` JSONB: `same`, `multi_chapters`, `custom_language`. **Stays JSONB**: it is operator-authored, open-ended, and read whole. The processor takes it from **here, never from worker output**, because override options decide what counts as a duplicate and which languages may stay on MangaDex, so trusting a worker's copy would let a compromised worker steer deletions (`core/processor/processor.ts:338-347`). |
-| `schedule_overrides` | `extension` (pk) | `hour`, `minute`, `day?`: UTC. Overrides the manifest's `schedule` (`scheduler/slots.ts:17-37`). |
+| `schedule_entries` | `id` (pk), index on `extension` | One recurring slot: `hour`, `minute`, `days[]` (Monday=0, empty = daily), `kind` (`RunKind`), `label?`, `enabled`. An extension has *many*. Rows for an extension replace its manifest `schedule` wholesale, including when all of them are disabled, which means "run nothing" (`scheduler/slots.ts`). |
 | `disabled_extensions` | `extension` (pk) | Presence means "do not schedule". |
 | `settings` | `key` (pk) | Free-form string settings: `pause_until` (`"inf"` or an epoch), `chapter_removal_mode`, `dash_signups_enabled`, `scheduler_last_tick`, and the MangaDex session tokens `mdauth_access` / `mdauth_refresh` (`md/client.ts:24-25`, replacing the legacy `mdauth.json`). |
 

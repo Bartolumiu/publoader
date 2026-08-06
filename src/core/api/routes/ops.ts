@@ -10,7 +10,7 @@ import type { AppContext } from "../context.js";
 import { adminAuthHook, requireOwner, requireScope } from "../auth.js";
 import { hasScope } from "../scopes.js";
 import { sessionAuthenticator } from "../session.js";
-import { EXTENSION_NAME_RE, Manifest, hostAllowed } from "../../../contracts/manifest.js";
+import { EXTENSION_NAME_RE, Manifest, hostAllowed, manifestSchedule } from "../../../contracts/manifest.js";
 import { normaliseMangadexLanguage } from "../../../contracts/languages.js";
 import { UPLOAD_TASK_KINDS, UPLOAD_TASK_STATES } from "../../store/uploadTasks.js";
 import { mangaEditPayload } from "../../md/titleService.js";
@@ -413,7 +413,9 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
             allowedHosts: manifest.allowed_hosts,
             mangadexGroupId: manifest.mangadex_group_id,
             minTrust: manifest.min_trust,
-            schedule: manifest.schedule ?? null,
+            // Normalised, so the preview shows what the scheduler will read
+            // rather than which of the two spellings the author happened to use.
+            schedule: manifestSchedule(manifest),
           },
           currentlyPublished: latest ? { version: latest.version, sha256: latest.sha256, publishedAt: latest.publishedAt } : null,
           replacesSameVersion: latest?.version === manifest.version,
