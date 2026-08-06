@@ -639,7 +639,7 @@ async function importExtensionConfig(
 
 /**
  * `--extensions <dir>`: walk the legacy extension checkout. Per-extension
- * configuration was never in Mongo, the Python stack loaded manga_id_map.json
+ * configuration was never in Mongo; the legacy stack loaded manga_id_map.json
  * and override_options.json from disk beside each extension, so this is the
  * only place the cutover can get it from.
  */

@@ -180,7 +180,7 @@ function wrapChars(text: string, fontSize: number, maxW: number, maxLines: numbe
   return lines.length > 0 ? lines : [""];
 }
 
-/** Format a footer date, dropping the 1990 "unknown" sentinel as Python does. */
+/** Format a footer date, dropping the 1990 "unknown" sentinel. */
 function formatDate(value: string | Date | null | undefined): string | null {
   if (value === null || value === undefined || value === "") return null;
   const date = value instanceof Date ? value : new Date(value);

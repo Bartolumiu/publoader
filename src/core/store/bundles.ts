@@ -139,13 +139,11 @@ export class BundleStore {
    * has to honour the file without trampling decisions made after it.
    * `source` is what makes that possible:
    *
-   *   - a NEW pair is inserted (this is the contributor workflow, and it works);
+   *   - a new pair is inserted, which is the contributor workflow;
    *   - a pair whose row came from a previous import (`bundle-import`) is
-   *     UPDATED, so correcting a wrong id in git actually takes effect; the
-   *     previous create-only behaviour silently ignored those edits, which is a
-   *     bad thing to discover after opening a PR;
+   *     updated, so correcting a wrong id in git takes effect;
    *   - a row an operator set by hand (`operator:…`) or the title pipeline
-   *     created (`auto`) is LEFT ALONE, because it represents a later, more
+   *     created (`auto`) is left alone, because it represents a later and more
    *     informed decision than the file's.
    *
    * Nothing is ever deleted here: removing a line from the map must not silently
@@ -270,15 +268,11 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  *                                         the same numeric id under each is a
  *                                         different series
  *
- * They are told apart by the type of each top-level VALUE (array, string,
+ * They are told apart by the type of each top-level value (array, string,
  * object), per entry rather than for the file as a whole, so a hand-edited file
  * that mixes them still imports. A namespace's contents may themselves be in
  * either flat shape. The MangaDex side is always the uuid; a row where neither
  * side is one is skipped rather than inserted backwards.
- *
- * NOTE: alpha_manga's shape was previously dropped on the floor; the old
- * parser required array values, so `{externalId: mdMangaId}` seeded nothing at
- * all and viz's nested map likewise seeded nothing.
  */
 export function parseMangaIdMapFile(document: unknown): ParsedIdMapRow[] {
   if (!isPlainObject(document)) return [];
@@ -320,10 +314,9 @@ export function parseMangaIdMapFile(document: unknown): ParsedIdMapRow[] {
  * Best-effort check that a node bundle's entrypoint is actually there and
  * actually an ES module with a default export.
  *
- * This is not a parser and does not try to be one; the real validation is
- * that the runner imports the file and refuses it if `default` is not a
- * function. The point is to fail at publish, where an operator is watching,
- * rather than on a worker an hour later.
+ * Not a parser: the real validation is that the runner imports the file and
+ * refuses it if `default` is not a function. This just fails at publish, where
+ * an operator is watching, rather than on a worker an hour later.
  */
 function assertNodeEntrypoint(manifest: Manifest, zipData: Buffer): void {
   let zip: AdmZip;

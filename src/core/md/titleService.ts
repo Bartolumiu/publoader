@@ -41,21 +41,21 @@ export interface MangaEditPlan {
  *
  *  1. A field that did not change is not sent. MangaDex leaves absent fields
  *     alone, so a title's description, authors, tags and covers survive an edit
- *     from here untouched; which matters most for the case where this pipeline
- *     did not create the title but was pointed at an existing one.
+ *     from here, which matters most when this pipeline did not create the title
+ *     but was pointed at an existing one.
  *
- *  2. A field that IS sent replaces its whole value, so `title` and `links` are
+ *  2. A field that is sent replaces its whole value, so `title` and `links` are
  *     merged from what MangaDex currently holds rather than rebuilt. Sending
  *     `{links: {raw: …}}` at a title that also has an `al` or `mu` link would
- *     delete those links, and nobody asked for that.
+ *     delete those links.
  *
  * The one deliberate deletion: when the title carries exactly one name and the
- * operator corrected the LANGUAGE, the name moves rather than being duplicated.
+ * operator corrected the language, the name moves rather than being duplicated.
  * A single-entry title map is what this pipeline creates (see `createOne`), so
- * that entry is ours to rewrite; leaving it behind would publish the mangled
+ * that entry is ours to rewrite, and leaving it behind would publish the mangled
  * name as an alternative title in a language it was never in. A title with
- * several names is somebody's curation: the correction is added and the rest are
- * kept, with a note saying so.
+ * several names is somebody's curation: the correction is added, the rest kept,
+ * with a note saying so.
  */
 export function mangaEditPayload(current: MdMangaDetail, desired: TitleFields): MangaEditPlan {
   const changes: MangaEditChange[] = [];

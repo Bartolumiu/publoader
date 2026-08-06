@@ -3,7 +3,7 @@ import { z } from "zod";
 /**
  * Extension API v2; the TypeScript extension contract (publoader_api ^2.0.0).
  *
- * Replaces the Python class contract entirely. Design changes from v1:
+ * Design changes from v1:
  *  - ONE entrypoint method (`collect`) instead of five methods + six
  *    attributes: identity (name, group id, languages) and configuration
  *    (tracked map, override options, schedule) come from the manifest and the

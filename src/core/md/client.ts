@@ -5,19 +5,16 @@ import type { Logger } from "../../logging.js";
 import type { MdApi, MdChapter, MdManga, MdMangaDetail } from "./types.js";
 
 /**
- * MangaDex API client; the TypeScript port of publoader/http/{model,client,
- * oauth}.py plus the pagination helpers in utils/misc.py.
+ * MangaDex API client. Three things it owns:
  *
- * Three things this owns that the Python spread across a singleton session:
  *   1. OAuth password/refresh grants, with the token pair persisted in the
- *      `settings` table instead of mdauth.json, so a restarted (or replaced)
- *      core container resumes the same MangaDex session.
- *   2. A single request gate: every call, authed or not, is spaced by at
- *      least `config.mdRatelimitMs`, and a 429 pushes the gate forward for
- *      everyone rather than only the caller that hit it.
- *   3. Bounded retries. The Python loop could spin indefinitely on connection
- *      errors; here `config.uploadRetry` attempts is a hard ceiling on every
- *      request and exhausting it throws MdRequestError.
+ *      `settings` table, so a restarted or replaced core container resumes the
+ *      same MangaDex session.
+ *   2. A single request gate: every call, authed or not, is spaced by at least
+ *      `config.mdRatelimitMs`, and a 429 pushes the gate forward for everyone
+ *      rather than only the caller that hit it.
+ *   3. Bounded retries. `config.uploadRetry` attempts is a hard ceiling on every
+ *      request, and exhausting it throws MdRequestError.
  */
 
 const USER_AGENT = "publoader/2.0.0";
@@ -649,12 +646,11 @@ export class MdClient implements MdExtendedApi {
    * version MangaDex currently holds, which it bumps itself.
    *
    * `tries: 1`, unlike every other write here: a rejection is either a version
-   * conflict (someone edited the title between our read and our write, and the
-   * same stale version can never succeed) or a validation error (which will not
-   * change on retry). Replaying either against a public catalogue buys nothing
-   * and risks applying an edit the operator was told had failed. A 4xx becomes
-   * an MdRequestError carrying the status, so the caller can tell "the title
-   * moved under you" apart from "MangaDex refused this".
+   * conflict (the same stale version can never succeed) or a validation error
+   * (which will not change on retry). Replaying either against a public
+   * catalogue risks applying an edit the operator was told had failed. A 4xx
+   * becomes an MdRequestError carrying the status, so the caller can tell "the
+   * title moved under you" from "MangaDex refused this".
    */
   async editManga(
     mangaId: string,
@@ -747,8 +743,8 @@ export class MdClient implements MdExtendedApi {
    * `name`, because MangaDex echoes the filename back as `originalFileName` and
    * the uploader keys page order off it.
    *
-   * Throws when MangaDex reports errors for a request; mirroring
-   * `_images_upload` returning None, which makes the caller retry the batch.
+   * Throws when MangaDex reports errors for a request, which makes the caller
+   * retry the batch.
    */
   async uploadImages(
     sessionId: string,

@@ -75,14 +75,14 @@ export interface DecideResult {
 }
 
 // ---------------------------------------------------------------------------
-// utils/misc.py ports
+// helpers
 // ---------------------------------------------------------------------------
 
 export function flatten<T>(nested: T[][]): T[] {
   return nested.reduce<T[]>((acc, sublist) => acc.concat(sublist), []);
 }
 
-/** find_key_from_list_value: the key whose list value contains `element`. */
+/** The key whose list value contains `element`. */
 export function findKeyFromListValue(
   dictToSearch: Record<string, string[]>,
   element: string,
@@ -119,7 +119,7 @@ export function urlPath(url: string): string {
   const query = rest.indexOf("?");
   if (query !== -1) rest = rest.slice(0, query);
 
-  // urllib only splits `;params` off the last path segment.
+  // `;params` is only split off the last path segment.
   const lastSlash = rest.lastIndexOf("/");
   const params = rest.indexOf(";", lastSlash === -1 ? 0 : lastSlash);
   if (params !== -1) rest = rest.slice(0, params);
@@ -136,9 +136,9 @@ export function checkChapterUrlSame(
   mdExternalUrl: string | null | undefined,
   chapterId: string | null | undefined,
 ): boolean {
-  // Python only guarded the url and raised on a null chapter id; an empty id
-  // matched everything (both sides split to [""]). Both are treated as "no
-  // match" here: an id-less chapter can never be identified by its url.
+  // A missing url and an empty chapter id are both "no match": an id-less
+  // chapter can never be identified by its url, and an empty id would otherwise
+  // match everything, since both sides split to [""].
   if (!mdExternalUrl || !chapterId) return false;
 
   const pathSegments = stripSlashes(urlPath(mdExternalUrl)).split("/");
@@ -189,7 +189,7 @@ export function formatTitle(manga: MdManga): string {
 }
 
 // ---------------------------------------------------------------------------
-// Volume backfill (MangaUploaderProcess.get_chapter_volumes)
+// Volume backfill
 // ---------------------------------------------------------------------------
 
 interface AggregateVolume {
@@ -322,7 +322,7 @@ function findExtraChapters(input: DecideInput): MdChapter[] {
 
   const customLanguage = input.overrideOptions.custom_language ?? {};
   const allowedLanguages = new Set([...input.languages, ...Object.values(customLanguage)]);
-  // Null urls are kept in the set deliberately: Python's set comprehension
+  // Null urls are kept in the set deliberately: the comprehension
   // included them, so an MD chapter with no externalUrl is "still present"
   // whenever any extension chapter also lacks one.
   const externalUrls = new Set<string | null>(input.allMangaChapters.map((c) => c.chapterUrl));
@@ -384,7 +384,7 @@ function checkUploadedDifferentId(
   const masterId = findKeyFromListValue(input.overrideOptions.same ?? {}, chapter.chapterId);
   if (masterId === null) return false;
 
-  // Python used `re.search(master_id, url)`; chapter ids are plain tokens, so a
+  // Chapter ids are plain tokens, so a
   // substring test is equivalent and cannot blow up on regex metacharacters.
   const onMd = input.chaptersOnMd.some(
     (c) => c.attributes.externalUrl !== null && c.attributes.externalUrl.includes(masterId),
@@ -460,7 +460,7 @@ export function decideForManga(input: DecideInput): DecideResult {
 
   // Removal is decided from the untouched MD listing, before any dedupe: a
   // chapter can be both "no longer on the publisher" and a match for an
-  // updated chapter, and the Python original queued it for removal in the
+  // updated chapter, and it is queued for removal in the
   // constructor regardless.
   const toRemove = input.chaptersOnMd.length > 0 ? findExtraChapters(input) : [];
 
@@ -506,7 +506,7 @@ export function decideForManga(input: DecideInput): DecideResult {
 }
 
 // ---------------------------------------------------------------------------
-// Duplicate detection (dupes_checker.DeleteDuplicatesMD)
+// Duplicate detection
 // ---------------------------------------------------------------------------
 
 /**

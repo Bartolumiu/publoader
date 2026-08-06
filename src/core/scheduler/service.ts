@@ -253,7 +253,7 @@ export class SchedulerService {
         kind: opts.kind,
         idempotencyKey: opts.idempotencyKey,
       });
-      // Python announced each extension as it began reading it. Only on
+      // Each extension is announced as it begins. Only on
       // `created`: createRun is idempotent by key, and a duplicate trigger must
       // not produce a second "started" that implies a second run.
       await this.reportRunStarted(manifest.name);

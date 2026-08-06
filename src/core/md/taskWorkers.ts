@@ -15,7 +15,7 @@ import type { SettingsStore } from "../store/settings.js";
  * Execution of a single claimed UploadTask; the TypeScript port of
  * publoader/workers/{uploader,editor,deleter,unavailable}.py.
  *
- * The Python workers deleted their queue row on success and left it in place on
+ * The workers delete their queue row on success and leave it in place on
  * failure. Here the caller owns the task lifecycle: `execute` either returns
  * (task is DONE) or throws (task goes back to UploadTaskStore.fail, which
  * handles backoff and dead-lettering). Nothing in here retries the task itself.
@@ -97,13 +97,13 @@ export class UploadTaskWorkers {
   }
 
   /**
-   * The end-of-drain messages the Python queue workers sent.
+   * The end-of-drain messages the queue workers send.
    *
    * `processed` counts per kind rather than per worker thread, which is the
-   * closest this architecture has: Python named the embed after the thread, and
+   * closest this architecture has: the embed is named after the worker, and
    * here one uploader drains typed queues, so the kind IS the queue.
    *
-   * Nothing is sent when nothing was processed; Python only spoke when it had
+   * Nothing is sent when nothing was processed: speak only when there is
    * done something, and a per-tick "finished 0 items" would be constant noise.
    */
   async flushQueueSummary(counts: Map<string, { processed: number; failed: number }>): Promise<void> {
@@ -111,7 +111,7 @@ export class UploadTaskWorkers {
     const embeds: DiscordEmbedInput[] = [];
     for (const [kind, count] of counts) {
       if (count.processed === 0 && count.failed === 0) continue;
-      // UNAVAILABLE was summary-only in Python: a per-chapter embed for a bulk
+      // UNAVAILABLE is summary-only: a per-chapter embed for a bulk
       // "mark these unavailable" pass is hundreds of messages nobody reads.
       if (kind === "UNAVAILABLE") {
         embeds.push(queueSummaryEmbed(kind, count.processed, count.failed));
@@ -606,7 +606,7 @@ export class UploadTaskWorkers {
     // it is what the operator wanted.
     if (success && !this.sendSuccesses) return;
 
-    // The Python shape, not a per-action status line: one field carrying
+    // Not a per-action status line: one field carrying
     // Success/Manga/Chapter/Extension plus the language, title, expiry and the
     // four links, titled after the queue that did the work. A channel that has
     // been reading these for years should not have to relearn them. The failure

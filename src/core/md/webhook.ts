@@ -39,7 +39,7 @@ export interface DiscordEmbedInput {
   footer?: string | null;
   fields?: DiscordField[];
   /** ISO-8601. Discord renders it in the reader's own timezone, which is why
-   *  the Python embeds carried one rather than writing a time into the text. */
+   *  the embeds carry one rather than writing a time into the text. */
   timestamp?: string | null;
 }
 

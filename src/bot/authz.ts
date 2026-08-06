@@ -9,17 +9,13 @@
  * returns a decision, no discord.js objects, no I/O, so every branch is
  * unit-testable (test/unit/botAuthz.test.ts).
  *
- * ## Deliberate difference from the legacy bot
+ * ## An empty config fails closed
  *
- * The Python bot failed OPEN: `_is_admin` returned True when neither
- * DISCORD_ADMIN_USERS nor DISCORD_ADMIN_ROLES was configured, and
- * `_channel_allowed` returned True when DISCORD_ALLOWED_CHANNELS was empty. A
- * fresh deployment with an incomplete .env therefore let every member of the
- * guild trigger runs and pause the platform.
- *
- * This version fails CLOSED for anything that mutates: an unconfigured
- * allowlist denies, and says so. Read-only commands stay permissive because
- * their worst case is a noisy channel, not a changed platform.
+ * Anything that mutates is denied when its allowlist is unconfigured, and the
+ * refusal says so. Failing open would mean a fresh deployment with an
+ * incomplete .env let every member of the guild trigger runs and pause the
+ * platform. Read-only commands stay permissive, because their worst case is a
+ * noisy channel rather than a changed platform.
  */
 
 /** How much damage a command can do, which is what decides how it is gated. */

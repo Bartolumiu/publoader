@@ -299,14 +299,12 @@ export class JobStore {
    * TRANSIENT and POLICY errors requeue with backoff until maxAttempts;
    * PERMANENT dead-letters immediately.
    *
-   * POLICY used to dead-letter on the first occurrence, on the reasoning that a
-   * rejected envelope would be rejected again. But the envelope is produced by a
-   * *worker*, and a hostile or broken one can fail policy on demand; so that
-   * reasoning handed any single worker the ability to dead-letter every job it
-   * could lease, and `advanceRuns` then killed those runs along with their
-   * healthy segments. Retrying costs one more attempt and, because the next
-   * attempt is very likely leased elsewhere, routes around the bad worker.
-   * A genuinely bad bundle still dead-letters; it just takes maxAttempts.
+   * POLICY retries rather than dead-lettering at once because the envelope comes
+   * from a worker, and a hostile or broken one can fail policy on demand.
+   * Dead-lettering immediately would let any single worker kill every job it
+   * could lease. Retrying costs one attempt and routes around the bad worker,
+   * since the next attempt is very likely leased elsewhere. A genuinely bad
+   * bundle still dead-letters, it just takes maxAttempts.
    */
   async fail(
     jobId: string,
@@ -417,12 +415,10 @@ export class JobStore {
    * Stop all outstanding work for one extension; the "unload" half of
    * enable/disable.
    *
-   * Disabling used to mean only "stop scheduling it", which left whatever was
-   * already queued to run minutes or hours later. For an operator pulling a
-   * misbehaving extension that is the wrong behaviour: they want it stopped now.
    * Queued jobs are cancelled outright; jobs a worker is already running are
    * flagged, and the worker aborts on its next lease renewal (see the renew
-   * response's `cancelRequested`).
+   * response's `cancelRequested`). An operator pulling a misbehaving extension
+   * wants it stopped now, not after the queue drains.
    */
   async cancelAllForExtension(extension: string): Promise<{ cancelled: number; flagged: number }> {
     const cancelled = await this.prisma.job.updateMany({
@@ -528,13 +524,11 @@ export class JobStore {
   /**
    * Operator replay of a dead-lettered job: back to PENDING with fresh budget.
    *
-   * The parent run must be revived too. `advanceRuns` only ever moves a run out
-   * of PENDING/EXECUTING, so a run that already reached DEAD_LETTER is
-   * terminal: replaying its job alone made the job succeed and then sit there,
-   * with the run never advancing to INGESTING and the chapters never uploaded;
- * while the API answered `{ok: true}` and the job disappeared from the
-   * dead-letter list. The retry looked like it worked and silently did nothing,
-   * which is worse than refusing. Both are reset in one transaction.
+   * The parent run is revived in the same transaction. `advanceRuns` only moves
+   * a run out of PENDING/EXECUTING, so a run that already reached DEAD_LETTER is
+   * terminal: replaying its job alone would let the job succeed and then sit
+   * there, with the run never advancing to INGESTING and the chapters never
+   * uploaded, while the API answered `{ok: true}`.
    */
   async replayDeadLetter(jobId: string): Promise<boolean> {
     return this.prisma.$transaction(async (tx) => {

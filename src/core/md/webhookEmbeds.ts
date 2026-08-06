@@ -1,25 +1,16 @@
 /**
- * The Discord embeds the Python publoader sent, rebuilt for this platform.
+ * The Discord embeds this platform sends.
  *
- * These are a deliberate port rather than a redesign: the wording, the field
- * layout, the colours and the link phrasing all match `publoader/webhook.py`, so
- * a channel that has been receiving these for years does not suddenly read
- * differently. Where the new architecture cannot produce the same thing, the
- * difference is named in the relevant builder rather than papered over.
- *
- * What the Python version sent, and where each one now comes from:
- *
- *   PubloaderUpdatesWebhook     per manga, at update-check time  -> `updatesEmbeds`
- *   PubloaderQueueWebhook       per worker queue, progress+summary -> `queueEmbed`,
- *                               `queueSummaryEmbed`, `queueFinishedEmbed`
- *   PubloaderDupesWebhook       duplicate chapters found          -> `dupesEmbeds`
- *   PubloaderNotIndexedWebhook  uploaded but not indexed by MD    -> `notIndexedEmbed`
- *   PubloaderWebhook            general operational message       -> `messageEmbed`
- *   WebhookLogHandler           log records above a level         -> `logEmbed`
+ *   `updatesEmbeds`      per manga, at update-check time
+ *   `queueEmbed`, `queueSummaryEmbed`, `queueFinishedEmbed`
+ *                        per worker queue: progress and summary
+ *   `dupesEmbeds`        duplicate chapters found
+ *   `notIndexedEmbed`    uploaded but not indexed by MangaDex
+ *   `messageEmbed`       general operational message
+ *   `logEmbed`           log records above a level
  *
  * The transport (splitting oversized embeds, batching ten per message, the 6000
- * character budget across a whole message) already lives in webhook.ts and was
- * already a faithful port; only the embed *shapes* were missing.
+ * character budget across a whole message) lives in webhook.ts.
  */
 import type { DiscordEmbedInput, DiscordField } from "./webhook.js";
 
@@ -33,14 +24,14 @@ export const COLOUR_NOT_INDEXED = "45539B";
 export const MD_CHAPTER_URL = "https://mangadex.org/chapter/";
 export const MD_MANGA_URL = "https://mangadex.org/manga/";
 
-/** Python's `EXPIRE_TIME`: the sentinel printed when a chapter has no expiry. */
+/** The sentinel printed when a chapter has no expiry. */
 export const EXPIRE_TIME = "1990-01-01T00:00:00+00:00";
 
-/** Discord caps fields at 25 per embed; Python chunked by the same number. */
+/** Discord caps fields at 25 per embed. */
 const FIELDS_PER_EMBED = 25;
 
 /** One chapter, in the shape these embeds read. Loose on purpose: the callers
- *  hold rows from three different tables and Python read a dict too. */
+ *  hold rows from three different tables. */
 export interface EmbedChapter {
   mangaName?: string | null;
   chapterNumber?: string | null;
@@ -55,10 +46,10 @@ export interface EmbedChapter {
 }
 
 /**
- * Python's `_format_link`. Returns "" when there is no URL, so the caller can
+ * Returns "" when there is no URL, so the caller can
  * concatenate unconditionally and simply get nothing.
  *
- * `name.title()` in Python title-cases every word, which is why an extension
+ * `titleCase` upper-cases every word, which is why an extension
  * called `mangaplus` appears as `Mangaplus` in the link text. Reproduced rather
  * than corrected: changing it would be a visible difference in every embed.
  */
@@ -74,7 +65,7 @@ export function formatLink(
   return `${label} ${kind} link: [here](${url})\n`;
 }
 
-/** Python's `str.title()`: upper-case after any non-alphabetic character. */
+/** Upper-case after any non-alphabetic character. */
 function titleCase(value: string): string {
   return value.replace(/[A-Za-z]+/g, (word) => word[0]!.toUpperCase() + word.slice(1).toLowerCase());
 }
@@ -86,7 +77,7 @@ function expiryText(value: string | Date | null | undefined): string {
 }
 
 /**
- * Python's `normalise_chapter`: one embed field per chapter.
+ * One embed field per chapter.
  *
  * `failedUpload` suppresses the two MangaDex links, because a chapter that
  * failed to upload has no MangaDex chapter id to link to and the manga link
@@ -120,7 +111,7 @@ export function chapterField(
   return { name, value, inline };
 }
 
-/** Python's `normalise_chapters`: fields chunked 25 to an embed. */
+/** Fields chunked 25 to an embed. */
 export function chapterFieldChunks(
   chapters: EmbedChapter[],
   options: { failedUpload?: boolean; success?: boolean } = {},
@@ -146,16 +137,14 @@ export interface UpdatesInput {
 }
 
 /**
- * `PubloaderUpdatesWebhook`: what a run decided to do, per manga.
+ * What a run decided to do, per manga.
  *
- * This is the one that fires at UPDATE-CHECK time rather than after a successful
- * upload; "To Upload" is a plan, not a result. That distinction is the whole
- * character of the Python notifications and is why a channel full of
- * "upload succeeded" messages reads wrong.
+ * Fires at update-check time rather than after a successful upload: "To Upload"
+ * is a plan, not a result.
  *
- * One embed per 25-chapter chunk, each repeating the manga header, exactly as
- * Python did: the header is what identifies the series when Discord splits a
- * long run across several messages.
+ * One embed per 25-chapter chunk, each repeating the manga header, since the
+ * header is what identifies the series when Discord splits a long run across
+ * several messages.
  */
 export function updatesEmbeds(input: UpdatesInput): DiscordEmbedInput[] {
   const description =
@@ -169,7 +158,7 @@ export function updatesEmbeds(input: UpdatesInput): DiscordEmbedInput[] {
     ...chapterFieldChunks(input.failedChapters ?? [], { failedUpload: true }),
   ];
 
-  // Python skipped empty chunks but still sent the header embed when there were
+  // Empty chunks are skipped, but the header embed is still sent when there were
   // no chapters at all, so a manga with only skips is still reported.
   if (groups.length === 0) {
     return [
@@ -196,7 +185,7 @@ export function updatesEmbeds(input: UpdatesInput): DiscordEmbedInput[] {
 /**
  * `PubloaderQueueWebhook.add_chapter`: per-chapter progress for a queue worker.
  *
- * Python named the embed after the worker thread ("Uploader", "Deleter",
+ * The embed is named after the worker ("Uploader", "Deleter",
  * "Editor"). The new pipeline has one uploader draining typed queues, so the
  * kind of work is the closest equivalent and is what is used here.
  */
@@ -209,7 +198,7 @@ export function queueEmbed(
   return {
     title: titleCase(workerType),
     colour: COLOUR_DEFAULT,
-    // Only on failure, and only when there is something to say. Python's embed
+    // Only on failure, and only when there is something to say. The embed
     // had no description, and a successful upload needs no explanation; but a
     // failure that does not say why is a notification the operator cannot act
     // on, which is the whole reason to be told about it.
@@ -316,17 +305,15 @@ export function messageEmbed(
 
 // ------------------------------------------------------- run-level messages
 //
-// The five `PubloaderWebhook` calls the Python run made around each extension.
-// They are what tells a channel that a run started, what it found, and whether
-// it blew up; without them the only traffic is per-chapter upload results,
-// which says nothing until uploads are already happening.
+// These tell a channel that a run started, what it found, and whether it blew
+// up. Without them the only traffic is per-chapter upload results, which says
+// nothing until uploads are already happening.
 //
-// Titles are reproduced verbatim, including Python's `extensions.` prefix on
-// two of the five (`normalised_extension_name` in load_extensions.py:283) and
-// its absence on the other three. The inconsistency is Python's; a channel that
-// has been reading these for years should not have to relearn them.
+// The `extensions.` prefix appears on two of the five titles and not the other
+// three. That inconsistency is deliberate: a channel that has been reading
+// these for years should not have to relearn them.
 
-/** Python batched untracked series 30 to a message. */
+/** Untracked series are batched 30 to a message. */
 export const UNTRACKED_PER_EMBED = 30;
 
 export interface UntrackedMangaLike {
@@ -396,13 +383,10 @@ export function runErrorEmbed(extensionName: string, error: unknown): DiscordEmb
 }
 
 /**
- * `WebhookLogHandler`: a log record, as an embed.
- *
- * Python attached this to the logger so anything at or above a level went to
- * Discord. That is reproduced, but note the platform also records every
- * application-level event as a durable row visible in the dashboard's Activity
- * feed; so this is best pointed at ERROR and above, or the channel becomes a
- * firehose that duplicates a better view.
+ * A log record, as an embed. Best pointed at ERROR and above: the platform also
+ * records every application-level event as a durable row in the dashboard's
+ * Activity feed, so a lower level makes this a firehose duplicating a better
+ * view.
  */
 export function logEmbed(level: string, message: string, extensionName?: string | null): DiscordEmbedInput {
   return {

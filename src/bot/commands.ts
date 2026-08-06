@@ -8,8 +8,8 @@
  * discord.js builders, because that is the registration payload's schema and
  * duplicating it would only let the two drift.
  *
- * Parity with the legacy Python bot is tracked in docs/ipc-to-api-mapping.md.
- * Where the platform has no equivalent, the command still exists and explains
+ * Command parity is tracked in docs/ipc-to-api-mapping.md. Where the platform
+ * has no equivalent, the command still exists and explains
  * what to do instead (see RETIRED_COMMANDS): a bot that answers "unknown
  * command" to `/logs` teaches nobody anything.
  */

@@ -26,7 +26,7 @@ const log = createLogger("core-processor", config.logLevel);
 const prisma = getPrisma(config.databaseUrl);
 const md = new MdClient(config, prisma, log);
 // The processor is where the update plan is decided, so it is where the
-// per-manga report is sent from; the same point the Python version used.
+// per-manga report is sent from.
 const notifier = DiscordNotifier.fromConfig(config, log);
 const processor = new RunProcessor(prisma, md, log, { notifier });
 const settings = new SettingsStore(prisma);

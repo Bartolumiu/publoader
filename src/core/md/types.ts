@@ -1,7 +1,7 @@
 import type { ChapterRecord } from "../../contracts/records.js";
 
 /**
- * Internal canonical chapter shape; the platform-side mirror of the Python
+ * Internal canonical chapter shape; the platform-side mirror of the
  * `Chapter` dataclass, and what the processor/uploader pass around.
  *
  * On its way to storage it splits two ways, both via src/core/md/chapterRows.ts:

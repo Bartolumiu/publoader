@@ -82,7 +82,7 @@ export class SettingsStore {
   /**
    * Whether a per-chapter embed is sent for uploads that SUCCEEDED.
    *
-   * Python sent one either way, which on a normal run means the channel is
+   * Sending one either way means that on a normal run the channel is
    * almost entirely "Success: True"; and a failure, the only thing anyone
    * needs to act on, scrolls past between them. Off by default so the channel
    * carries exceptions rather than a transcript; the run-level "Found N
