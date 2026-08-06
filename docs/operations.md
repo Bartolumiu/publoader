@@ -1267,6 +1267,77 @@ first and only then offers to queue.
 
 ---
 
+## Reconcile the archives with MangaDex
+
+`unavailable_chapters` and `deleted_chapters` are written by the upload-task
+workers, which means they record what *this platform* did. Nothing records what
+MangaDex did on its own: a publisher rotating an external URL out of
+readability, a staff deletion, a takedown performed by hand. Each of those
+leaves `uploaded_chapters` claiming a chapter is still up when it is not, and
+the claim is invisible until somebody looks the chapter up.
+
+`scripts/backfill-md-chapter-state.mjs` walks the whole table, asks MangaDex
+about every chapter, and moves the ones that have stopped being live uploads
+into the archive they belong in. Run it inside the stack — `core-uploader` is
+the one service attached to both the `data` and `edge` networks, so it has the
+database and the internet at once:
+
+```bash
+docker compose -f docker/core/docker-compose.yml exec -T core-uploader \
+  node --input-type=module - < scripts/backfill-md-chapter-state.mjs
+```
+
+That is a dry run. It reads MangaDex, prints the four counts, and writes
+nothing:
+
+```
+unavailable on MangaDex : 41
+deleted from MangaDex   : 6
+hidden, cause unknown   : 2 (not archived — review)
+still live              : 8104
+```
+
+Read it before applying it. `deleted` is the row that matters — the archive
+claims a chapter is gone forever, so it is only ever recorded on a 404 from the
+chapter's own endpoint, never on a chapter merely missing from a list response.
+`hidden` is the honest leftover: on MangaDex, fetchable by id, but absent from
+the collection for a reason that is not unavailability (a future `publishAt` is
+the usual one). Those are never written. Pass `--out=/tmp/state.json` to get the
+full per-chapter classification to look through.
+
+To write, put the flags **after** the `-`, which is what makes node read the
+script from stdin — without it node parses `--apply` as its own option and
+exits:
+
+```bash
+docker compose -f docker/core/docker-compose.yml exec -T core-uploader \
+  node --input-type=module - --apply < scripts/backfill-md-chapter-state.mjs
+```
+
+Applying mirrors what the workers do: upsert the archive row with every column
+carried across unchanged and the MangaDex snapshot under `extra.mdAttributes`,
+then drop the row from `uploaded_chapters`, so a chapter lives in exactly one
+table. It is safe to re-run — an id already archived keeps its original
+timestamp, because that instant is when the change was first seen and today's
+sweep is not a better answer.
+
+Useful when the whole table is more than you want in one pass:
+
+| Flag | Effect |
+|---|---|
+| `--extension=<name>` | One extension only. |
+| `--limit=<n>` | Stop after n chapters — a first look before committing to a full sweep. |
+| `--keep-uploaded` | Write the archive row but leave `uploaded_chapters` alone. |
+| `--rps=<n>` | MangaDex requests per second (default 3; the API's ceiling is 5, and `core-uploader` is publishing from the same IP). |
+
+What it does **not** find: chapters this platform has already replaced with an
+unavailable card. Those need no backfill — the worker that posts the card writes
+the archive row in the same step — and they have no reliable signature anyway,
+because the card flow repoints `externalUrl` at the series or domain root rather
+than clearing it.
+
+---
+
 ## Clear a bad MangaDex session
 
 The MangaDex token pair lives in the `settings` table (`mdauth_access` /
