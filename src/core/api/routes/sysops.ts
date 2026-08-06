@@ -1,6 +1,3 @@
-// Not self-registering: server.ts is owned elsewhere, so the integrator wires
-// this module in with `registerSysopsRoutes(app, ctx)` next to the other route
-// modules.
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -42,45 +39,34 @@ import {
 } from "../../sysops/restartSignal.js";
 
 /**
- * The four things an operator used to need a shell for.
+ * The four things an operator used to need a shell for: pull the latest
+ * extension code from GitHub, restart a service, install an extension that is
+ * not in a configured repo yet, and read the documentation.
  *
- * Everything else in the dashboard answers "what is the platform doing?". These
- * routes answer "make it do something to itself": pull the latest extension code
- * from GitHub, restart a service, install an extension that is not in a
- * configured repo yet, and read the documentation. The pattern each one follows
- * is the same — reuse the mechanism that already exists, and be explicit about
- * what it cannot do:
- *
- *  - sync REUSES the push webhook's publish path (extract → esbuild → publish),
- *    so a bundle published by a button and a bundle published by a push are the
- *    same bytes with the same sha256. Two publish paths would be two programs.
- *  - restart is a graceful SELF-EXIT that depends on the container restart
+ *  - sync reuses the push webhook's publish path (extract, esbuild, publish), so
+ *    a bundle published by a button and one published by a push are the same
+ *    bytes with the same sha256.
+ *  - restart is a graceful self-exit that depends on the container restart
  *    policy. There is no Docker socket here and there must never be one: it is
- *    root-equivalent host access, and this process is reachable from the
- *    internet. See core/sysops/restartSignal.ts.
- *  - install accepts a repo or a zip and runs the same builder, so "it works on
- *    my laptop" and "it works in the platform" cannot diverge.
+ *    root-equivalent host access on a process reachable from the internet. See
+ *    core/sysops/restartSignal.ts.
+ *  - install accepts a repo or a zip and runs the same builder.
  *  - docs are served from the image, read-only, from an allowlist.
  */
 
 /**
- * Body limit for an uploaded bundle: deliberately far below the 50 MB total
- * uncompressed cap the intake enforces, and two orders of magnitude below the
- * 64 MiB the generic publish route allows.
- *
- * The reasoning is that this endpoint takes a zip from a browser and the largest
- * real extension is tens of kilobytes, so 8 MiB is already absurd generosity —
- * and the smaller the body, the less work a hostile archive can ask for before
- * the intake's own counters get involved. The two limits are complementary: this
- * one bounds the bytes we accept, the intake bounds the bytes they can become.
+ * Body limit for an uploaded bundle, far below the 50 MB total uncompressed cap
+ * the intake enforces and the 64 MiB the generic publish route allows. The
+ * largest real extension is tens of kilobytes. The two limits are
+ * complementary: this bounds the bytes we accept, the intake bounds the bytes
+ * they can become.
  */
 export const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 
 /**
- * Ceiling on GitHub API calls for one status/sync request. Each extension may
- * cost one compare per configured repo, and an operator holding down a refresh
- * button must not be able to burn a 5000/hour token budget (or a 60/hour
- * anonymous one) on our behalf.
+ * Ceiling on GitHub API calls for one status/sync request, so an operator
+ * holding down a refresh button cannot burn a 5000/hour token budget (or a
+ * 60/hour anonymous one).
  */
 const MAX_GITHUB_CALLS = 40;
 
@@ -91,22 +77,16 @@ const MAX_SYNC_EXTENSIONS = 10;
 const SYNC_BUDGET_MS = 120_000;
 
 /**
- * Delay between answering a restart request and actually exiting. Long enough
- * for the response to reach the browser through the tunnel — an operator who
- * gets a connection reset instead of a 202 has no idea whether the restart
- * happened.
+ * Delay between answering a restart request and exiting, long enough for the
+ * response to reach the browser through the tunnel.
  */
 const RESTART_DELAY_MS = 500;
 
 /**
- * Publishing budget per PRINCIPAL, not per IP.
- *
- * The IP limiter on the whole admin scope is about hammering; this is about the
- * cost of one credential's requests. Each accepted install downloads or unpacks
- * an archive, runs a build subprocess and writes a row, and each REFUSED one
- * still costs the intake's work — so a leaked `bundles:write` token gets six
- * bursts and one more every two minutes, which is far more than an operator
- * publishing by hand ever needs.
+ * Publishing budget per principal, not per IP. The IP limiter on the admin scope
+ * is about hammering; this is about the cost of one credential's requests, since
+ * each accepted install downloads or unpacks an archive, runs a build subprocess
+ * and writes a row, and each refused one still costs the intake's work.
  */
 const INSTALL_BURST = 6;
 const INSTALL_REFILL_PER_SECOND = 1 / 120;
@@ -118,8 +98,8 @@ export interface SysopsRouteOptions {
   fetchArchive?: RepoArchiveFetcher;
   /**
    * Test seam: what "restart myself" does. The default raises SIGTERM on our own
-   * pid, which runs the service's existing shutdown path (close the server,
-   * disconnect prisma, exit 0) rather than a bare process.exit.
+   * pid, which runs the service's existing shutdown path rather than a bare
+   * process.exit.
    */
   selfExit?: (target: RestartTarget) => void;
   /** Test seam: docs directory, overriding config.docsPath and the search. */
@@ -139,9 +119,8 @@ const SyncBody = z.object({
 
 /**
  * `owner/name` or a bare `name` (which takes GITHUB_REPO_OWNER). Constrained to
- * what GitHub itself allows, because both halves are interpolated into an API
- * URL — encodeURIComponent already handles that, but a name this shape also
- * cannot be a path or a scheme in an error message an operator reads.
+ * what GitHub itself allows, since both halves are interpolated into an API URL
+ * and appear in error messages an operator reads.
  */
 const RepoRef = z
   .string()
@@ -190,8 +169,7 @@ interface ExtensionStatus {
   latestCommit: string | null;
   /**
    * True when HEAD differs from the published commit. Null means the question
-   * could not be answered — never `false`, which an operator would read as
-   * "up to date".
+   * could not be answered, never `false`, which would read as "up to date".
    */
   behind: boolean | null;
   /** Paths under the extension's directory that changed, when known. */
@@ -232,15 +210,13 @@ export function registerSysopsRoutes(
     options.selfExit ??
     ((target: RestartTarget) => {
       ctx.log.warn({ target }, "restart requested: raising SIGTERM on self");
-      // The registered SIGTERM handler closes the HTTP server, closes the
-      // metrics server and disconnects prisma before exiting 0. Docker's
-      // `restart: unless-stopped` starts us again.
+      // The registered SIGTERM handler closes the HTTP server, closes the metrics
+      // server and disconnects prisma before exiting 0.
       process.kill(process.pid, "SIGTERM");
     });
 
-  // Resolved once: the answer cannot change while the process lives, and a
-  // per-request upward filesystem walk would be pure waste. A missing directory
-  // is reported by the route, not hidden.
+  // Resolved once: the answer cannot change while the process lives. A missing
+  // directory is reported by the route, not hidden.
   const docsDir = options.docsDir ?? resolveDocsDir(ctx.config.docsPath);
 
   const githubConfig = (): GithubApiConfig => ({
@@ -266,8 +242,7 @@ export function registerSysopsRoutes(
 
     /**
      * Per-principal budget for the three endpoints that publish. Keyed on the
-     * principal name so a token and a session are metered separately, and one
-     * operator's mistake does not lock the other out.
+     * principal name so a token and a session are metered separately.
      */
     const installLimiter = new RateLimiter(INSTALL_BURST, INSTALL_REFILL_PER_SECOND);
     const installAllowed = async (req: FastifyRequest, reply: FastifyReply): Promise<boolean> => {
@@ -295,11 +270,11 @@ export function registerSysopsRoutes(
     /**
      * Compare every published extension against its repo's default-branch HEAD.
      *
-     * The honesty requirement is the whole design here. There are four ways this
-     * can fail to know the answer — no repos configured, no token for a private
-     * repo, GitHub unreachable, or a bundle published without a `sourceCommit` —
-     * and all four must read as "cannot tell, because X" rather than as "up to
-     * date". An operator who is told everything is current does not look again.
+     * There are four ways this can fail to know the answer: no repos configured,
+     * no token for a private repo, GitHub unreachable, or a bundle published
+     * without a `sourceCommit`. All four read as "cannot tell, because X" rather
+     * than as "up to date", because an operator told everything is current does
+     * not look again.
      */
     scope.get(
       "/api/v1/admin/sysops/github/status",
@@ -309,12 +284,8 @@ export function registerSysopsRoutes(
 
     /**
      * Publish the extensions that are behind, using the push webhook's path.
-     *
-     * Per-extension outcomes, and one failure never fails the others: a repo
-     * where someone broke the TypeScript must not block the four extensions that
-     * build fine. `dryRun` answers "what would this do?" without publishing,
-     * which is the safe way to use a button that changes the code every worker
-     * will execute.
+     * Per-extension outcomes, and one failure never fails the others. `dryRun`
+     * answers "what would this do?" without publishing.
      */
     scope.post(
       "/api/v1/admin/sysops/github/sync",
@@ -322,8 +293,7 @@ export function registerSysopsRoutes(
       async (req, reply) => {
         const body = parseOrThrow(SyncBody, req.body ?? {});
         // A dry run does not download, build or publish, so it does not spend the
-        // publish budget — an operator checking twice before committing to it is
-        // the behaviour we want to encourage.
+        // publish budget.
         if (!body.dryRun && !(await installAllowed(req, reply))) return reply;
         const status = await collectGithubStatus();
         if (!status.available) {
@@ -456,16 +426,14 @@ export function registerSysopsRoutes(
     /**
      * Restart by graceful self-exit, relying on the container restart policy.
      *
-     * OWNER *and* settings:write: an api-token is never OWNER however broadly it
-     * is scoped, and "take the control plane down" is not an authority to hand a
-     * machine client that only needed to publish bundles.
+     * OWNER and settings:write: an api token is never OWNER however broadly it is
+     * scoped, and "take the control plane down" is not an authority for a machine
+     * client that only needed to publish bundles.
      *
      * The response is sent before the exit, and the exit uses the service's
-     * existing SIGTERM path so in-flight work finishes the way it does on every
-     * deploy. What this route CANNOT do is start something that is already down:
-     * if the deployment has no restart policy, this is a stop button. That is
-     * why it is refusable with SYSOPS_RESTART_ENABLED=false and why the response
-     * says so out loud.
+     * existing SIGTERM path. What this cannot do is start something already down:
+     * with no restart policy this is a stop button, which is why it is refusable
+     * with SYSOPS_RESTART_ENABLED=false and why the response says so.
      */
     scope.post(
       "/api/v1/admin/sysops/restart",
@@ -516,9 +484,8 @@ export function registerSysopsRoutes(
 
         if (exiting) {
           const timer = setTimeout(() => selfExit(target), RESTART_DELAY_MS);
-          // Never hold the event loop open on this timer's account: an unref'd
-          // timer still fires in a live server, and a test that injects a
-          // no-op selfExit must not hang for half a second at teardown.
+          // Never hold the event loop open on this timer's account: a test that
+          // injects a no-op selfExit must not hang at teardown.
           timer.unref();
         }
         return reply;
@@ -528,12 +495,9 @@ export function registerSysopsRoutes(
     // ---- 3. install an extension ----
 
     /**
-     * Install from any GitHub repo, configured or not.
-     *
-     * This is the path for an extension that does not live in
-     * GITHUB_EXTENSIONS_REPOS yet — a fork, a contributor's branch, a new source
-     * being trialled. It is the same download, build and publish the webhook
-     * runs; only the trigger and the audit attribution differ.
+     * Install from any GitHub repo, configured or not: a fork, a contributor's
+     * branch, a new source being trialled. Same download, build and publish the
+     * webhook runs; only the trigger and the audit attribution differ.
      */
     scope.post(
       "/api/v1/admin/sysops/extensions/install-github",
@@ -547,7 +511,7 @@ export function registerSysopsRoutes(
 
         // The commit is resolved rather than trusted so the bundle records real
         // provenance: `sourceCommit` is what the "is this behind?" check reads
-        // later, and a branch name there would make that question unanswerable.
+        // later, and a branch name there would make that unanswerable.
         let commit: string;
         let ref: string;
         try {
@@ -585,8 +549,7 @@ export function registerSysopsRoutes(
         }
 
         // Where the extension lives is a question about the tree, not about the
-        // operator. Ambiguity is reported so they can answer it with `path`
-        // rather than having one guessed for them.
+        // operator. Ambiguity is reported so they can answer it with `path`.
         const stats = archiveStats(archive);
         let subPath = body.path;
         if (subPath === undefined) {
@@ -647,14 +610,12 @@ export function registerSysopsRoutes(
     );
 
     /**
-     * Install from a zip the operator drops in the browser.
-     *
-     * This is the "it is on my laptop and not in git yet" path, and it accepts
-     * both shapes an operator will actually produce: a built extension
-     * (manifest.json + index.mjs) or the source directory (manifest.json +
-     * index.ts / src/), which is built here with the same esbuild invocation the
-     * webhook uses. A folder zipped from a file manager wraps everything in one
-     * directory; that is unwrapped rather than rejected.
+     * Install from a zip the operator drops in the browser: the "it is on my
+     * laptop and not in git yet" path. Accepts both shapes an operator produces,
+     * a built extension (manifest.json + index.mjs) or the source directory
+     * (manifest.json + index.ts / src/), which is built here with the same
+     * esbuild invocation the webhook uses. A folder zipped from a file manager
+     * wraps everything in one directory; that is unwrapped rather than rejected.
      */
     scope.post(
       "/api/v1/admin/sysops/extensions/install-upload",
@@ -672,8 +633,7 @@ export function registerSysopsRoutes(
         try {
           try {
             // The extension's own directory becomes workDir itself, whatever it
-            // was called inside the zip — `root` is only which directory was
-            // taken, for the log.
+            // was called inside the zip; `root` is only which directory was taken.
             const intake = extractBundleTree(req.body, workDir);
             ctx.log.info({ ...stats, ...intake }, "accepted an uploaded bundle archive");
           } catch (err) {
@@ -704,18 +664,15 @@ export function registerSysopsRoutes(
     // ---- 4. read the docs ----
 
     /**
-     * The documents shipped with this build.
-     *
-     * `stats:read` is the floor: this is the operator handbook, not data. It is
-     * still behind admin auth because the deployment notes name hosts, paths and
-     * the shape of the credential layout.
+     * The documents shipped with this build. `stats:read` is the floor: this is
+     * the operator handbook, not data. It is still behind admin auth because the
+     * deployment notes name hosts, paths and the credential layout.
      */
     scope.get("/api/v1/admin/docs", { preHandler: requireScope("stats:read") }, async () => {
-      // An EMPTY directory is the same answer as a missing one, and it is the
-      // shape a build produces when `COPY docs ./docs` was dropped or pointed at
-      // the wrong context. Reporting `documents: []` with `available: true` would
-      // read as "this project has no documentation", which is a different and
-      // untrue statement.
+      // An empty directory is the same answer as a missing one, and it is what a
+      // build produces when `COPY docs ./docs` was dropped. Reporting
+      // `documents: []` with `available: true` would read as "this project has no
+      // documentation", which is a different and untrue statement.
       const documents = docsDir === null ? [] : listDocs(docsDir);
       if (documents.length === 0) {
         return {
@@ -731,12 +688,10 @@ export function registerSysopsRoutes(
     });
 
     /**
-     * One document's markdown.
-     *
-     * `:name` is validated against an allowlist derived from the shipped
-     * directory (see core/sysops/docsStore.ts). Every rejection is the same 404:
-     * distinguishing "malformed name" from "no such document" would confirm
-     * which files exist to whoever is probing the endpoint.
+     * One document's markdown. `:name` is validated against an allowlist derived
+     * from the shipped directory (see core/sysops/docsStore.ts). Every rejection
+     * is the same 404: distinguishing "malformed name" from "no such document"
+     * would confirm which files exist to whoever is probing.
      */
     scope.get(
       "/api/v1/admin/docs/:name",
@@ -755,12 +710,9 @@ export function registerSysopsRoutes(
     // ---- helpers that need ctx ----
 
     /**
-     * Refuse an archive: 422 with the reason and the code, and an audit row.
-     *
-     * A refused upload is exactly the event an operator wants to find later —
-     * "someone tried to publish something the intake rejected" is worth as much
-     * as a successful publish, and more if it happens repeatedly. The sha256 is
-     * of the archive as received, so two attempts with the same bytes are
+     * Refuse an archive: 422 with the reason and the code, and an audit row. A
+     * refused upload is worth finding later, especially if it repeats. The sha256
+     * is of the archive as received, so two attempts with the same bytes are
      * recognisable as one.
      */
     async function refuse(
@@ -783,13 +735,9 @@ export function registerSysopsRoutes(
     }
 
     /**
-     * Did this bundle become the one the scheduler will pin?
-     *
-     * "Is it live?" is the operator's next question after every publish, and the
-     * answer is not always yes: publishing an older version number leaves the
-     * newer one as `latest`, and a yanked-then-republished bundle behaves
-     * differently again. Answering it here beats making them cross-check the
-     * Extensions tab.
+     * Did this bundle become the one the scheduler will pin? Not always yes:
+     * publishing an older version number leaves the newer one as `latest`, and a
+     * yanked-then-republished bundle behaves differently again.
      */
     async function liveness(
       outcome: PublishOutcome,
@@ -876,7 +824,7 @@ export function registerSysopsRoutes(
           continue;
         }
 
-        // Cheapest case first, and the common one: the published commit IS the
+        // Cheapest case first, and the common one: the published commit is the
         // head of one of the repos, so nothing needs comparing.
         const atHead = [...heads.entries()].find(([, sha]) => sha === bundle.sourceCommit);
         if (atHead) {
@@ -972,9 +920,9 @@ function servicesFor(target: RestartTarget): string[] {
 }
 
 /**
- * HTTP status for a single-extension install. 422 for a rejected bundle (the
- * body carries the reason), 200 for a republish of identical bytes, 201 for a
- * new one — matching POST /api/v1/admin/bundles so a client can treat them alike.
+ * HTTP status for a single-extension install: 422 for a rejected bundle, 200 for
+ * a republish of identical bytes, 201 for a new one, matching
+ * POST /api/v1/admin/bundles so a client can treat them alike.
  */
 function statusFor(outcome: PublishOutcome): number {
   if (outcome.status === "failed") return 422;

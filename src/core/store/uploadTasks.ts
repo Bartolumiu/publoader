@@ -8,21 +8,18 @@ import {
 } from "@prisma/client";
 
 /**
- * Central MangaDex work queues — the Postgres replacement for the Mongo
- * `to_upload` / `to_edit` / `to_delete` / `to_unavailable` collections.
+ * Central MangaDex work queues, replacing the Mongo `to_upload` / `to_edit` /
+ * `to_delete` / `to_unavailable` collections.
  *
- * Insertion preserves today's `$setOnInsert` upsert semantics via a unique
- * (kind, dedupe_key) constraint + ON CONFLICT DO NOTHING: re-processing a run
- * or ingesting overlapping results can never enqueue the same chapter twice.
- * Draining uses the same SKIP LOCKED lease pattern as jobs, so multiple
- * uploader processes are safe.
+ * Insertion keeps the old `$setOnInsert` semantics via a unique
+ * (kind, dedupe_key) constraint plus ON CONFLICT DO NOTHING, so re-processing a
+ * run can never enqueue the same chapter twice. Draining uses the same SKIP
+ * LOCKED lease pattern as jobs.
  *
- * The operator half of this file (list/retry/remove/purge/reorder/manual add)
- * follows jobs.ts to the letter: every mutation is one statement, or one
+ * The operator half follows jobs.ts: every mutation is one statement, or one
  * transaction, whose WHERE clause names the expected prior state. Zero rows
- * affected means the caller lost the race and must report a refusal — there is
- * no read-then-write anywhere, and nothing here can touch a LEASED row, which
- * belongs to a live uploader process.
+ * affected means the caller lost the race and must report a refusal. There is no
+ * read-then-write anywhere, and nothing here can touch a LEASED row.
  */
 
 export const UPLOAD_TASK_KINDS = ["UPLOAD", "EDIT", "DELETE", "UNAVAILABLE"] as const;
@@ -35,15 +32,13 @@ export const RETRYABLE_STATES = ["FAILED", "DEAD_LETTER"] as const satisfies rea
  * States a row may be deleted from without an extra flag. DONE is deliberately
  * absent: a DONE row is half of the double-upload guard (the other half being
  * `upload_logs`), so dropping one re-arms the processor to enqueue that chapter
- * again. Callers must pass `includeCompleted` and say so out loud.
+ * again. Callers must pass `includeCompleted`.
  */
 export const REMOVABLE_STATES = ["PENDING", "FAILED", "DEAD_LETTER"] as const satisfies readonly UploadTaskState[];
 
 /**
- * Hard ceiling on one bulk mutation. Bulk here means "an operator clicked
- * select-all", not "migrate the queue" — a capped-and-reported batch is far
- * easier to reason about after the fact than a statement that touched 90k rows
- * because a filter was wider than intended.
+ * Hard ceiling on one bulk mutation. Bulk means "an operator clicked
+ * select-all", not "migrate the queue".
  */
 export const BULK_CAP = 1000;
 /** Same idea for a whole-queue purge, which is expected to be larger. */
@@ -59,11 +54,9 @@ export function uploadDedupeKey(chapter: {
 
 /**
  * The dedupe key for a hand-built task, derived exactly as the producers do:
- * `uploadDedupeKey` for UPLOAD (processor.ts) and the MangaDex chapter id for
- * every other kind (processor.enqueueRemovals, and the EDIT branch above it).
- * Returning null rather than a degenerate key is what stops a chapter with no
- * identity at all from occupying the `||` slot — the same guard
- * cli/migrate-from-mongo.ts applies to legacy documents.
+ * `uploadDedupeKey` for UPLOAD and the MangaDex chapter id for every other kind.
+ * Returning null rather than a degenerate key stops a chapter with no identity
+ * from occupying the `||` slot.
  */
 export function taskDedupeKey(
   kind: UploadTaskKind,
@@ -88,14 +81,9 @@ export interface UploadTaskFilter {
   /** Case-insensitive substring over `dedupe_key`. */
   dedupeKey?: string;
   /**
-   * Case-insensitive substring over the chapter payload — series name, chapter
-   * title, chapter number, and both MangaDex ids.
-   *
-   * A dedupe key is machine identity (`chapterId|number|language`, or a
-   * MangaDex uuid), so "everything queued for Sakamoto Days" was not expressible
-   * before this. It applies to every path the filter reaches, purge included,
-   * which is deliberate: pulling one series' worth of bad rows out of the queue
-   * is the case that used to mean `psql`.
+   * Case-insensitive substring over the chapter payload: series name, chapter
+   * title, chapter number, and both MangaDex ids. Applies to every path the
+   * filter reaches, purge included.
    */
   q?: string;
   attemptMin?: number;
@@ -109,13 +97,11 @@ export interface UploadTaskFilter {
 /**
  * Which chapter a queue row is about.
  *
- * The `chapter` payload is deliberately absent from every list projection: it
- * is worker-supplied, carries the page-artifact ids and (for EDIT) a whole
- * before/after pair, and is read exactly once by the uploader. But with none of
- * it a row is a bare dedupe key — and for EDIT, DELETE and UNAVAILABLE that key
- * is the MangaDex chapter UUID (see `taskDedupeKey`), which names nothing an
- * operator recognises. These are the fields that make a row readable as a
- * chapter rather than a UUID.
+ * The `chapter` payload is absent from every list projection: it is
+ * worker-supplied, carries the page-artifact ids and (for EDIT) a whole
+ * before/after pair, and is read once by the uploader. Without it a row is a
+ * bare dedupe key, which for EDIT, DELETE and UNAVAILABLE is a MangaDex UUID.
+ * These are the fields that make such a row readable as a chapter.
  */
 export interface UploadTaskIdentity {
   extension: string | null;
@@ -128,7 +114,7 @@ export interface UploadTaskIdentity {
   chapterLanguage: string | null;
 }
 
-/** A queue row without its `chapter` payload — what list views return. */
+/** A queue row without its `chapter` payload: what list views return. */
 export interface UploadTaskRow {
   id: string;
   kind: string;
@@ -147,13 +133,11 @@ export interface UploadTaskRow {
 
 /**
  * A queue row read as the chapter it will act on. Every chapter field is
- * nullable because the payload is whatever the extension produced — a DELETE
- * task, for instance, carries a MangaDex id and often little else.
+ * nullable because the payload is whatever the extension produced.
  *
- * `identity` is dropped rather than inherited: this row already carries every
- * one of those fields flat, and a nested copy of them would be a second shape
- * for the same data that `listChapters` does not select — an interface claiming
- * a property the query never returns, which `$queryRaw` cannot catch.
+ * `identity` is dropped rather than inherited: this row carries every one of
+ * those fields flat, and a nested copy would be a shape `listChapters` does not
+ * select, which `$queryRaw` cannot catch.
  */
 export interface QueuedChapterRow extends Omit<UploadTaskRow, "identity"> {
   /** 1-based place in the claim order across everything matching the filter. */
@@ -217,12 +201,9 @@ export function decodeTaskCursor(raw: string): TaskCursor | null {
 
 /**
  * Millisecond offsets from the mode's anchor, one per id in the order given.
- *
- * Reordering is expressed purely as `not_before` — see the comment on
- * `UploadTaskStore.reorder` for why — so "position in the queue" is arithmetic
- * on an instant. Steps are 1 ms apart, which postgres stores exactly
- * (timestamptz is microsecond-resolution) and which is far below any interval
- * an operator cares about.
+ * Reordering is expressed purely as `not_before` (see `UploadTaskStore.reorder`),
+ * so position is arithmetic on an instant. Steps are 1 ms apart, which postgres
+ * stores exactly.
  */
 export function reorderOffsetsMs(mode: Exclude<ReorderMode, "defer">, count: number): number[] {
   const offsets: number[] = [];
@@ -254,30 +235,24 @@ export class UploadTaskStore {
   /**
    * Queue a chapter action an operator asked for, superseding a settled row.
    *
-   * `enqueue` cannot serve this. Its ON CONFLICT DO NOTHING is what makes the
-   * processor idempotent, but it also means the (kind, dedupe_key) slot for a
-   * chapter is occupied FOREVER once the task completes — nothing deletes DONE
-   * rows — so a second operator action on the same chapter would silently do
-   * nothing. That is correct for the processor (it re-derives the same work
-   * every run) and wrong for a person who has just corrected a title and wants
-   * it pushed again.
+   * `enqueue` cannot serve this: its ON CONFLICT DO NOTHING keeps the processor
+   * idempotent, but it also means the (kind, dedupe_key) slot is occupied
+   * forever once the task completes, so a second operator action on the same
+   * chapter would silently do nothing.
    *
-   * So a settled row is reset in place: same slot, new payload, PENDING, fresh
-   * attempt budget, due now. Which states count as settled is the whole safety
-   * property and it lives in the WHERE clause of the one statement:
+   * A settled row is therefore reset in place: same slot, new payload, PENDING,
+   * fresh attempt budget, due now. Which states count as settled is the safety
+   * property, and it lives in the WHERE clause of the one statement:
    *
    *  - LEASED is excluded because an uploader is mid-flight against MangaDex.
-   *  - PENDING is excluded because the work is already queued; overwriting it
-   *    would change what a queued task does under an operator who is watching
-   *    the queue, and "it is already queued" is a better answer than a silent
-   *    rewrite.
+   *  - PENDING is excluded because the work is already queued, and saying so is
+   *    a better answer than a silent rewrite.
    *
-   * Both come back as null, and the caller reads the row afterwards purely to
-   * name the state in its refusal — never to decide whether to write.
+   * Both come back as null; the caller reads the row afterwards purely to name
+   * the state in its refusal.
    *
    * UPLOAD is not accepted, by type and at runtime: resetting a DONE UPLOAD row
-   * removes half of the double-upload guard (see REMOVABLE_STATES), and every
-   * chapter this is reachable from is already on MangaDex.
+   * removes half of the double-upload guard (see REMOVABLE_STATES).
    */
   async requeueForChapter(
     kind: Exclude<UploadTaskKind, "UPLOAD">,
@@ -300,10 +275,8 @@ export class UploadTaskStore {
             lease_id = NULL, lease_expires_at = NULL, last_error = NULL, updated_at = now()
         WHERE upload_tasks.state IN ('DONE', 'FAILED', 'DEAD_LETTER')
       -- xmax is 0 on a freshly inserted tuple and carries the updating
-      -- transaction id on one that took the DO UPDATE branch. It is the only
-      -- way to tell "queued" from "requeued" without a second statement, and
-      -- the difference matters: superseding a DONE row is worth saying out loud
-      -- in the response and in the audit trail.
+      -- transaction id on one that took the DO UPDATE branch: the only way to
+      -- tell "queued" from "requeued" without a second statement.
       RETURNING id, kind::text AS kind, dedupe_key AS "dedupeKey", state::text AS state,
                 attempt, max_attempts AS "maxAttempts", not_before AS "notBefore",
                 lease_id AS "leaseId", lease_expires_at AS "leaseExpiresAt",
@@ -317,9 +290,9 @@ export class UploadTaskStore {
   }
 
   /**
-   * Every queue row for one dedupe key, across kinds. For a chapter that is
-   * `mdChapterId` — the key EDIT, DELETE and UNAVAILABLE all use — so this
-   * answers "is anything already queued against this chapter?".
+   * Every queue row for one dedupe key, across kinds. For a chapter that key is
+   * `mdChapterId`, so this answers "is anything already queued against this
+   * chapter?".
    */
   async forDedupeKey(dedupeKey: string): Promise<UploadTaskRow[]> {
     return this.forDedupeKeys([dedupeKey]);
@@ -327,9 +300,8 @@ export class UploadTaskStore {
 
   /**
    * The same question for many chapters in one query, which is what a bulk
-   * action's dry run asks: it has to predict, for every chapter in the set,
-   * whether the write would be accepted — and doing that one chapter at a time
-   * would make the preview slower than the operation it previews.
+   * action's dry run asks; one chapter at a time would make the preview slower
+   * than the operation it previews.
    */
   async forDedupeKeys(dedupeKeys: readonly string[]): Promise<UploadTaskRow[]> {
     if (dedupeKeys.length === 0) return [];
@@ -418,12 +390,9 @@ export class UploadTaskStore {
    * One page of the queue in the order it will actually drain, plus the total
    * matching the filter.
    *
-   * `not_before ASC` is the claim query's ordering, so this list answers "what
-   * runs next?" rather than "what changed last?" (which is what ordering by
-   * `updated_at` answers, and which is why the same list keyed on `updated_at`
-   * could never be used to verify a reorder). `created_at, id` are appended
-   * only to make the ordering total, which keyset paging requires; the claim
-   * query breaks ties arbitrarily and does not need to care.
+   * `not_before ASC` is the claim query's ordering, so this answers "what runs
+   * next?" rather than "what changed last?". `created_at, id` are appended only
+   * to make the ordering total, which keyset paging requires.
    */
   async list(
     filter: UploadTaskFilter,
@@ -458,19 +427,13 @@ export class UploadTaskStore {
   }
 
   /**
-   * The same page as `list`, but as CHAPTERS rather than as queue rows: the
-   * series, number, volume, title and language the uploader is about to send,
-   * with the row's position in the claim order.
-   *
-   * `list` answers "what is in the queue and what state is it in", which is the
-   * incident view. This answers "what is about to happen to the catalogue", and
-   * they are not the same question — a dedupe key of
-   * `1015117|142|en` names a chapter only to someone willing to decode it.
+   * The same page as `list`, but as chapters rather than queue rows: the series,
+   * number, volume, title and language the uploader is about to send, with the
+   * row's position in the claim order.
    *
    * The position comes from a window function over the whole filtered set in the
-   * same ordering the claim query uses, so "3rd" means third out of everything
-   * matching, not third on this page. Paging stays keyset for the reason `list`
-   * documents: the queue drains while it is being read.
+   * claim query's ordering, so "3rd" means third out of everything matching, not
+   * third on this page. Paging stays keyset for the reason `list` documents.
    */
   async listChapters(
     filter: UploadTaskFilter,
@@ -499,8 +462,8 @@ export class UploadTaskStore {
                t.chapter ->> 'chapterLanguage' AS "chapterLanguage",
                t.chapter ->> 'chapterUrl' AS "chapterUrl",
                t.chapter ->> 'extensionName' AS "extension",
-               -- The fields an EDIT task will actually change, so the list can
-               -- show "title → …" without a second fetch per row.
+               -- The fields an EDIT task will change, so the list can show them
+               -- without a second fetch per row.
                CASE WHEN jsonb_typeof(t.chapter -> 'payload') = 'object'
                     THEN t.chapter -> 'payload' END AS "editPayload",
                coalesce(jsonb_array_length(
@@ -529,7 +492,7 @@ export class UploadTaskStore {
     };
   }
 
-  /** One row including its `chapter` payload — the detail/edit view. */
+  /** One row including its `chapter` payload: the detail/edit view. */
   async get(id: string): Promise<(UploadTaskRow & { chapter: unknown }) | null> {
     const rows = await this.prisma.$queryRaw<(UploadTaskRow & { chapter: unknown })[]>(Prisma.sql`
       SELECT ${TASK_COLUMNS}, ${TASK_IDENTITY}, t.chapter FROM upload_tasks t WHERE t.id = ${id}
@@ -539,8 +502,8 @@ export class UploadTaskStore {
 
   /**
    * Current state of specific ids, for explaining a refusal. Only ever read
-   * AFTER a guarded mutation reported fewer rows than asked for — never before
-   * one, which would be the read-then-write this file does not do.
+   * after a guarded mutation reported fewer rows than asked for, never before
+   * one.
    */
   async statesOf(ids: readonly string[]): Promise<Map<string, UploadTaskStateRow>> {
     if (ids.length === 0) return new Map();
@@ -570,7 +533,7 @@ export class UploadTaskStore {
     return Number(rows[0]?.total ?? 0);
   }
 
-  /** Per kind+state counts for a filter — the depth breakdown a purge reports. */
+  /** Per kind+state counts for a filter: the depth breakdown a purge reports. */
   async breakdown(filter: UploadTaskFilter): Promise<{ kind: string; state: string; count: number }[]> {
     const rows = await this.prisma.$queryRaw<{ kind: string; state: string; count: bigint }[]>(Prisma.sql`
       SELECT t.kind::text AS kind, t.state::text AS state, count(*) AS count
@@ -581,12 +544,10 @@ export class UploadTaskStore {
   }
 
   /**
-   * FAILED/DEAD_LETTER -> PENDING with a fresh attempt budget and due now.
-   *
-   * The budget resets because the operator is asserting the cause is fixed;
-   * leaving `attempt` at `maxAttempts` would dead-letter the task again on the
-   * first hiccup. LEASED rows cannot match the WHERE clause, so a worker's task
-   * is untouchable here by construction rather than by a check.
+   * FAILED/DEAD_LETTER to PENDING with a fresh attempt budget, due now. The
+   * budget resets because the operator is asserting the cause is fixed. LEASED
+   * rows cannot match the WHERE clause, so a worker's task is untouchable by
+   * construction rather than by a check.
    */
   async retryMany(ids: readonly string[]): Promise<string[]> {
     if (ids.length === 0) return [];
@@ -602,9 +563,8 @@ export class UploadTaskStore {
   }
 
   /**
-   * Delete rows outright. Returns what went, so the caller can report it rather
-   * than a count — "3 deleted" is not an audit trail, and these rows do not
-   * exist afterwards to look up.
+   * Delete rows outright. Returns what went rather than a count, since these
+   * rows do not exist afterwards to look up.
    */
   async removeMany(
     ids: readonly string[],
@@ -622,12 +582,10 @@ export class UploadTaskStore {
 
   /**
    * Whole-queue delete by filter, capped. LEASED is excluded in the statement
-   * itself (not by the caller's filter) so no combination of inputs can reach a
+   * itself, not by the caller's filter, so no combination of inputs can reach a
    * row a worker owns; DONE likewise needs `includeCompleted`.
    *
-   * The inner SELECT is what applies the cap: `DELETE … LIMIT` is not valid SQL,
-   * and an uncapped delete is exactly the operation that turns a too-wide filter
-   * into an unrecoverable morning.
+   * The inner SELECT applies the cap, since `DELETE … LIMIT` is not valid SQL.
    */
   async purge(
     filter: UploadTaskFilter,
@@ -650,21 +608,16 @@ export class UploadTaskStore {
   /**
    * Reprioritise PENDING rows by rewriting `not_before`.
    *
-   * WHY `not_before` AND NOT A PRIORITY COLUMN: the claim query already reads
-   * `WHERE state = 'PENDING' AND not_before <= now() ORDER BY not_before ASC`,
-   * so `not_before` *is* the queue's priority — it is both the readiness gate
-   * and the sort key. Adding a `priority` column would need a schema change, a
-   * change to that ORDER BY, and would then leave two fields deciding order,
-   * with the awkward question of which wins when a backing-off task (future
-   * `not_before`) carries a high priority. Writing an instant needs none of
-   * that: "run this next" is `not_before` before everyone else's, "run it later"
-   * is `not_before` further out, and the semantics of "not yet due" are
-   * preserved for free.
+   * `not_before` is used rather than a priority column because the claim query
+   * already reads `WHERE state = 'PENDING' AND not_before <= now() ORDER BY
+   * not_before ASC`, making it both the readiness gate and the sort key. A
+   * separate priority column would leave two fields deciding order, with no good
+   * answer for a backing-off task carrying a high priority.
    *
-   * Every mode is one statement whose WHERE names PENDING, so a row a worker
-   * leased between the operator's click and this update simply is not returned.
-   * The anchor is a scalar subquery inside that same statement rather than a
-   * prior SELECT, which keeps the whole thing atomic.
+   * Every mode is one statement whose WHERE names PENDING, so a row leased
+   * between the operator's click and this update is simply not returned. The
+   * anchor is a scalar subquery inside that statement rather than a prior SELECT,
+   * which keeps the whole thing atomic.
    */
   async reorder(
     ids: readonly string[],
@@ -675,9 +628,8 @@ export class UploadTaskStore {
     const idArray = [...ids];
 
     if (mode === "defer") {
-      // Relative to now() for a row already due, so deferring a long-overdue
-      // task by 60s means "in a minute" rather than "a minute after a date that
-      // has passed", which would be no deferral at all.
+      // Relative to now() for a row already due, so deferring a long-overdue task
+      // by 60s means "in a minute" rather than a minute after a date that passed.
       return this.prisma.$queryRaw<{ id: string; notBefore: Date }[]>(Prisma.sql`
         UPDATE upload_tasks
         SET not_before = greatest(not_before, now()) + make_interval(secs => ${deferSeconds}),
@@ -694,8 +646,8 @@ export class UploadTaskStore {
     );
     // front/back anchor on the rest of the queue and are clamped to now(), so
     // "front" is due immediately even when every other pending row is backing
-    // off into the future. sequence anchors on the listed rows themselves,
-    // which is what makes it a relative reordering rather than a queue jump.
+    // off into the future. sequence anchors on the listed rows themselves, which
+    // makes it a relative reordering rather than a queue jump.
     const anchor =
       mode === "front"
         ? Prisma.sql`SELECT least(coalesce(min(not_before), now()), now()) AS at
@@ -719,9 +671,8 @@ export class UploadTaskStore {
   /**
    * Enqueue a hand-built task, returning the row or null when the unique
    * (kind, dedupe_key) constraint already holds one. Same INSERT … ON CONFLICT
-   * DO NOTHING as `enqueue`, because that constraint is the whole reason a
-   * double upload is impossible; the caller turns null into a 409 naming the
-   * existing task rather than silently doing nothing.
+   * DO NOTHING as `enqueue`; the caller turns null into a 409 naming the existing
+   * task.
    */
   async createManual(
     kind: UploadTaskKind,
@@ -752,13 +703,10 @@ export class UploadTaskStore {
    * `expectedUpdatedAt` is optimistic concurrency: the caller read the row to
    * merge a partial chapter patch and to derive the new dedupe key in the one
    * place that logic lives (`taskDedupeKey`), so the write pins the version it
-   * read. Anything that touched the row in between — a claim, another edit, the
-   * sweeper — leaves this at zero rows, which the caller reports as losing the
-   * race instead of clobbering. Deriving the key in SQL instead would avoid the
-   * read but would make the dedupe rule exist twice, in two languages.
+   * read. Anything that touched the row in between leaves this at zero rows,
+   * which the caller reports as losing the race instead of clobbering.
    *
-   * Throws P2002 on a dedupe-key collision; that is the unique constraint doing
-   * its job and the caller turns it into a 409.
+   * Throws P2002 on a dedupe-key collision, which the caller turns into a 409.
    */
   async patchPending(
     id: string,
@@ -793,13 +741,11 @@ const TASK_COLUMNS = Prisma.sql`t.id, t.kind::text AS kind, t.dedupe_key AS "ded
   t.created_at AS "createdAt", t.updated_at AS "updatedAt"`;
 
 /**
- * `UploadTaskIdentity`, built in the database.
- *
- * Projected as one JSON object rather than eight aliased columns so the shape
- * arrives assembled and the whole `chapter` payload never crosses the wire.
- * `chapter` is intentionally unqualified: every statement this is spliced into
- * has exactly one table in scope, including `INSERT … RETURNING`, where the
- * `t` alias the SELECTs use does not exist.
+ * `UploadTaskIdentity`, built in the database. One JSON object rather than eight
+ * aliased columns, so the shape arrives assembled and the whole `chapter`
+ * payload never crosses the wire. `chapter` is unqualified on purpose: every
+ * statement this is spliced into has one table in scope, including
+ * `INSERT … RETURNING`, where the `t` alias does not exist.
  */
 const TASK_IDENTITY = Prisma.sql`jsonb_build_object(
   'extension', chapter->>'extensionName',
@@ -813,8 +759,8 @@ const TASK_IDENTITY = Prisma.sql`jsonb_build_object(
 ) AS identity`;
 
 /**
- * Filter predicates, parameterised. The enum comparisons keep the enum type
- * (via text[] -> enum[]) rather than casting the column to text, so the
+ * Filter predicates, parameterised. The enum comparisons keep the enum type (via
+ * text[] to enum[]) rather than casting the column to text, so the
  * (state, not_before) index stays usable.
  */
 function taskWhere(filter: UploadTaskFilter): Prisma.Sql[] {
@@ -825,15 +771,13 @@ function taskWhere(filter: UploadTaskFilter): Prisma.Sql[] {
   if (filter.states && filter.states.length > 0) {
     parts.push(Prisma.sql`t.state = ANY(${[...filter.states]}::text[]::"UploadTaskState"[])`);
   }
-  // Parameterised, so a `%` an operator types is a wildcard they meant and a
-  // quote is data either way.
+  // Parameterised, so a `%` an operator types is a wildcard they meant.
   if (filter.dedupeKey) parts.push(Prisma.sql`t.dedupe_key ILIKE ${`%${filter.dedupeKey}%`}`);
   if (filter.q) {
     const needle = `%${filter.q}%`;
-    // Both MangaDex ids are in here as well as the human-readable fields: for
-    // EDIT, DELETE and UNAVAILABLE the dedupe key IS the chapter id, so an
-    // operator pasting a uuid from a MangaDex link or a webhook has nowhere
-    // else to put it, and `dedupeKey` would only answer for one of the two.
+    // Both MangaDex ids as well as the human-readable fields: for EDIT, DELETE
+    // and UNAVAILABLE the dedupe key is the chapter id, so an operator pasting a
+    // uuid has nowhere else to put it.
     parts.push(Prisma.sql`(
       t.chapter ->> 'mangaName' ILIKE ${needle}
       OR t.chapter ->> 'chapterTitle' ILIKE ${needle}
@@ -844,13 +788,10 @@ function taskWhere(filter: UploadTaskFilter): Prisma.Sql[] {
   }
   if (filter.attemptMin !== undefined) parts.push(Prisma.sql`t.attempt >= ${filter.attemptMin}`);
   if (filter.attemptMax !== undefined) parts.push(Prisma.sql`t.attempt <= ${filter.attemptMax}`);
-  // Payload predicates. These read `chapter` rather than a column, so they are
-  // unindexed and scan; that is accounted for. They exist to be ANDed with the
-  // indexed kind/state predicates above, they are only ever reached from an
-  // operator action on a paged view, and `upload_tasks` keeps its DONE rows
-  // forever (they are half of the double-upload guard), so the alternative —
-  // expression indexes — would be permanent write cost and Prisma schema drift
-  // for a query a human runs by hand.
+  // Payload predicates read `chapter` rather than a column, so they are unindexed
+  // and scan. They are only ever ANDed with the indexed kind/state predicates
+  // above and only reached from an operator action on a paged view, so expression
+  // indexes would be permanent write cost for a query a human runs by hand.
   if (filter.extension) {
     parts.push(Prisma.sql`t.chapter->>'extensionName' = ${filter.extension}`);
   }

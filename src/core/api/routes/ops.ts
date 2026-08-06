@@ -1,6 +1,3 @@
-// Not self-registering: server.ts is owned elsewhere, so the integrator wires
-// this module in with `registerOpsRoutes(app, ctx)` next to the other route
-// modules.
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -18,45 +15,16 @@ import { normaliseMangadexLanguage } from "../../../contracts/languages.js";
 import { UPLOAD_TASK_KINDS, UPLOAD_TASK_STATES } from "../../store/uploadTasks.js";
 import { mangaEditPayload } from "../../md/titleService.js";
 
-/**
- * Operational visibility and triage that the legacy Discord IPC commands used
- * to provide and the HTTP API did not (see docs/ipc-to-api-mapping.md §gaps):
- * upload-task queues (`queue_peek` / `queue_clear`), MangaDex session state
- * (`mdauth_status` / `logout`), and a merged error feed standing in for `logs`.
- *
- * The through-line is that an operator should never need a shell on the core
- * container to answer "what is stuck and why" — or, since the dashboard grew
- * schema status, backups and the Activity feed, to *fix* it either. Container
- * stdout stays where it is (`docker logs`) because it describes processes; every
- * application-level event is a row, and rows are what this module serves.
- */
-
-/** Bundle preflight bodies are the same zip the publish route takes. */
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
-
-/**
- * How far back the Activity feed and the audit search will look by default.
- * A bounded window is what keeps a substring search over `audit_events`
- * predictable without a full-text index (see the audit search route).
- */
 const DEFAULT_WINDOW_HOURS = 72;
 
-/** Settings keys written by MdClient; read-only here (see core/md/client.ts). */
+/** Written by MdClient (core/md/client.ts); read-only here. */
 const MD_ACCESS_KEY = "mdauth_access";
 const MD_REFRESH_KEY = "mdauth_refresh";
 
 /**
- * Validate, answering 400 instead of 500.
- *
- * A bare `schema.parse` throws a ZodError, which the server's error handler
- * reports as "internal error" — actively misleading for a caller who mistyped a
- * filter. The filters here are the ones an operator types by hand, so they get
- * a real answer. `statusCode` is what the handler keys off.
- *
- * Generic over the schema rather than over a result type, so the return is the
- * schema's OUTPUT: with `z.ZodType<T>` TypeScript infers T from the input side,
- * which types every `.default(…)` field as possibly-undefined even though
- * parsing guarantees it is not.
+ * Parse with zod, answering 400 instead of the error handler's default 500.
+ * Generic over the schema so the return is the schema's output type.
  */
 function parseOrThrow<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infer<S> {
   const result = schema.safeParse(value);
@@ -68,15 +36,7 @@ function parseOrThrow<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infe
   });
 }
 
-/**
- * `exp` from a JWT payload, WITHOUT verifying the signature.
- *
- * Verification would need MangaDex's signing keys and would prove nothing we
- * act on: this is a "when does the saved session go stale?" readout for a
- * human, and a token we cannot parse is reported as unknown expiry rather than
- * treated as an error. Never returns any other claim — the token itself must
- * not leak through this endpoint.
- */
+/** `exp` from a JWT payload, without verifying the signature. Returns no other claim. */
 function jwtExpiry(token: string): Date | null {
   const payload = token.split(".")[1];
   if (!payload) return null;
@@ -90,15 +50,7 @@ function jwtExpiry(token: string): Date | null {
   }
 }
 
-/**
- * Locate `prisma/migrations` by walking up from this module.
- *
- * The depth differs between `src/` (vitest, tsx) and `dist/` (the container),
- * and the runtime image copies `prisma/` next to `dist/` — so searching upwards
- * for the directory is the one lookup that is correct in both, without either
- * layout being hard-coded. Returns null when the history was not shipped, which
- * the route reports as "unknown" rather than "up to date".
- */
+/** Walk up for `prisma/migrations`: the depth differs between `src/` and `dist/`. */
 function findMigrationsDir(): string | null {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (let hop = 0; hop < 8; hop++) {
@@ -120,11 +72,7 @@ function migrationsOnDisk(dir: string | null): string[] {
     .sort();
 }
 
-/**
- * Postgres connection parameters for `pg_dump`, taken from the URL the app is
- * already using. Returned separately from the password so the password can go
- * into the child's environment instead of its argv, where `ps` would show it.
- */
+/** `pg_dump` connection args, with the password returned separately so it stays out of argv. */
 function pgDumpTarget(databaseUrl: string): { args: string[]; password: string; database: string } | null {
   let url: URL;
   try {
@@ -146,9 +94,7 @@ function pgDumpTarget(databaseUrl: string): { args: string[]; password: string; 
       decodeURIComponent(url.username),
       "--dbname",
       database,
-      // Custom format: compressed, and `pg_restore` can pick objects out of it.
-      // Matches the shape docs/operations.md §"Backup and restore" documents,
-      // so a dashboard dump and a host dump restore identically.
+      // Compressed, and `pg_restore` can pick objects out of it.
       "--format=custom",
       "--no-owner",
       "--no-privileges",
@@ -156,57 +102,26 @@ function pgDumpTarget(databaseUrl: string): { args: string[]; password: string; 
   };
 }
 
-/**
- * Severity for the Activity feed. Rows are classified once, here, so the UI
- * filter is a server-side predicate rather than a guess made from a label.
- */
 type Severity = "error" | "warn" | "info";
 
 interface ActivityRow {
   at: Date;
   severity: Severity;
-  /** Which table this came from; also the permalink's type. */
   source: "run" | "job" | "upload-task" | "submission" | "audit";
   kind: string;
   subject: string;
   message: string;
   id: string;
   extension?: string | null;
-  /**
-   * Parent run, for rows that have one. The dashboard's per-row permalink needs
-   * it: a job id alone opens nothing an operator can act on, while its run
-   * shows every sibling segment and the retry buttons.
-   */
+  /** Parent run, for rows that have one; the dashboard permalink needs it. */
   runId?: string | null;
 }
 
-/**
- * Membership in the MangaDex language allowlist, not a shape check.
- *
- * A well-formed code MangaDex does not know (`xx`) would be accepted by a regex
- * and then rejected at apply time — after the row had been changed, by which
- * point the operator has to undo an edit to find out what went wrong. The
- * allowlist in src/contracts/languages.ts is the same list `custom_language`
- * validates against, so a language is correct or refused in one place.
- */
+/** Membership in the MangaDex language allowlist, not a shape check. */
 const LANGUAGE_VALIDATION = "allowlist" as const;
 
-/** Titles reach a public catalogue and a Discord embed; keep them printable. */
 const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/;
 
-/**
- * Second-stage guard for writes that leave this platform.
- *
- * `untracked:write` is deliberately in the CONTRIBUTOR scope set: working the
- * untracked queue — correcting a mangled row, skipping a duplicate — is exactly
- * the job that role exists for, and it is all local and reversible. Editing the
- * MangaDex entry is a different act with a different blast radius: it changes a
- * public catalogue, cannot be undone from here, and is attributed to the
- * platform's shared MangaDex account rather than to the person who clicked. So
- * it sits at ADMIN, and the 403 says why rather than just "forbidden" — a
- * contributor who has correctly fixed a row needs to know the remaining step is
- * someone else's, not that they did something wrong.
- */
 const APPLY_ROLE_REASON =
   "editing the MangaDex title requires the ADMIN role: it changes a public " +
   "catalogue entry under the platform's MangaDex account. Correct the row and " +
@@ -221,23 +136,9 @@ const APPLY_TOKEN_REASON =
 /**
  * May this caller push a row's corrections onto the public MangaDex entry?
  *
- * Written as an allow-list, and deliberately so. The obvious form — refuse
- * CONTRIBUTOR — is a deny-list, and a deny-list on a role enum grants every role
- * that does not exist yet. `CONTRIBUTOR` was itself added to `AdminRole` after
- * the fact, so the next addition is not hypothetical, and it would silently
- * arrive holding the right to edit a public catalogue. `requireOwner` already
- * uses the allow-list form; this now matches it.
- *
- * API tokens are refused outright rather than judged on their role, because
- * `adminAuthHook` assigns every api token `adminRole = "ADMIN"` — a deliberate
- * default that means "not owner-equivalent", not "vetted human". Combined with a
- * deny-list, that let the `curator` preset through: it carries `untracked:write`
- * precisely so a community curator can work this queue, and it would then have
- * cleared a gate whose stated purpose is to stop exactly that person from
- * editing MangaDex. A leaked curator token could have mutated the public
- * catalogue under the shared account, which is the blast radius scoped tokens
- * exist to prevent. Nothing programmatic calls this endpoint — the dashboard is
- * the only caller — so closing it to tokens costs no capability.
+ * Allow-list, not deny-list: a deny-list on a role enum grants every role added
+ * later. API tokens are refused outright rather than judged on their role,
+ * because `adminAuthHook` assigns every api token `adminRole = "ADMIN"`.
  */
 async function requireApplyRole(req: FastifyRequest, reply: FastifyReply): Promise<void> {
   if (req.principal?.kind === "api-token") {
@@ -250,8 +151,6 @@ async function requireApplyRole(req: FastifyRequest, reply: FastifyReply): Promi
 }
 
 export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
-  // Resolved once at wiring time: the answer cannot change while the process
-  // lives, and a per-request filesystem walk would be pure waste.
   const migrationsDir = findMigrationsDir();
 
   app.register(async (scope) => {
@@ -269,7 +168,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
       }
     });
 
-    /** Same attribution rules as routes/admin.ts — see the comment there. */
+    /** Same attribution rules as routes/admin.ts. */
     const actor = (req: FastifyRequest) => {
       const claimed = (req.headers["x-actor"] as string | undefined)?.slice(0, 64);
       const principal = req.principal;
@@ -284,18 +183,8 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
     /**
      * The principal's own identity and authority. No scope guard: every
-     * authenticated caller may ask what it is, and refusing would make the
-     * answer unobtainable exactly when it is needed.
-     *
-     * This exists because the dashboard cannot otherwise know what to render.
-     * It used to probe an owner-only endpoint and read the 403 — which worked,
-     * but only answered one bit. Returning the scope set lets the SPA hide
-     * every control the server would refuse, so an operator never clicks into a
-     * wall of "missing scope" toasts.
-     *
-     * Hiding is cosmetic and this endpoint does not change that: the same scope
-     * checks still run on every route. Nothing secret is returned — no token,
-     * no session id, no email beyond the actor name already in the audit log.
+     * authenticated caller may ask what it is. Lets the dashboard hide controls
+     * the server would refuse; the scope checks still run on every route.
      */
     scope.get("/api/v1/admin/whoami", async (req, reply) => {
       const principal = req.principal;
@@ -305,8 +194,6 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
         name: principal.name,
         role: req.adminRole ?? null,
         scopes: [...principal.scopes],
-        // The SPA needs this on every mutating call; sending it beats hard-coding
-        // the same constant in two languages.
         csrfHeader: "x-requested-with",
       };
     });
@@ -314,15 +201,9 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
     // ---- schema & migrations ----
 
     /**
-     * Is the database schema the one this build expects?
-     *
-     * The answer used to require `docker compose run migrate status` on the
-     * host. It is a `settings:read` question rather than a privileged one: it
-     * returns migration names and timestamps, nothing about the data.
-     *
-     * A migration prisma recorded but never finished (`finished_at` null) or
-     * rolled back is reported as failed. That is the state that makes a
-     * container crash-loop on boot, and it is invisible from every other panel.
+     * Is the database schema the one this build expects? A migration prisma
+     * recorded but never finished (`finished_at` null) or rolled back is
+     * reported as failed: that is what makes a container crash-loop on boot.
      */
     scope.get("/api/v1/admin/schema", { preHandler: requireScope("settings:read") }, async () => {
       const onDisk = migrationsOnDisk(migrationsDir);
@@ -337,9 +218,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
         );
       } catch {
         // No `_prisma_migrations` table: the schema was created some other way
-        // (`prisma db push`, a hand-restored dump). Say so instead of implying
-        // the database is unmigrated, which would send an operator to run a
-        // migration that then conflicts with existing objects.
+        // (`prisma db push`, a hand-restored dump), not left unmigrated.
         return {
           historyAvailable: false,
           current: null,
@@ -362,9 +241,8 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
       return {
         historyAvailable: true,
-        // Null rather than true when the history was not shipped with the
-        // build: "no pending migrations found" and "we cannot see the
-        // migrations" must not look alike.
+        // Null rather than true when the history was not shipped: "none pending"
+        // and "we cannot see the migrations" must not look alike.
         current: migrationsDir === null ? null : pending.length === 0 && failed.length === 0,
         applied,
         pending,
@@ -379,22 +257,14 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
     /**
      * Stream a `pg_dump` of the whole database as a download.
      *
-     * Gated on the OWNER role AND `users:admin` — the same double gate as
-     * routes/tokens.ts and routes/users.ts, and for the same reason. The scope
-     * name looks off for a backup until you notice what a dump contains: every
-     * operator password hash, every token hash and the saved MangaDex session in
-     * plaintext. Taking one is a credential-theft primitive, not a read, so it
-     * belongs at the bar for account administration — emphatically NOT at
-     * `settings:write`, which the Discord bot holds so it can pause the platform.
+     * Gated on the OWNER role AND `users:admin`: a dump contains every operator
+     * password hash, every token hash and the saved MangaDex session, so taking
+     * one is a credential-theft primitive rather than a read. `requireOwner` is
+     * what excludes api tokens, since a wildcard-scoped token satisfies the
+     * scope check but is never assigned the OWNER role.
      *
-     * The scope alone is not that bar: an OWNER may mint a `pa_…` token with
-     * `["*"]` (or with `users:admin` outright), and wildcard satisfies every
-     * scope check. `requireOwner` is what actually excludes tokens, because
-     * `adminAuthHook` never assigns one the OWNER role — so no credential a
-     * client holds can dump the database and widen itself offline.
-     *
-     * stdout is piped straight to the response: a multi-GB dump must never be
-     * buffered in the API process, and the operator sees bytes immediately.
+     * stdout is piped straight to the response so a multi-GB dump is never
+     * buffered in the API process.
      */
     scope.get("/api/v1/admin/backup", { preHandler: [requireOwner, requireScope("users:admin")] }, async (req, reply) => {
       const target = pgDumpTarget(ctx.config.databaseUrl);
@@ -404,16 +274,13 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
       const child = spawn("pg_dump", target.args, {
-        // The password goes in the environment, never in argv where `ps` on the
-        // host would show it. PGCONNECT_TIMEOUT keeps a wedged connection from
-        // holding the request open forever.
+        // Password in the environment, never in argv where `ps` would show it.
         env: { ...process.env, PGPASSWORD: target.password, PGCONNECT_TIMEOUT: "10" },
         stdio: ["ignore", "pipe", "pipe"],
       });
 
-      // ENOENT is the expected failure, not an exceptional one: the runtime
-      // image deliberately carries no postgres client tools. Answer with the
-      // fix rather than a 500 (see docs/dashboard.md §"still needs host access").
+      // ENOENT is the expected failure: the runtime image carries no postgres
+      // client tools. Answer with the fix rather than a 500.
       const spawned = await new Promise<Error | null>((resolve) => {
         child.once("spawn", () => resolve(null));
         child.once("error", (err) => resolve(err));
@@ -428,8 +295,8 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
         });
       }
 
-      // pg_dump's diagnostics are on stderr; keep them for the log line rather
-      // than mixing them into the download.
+      // Diagnostics go to stderr; keep them for the log line rather than mixing
+      // them into the download.
       let stderr = "";
       child.stderr.setEncoding("utf8");
       child.stderr.on("data", (chunk: string) => {
@@ -456,14 +323,9 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
     // ---- bundle preflight ----
 
     /**
-     * Read a bundle zip and report what publishing it would accept or reject,
-     * WITHOUT publishing.
-     *
-     * The publish route already answers 422 with a readable reason, so this is
-     * not the validation of record — `POST /bundles` is, and it re-checks
-     * everything. What this buys is that an operator who dragged the wrong
-     * directory in learns so from an inline error next to the drop zone,
-     * before they have authorized a code-execution change to every worker.
+     * Report what publishing a bundle zip would accept or reject, without
+     * publishing. `POST /bundles` remains the validation of record and re-checks
+     * everything.
      */
     scope.post(
       "/api/v1/admin/bundles/inspect",
@@ -486,7 +348,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
             ok: false,
             entries: names.length,
             errors: [
-              "no manifest.json at the root of the archive — zip the contents of the " +
+              "no manifest.json at the root of the archive; zip the contents of the " +
                 "extension directory, not the directory itself",
             ],
           });
@@ -503,8 +365,6 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
         const parsed = Manifest.safeParse(raw);
         if (!parsed.success) {
-          // One line per bad field, pathed — "languages: array must contain at
-          // least 1 element" is actionable in a way "validation failed" is not.
           return reply.code(422).send({
             ok: false,
             entries: names.length,
@@ -514,10 +374,8 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
           });
         }
 
-        // Mirrors the entrypoint checks in store/bundles.ts. Duplicated on
-        // purpose and deliberately advisory: publishing re-runs the real ones,
-        // so drift here can only ever make the preflight less helpful, never
-        // let a bad bundle through.
+        // Advisory only: publishing re-runs the real checks in store/bundles.ts,
+        // so drift here can never let a bad bundle through.
         const manifest = parsed.data;
         const errors: string[] = [];
         const entry = zip.getEntry(manifest.entrypoint);
@@ -550,8 +408,6 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
             minTrust: manifest.min_trust,
             schedule: manifest.schedule ?? null,
           },
-          // "Am I about to replace what is live?" is the question an operator
-          // asks right before clicking publish.
           currentlyPublished: latest ? { version: latest.version, sha256: latest.sha256, publishedAt: latest.publishedAt } : null,
           replacesSameVersion: latest?.version === manifest.version,
         });
@@ -561,10 +417,9 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
     // ---- upload-task queues ----
 
     /**
-     * The row-level view `queue_peek` had, plus the depth summary the Overview
-     * needs. `chapter` is deliberately not returned: the payload is large, it
-     * is worker-supplied, and nothing in triage needs it — the dedupe key
-     * identifies the chapter well enough to find it on MangaDex.
+     * Upload-task rows plus the depth summary. `chapter` is deliberately not
+     * returned: the payload is large and worker-supplied, and the dedupe key
+     * identifies the chapter well enough for triage.
      */
     scope.get("/api/v1/admin/upload-tasks", { preHandler: requireScope("runs:read") }, async (req) => {
       const query = parseOrThrow(
@@ -606,10 +461,9 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
     const taskId = z.object({ id: z.string().uuid() });
 
     /**
-     * Requeue a task the uploader gave up on. The attempt counter resets so the
-     * task gets a full budget again — the operator is asserting the cause is
-     * fixed, and leaving it at maxAttempts would dead-letter it on the first
-     * hiccup.
+     * Requeue a task the uploader gave up on. The attempt counter resets: the
+     * operator is asserting the cause is fixed, and leaving it at maxAttempts
+     * would dead-letter it on the first hiccup.
      */
     scope.post("/api/v1/admin/upload-tasks/:id/retry", { preHandler: requireScope("runs:write") }, async (req, reply) => {
       const { id } = parseOrThrow(taskId, req.params);
@@ -638,14 +492,13 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
     });
 
     /**
-     * Abandon a task without running it. There is no CANCELLED state in the
-     * enum, so this marks it DONE and records why in `lastError` — the row has
-     * to leave the queue, and a silent DONE would be indistinguishable from a
-     * chapter that actually uploaded.
+     * Abandon a task without running it. There is no CANCELLED state, so this
+     * marks it DONE and records why in `lastError`; a silent DONE would be
+     * indistinguishable from a chapter that actually uploaded.
      *
-     * A LEASED row belongs to an uploader process that is mid-flight: setting
-     * it DONE here would race that process into either a duplicate upload or a
-     * lost result. The lease has to expire (or the task fail) first.
+     * A LEASED row belongs to an uploader that is mid-flight, so it is refused:
+     * setting it DONE would race that process into a duplicate upload or a lost
+     * result.
      */
     scope.post("/api/v1/admin/upload-tasks/:id/cancel", { preHandler: requireScope("runs:write") }, async (req, reply) => {
       const { id } = parseOrThrow(taskId, req.params);
@@ -671,11 +524,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
       return { ok: true, state: "DONE" };
     });
 
-    /**
-     * Manual sweep. The uploader sweeps on its own timer; this is the button for
-     * when that process died holding leases and the operator does not want to
-     * wait out the interval.
-     */
+    /** Manual sweep, for when the uploader died holding leases. */
     scope.post("/api/v1/admin/upload-tasks/requeue-stale", { preHandler: requireScope("runs:write") }, async (req) => {
       const requeued = await ctx.uploadTasks.sweepExpired();
       await ctx.audit.record(actor(req), "upload_task.requeue_stale", undefined, { requeued });
@@ -684,14 +533,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
     // ---- MangaDex session visibility ----
 
-    /**
-     * Is the saved MangaDex session still good? `settings:write` rather than a
-     * read scope because the answer is about the platform's own credential
-     * state, and the clear button next door is the reason anyone asks.
-     *
-     * The tokens themselves are never returned — only whether they exist and
-     * when the access token stops being usable.
-     */
+    /** Whether the saved MangaDex session is still good. The tokens are never returned. */
     scope.get("/api/v1/admin/mangadex/auth", { preHandler: requireScope("settings:read") }, async () => {
       const [access, refresh] = await Promise.all([
         ctx.settings.getSetting(MD_ACCESS_KEY),
@@ -704,19 +546,15 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
         hasAccess: access !== null,
         hasRefresh: refresh !== null,
         expiresAt,
-        // Unknown expiry is not "expired": an unparseable token may still work,
-        // and reporting it as dead would send an operator to clear a session
-        // that is fine.
+        // Unknown expiry is not "expired": an unparseable token may still work.
         expired: expiresInSeconds === null ? false : expiresInSeconds <= 0,
         expiresInSeconds,
       };
     });
 
     /**
-     * Forget the saved session. The next MangaDex call re-authenticates from
-     * the configured credentials, so this fixes "the stored refresh token is
-     * bad" without a redeploy. It does NOT revoke anything MangaDex-side —
-     * that is a credential rotation (docs/operations.md).
+     * Forget the saved session; the next MangaDex call re-authenticates from the
+     * configured credentials. Revokes nothing MangaDex-side.
      */
     scope.post("/api/v1/admin/mangadex/auth/clear", { preHandler: requireScope("settings:write") }, async (req) => {
       await ctx.settings.clearSetting(MD_ACCESS_KEY);
@@ -728,14 +566,12 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
     // ---- merged error feed ----
 
     /**
-     * One time-ordered list of everything that failed, so triage starts in the
-     * dashboard instead of in `docker logs`. Every source is queried at the full
-     * `limit` before merging: splitting the budget between them would hide a
+     * One time-ordered list of everything that failed. Every source is queried
+     * at the full `limit` before merging: splitting the budget would hide a
      * burst in one source behind old rows from another.
      *
-     * `FAILED` exists on upload tasks but not on jobs (a job that exhausts its
-     * attempts goes straight to `DEAD_LETTER`), which is why the two halves
-     * filter on different state sets.
+     * `FAILED` exists on upload tasks but not on jobs, which is why the two
+     * halves filter on different state sets.
      */
     scope.get("/api/v1/admin/errors", { preHandler: requireScope("runs:read") }, async (req) => {
       const query = parseOrThrow(
@@ -806,30 +642,18 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
     // ---- unified activity feed ----
 
     /**
-     * Everything the platform did recently, in one time-ordered list: runs,
-     * jobs, upload tasks, quarantined submissions and audit events.
+     * Runs, jobs, upload tasks, quarantined submissions and audit events in one
+     * time-ordered list. Application events only: every one is a durable row.
+     * Process stdout is not captured here and stays in `docker logs`.
      *
-     * This is the closest thing to "logs" the dashboard can honestly offer, and
-     * the distinction matters enough to state twice: it covers APPLICATION
-     * events, every one of which is a durable row. Process stdout — a stack
-     * trace from a crash loop, prisma's connection warnings — is not here and
-     * cannot be, because nothing writes it to the database. That stays
-     * `docker logs` (docs/dashboard.md §"still needs host access").
-     *
-     * Unlike `/errors`, healthy rows are included, because "the run succeeded
-     * four minutes ago" is half of most answers. `severity=error` reproduces
-     * the old feed.
-     *
-     * Audit events need `audit:read` on top of `runs:read`, so a credential
-     * with only the latter gets the operational half and is TOLD that the audit
-     * half was withheld — silently returning a short list would read as "the
-     * platform has been quiet".
+     * Unlike `/errors`, healthy rows are included. Audit events need
+     * `audit:read` on top of `runs:read`; a credential with only the latter is
+     * told the audit half was withheld rather than silently getting a short list.
      */
     scope.get("/api/v1/admin/activity", { preHandler: requireScope("runs:read") }, async (req) => {
       const query = parseOrThrow(
         z.object({
           severity: z.enum(["error", "warn", "info", "all"]).default("all"),
-          /** How far back to look, in hours. */
           hours: z.coerce.number().int().min(1).max(24 * 30).default(DEFAULT_WINDOW_HOURS),
           extension: z.string().max(128).optional(),
           /** Case-insensitive substring over the subject and message. */
@@ -843,9 +667,6 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
       const extensionFilter = query.extension ? { extension: query.extension } : {};
       const includeAudit = hasScope(req.principal!, "audit:read");
 
-      // Every source is queried at the full limit before merging, for the same
-      // reason the error feed does it: splitting the budget would hide a burst
-      // in one source behind old rows from another.
       const [runs, jobs, tasks, submissions, auditEvents] = await Promise.all([
         ctx.prisma.run.findMany({
           where: { updatedAt: { gte: since }, ...extensionFilter },
@@ -920,9 +741,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
           kind: `job:${job.state}`,
           subject: `${job.extension} · segment ${job.segmentIndex + 1}/${job.segmentTotal} · attempt ${job.attempt}/${job.maxAttempts}`,
           // A retrying job carries its last error while still being healthy, so
-          // the text is attached whatever the state — that is the single most
-          // useful string in the whole feed and it is otherwise only visible by
-          // opening the run.
+          // the text is attached whatever the state.
           message: job.lastError ? `${job.errorClass ? `[${job.errorClass}] ` : ""}${job.lastError}` : "",
           id: job.id,
           extension: job.extension,
@@ -950,7 +769,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
         ...auditEvents.map((event): ActivityRow => ({
           at: event.createdAt,
           // An audit event records a deliberate action, so it is never an error
-          // in itself; the thing it did may show up as one on its own row.
+          // in itself.
           severity: "info",
           source: "audit",
           kind: `audit:${event.action}`,
@@ -964,9 +783,9 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
       const needle = query.q?.toLowerCase();
       const filtered = rows
         .filter((r) => query.severity === "all" || r.severity === query.severity)
-        // An extension filter cannot pass rows we cannot attribute: upload
-        // tasks and submissions carry no extension column, and guessing from
-        // the dedupe key would quietly show the wrong series.
+        // Upload tasks and submissions carry no extension column, so an
+        // extension filter cannot pass them: guessing from the dedupe key would
+        // show the wrong series.
         .filter((r) => !query.extension || r.extension === query.extension)
         .filter((r) => !needle || r.subject.toLowerCase().includes(needle) || r.message.toLowerCase().includes(needle))
         .sort((a, b) => b.at.getTime() - a.at.getTime())
@@ -975,8 +794,6 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
       return {
         activity: filtered,
         since,
-        // Named sources rather than a boolean: the UI says which half is
-        // missing, and adding a source later does not change the shape.
         sources: ["run", "job", "upload-task", "submission", ...(includeAudit ? ["audit"] : [])],
         omittedSources: includeAudit ? [] : [{ source: "audit", reason: "missing scope: audit:read" }],
         note: "application events only; container stdout is not captured here (see docker logs)",
@@ -986,16 +803,12 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
     // ---- audit search ----
 
     /**
-     * Search the audit log instead of paging through it.
+     * Search the audit log. `q` is a case-insensitive substring across actor,
+     * action, subject and the serialised detail.
      *
-     * `q` is a case-insensitive substring across actor, action, subject and the
-     * serialised detail — matching detail is the whole point, because "which
-     * change set removal mode to delete?" lives in there and nowhere else.
-     *
-     * Deliberately ILIKE and not a tsvector index: the corpus is small, the
-     * queries are ad-hoc, and substring beats word-stemming on identifiers like
-     * `mangaplus:12345`, which a text-search parser would mangle. The time
-     * window is what keeps it bounded, and `createdAt` is already indexed.
+     * ILIKE rather than a tsvector index: the corpus is small and substring beats
+     * word-stemming on identifiers like `mangaplus:12345`. The time window keeps
+     * it bounded, and `createdAt` is already indexed.
      */
     scope.get("/api/v1/admin/audit/search", { preHandler: requireScope("audit:read") }, async (req) => {
       const query = parseOrThrow(
@@ -1004,7 +817,6 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
           actor: z.string().max(128).optional(),
           action: z.string().max(128).optional(),
           subject: z.string().max(256).optional(),
-          /** ISO instants. Omitted `since` means "as far back as it goes". */
           since: z.coerce.date().optional(),
           until: z.coerce.date().optional(),
           limit: z.coerce.number().int().min(1).max(500).default(100),
@@ -1015,9 +827,9 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
       const where: Prisma.Sql[] = [];
       if (query.q) {
-        // Parameterised, so a `%` or a quote in the needle is data. Escaping the
-        // LIKE metacharacters as well would make `%` un-searchable; an operator
-        // typing one means it as a wildcard.
+        // Parameterised, so a `%` or a quote in the needle is data. LIKE
+        // metacharacters are left unescaped: an operator typing `%` means it as
+        // a wildcard.
         const like = `%${query.q}%`;
         where.push(
           Prisma.sql`(actor ILIKE ${like} OR action ILIKE ${like} OR coalesce(subject, '') ILIKE ${like} OR coalesce(detail::text, '') ILIKE ${like})`,
@@ -1064,14 +876,9 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
     // ---- per-extension activity ----
 
     /**
-     * One extension, everything about it: its runs, its jobs, the upload tasks
-     * its chapters produced, its quarantined submissions and its curation
-     * counts.
-     *
-     * Assembling this by hand meant five filtered views and a mental join on
-     * run ids. It is the panel an operator opens when an extension "looks
-     * broken" and the one place where "the scrape succeeded but the uploads are
-     * all failing" is visible as a single fact.
+     * One extension's runs, jobs, upload tasks, quarantined submissions and
+     * curation counts, so "the scrape succeeded but the uploads are all failing"
+     * is visible as a single fact.
      */
     scope.get(
       "/api/v1/admin/extensions/:name/activity",
@@ -1117,10 +924,8 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
               updatedAt: true,
             },
           }),
-          // Upload tasks have no extension column — the chapter payload is a
-          // transient queue document, not a queryable record. Reaching into the
-          // JSONB is the only join available, and it checks the EDIT shape's
-          // nested payload too, because an edit task wraps the chapter.
+          // Upload tasks have no extension column, so the JSONB is the only join
+          // available. The EDIT shape wraps the chapter, hence the nested path.
           ctx.prisma.$queryRaw<
             {
               id: string;
@@ -1187,18 +992,9 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
     // ---- correcting an untracked series ----
 
-    /**
-     * What an extension scraped is not always right: a mangled name, a title
-     * keyed to the wrong language, a source URL that moved. Approve-or-skip was
-     * the whole vocabulary before these three routes, which meant the only way
-     * to fix a bad row was to skip it and wait for the extension to report it
-     * again — and if a title had already been created, the wrong name was
-     * already on a public catalogue with no way back through this API.
-     *
-     * The split is deliberate and load-bearing: PATCH corrects the LOCAL row and
-     * is a contributor's job; apply-to-mangadex changes a public entry and is an
-     * admin's. Nothing here touches MangaDex implicitly.
-     */
+    // The split below is load-bearing: PATCH corrects the LOCAL row and is a
+    // contributor's job; apply-to-mangadex changes a public entry and is an
+    // admin's. Nothing here touches MangaDex implicitly.
 
     const untrackedId = z.object({ id: z.string().uuid() });
 
@@ -1212,18 +1008,16 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
     /**
      * Why the apply button must be disabled, or null when it is available.
-     * Returned by the GET so the dashboard can disable the control WITH the
-     * reason instead of letting an operator find out from a 403 — the role case
-     * in particular is not a mistake on their part and should not read like one.
+     * Returned by the GET so the dashboard can disable the control with the
+     * reason instead of letting an operator find out from a 403.
      */
     const applyBlockedReason = (
       req: FastifyRequest,
       row: { mdMangaId: string | null; state: string },
     ): string | null => {
       if (!hasScope(req.principal!, "untracked:write")) return "missing scope: untracked:write";
-      // Mirrors requireApplyRole exactly, including the allow-list shape and the
-      // api-token refusal. If these two ever disagree the dashboard offers a
-      // button that 403s, which is the failure this function exists to avoid.
+      // Must mirror requireApplyRole exactly; if they disagree the dashboard
+      // offers a button that 403s.
       if (req.principal?.kind === "api-token") return APPLY_TOKEN_REASON;
       if (req.adminRole !== "OWNER" && req.adminRole !== "ADMIN") return APPLY_ROLE_REASON;
       if (!row.mdMangaId) {
@@ -1238,18 +1032,12 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
     /**
      * One untracked row, plus what MangaDex currently says about the title it
-     * created.
+     * created. The live read is the point: the title may have been corrected by
+     * hand or merged since, so `pendingChanges` says what an apply would send.
      *
-     * The live read is the point. An operator correcting a row is deciding what
-     * a public catalogue entry should say, and the scraped values in the row are
-     * the LEAST reliable description of it: the title may have been created days
-     * ago, corrected by hand on MangaDex since, or merged into another entry. So
-     * the fields come from MangaDex at request time, and `pendingChanges` says
-     * exactly what an apply would send.
-     *
-     * A MangaDex outage must not make the row unreadable — correcting the local
-     * row does not need MangaDex at all. The call failing is reported as
-     * `mangadex: null` plus `mangadexError`, and everything else still answers.
+     * A MangaDex outage is reported as `mangadex: null` plus `mangadexError`;
+     * everything else still answers, because correcting the local row does not
+     * need MangaDex.
      */
     scope.get(
       "/api/v1/admin/untracked/:id",
@@ -1308,8 +1096,8 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
           editable: row.state !== "CREATING",
           extension: {
             name: row.extension,
-            // Null manifest means no published, non-yanked bundle — which is
-            // also why a URL correction is refused for this row (see PATCH).
+            // Null manifest means no published, non-yanked bundle, which is also
+            // why a URL correction is refused for this row (see PATCH).
             allowedHosts: manifest?.allowed_hosts ?? null,
             languages: manifest?.languages ?? null,
             autoCreateTitles: manifest?.auto_create_titles ?? null,
@@ -1318,10 +1106,9 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
           mangadex,
           mangadexError,
           pendingChanges,
-          // The row is authoritative for WHETHER and WHEN, because it survives
-          // audit-log pruning; the log still supplies the detail of the last
-          // application, and answers for rows applied before those columns
-          // existed.
+          // The row is authoritative for whether and when, because it survives
+          // audit-log pruning; the log supplies the detail and answers for rows
+          // applied before those columns existed.
           appliedToMangaDex: row.mdAppliedAt
             ? {
                 at: row.mdAppliedAt,
@@ -1340,17 +1127,12 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
     /**
      * Correct the scraped details on the LOCAL row. Nothing reaches MangaDex
-     * from here, including for a row that already has a title — that is the
-     * separate apply below, and conflating them would let a contributor edit a
-     * public catalogue entry by editing a database row.
+     * from here; that is the separate apply below.
      *
      * Every field is validated because every field escapes: the name goes into a
      * public title and a Discord embed, and `mangaUrl` becomes `links.raw` on
-     * the MangaDex entry and a clickable link in chat. An unvalidated host there
-     * is a way to get the platform to publish a link to anywhere, attributed to
-     * its own account, so the URL is checked against the extension manifest's
-     * `allowed_hosts` — the same allowlist the sandbox enforces on the
-     * extension, applied to the operator correcting its output.
+     * the MangaDex entry. The URL is checked against the manifest's
+     * `allowed_hosts`, the same allowlist the sandbox enforces on the extension.
      */
     scope.patch(
       "/api/v1/admin/untracked/:id",
@@ -1405,11 +1187,8 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
                 `accepts (expected e.g. "en", "ja", "pt-br")`,
             });
           }
-          // The manifest's languages are the ones this extension is known to
-          // produce. A title in another language is unusual but legitimate (a
-          // series' name in its original language, say), so this is a warning
-          // and not a refusal — and it is returned rather than logged, because
-          // the person who typed it is the only one who can judge it.
+          // A title in a language outside the manifest is unusual but legitimate,
+          // so this warns rather than refuses, and is returned rather than logged.
           if (manifest && !manifest.languages.includes(language)) {
             warnings.push(
               `${language} is not in ${row.extension}'s manifest languages ` +
@@ -1433,9 +1212,8 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
               .send({ error: `mangaUrl scheme ${parsed.protocol} is not allowed (http or https only)` });
           }
           if (!manifest) {
-            // Without a manifest there is no allowlist to check against, and
-            // this URL can end up on a public catalogue entry. Refusing is the
-            // conservative half of that trade.
+            // Without a manifest there is no allowlist to check against, and this
+            // URL can end up on a public catalogue entry.
             return reply.code(409).send({
               error:
                 `no published bundle for ${row.extension}, so its allowed_hosts cannot be ` +
@@ -1446,7 +1224,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
             return reply.code(400).send({
               error:
                 `mangaUrl host is not in ${row.extension}'s allowed_hosts ` +
-                `(${manifest.allowed_hosts.join(", ")}) — this URL is published on the MangaDex ` +
+                `(${manifest.allowed_hosts.join(", ")}); this URL is published on the MangaDex ` +
                 `entry and in Discord, so it has to be a host this extension actually scrapes`,
               allowedHosts: manifest.allowed_hosts,
             });
@@ -1471,8 +1249,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
           updated = await ctx.prisma.untrackedManga.update({ where: { id }, data: after });
         } catch (err) {
           // (extension, mangaId, mangaLanguage) is unique, so correcting the
-          // language can collide with another row for the same series — usually
-          // the duplicate that prompted the correction in the first place.
+          // language can collide with another row for the same series.
           if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
             return reply.code(409).send({
               error:
@@ -1497,8 +1274,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
           warnings,
           untracked: updated,
           // The row and the MangaDex entry now disagree, and only an admin can
-          // reconcile them. Saying so is what stops a correction from being
-          // silently local.
+          // reconcile them.
           mangadexNeedsApply: updated.mdMangaId !== null,
           languageValidation: LANGUAGE_VALIDATION,
         };
@@ -1508,14 +1284,12 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
     /**
      * Push the corrected details onto the MangaDex title this row created.
      *
-     * Two guards, not one. `untracked:write` says the caller may work this
-     * queue; the role check says they may change a public catalogue. A
-     * CONTRIBUTOR holds the scope and is still refused here, which is the whole
-     * reason the second guard exists (see APPLY_ROLE_REASON).
+     * Two guards: `untracked:write` says the caller may work this queue, and the
+     * role check says they may change a public catalogue. A CONTRIBUTOR holds
+     * the scope and is still refused.
      *
-     * Failure statuses are distinct on purpose: 409 is something the operator
-     * can resolve (no title yet, a create in flight, the entry moved under
-     * them), 502 is MangaDex refusing a well-formed request.
+     * Failure statuses are distinct: 409 is something the operator can resolve,
+     * 502 is MangaDex refusing a well-formed request.
      */
     scope.post(
       "/api/v1/admin/untracked/:id/apply-to-mangadex",
