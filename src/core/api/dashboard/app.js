@@ -1946,6 +1946,70 @@ async function boot() {
 
 // ------------------------------------------------------------------- overview
 
+/**
+ * Job states that still owe something, worst first. Anything not on this list
+ * (SUCCEEDED, CANCELLED, and any state added later) is settled and folds away
+ * — listing the open ones rather than excluding the closed ones means a state
+ * this dashboard has never heard of surfaces instead of vanishing.
+ */
+const OUTSTANDING_JOB_STATES = ["DEAD_LETTER", "RUNNING", "LEASED", "PENDING"];
+
+/**
+ * Jobs as work outstanding, on the same terms as the upload queue below it:
+ * what still needs to happen up front, what already happened behind a
+ * disclosure. SUCCEEDED grows without bound and drowns the four numbers an
+ * operator opens this page to read.
+ */
+function outstandingJobsCard(jobs) {
+  const entries = Object.entries(jobs).filter(([, count]) => count > 0);
+  const open = entries
+    .filter(([state]) => OUTSTANDING_JOB_STATES.includes(state))
+    .sort(
+      (a, b) => OUTSTANDING_JOB_STATES.indexOf(a[0]) - OUTSTANDING_JOB_STATES.indexOf(b[0]),
+    );
+  const settled = entries.filter(([state]) => !OUTSTANDING_JOB_STATES.includes(state));
+  const settledTotal = settled.reduce((sum, [, count]) => sum + count, 0);
+
+  return card(
+    "Jobs outstanding",
+    entries.length
+      ? el(
+          "div",
+          {},
+          open.length
+            ? el(
+                "div",
+                { class: "grid tight" },
+                open.map(([state, count]) =>
+                  el(
+                    "div",
+                    { class: "stat" },
+                    el("div", { class: "n", text: String(count) }),
+                    el("div", { class: "k" }, chip(state)),
+                  ),
+                ),
+              )
+            : emptyState("Nothing outstanding — every job has finished."),
+          settled.length
+            ? el(
+                "details",
+                {},
+                el("summary", { text: `Settled (${settledTotal.toLocaleString()})` }),
+                table(
+                  ["State", "Count"],
+                  settled
+                    .slice()
+                    .sort((a, b) => a[0].localeCompare(b[0]))
+                    .map(([state, count]) => [chip(state), String(count)]),
+                  { empty: "Nothing has finished yet." },
+                ),
+              )
+            : null,
+        )
+      : emptyState("No jobs have been created yet."),
+  );
+}
+
 VIEWS.overview = (route) => {
   if (route.tab === "mangadex") return mangadexPanel();
 
@@ -2056,15 +2120,15 @@ VIEWS.overview = (route) => {
         el(
           "div",
           {},
-          counts("Jobs by state", Object.entries(data.jobs || {}), "No jobs have been created yet."),
+          outstandingJobsCard(data.jobs || {}),
           counts("Workers by status", Object.entries(data.workers || {}), "No worker has ever enrolled."),
           card(
-            "Upload tasks",
-            table(
-              ["Kind", "State", "Count"],
-              (data.uploadTasks || []).map((r) => [r.kind, chip(r.state), String(r.count)]),
-              { empty: "Nothing has ever been queued for upload." },
-            ),
+            "Upload queue — outstanding",
+            (data.uploadTasks || []).length
+              ? outstandingTasks(data.uploadTasks, {
+                  emptyText: "Nothing outstanding — every queued upload has been published.",
+                })
+              : emptyState("Nothing has ever been queued for upload."),
           ),
           card(
             "Quarantine",
@@ -2697,31 +2761,100 @@ VIEWS.queues = (route) => {
   );
 };
 
+/**
+ * Outstanding upload-task states, worst first.
+ *
+ * Attention before motion before waiting: DEAD_LETTER and FAILED are the two
+ * that will not move again without an operator, so they lead. DONE is not on
+ * this list at all — see `outstandingTasks`.
+ */
+const OUTSTANDING_TASK_STATES = ["DEAD_LETTER", "FAILED", "LEASED", "PENDING"];
+
+/** The non-empty, non-DONE entries of a depth summary, worst first. */
+function outstandingDepths(counts) {
+  return counts
+    .filter((entry) => entry.state !== "DONE" && entry.count > 0)
+    .sort(
+      (a, b) =>
+        OUTSTANDING_TASK_STATES.indexOf(a.state) - OUTSTANDING_TASK_STATES.indexOf(b.state) ||
+        a.kind.localeCompare(b.kind),
+    );
+}
+
+/**
+ * One depth tile that is also the way into the rows behind it.
+ *
+ * A real anchor so middle-click and "copy link" still work; the filter is set
+ * on the way through because the hash carries a section and tab, not a filter.
+ * Opening it in a new tab therefore lands on the unfiltered Tasks list, which
+ * is the honest degradation — a wrong filter would be worse than none.
+ */
+function queueDepthTile(entry) {
+  return el(
+    "a",
+    {
+      class: "stat linked",
+      href: routeTo("queues", null, "tasks"),
+      title: `Open the ${entry.count} ${entry.state} ${entry.kind} task(s)`,
+      onclick: () => setFilter({ queueKind: entry.kind, queueState: entry.state, queueCursors: [] }),
+    },
+    el("div", { class: "n", text: String(entry.count) }),
+    el("div", { class: "k" }, `${entry.kind} · `, chip(entry.state)),
+  );
+}
+
+/**
+ * What the queue still owes, and — folded away — what it has already settled.
+ *
+ * DONE is deliberately not a tile. It is both the largest number here and the
+ * only one nobody can act on, so a queue that has published forty thousand
+ * chapters and has three stuck ones read as a wall of completed work with the
+ * problem buried in it. The completed count is still available, one disclosure
+ * down, because "did that kind ever go through at all" is a real question — it
+ * is just never the first one.
+ */
+function outstandingTasks(counts, { emptyText }) {
+  const outstanding = outstandingDepths(counts);
+  const done = counts.filter((entry) => entry.state === "DONE" && entry.count > 0);
+  const doneTotal = done.reduce((sum, entry) => sum + entry.count, 0);
+
+  return el(
+    "div",
+    {},
+    outstanding.length
+      ? el("div", { class: "grid tight" }, outstanding.map(queueDepthTile))
+      : emptyState(emptyText),
+    done.length
+      ? el(
+          "details",
+          {},
+          el("summary", { text: `Completed (${doneTotal.toLocaleString()})` }),
+          table(
+            ["Kind", "Completed"],
+            done
+              .slice()
+              .sort((a, b) => a.kind.localeCompare(b.kind))
+              .map((entry) => [entry.kind, String(entry.count)]),
+            { empty: "Nothing has completed yet." },
+          ),
+        )
+      : null,
+  );
+}
+
 /** Depth by kind and state, from the same summary the list returns. */
 function queueDepthPanel() {
   const depths = new Resource("queue-depths", () => api("/queues"));
   return card(
-    "Depth by kind and state",
+    "Outstanding by kind and state",
     live(
       [depths],
       (data) => {
         const counts = data.summary ?? [];
         return counts.length
-          ? el(
-              "div",
-              { class: "grid tight" },
-              counts
-                .slice()
-                .sort((a, b) => a.kind.localeCompare(b.kind) || a.state.localeCompare(b.state))
-                .map((entry) =>
-                  el(
-                    "div",
-                    { class: "stat" },
-                    el("div", { class: "n", text: String(entry.count) }),
-                    el("div", { class: "k" }, `${entry.kind} · `, chip(entry.state)),
-                  ),
-                ),
-            )
+          ? outstandingTasks(counts, {
+              emptyText: "Nothing outstanding — every queued upload has been published.",
+            })
           : emptyState("No upload task has ever been queued.");
       },
       { reserve: 120, skeleton: () => skeletonGrid(6) },
