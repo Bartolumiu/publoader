@@ -565,8 +565,10 @@ Two refusals are worth knowing about:
 
 | Method | Path | Scope | Notes |
 | --- | --- | --- | --- |
-| `GET` | `/stats` | `stats:read` | `{jobs: {state: n}, uploadTasks: [{kind, state, count}], workers: {status: n}, quarantined, paused}` |
-| `GET` | `/errors` | `runs:read` | `?limit=1..200` (50). One time-ordered feed merging dead-lettered jobs, failed/dead-lettered upload tasks, and quarantined submissions → `{errors: [{at, kind, subject, message, id}]}`. Each source is queried at the full limit before merging, so a burst in one cannot be hidden behind old rows from another |
+| `GET` | `/stats` | `stats:read` | `{jobs: {state: n}, uploadTasks: [{kind, state, count}], workers: {status: n}, quarantined, errorsOutstanding: {total, jobs, uploadTasks, submissions}, paused}`. `quarantined` is a state count; `errorsOutstanding` excludes failures an operator has cleared and is what the dashboard badge uses |
+| `GET` | `/errors` | `runs:read` | `?limit=1..200` (50), `?cleared=without\|with\|only` (`without`). One time-ordered feed merging dead-lettered jobs, failed/dead-lettered upload tasks, and quarantined submissions → `{errors: [{at, kind, source, subject, message, id, cleared?}], clearedHidden}`. Each source is queried at the full limit before merging, so a burst in one cannot be hidden behind old rows from another. Cleared entries are omitted by default and counted in `clearedHidden`, so an empty feed never reads as "nothing ever failed" |
+| `POST` | `/errors/clear` | `runs:write` | `{refs?: [{source, id}], ids?: [id], all?: true, note?}` — acknowledge failures that have been read and dealt with, so they leave the feed. `ids` accept a full id or a leading prefix (≥4 chars) and are resolved across all three sources; ambiguous prefixes are refused, not guessed. Entries that are not currently failing come back in `skipped` with a reason (404 if nothing matched at all), because acknowledging a healthy row would hide its NEXT failure. Hides only — no row changes state, and anything that fails again reappears. One audit event per entry |
+| `POST` | `/errors/restore` | `runs:write` | `{refs?, ids?, all?: true}` — un-clear, putting entries back in the feed → `{restored}`. The undo for a mis-clicked "clear all" |
 | `GET` | `/audit` | `audit:read` | `?limit=1..500` (100) → `{events}` |
 
 `routes/admin.ts:432-453`, `routes/ops.ts:274-338`.

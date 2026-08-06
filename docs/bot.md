@@ -199,7 +199,9 @@ DMs are closed the bot falls back to the ephemeral reply and says so.
 | `/jobs retry <id>` | mutate | `runs:write` | Replay a dead-lettered job. |
 | `/dead-letter` | read | `runs:read` | Jobs that exhausted retries or hit a permanent error. |
 | `/quarantine` | read | `runs:read` | Result envelopes rejected by schema or policy validation — the signal a worker is misbehaving. |
-| `/errors [limit]` | read | `runs:read` | One merged feed of everything that recently failed: dead-lettered jobs, failed upload tasks, quarantined submissions. The closest thing to the legacy `/logs`. |
+| `/errors list [limit] [show]` | read | `runs:read` | One merged feed of everything that recently failed: dead-lettered jobs, failed upload tasks, quarantined submissions. The closest thing to the legacy `/logs`. Entries somebody has cleared are hidden by default and counted; `show` switches to including them or to only them. Each row prints the first eight characters of its id, which is what `clear` takes. |
+| `/errors clear [id] [all] [note]` | mutate | `runs:write` | Mark failures as read and dealt with so they leave the list. `id` is a full id or a leading prefix; `all: true` clears everything outstanding. Nothing is deleted — the jobs, tasks and submissions keep their state, and anything that fails again comes back on its own. `note` records why, for whoever reviews cleared entries later. |
+| `/errors restore [id] [all]` | mutate | `runs:write` | Put cleared entries back in the list — the undo, and the way to re-open something that turned out not to be fixed. |
 
 Each `/run` uses the Discord interaction id as its idempotency key, so a
 double-submit or a Discord-side retry cannot produce two runs. The reply says
@@ -301,8 +303,8 @@ plus the renamed `/load`, `/unload`, `/force`, `/clean`, `/history` and
 
 `/queue` and `/mdauth` used to be on that list and are now real commands (see
 above) — `src/core/api/routes/ops.ts` closed those gaps. `/logs` points
-at `/errors` for failures and at `docker compose logs` for process output, since
-container logs describe processes rather than platform state.
+at `/errors list` for failures and at `docker compose logs` for process output,
+since container logs describe processes rather than platform state.
 
 Full rationale per command: `docs/ipc-to-api-mapping.md`.
 

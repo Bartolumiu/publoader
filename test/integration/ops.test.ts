@@ -500,6 +500,210 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     expect(trimmed.json().errors).toHaveLength(1);
   });
 
+  // ---- clearing the error feed ----
+
+  /** The three sources at once, so a feed assertion covers all of them. */
+  async function threeFailures() {
+    const dead = await job({ state: "DEAD_LETTER", errorClass: "PERMANENT", lastError: "extension threw" });
+    const failed = await task({ state: "FAILED", kind: "DELETE", lastError: "md 503" });
+    const healthy = await job({ state: "SUCCEEDED" });
+    const submission = await prisma.resultSubmission.create({
+      data: {
+        idempotencyKey: `sub-${healthy.id}`,
+        jobId: healthy.id,
+        attempt: 1,
+        leaseId: "44444444-4444-4444-8444-444444444444",
+        workerId: "deadbeef-0000-4000-8000-000000000000",
+        envelope: {},
+        state: "QUARANTINED",
+        rejectReason: "host not in allowed_hosts",
+      },
+    });
+    return { dead, failed, healthy, submission };
+  }
+
+  const feed = async (query = "") => {
+    const res = await app.inject({ method: "GET", url: `/api/v1/admin/errors${query}`, headers: root });
+    expect(res.statusCode).toBe(200);
+    return res.json() as {
+      errors: { id: string; kind: string; source: string; cleared?: { by: string; note: string | null } }[];
+      clearedHidden: number;
+    };
+  };
+
+  it("hides a cleared failure from the feed, still lists it on request, and audits who cleared it", async () => {
+    const { dead, failed, submission } = await threeFailures();
+    expect((await feed()).errors).toHaveLength(3);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/errors/clear",
+      headers: root,
+      payload: { refs: [{ source: "job", id: dead.id }], note: "upstream fixed in 1.4.2" },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, cleared: 1, skipped: [] });
+
+    // Gone from the default feed, which is a to-do list — but counted, so an
+    // empty list can never be mistaken for "nothing ever failed".
+    const outstanding = await feed();
+    expect(outstanding.errors.map((e) => e.id).sort()).toEqual([failed.id, submission.id].sort());
+    expect(outstanding.clearedHidden).toBe(1);
+
+    // Still there when asked for, annotated with who dealt with it and why.
+    const withCleared = await feed("?cleared=with");
+    expect(withCleared.errors).toHaveLength(3);
+    expect(withCleared.errors.find((e) => e.id === dead.id)!.cleared).toMatchObject({
+      by: "admin:root",
+      note: "upstream fixed in 1.4.2",
+    });
+
+    const onlyCleared = await feed("?cleared=only");
+    expect(onlyCleared.errors.map((e) => e.id)).toEqual([dead.id]);
+
+    // The row itself is untouched: clearing is a view filter, not a transition.
+    expect((await prisma.job.findUniqueOrThrow({ where: { id: dead.id } })).state).toBe("DEAD_LETTER");
+
+    // One audit row per subject, so "who decided this was fine" is answerable by
+    // subject lookup rather than only by reading a summary.
+    const audited = await prisma.auditEvent.findMany({ where: { action: "errors.clear" } });
+    expect(audited).toHaveLength(1);
+    expect(audited[0]!.subject).toBe(`job:${dead.id}`);
+
+    // And the badge count follows the same rule as the feed.
+    const stats = await app.inject({ method: "GET", url: "/api/v1/admin/stats", headers: root });
+    expect(stats.json().errorsOutstanding).toMatchObject({ total: 2, jobs: 0, uploadTasks: 1, submissions: 1 });
+  });
+
+  it("brings a cleared failure back when the same row fails again", async () => {
+    const { dead } = await threeFailures();
+    const clearedAgainst = dead.updatedAt;
+
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/errors/clear",
+      headers: root,
+      payload: { refs: [{ source: "job", id: dead.id }] },
+    });
+    expect((await feed()).errors.map((e) => e.id)).not.toContain(dead.id);
+
+    // A retry that dead-letters again touches the row, moving its timestamp past
+    // the acknowledgement. Set explicitly rather than by sleeping: the two writes
+    // can otherwise land in the same millisecond and the test would be a
+    // coin flip.
+    await prisma.job.update({
+      where: { id: dead.id },
+      data: { lastError: "failed again", updatedAt: new Date(clearedAgainst.getTime() + 5_000) },
+    });
+
+    const again = await feed();
+    expect(again.errors.map((e) => e.id)).toContain(dead.id);
+    // Back as NEW work, not as something already dealt with.
+    expect(again.errors.find((e) => e.id === dead.id)!.cleared).toBeUndefined();
+  });
+
+  it("clears everything at once, and restores by id prefix", async () => {
+    const { dead, failed, submission } = await threeFailures();
+
+    const cleared = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/errors/clear",
+      headers: root,
+      payload: { all: true },
+    });
+    expect(cleared.json()).toMatchObject({ ok: true, cleared: 3 });
+    expect((await feed()).errors).toHaveLength(0);
+    expect((await feed()).clearedHidden).toBe(3);
+
+    // A prefix is what an operator can actually copy off a truncated table.
+    const restored = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/errors/restore",
+      headers: root,
+      payload: { ids: [failed.id.slice(0, 8)] },
+    });
+    expect(restored.json()).toMatchObject({ ok: true, restored: 1 });
+    expect((await feed()).errors.map((e) => e.id)).toEqual([failed.id]);
+
+    const all = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/errors/restore",
+      headers: root,
+      payload: { all: true },
+    });
+    expect(all.json()).toMatchObject({ restored: 2 });
+    expect((await feed()).errors.map((e) => e.id).sort()).toEqual([dead.id, failed.id, submission.id].sort());
+  });
+
+  it("refuses to acknowledge anything that is not currently failing", async () => {
+    const { dead, healthy } = await threeFailures();
+
+    // Acknowledging a healthy row would silence its NEXT failure, so this is a
+    // 404 with a reason rather than a write.
+    const healthyClear = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/errors/clear",
+      headers: root,
+      payload: { ids: [healthy.id] },
+    });
+    expect(healthyClear.statusCode).toBe(404);
+    expect(healthyClear.json().skipped[0].reason).toMatch(/nothing currently failing/);
+    expect(await prisma.clearedError.count()).toBe(0);
+
+    // Too short to be a deliberate prefix.
+    const tooShort = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/errors/clear",
+      headers: root,
+      payload: { ids: [dead.id.slice(0, 2)] },
+    });
+    expect(tooShort.statusCode).toBe(404);
+    expect(tooShort.json().skipped[0].reason).toMatch(/at least 4 characters/);
+
+    // Right id, wrong source: the source is a claim about what failed and is
+    // checked, not ignored.
+    const wrongSource = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/errors/clear",
+      headers: root,
+      payload: { refs: [{ source: "upload-task", id: dead.id }] },
+    });
+    expect(wrongSource.statusCode).toBe(404);
+    expect(wrongSource.json().skipped[0].reason).toMatch(/no upload-task/);
+
+    // And nothing at all is not a request.
+    const empty = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/errors/clear",
+      headers: root,
+      payload: {},
+    });
+    expect(empty.statusCode).toBe(400);
+  });
+
+  it("drops acknowledgements whose row has gone, so the filter cannot grow forever", async () => {
+    const { dead, failed } = await threeFailures();
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/errors/clear",
+      headers: root,
+      payload: { all: true },
+    });
+    expect(await prisma.clearedError.count()).toBe(3);
+
+    // Upload tasks are deleted once drained; the acknowledgement must not outlive
+    // its subject.
+    await prisma.uploadTask.delete({ where: { id: failed.id } });
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/errors/clear",
+      headers: root,
+      payload: { refs: [{ source: "job", id: dead.id }] },
+    });
+    expect(await prisma.clearedError.count()).toBe(2);
+    expect(await prisma.clearedError.findFirst({ where: { subjectId: failed.id } })).toBeNull();
+  });
+
   // ---- scope containment ----
 
   it("confines each endpoint to the scope it declares", async () => {
@@ -529,6 +733,15 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     expect(denied.statusCode).toBe(403);
     expect(denied.json().error).toBe("missing scope: runs:write");
     expect((await prisma.uploadTask.findUniqueOrThrow({ where: { id: pending.id } })).state).toBe("PENDING");
+
+    // Reading the failure feed and deciding a failure has been dealt with are
+    // different privileges: clearing changes what the next operator sees.
+    for (const url of ["/api/v1/admin/errors/clear", "/api/v1/admin/errors/restore"]) {
+      const res = await app.inject({ method: "POST", url, headers: runsRead, payload: { all: true } });
+      expect(res.statusCode, `${url} should need runs:write`).toBe(403);
+      expect(res.json().error).toBe("missing scope: runs:write");
+    }
+    expect(await prisma.clearedError.count()).toBe(0);
 
     // runs:write may act on the queues, and write implies read.
     expect(

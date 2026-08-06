@@ -104,6 +104,8 @@ const store = {
     activityQuery: "",
     activityExtension: "",
     activityLimit: 100,
+    /** Errors view: "without" | "with" | "only" — cleared entries hidden by default. */
+    errorsCleared: "without",
     auditQuery: "",
     auditActor: "",
     auditAction: "",
@@ -1482,22 +1484,37 @@ function renderSummary() {
       ? "none yet"
       : "—";
 
-  // A quarantine count is the one number in the header that is a problem rather
-  // than a fact, so it also lands on the Errors destination as a badge. Only
-  // when it has actually changed: this runs on every poll, and rebuilding the
-  // sidebar takes the keyboard focus with it — a ten-second timer that steals
-  // focus mid-Tab makes the whole menu unusable without a mouse.
-  const quarantined = stats?.quarantined ?? 0;
-  if (quarantined !== lastNavBadge) {
-    lastNavBadge = quarantined;
+  // Outstanding failures are the one number in the header that is a problem
+  // rather than a fact, so the count also lands on the Errors destination as a
+  // badge. It counts what nobody has dealt with yet, NOT every failure on
+  // record: a badge that kept nagging about failures the operator had already
+  // cleared would teach them to ignore the badge.
+  //
+  // Only redrawn when it has actually changed: this runs on every poll, and
+  // rebuilding the sidebar takes the keyboard focus with it — a ten-second timer
+  // that steals focus mid-Tab makes the whole menu unusable without a mouse.
+  const outstanding = navBadgeCount(stats);
+  if (outstanding !== lastNavBadge) {
+    lastNavBadge = outstanding;
     renderNav();
   }
 }
 
 // ----------------------------------------------------------------- the sidebar
 
-/** Last quarantine count drawn on the nav, so a poll can skip a rebuild. */
+/** Last outstanding-failure count drawn on the nav, so a poll can skip a rebuild. */
 let lastNavBadge = 0;
+
+/**
+ * The Errors badge number: failures nobody has cleared.
+ *
+ * Falls back to the raw quarantine count when `errorsOutstanding` is absent, so
+ * a dashboard served from a newer bundle than the core still shows a badge
+ * instead of a silent zero.
+ */
+function navBadgeCount(stats) {
+  return stats?.errorsOutstanding?.total ?? stats?.quarantined ?? 0;
+}
 
 function renderNav() {
   const nav = $("nav");
@@ -1510,7 +1527,7 @@ function renderNav() {
     else groups.push({ name, items: [entry] });
   }
 
-  const quarantined = summary.data?.stats?.quarantined ?? 0;
+  const outstanding = navBadgeCount(summary.data?.stats);
 
   nav.replaceChildren(
     ...groups.map((group) =>
@@ -1523,7 +1540,7 @@ function renderNav() {
           {},
           group.items.map((entry) => {
             const current = entry.id === store.route.section;
-            const count = entry.id === "errors" && quarantined > 0 ? quarantined : null;
+            const count = entry.id === "errors" && outstanding > 0 ? outstanding : null;
             return el(
               "li",
               {},
@@ -5239,42 +5256,186 @@ function activityActions(entry) {
 
 // --------------------------------------------------------------------- errors
 
+/**
+ * The failure list, and the controls that empty it.
+ *
+ * This view is a to-do list rather than a log: an operator who has read a
+ * failure and dealt with it clears the entry and it stops being shown, so what
+ * remains is what still needs attention. Nothing is deleted — the row itself is
+ * untouched, "Cleared" lists what was acknowledged and by whom, and Restore puts
+ * an entry back. A failure that happens AGAIN reappears on its own, because the
+ * acknowledgement is recorded against the failure's timestamp (see
+ * core/observability/errorFeed.ts).
+ */
 VIEWS.errors = (route) => {
   if (route.tab === "quarantine") return quarantinePanel();
 
-  const errors = new Resource("errors", () => api("/errors?limit=100"));
-  return card(
-    "Failures",
-    el("p", {
-      class: "dim small",
-      text:
-        "Dead-lettered jobs, failed upload tasks and quarantined submissions in one time-ordered list, so " +
-        "triage starts here instead of in docker logs.",
-    }),
-    live(
-      [errors],
-      ({ errors: rows }) =>
-        table(
-          ["When", "Kind", "Subject", "Message"],
-          rows.map((entry) => [
-            el(
-              "div",
-              {},
-              el("div", { text: fmtTime(entry.at) }),
-              el("div", { class: "dim small", text: ago(entry.at) }),
-            ),
-            chip(String(entry.kind).split(":")[1] ?? entry.kind),
-            el(
-              "div",
-              {},
-              el("div", { text: entry.subject }),
-              el("div", { class: "dim small", text: entry.kind }),
-            ),
-            truncate(entry.message, 280),
-          ]),
-          { empty: "Nothing has failed." },
+  const errors = new Resource("errors", () =>
+    api(`/errors?limit=100&cleared=${encodeURIComponent(store.filters.errorsCleared)}`),
+  );
+
+  // Outside the reactive region, like the Activity search box: a redraw that
+  // replaced it would take the caret and the half-typed note with it.
+  const note = el("input", {
+    id: "errors-note",
+    type: "text",
+    maxlength: 500,
+    placeholder: "why this is fine (optional)",
+    "aria-label": "Note to attach when clearing",
+  });
+
+  const clear = (body, label, button) =>
+    act(label, () => api("/errors/clear", { method: "POST", body: { ...body, note: note.value.trim() || undefined } }), {
+      button,
+      refresh: [errors, summary],
+    }).then((result) => {
+      if (!result) return;
+      note.value = "";
+      // Entries that were not actually failing are reported, not swallowed: a
+      // row from a stale poll is the common case and the operator should know
+      // their click did nothing.
+      for (const skip of result.skipped ?? []) toast(`${skip.id.slice(0, 8)}: ${skip.reason}`, false);
+    });
+
+  const restore = (body, label, button) =>
+    act(label, () => api("/errors/restore", { method: "POST", body }), { button, refresh: [errors, summary] });
+
+  const showing = store.filters.errorsCleared;
+
+  return el(
+    "div",
+    {},
+    card(
+      "Failures",
+      el("p", {
+        class: "dim small",
+        text:
+          "Dead-lettered jobs, failed upload tasks and quarantined submissions in one time-ordered list, so " +
+          "triage starts here instead of in docker logs. Clearing an entry hides it from this list only — the " +
+          "job, task or submission is untouched, and anything that fails again comes back.",
+      }),
+      row(
+        el("label", { class: "inline", for: "errors-cleared", text: "Show" }),
+        el(
+          "select",
+          {
+            id: "errors-cleared",
+            onchange: (event) => {
+              setFilter({ errorsCleared: event.target.value });
+              void errors.load({ force: true });
+            },
+          },
+          [
+            ["without", "outstanding only"],
+            ["with", "outstanding and cleared"],
+            ["only", "cleared only"],
+          ].map(([value, text]) => el("option", { value, text, selected: value === showing })),
         ),
-      { reserve: 320, skeleton: () => skeletonTable(8, 4) },
+        el("label", { class: "inline", for: "errors-note", text: "Note" }),
+        note,
+        gatedButton("runs:write", {
+          text: "Clear all",
+          title: "Acknowledge every outstanding failure in this list",
+          onclick: async (event) => {
+            const button = event.currentTarget;
+            const outstanding = summary.data?.stats?.errorsOutstanding?.total ?? null;
+            const ok = await confirmDialog({
+              title: "Clear every outstanding failure?",
+              lead:
+                outstanding === null
+                  ? "Every failure currently in the feed will be marked as dealt with."
+                  : `${outstanding} outstanding failure(s) will be marked as dealt with.`,
+              points: [
+                "Nothing is deleted: jobs, upload tasks and submissions keep their state, and Activity still shows every failure.",
+                "Anything that fails again reappears here as new.",
+                "Restore puts entries back, individually or all at once.",
+              ],
+              confirmLabel: "Clear all",
+              danger: false,
+            });
+            if (ok) await clear({ all: true }, "clear all errors", button);
+          },
+        }),
+        showing === "without"
+          ? null
+          : gatedButton("runs:write", {
+              text: "Restore all",
+              title: "Put every cleared entry back in the outstanding list",
+              onclick: (event) => restore({ all: true }, "restore all errors", event.currentTarget),
+            }),
+      ),
+    ),
+    card(
+      null,
+      live(
+        [errors],
+        ({ errors: rows, clearedHidden }) =>
+          el(
+            "div",
+            {},
+            clearedHidden > 0 && showing === "without"
+              ? el("p", {
+                  class: "dim small",
+                  text: `${clearedHidden} cleared entr${clearedHidden === 1 ? "y is" : "ies are"} hidden. Switch "Show" to review them.`,
+                })
+              : null,
+            table(
+              ["When", "Kind", "Subject", "Message", ""],
+              rows.map((entry) => [
+                el(
+                  "div",
+                  {},
+                  el("div", { text: fmtTime(entry.at) }),
+                  el("div", { class: "dim small", text: ago(entry.at) }),
+                ),
+                el(
+                  "div",
+                  {},
+                  chip(String(entry.kind).split(":")[1] ?? entry.kind),
+                  entry.cleared ? chip("cleared") : null,
+                ),
+                el(
+                  "div",
+                  {},
+                  el("div", { text: entry.subject }),
+                  el("div", { class: "dim small", text: entry.kind }),
+                  entry.cleared
+                    ? el("div", {
+                        class: "dim small",
+                        text:
+                          `cleared by ${entry.cleared.by} ${ago(entry.cleared.at)}` +
+                          (entry.cleared.note ? ` — ${entry.cleared.note}` : ""),
+                      })
+                    : null,
+                ),
+                truncate(entry.message, 280),
+                entry.cleared
+                  ? gatedButton("runs:write", {
+                      text: "Restore",
+                      onclick: (event) =>
+                        restore(
+                          { refs: [{ source: entry.source, id: entry.id }] },
+                          "restore error",
+                          event.currentTarget,
+                        ),
+                    })
+                  : gatedButton("runs:write", {
+                      text: "Clear",
+                      title: "Mark this failure as read and dealt with",
+                      onclick: (event) =>
+                        clear({ refs: [{ source: entry.source, id: entry.id }] }, "clear error", event.currentTarget),
+                    }),
+              ]),
+              {
+                empty:
+                  showing === "only"
+                    ? "Nothing has been cleared."
+                    : "Nothing is outstanding. Every failure has been dealt with, or nothing has failed.",
+              },
+            ),
+          ),
+        { reserve: 320, skeleton: () => skeletonTable(8, 5) },
+      ),
     ),
   );
 };

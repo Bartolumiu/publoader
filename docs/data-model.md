@@ -545,6 +545,30 @@ Scoped per-client credentials (`pa_…`).
 Indexes: `(created_at)` serves the reverse-chronological feed; `(action)` serves
 filtering by verb.
 
+### `cleared_errors` (operator bookkeeping)
+
+One row per failure an operator has read and dealt with, which is what lets the
+merged error feed (`GET /admin/errors`) be a to-do list rather than a wall of
+everything that ever broke.
+
+| Column | Meaning |
+| --- | --- |
+| `source` | `JOB`, `UPLOAD_TASK` or `SUBMISSION` — which of the feed's three tables `subject_id` names. |
+| `subject_id` | The job / upload task / result submission id. **Not a foreign key:** one column cannot reference three tables, and an acknowledgement that outlives its row is harmless — it matches nothing and `pruneClearedErrors` sweeps it on the next clear. |
+| `error_at` | The timestamp the feed showed for the entry when it was cleared. This is what makes clearing acknowledge **one failure** rather than muting a row: anything that fails again moves its own `updated_at` past this value and reappears as new work. Without it, a cleared job that was retried and dead-lettered again would never be seen. |
+| `cleared_at`, `cleared_by` | When, and by whom (same actor shape as `audit_events.actor`). Shown in the dashboard's cleared view. |
+| `note` | Optional operator note — "upstream 503s, extension fixed in 1.4.2". |
+
+Why a side table rather than columns on the three sources: those rows carry
+`updated_at` maintained by Prisma's `@updatedAt`, so a write recording the
+acknowledgement would move the very timestamp the acknowledgement is measured
+against — and this is operator bookkeeping, not execution state a claim statement
+reads.
+
+Indexes: `(source, subject_id)` **unique** is both the feed's exclusion lookup and
+what makes clearing idempotent (a second clear updates the row); `(cleared_at)`
+serves the "what have we acknowledged lately" view.
+
 ---
 
 ## Why JSONB where it is used
@@ -586,6 +610,7 @@ because Prisma's generated version would have destroyed data:
 | `20260729222814_deleted_chapters` | The hard-delete archive. |
 | `20260729225058_normalise_chapter_storage` | **Hand-written.** Promotes the chapter document to typed columns on all four tables: add columns, copy the document into them, park the residue in `extra`, and only then `DROP COLUMN "chapter"`. `migrate dev` had generated `DROP COLUMN` + `ADD COLUMN`, which would have discarded every chapter snapshot the platform holds. Includes an exception-safe ISO-8601 → `timestamp(3)` converter so an unparseable legacy date survives verbatim in `extra` rather than becoming NULL. |
 | `20260805000000_login_tokens` | Single-use emailed sign-in links, plus the `LoginTokenPurpose` enum. |
+| `20260806000000_cleared_errors` | Acknowledgements for the merged error feed, plus the `ErrorSource` enum. Additive: no existing table is touched, and an un-migrated core simply has no acknowledgements. |
 
 The lesson, which [CONTRIBUTING.md](../CONTRIBUTING.md#migrations) makes a rule:
 generate the migration with `--create-only` and then write the SQL yourself.

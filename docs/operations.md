@@ -742,6 +742,25 @@ see whether a bad hour was one cause or three:
 padmin errors --limit 100
 ```
 
+**Clear what you have dealt with.** The feed is only useful if an empty feed
+means something, so a failure that has been read and fixed can be acknowledged
+and it drops out of the list:
+
+```bash
+padmin errors clear 3f9a1c2b --note "upstream 503s, extension fixed in 1.4.2"
+padmin errors clear --all                # after working through the list
+padmin errors --cleared only             # what was acknowledged, by whom, why
+padmin errors restore 3f9a1c2b           # it was not actually fixed
+```
+
+Clearing hides, it never deletes: the job, upload task or submission keeps its
+state, `padmin dead-letter` and the Activity feed still show the failure, and the
+`errorsOutstanding` count that drives the dashboard badge is what drops. Anything
+that fails *again* comes back on its own — the acknowledgement is recorded against
+that failure's timestamp, so a cleared-then-retried-then-failed job returns as new
+work rather than staying silenced. The same operation is on the dashboard's Errors
+view, `/errors clear` in Discord, and `POST /api/v1/admin/errors/clear`.
+
 This is deliberately *not* a log endpoint. **Container logs stay on the host**:
 work executes in containers (and on remote worker hosts) that the core cannot
 read, so `docker compose logs -f core-uploader` remains the way to read them.

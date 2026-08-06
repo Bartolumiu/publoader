@@ -263,10 +263,17 @@ export interface MdAuthState {
 export interface ErrorEntry {
   at: string;
   kind: string;
+  /** Which table it came from, and what `clear`/`restore` take as `source`. */
+  source: "job" | "upload-task" | "submission";
   subject: string;
   message: string;
   id: string;
+  /** Set only on entries an operator has already dealt with. */
+  cleared?: { at: string; by: string; note: string | null };
 }
+
+/** Which acknowledged entries a feed read should include. */
+export type ErrorClearedFilter = "without" | "with" | "only";
 
 export type UploadTaskKind = "UPLOAD" | "EDIT" | "DELETE" | "UNAVAILABLE";
 export type UploadTaskState = "PENDING" | "LEASED" | "DONE" | "FAILED" | "DEAD_LETTER";
@@ -654,14 +661,57 @@ export class AdminApiClient {
     });
   }
 
-  /** The merged failure feed: dead-lettered jobs, failed tasks, quarantines. */
-  errors(actor: string, limit: number): Promise<{ errors: ErrorEntry[] }> {
+  /**
+   * The merged failure feed: dead-lettered jobs, failed tasks, quarantines.
+   *
+   * Acknowledged entries are omitted by default and counted in `clearedHidden`,
+   * so a quiet feed can be reported as "nothing outstanding" without implying
+   * nothing ever failed.
+   */
+  errors(
+    actor: string,
+    limit: number,
+    cleared: ErrorClearedFilter = "without",
+  ): Promise<{ errors: ErrorEntry[]; clearedHidden: number }> {
     return this.request({
       method: "GET",
       path: "/api/v1/admin/errors",
       scope: "runs:read",
       actor,
-      query: { limit },
+      query: { limit, cleared },
+    });
+  }
+
+  /**
+   * Mark failures as read and dealt with, by id (a full id or a leading prefix)
+   * or all at once. Hides them from the feed; changes nothing about the rows.
+   */
+  clearErrors(
+    actor: string,
+    body: { ids?: string[]; all?: boolean; note?: string },
+  ): Promise<{
+    ok: boolean;
+    cleared: number;
+    entries?: { source: string; id: string }[];
+    skipped?: { source: string | null; id: string; reason: string }[];
+  }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/errors/clear",
+      scope: "runs:write",
+      actor,
+      json: body,
+    });
+  }
+
+  /** Undo clearing: put acknowledged entries back in the feed. */
+  restoreErrors(actor: string, body: { ids?: string[]; all?: boolean }): Promise<{ ok: boolean; restored: number }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/errors/restore",
+      scope: "runs:write",
+      actor,
+      json: body,
     });
   }
 
