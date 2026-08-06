@@ -12,7 +12,11 @@ name: Publish images
 on:
   push:
     branches: [master]
-    tags: ["v*"]
+    # Both spellings, because the repo has used both. Tag `2.1.6` was pushed
+    # against a `v*`-only filter and silently published nothing — no run, no
+    # failure, just a version that existed in git and never on Docker Hub.
+    # `+` here is a filter-pattern quantifier, not a literal.
+    tags: ["v*", "[0-9]+.[0-9]+.[0-9]+"]
   workflow_dispatch:
     inputs:
       version:
@@ -54,8 +58,13 @@ jobs:
           echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
           version="$INPUT_VERSION"
           if [ -z "$version" ] && [ "$REF_TYPE" = "tag" ]; then
-            version="${REF_NAME#v}"
+            version="$REF_NAME"
           fi
+          # A leading `v` is a git-tag convention, not part of the version. It
+          # comes off whichever way the version arrived — a `v2.1.7` tag and a
+          # `v2.1.7` typed into the manual run both publish `:2.1.7`, so the
+          # image tags stay bare numbers and never fork into two spellings.
+          version="${version#v}"
           case "$version" in
             "") ;;
             *[!0-9.]*) echo "::error::version must look like 2.1.2, got '$version'"; exit 1 ;;

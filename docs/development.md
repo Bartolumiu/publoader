@@ -311,16 +311,31 @@ dead-lettered jobs, failed upload tasks, and quarantined submissions
 (`GET /api/v1/admin/errors`). Each source is queried at the full limit before
 merging, so a burst in one is not hidden behind old rows from another.
 
+It is a to-do list, not a log. **Clear** on a row records that the failure has
+been read and dealt with and drops it from the list; the row itself is untouched,
+so Activity and the run views still show it, "Show → cleared" reviews what was
+acknowledged and by whom, and **Restore** undoes it. A failure that happens again
+reappears by itself, because the acknowledgement is recorded against the
+failure's timestamp — clearing acknowledges one failure, never a row
+(`src/core/observability/errorFeed.ts`).
+
 ### 2. The CLI
 
 ```bash
-padmin errors --limit 50      # the same merged feed
+padmin errors --limit 50      # the same merged feed (cleared entries hidden)
+padmin errors --cleared only  # what has been acknowledged, by whom, and why
+padmin errors clear 3f9a1c2b --note "upstream 503s, fixed in 1.4.2"
+padmin errors clear --all     # been through the list
+padmin errors restore 3f9a1c2b
 padmin dead-letter            # jobs that exhausted their attempts
 padmin quarantine             # envelopes rejected on policy grounds
 padmin runs show <runId>      # the run and every one of its jobs
 padmin queues list --state DEAD_LETTER
 padmin stats
 ```
+
+Ids may be given as a leading prefix (the eight characters the tables print are
+enough), and an ambiguous prefix is refused rather than resolved to a guess.
 
 `padmin errors` prints a note that container logs are *not* aggregated; that is
 deliberate. Container logs describe processes; the API describes platform state

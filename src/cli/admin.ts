@@ -582,6 +582,74 @@ maps
     );
   });
 
+// ---- chapter archives vs. what MangaDex actually holds ----
+const chapters = program
+  .command("chapters")
+  .description("the record of what is on MangaDex, and what has happened to it");
+
+chapters
+  .command("reconcile")
+  .description("record the chapters already marked unavailable on MangaDex, and the deleted ones")
+  .option("--apply", "write the archive rows (default is a dry run that writes nothing)")
+  .option("--extension <name...>", "only these extensions (default: every group we have uploaded to)")
+  .option("--skip-deleted", "skip the uploaded_chapters sweep, which is the only pass that finds deletions")
+  .action(async (opts: { apply?: boolean; extension?: string[]; skipDeleted?: boolean }) => {
+    const res = await api<{
+      dryRun: boolean;
+      groups: {
+        extension: string;
+        groupId: string;
+        total: number;
+        carded: number;
+        recorded: number;
+        hiddenOnMangadex: number;
+      }[];
+      unavailableFound: number;
+      unavailableRecorded: number;
+      scanned: number;
+      deletedFound: number;
+      deletedRecorded: number;
+      hiddenOnMangadex: string[];
+    }>("/api/v1/admin/chapters/reconcile", {
+      method: "POST",
+      json: {
+        dryRun: opts.apply !== true,
+        extensions: opts.extension ?? [],
+        skipDeleted: opts.skipDeleted === true,
+      },
+    });
+
+    table(res.groups, [
+      { header: "EXTENSION", get: (g) => g["extension"] },
+      { header: "GROUP", get: (g) => String(g["groupId"]).slice(0, 8) },
+      { header: "ON MD", get: (g) => g["total"] },
+      { header: "CARDED", get: (g) => g["carded"] },
+      { header: "NEW", get: (g) => g["recorded"] },
+      { header: "MD-HIDDEN", get: (g) => g["hiddenOnMangadex"] },
+    ], "no extension has uploaded anything, so there are no groups to ask about");
+
+    console.error(`  scanned ${res.scanned} uploaded row(s)`);
+    if (res.hiddenOnMangadex.length > 0) {
+      // Never archived: MangaDex is refusing to serve these, but they carry no
+      // card of ours, so they are candidates for an UNAVAILABLE task rather
+      // than chapters we have already marked.
+      console.error(
+        `  ${res.hiddenOnMangadex.length} live chapter(s) MangaDex will not serve — ` +
+          "not archived; queue them unavailable if that is what you want:",
+      );
+      for (const id of res.hiddenOnMangadex.slice(0, 20)) console.error(`    ${id}`);
+      if (res.hiddenOnMangadex.length > 20) {
+        console.error(`    … and ${res.hiddenOnMangadex.length - 20} more`);
+      }
+    }
+    ok(
+      `${res.dryRun ? "would record" : "recorded"} ` +
+        `${res.unavailableRecorded} unavailable and ${res.deletedRecorded} deleted ` +
+        `(found ${res.unavailableFound} / ${res.deletedFound}; the rest were already archived)` +
+        (res.dryRun ? " — re-run with --apply to write" : ""),
+    );
+  });
+
 // ---- extension config (the database replacement for override_options.json) ----
 const extConfig = program
   .command("ext-config")
@@ -1015,23 +1083,106 @@ queues
   });
 
 // ---- merged error feed ----
-program
+
+/** What `--cleared` accepts, mapped straight onto the API's query parameter. */
+const CLEARED_FILTERS = ["without", "with", "only"] as const;
+
+type ErrorEntry = {
+  at: string;
+  kind: string;
+  source: string;
+  subject: string;
+  message: string;
+  id: string;
+  cleared?: { at: string; by: string; note: string | null };
+};
+
+/**
+ * The feed, plus clearing the entries that have been dealt with.
+ *
+ * `padmin errors` still lists, so the muscle memory and every existing runbook
+ * keep working; `errors clear` and `errors restore` hang off it as subcommands.
+ * The list is a to-do list by default: cleared entries are hidden and counted, so
+ * an empty list means "nothing needs you", not "nothing ever broke".
+ */
+const errorFeed = program
   .command("errors")
   .description("dead-lettered jobs, failed upload tasks, and quarantined submissions, newest first")
   .option("--limit <n>", "how many rows", "50")
-  .action(async (opts: { limit: string }) => {
-    const res = await api<{
-      errors: { at: string; kind: string; subject: string; message: string; id: string }[];
-    }>("/api/v1/admin/errors", { query: { limit: opts.limit } });
+  .option(`--cleared <${CLEARED_FILTERS.join("|")}>`, "hide cleared entries (default), include them, or show only them", "without")
+  .action(async (opts: { limit: string; cleared: string }) => {
+    if (!CLEARED_FILTERS.includes(opts.cleared as (typeof CLEARED_FILTERS)[number])) {
+      fail(`--cleared must be one of ${CLEARED_FILTERS.join(", ")}`);
+    }
+    const res = await api<{ errors: ErrorEntry[]; clearedHidden: number }>("/api/v1/admin/errors", {
+      query: { limit: opts.limit, cleared: opts.cleared },
+    });
     table(res.errors, [
       { header: "WHEN", get: (e) => e.at },
       { header: "KIND", get: (e) => e.kind },
       { header: "ID", get: (e) => e.id },
       { header: "SUBJECT", get: (e) => e.subject.slice(0, 50) },
       { header: "MESSAGE", get: (e) => e.message.slice(0, 80) || "-" },
-    ], "nothing has failed");
+      {
+        header: "CLEARED",
+        get: (e) => (e.cleared ? `${e.cleared.by}${e.cleared.note ? ` (${e.cleared.note})` : ""}` : "-"),
+      },
+    ], opts.cleared === "only" ? "nothing has been cleared" : "nothing is outstanding");
     console.log("");
+    if (opts.cleared === "without" && res.clearedHidden > 0) {
+      console.log(
+        `${res.clearedHidden} cleared entr${res.clearedHidden === 1 ? "y" : "ies"} hidden; ` +
+          "`padmin errors --cleared only` to review, `errors restore` to un-clear.",
+      );
+    }
     console.log("Container logs are not aggregated here; use `docker compose logs` on the host.");
+  });
+
+errorFeed
+  .command("clear")
+  .description("mark failures as read and dealt with, so they drop out of the feed")
+  .argument("[id...]", "entry ids, or the leading characters of one (as printed by `padmin errors`)")
+  .option("--all", "clear every outstanding failure")
+  .option("--note <text>", "why it is fine — shown to whoever reviews cleared entries")
+  .action(async (ids: string[], opts: { all?: boolean; note?: string }) => {
+    // Both at once is a contradiction worth rejecting rather than resolving: it
+    // reads as "clear these" and would clear everything.
+    if (opts.all && ids.length > 0) fail("pass ids or --all, not both");
+    if (!opts.all && ids.length === 0) fail("pass one or more ids, or --all");
+
+    const res = await api<{
+      cleared: number;
+      entries?: { source: string; id: string }[];
+      skipped?: { source: string | null; id: string; reason: string }[];
+    }>("/api/v1/admin/errors/clear", {
+      method: "POST",
+      json: {
+        ...(opts.all ? { all: true } : { ids }),
+        ...(opts.note ? { note: opts.note } : {}),
+      },
+    });
+
+    for (const skip of res.skipped ?? []) console.log(`skipped ${skip.id}: ${skip.reason}`);
+    ok(
+      `${res.cleared} failure(s) cleared — hidden from the feed. Nothing else changed: ` +
+        "the jobs, tasks and submissions keep their state, anything that fails again reappears, " +
+        "and `errors restore` undoes this.",
+    );
+  });
+
+errorFeed
+  .command("restore")
+  .description("put cleared entries back in the feed")
+  .argument("[id...]", "entry ids, or the leading characters of one")
+  .option("--all", "restore everything that was cleared")
+  .action(async (ids: string[], opts: { all?: boolean }) => {
+    if (opts.all && ids.length > 0) fail("pass ids or --all, not both");
+    if (!opts.all && ids.length === 0) fail("pass one or more ids, or --all");
+    const res = await api<{ restored: number }>("/api/v1/admin/errors/restore", {
+      method: "POST",
+      json: opts.all ? { all: true } : { ids },
+    });
+    ok(`${res.restored} entr${res.restored === 1 ? "y" : "ies"} restored to the feed`);
   });
 
 // ---- MangaDex session ----

@@ -7,6 +7,7 @@ import { sessionAuthenticator } from "../session.js";
 import { normaliseMangadexLanguage } from "../../../contracts/languages.js";
 import { Manifest, hostAllowed } from "../../../contracts/manifest.js";
 import { chapterToTaskPayload } from "../../md/chapterRows.js";
+import { ChapterReconciler } from "../../md/chapterReconcile.js";
 import { generateChapterCard } from "../../md/card.js";
 import { unavailableCardOptions } from "../../md/unavailableCard.js";
 import type { MdChapterDetail } from "../../md/client.js";
@@ -499,6 +500,68 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
      * One page of an archive, newest first. `archive` selects which of the four
      * tables is being read; they share a shape, so they share an endpoint.
      */
+    /**
+     * Bring the archives back in line with what MangaDex actually holds.
+     *
+     * The one endpoint here that does NOT queue an upload task, and the reason
+     * it is allowed to write directly: it changes nothing on MangaDex. It reads
+     * the catalogue and corrects our record of it. Queueing would be actively
+     * wrong — every chapter it finds is already unavailable or already gone, so
+     * running the workers over them would re-upload cards and re-issue deletes
+     * for work MangaDex did on its own.
+     *
+     * The auth split is deliberate and is the only one in this module. A dry
+     * run reads MangaDex and reports, so it sits at `chapters:read` and any
+     * scoped token may run it — that is what makes the state observable from a
+     * monitoring probe or the bot. Applying moves rows between tables, so it
+     * takes the same guard as every other mutating route here: ADMIN-or-above
+     * and closed to api tokens.
+     */
+    scope.post(
+      "/api/v1/admin/chapters/reconcile",
+      { preHandler: requireScope("chapters:read") },
+      async (req, reply) => {
+        const body = parseOrThrow(
+          z.object({
+            dryRun: z.boolean().default(true),
+            extensions: z.array(z.string().max(64)).max(50).default([]),
+            /** Skip the uploaded_chapters sweep — the slow half, and the only
+             *  one that can find deletions. */
+            skipDeleted: z.boolean().default(false),
+          }),
+          req.body ?? {},
+        );
+
+        if (!ctx.md) {
+          return reply.code(503).send({ error: "this deployment has no MangaDex client" });
+        }
+        // The role check is here rather than in a preHandler because it depends
+        // on the body: a preHandler would refuse the dry run too.
+        if (!body.dryRun) {
+          if (req.principal?.kind === "api-token") {
+            return reply.code(403).send({ error: TOKEN_REFUSAL, requiredRole: "ADMIN" });
+          }
+          if (req.adminRole !== "OWNER" && req.adminRole !== "ADMIN") {
+            return reply.code(403).send({ error: ROLE_REFUSAL, requiredRole: "ADMIN" });
+          }
+        }
+
+        const reconciler = new ChapterReconciler({
+          prisma: ctx.prisma,
+          md: ctx.md,
+          log: ctx.log,
+          audit: ctx.audit,
+        });
+        const report = await reconciler.run({
+          dryRun: body.dryRun,
+          extensions: body.extensions,
+          skipDeleted: body.skipDeleted,
+          actor: actor(req),
+        });
+        return { ok: true, ...report };
+      },
+    );
+
     scope.get("/api/v1/admin/chapters", { preHandler: requireScope("chapters:read") }, async (req) => {
       const query = parseOrThrow(
         z.object({

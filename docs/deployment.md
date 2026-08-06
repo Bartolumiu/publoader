@@ -464,6 +464,7 @@ none of it needs a shell on a container:
 | Tracked manga mapping | `tracked_manga` | Extensions → Configure | `padmin tracked` |
 | Upload queue triage | `upload_tasks` | Queues | `padmin queues` |
 | Failure feed | `jobs`, `upload_tasks`, `result_submissions` | Errors | `padmin errors` |
+| Clearing failures that were dealt with | `cleared_errors` | Errors → Clear / Restore | `padmin errors clear` / `restore` |
 | Saved MangaDex session | `settings.mdauth_*` | Overview → MangaDex session | `padmin mangadex auth` / `clear-auth` |
 | Client credentials | `api_tokens` | Tokens (OWNER only) | `padmin tokens` |
 | Worker fleet | `workers` | Workers | `padmin workers` |

@@ -53,6 +53,16 @@ arrive for a job, duplicated, late, or hostile, the database admits one
 (`src/core/store/results.ts:70-97`). Proven against a real Postgres in
 `test/integration/lease.test.ts:142`.
 
+**cleared error**: A failure an operator has read and dealt with, recorded as a
+`cleared_errors` row and therefore absent from the merged error feed
+(`src/core/observability/errorFeed.ts`). It is a view filter and nothing more: the
+job, upload task or submission keeps its state, the Activity feed and the run views
+still show the failure, and `/errors/restore` un-clears it. The acknowledgement is
+recorded against the failure's timestamp, so a row that fails *again* moves past it
+and reappears as new work; clearing acknowledges one failure, never a row. Reached
+from all four surfaces: the dashboard's Errors view, `POST /admin/errors/clear`,
+`/errors clear` in Discord, and `padmin errors clear`.
+
 **dead letter**: The terminal failure state for a job (`JobState.DEAD_LETTER`)
 or an upload task (`UploadTaskState.DEAD_LETTER`). A job dead-letters when its
 attempts are exhausted, or immediately on a `PERMANENT` error;

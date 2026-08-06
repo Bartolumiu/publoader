@@ -1150,6 +1150,20 @@ input[type="search"] {
   min-width: 0;
 }
 
+/* A stat that is also the way into the rows it counts. Same tile, but it says
+   so on hover and takes focus like the link it actually is. */
+a.stat.linked {
+  display: block;
+  color: inherit;
+  text-decoration: none;
+}
+
+a.stat.linked:hover,
+a.stat.linked:focus-visible {
+  background: var(--panel-2);
+  border-left-color: var(--accent);
+}
+
 .stat .n {
   font-family: var(--mono);
   font-size: 21px;

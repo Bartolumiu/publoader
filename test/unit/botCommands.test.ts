@@ -814,24 +814,94 @@ describe("/mdauth", () => {
 });
 
 describe("/errors", () => {
-  it("merges the failure sources into one list", async () => {
-    const api = fakeApi({
-      errors: vi.fn().mockResolvedValue({
-        errors: [
-          { at: "2026-07-29T15:00:00Z", kind: "job:DEAD_LETTER", subject: "mangaplus · segment 1/2", message: "upstream 500", id: "job-1" },
-          { at: "2026-07-29T14:00:00Z", kind: "upload-task:FAILED", subject: "UPLOAD · key", message: "MD 429", id: "task-1" },
-        ],
-      }),
-    });
-    const reply = await invoke("errors", api, { limit: 5 });
+  const twoFailures = {
+    clearedHidden: 0,
+    errors: [
+      { at: "2026-07-29T15:00:00Z", kind: "job:DEAD_LETTER", source: "job", subject: "mangaplus · segment 1/2", message: "upstream 500", id: "3f9a1c2b-job" },
+      { at: "2026-07-29T14:00:00Z", kind: "upload-task:FAILED", source: "upload-task", subject: "UPLOAD · key", message: "MD 429", id: "7b1c2d3e-task" },
+    ],
+  };
+
+  it("merges the failure sources into one list, with the id `clear` takes", async () => {
+    const api = fakeApi({ errors: vi.fn().mockResolvedValue(twoFailures) });
+    const reply = await invoke("errors", api, { limit: 5 }, "list");
     expect(reply.text).toContain("job:DEAD_LETTER");
     expect(reply.text).toContain("upload-task:FAILED");
-    expect(reply.text).toContain("2 recent failure(s)");
+    expect(reply.text).toContain("2 failure(s)");
+    // The short id is what makes the next command typeable from this message.
+    expect(reply.text).toContain("3f9a1c2b");
+    expect(reply.text).toContain("/errors clear");
   });
 
-  it("says so when nothing has failed", async () => {
-    const api = fakeApi({ errors: vi.fn().mockResolvedValue({ errors: [] }) });
-    expect((await invoke("errors", api)).text).toContain("Nothing has failed recently");
+  it("distinguishes nothing outstanding from nothing ever failing", async () => {
+    const quiet = fakeApi({ errors: vi.fn().mockResolvedValue({ errors: [], clearedHidden: 0 }) });
+    expect((await invoke("errors", quiet, {}, "list")).text).toContain("Nothing has failed recently");
+
+    // Same empty list, but four failures were dealt with — an operator deciding
+    // whether to dig further needs that difference.
+    const handled = fakeApi({ errors: vi.fn().mockResolvedValue({ errors: [], clearedHidden: 4 }) });
+    const reply = await invoke("errors", handled, {}, "list");
+    expect(reply.text).toContain("Nothing outstanding");
+    expect(reply.text).toContain("4 cleared");
+  });
+
+  it("lists cleared entries with who cleared them", async () => {
+    const errors = vi.fn().mockResolvedValue({
+      clearedHidden: 0,
+      errors: [{ ...twoFailures.errors[0]!, cleared: { at: "2026-07-30T00:00:00Z", by: "discord:ardax", note: "upstream fixed" } }],
+    });
+    const reply = await invoke("errors", fakeApi({ errors }), { show: "only" }, "list");
+    expect(errors).toHaveBeenCalledWith("discord:ardax", 10, "only");
+    expect(reply.text).toContain("cleared by discord:ardax");
+    expect(reply.text).toContain("upstream fixed");
+  });
+
+  it("clears one failure by id prefix, with a note", async () => {
+    const clearErrors = vi.fn().mockResolvedValue({ ok: true, cleared: 1, skipped: [] });
+    const reply = await invoke("errors", fakeApi({ clearErrors }), { id: "3f9a1c2b", note: "fixed in 1.4.2" }, "clear");
+    expect(clearErrors).toHaveBeenCalledWith("discord:ardax", { ids: ["3f9a1c2b"], note: "fixed in 1.4.2" });
+    expect(reply.text).toContain("1 failure(s) cleared");
+    // The reply has to say what clearing did NOT do, or it reads as a delete.
+    expect(reply.text).toContain("unchanged");
+  });
+
+  it("reports entries it could not clear instead of claiming success", async () => {
+    const clearErrors = vi.fn().mockResolvedValue({
+      ok: false,
+      cleared: 0,
+      skipped: [{ source: null, id: "deadbeef", reason: "nothing currently failing matches this id" }],
+    });
+    const reply = await invoke("errors", fakeApi({ clearErrors }), { id: "deadbeef" }, "clear");
+    expect(reply.text).toContain("Nothing was cleared");
+    expect(reply.text).toContain("nothing currently failing matches this id");
+  });
+
+  it("refuses an id together with all, and refuses neither", async () => {
+    const clearErrors = vi.fn();
+    const api = fakeApi({ clearErrors });
+    // `id` with `all` reads as "clear this one" but would clear everything, so it
+    // is a user error rather than a resolved ambiguity.
+    expect((await invoke("errors", api, { id: "3f9a1c2b", all: true }, "clear")).text).toContain("not both");
+    expect((await invoke("errors", api, {}, "clear")).text).toContain("all");
+    expect(clearErrors).not.toHaveBeenCalled();
+  });
+
+  it("restores cleared entries, and says when nothing matched", async () => {
+    const restored = vi.fn().mockResolvedValue({ ok: true, restored: 2 });
+    expect((await invoke("errors", fakeApi({ restoreErrors: restored }), { all: true }, "restore")).text).toContain("2 entries");
+    expect(restored).toHaveBeenCalledWith("discord:ardax", { all: true });
+
+    const none = vi.fn().mockResolvedValue({ ok: true, restored: 0 });
+    expect((await invoke("errors", fakeApi({ restoreErrors: none }), { id: "deadbeef" }, "restore")).text).toContain(
+      "Nothing matched",
+    );
+  });
+
+  it("keeps clearing behind a mutate sensitivity while listing stays read", () => {
+    const errors = COMMANDS_BY_NAME.get("errors")!;
+    expect(resolveSensitivity(errors, "list")).toBe("read");
+    expect(resolveSensitivity(errors, "clear")).toBe("mutate");
+    expect(resolveSensitivity(errors, "restore")).toBe("mutate");
   });
 });
 
