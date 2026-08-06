@@ -1030,6 +1030,58 @@ const commands: BotCommand[] = [
     },
   },
   {
+    name: "reconcile",
+    description: "Check which chapters are marked unavailable or deleted on MangaDex.",
+    // "read" although it walks the whole catalogue: it reports and never
+    // writes. Applying is closed to api tokens at the endpoint, so this command
+    // could not write the rows even if it asked to — `padmin chapters
+    // reconcile --apply` or the dashboard does that.
+    sensitivity: "read",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("reconcile")
+      .setDescription("Check which chapters are marked unavailable or deleted on MangaDex.")
+      .addStringOption((o) =>
+        o
+          .setName("extension")
+          .setDescription("Only this extension. Omit for every group we have uploaded to.")
+          .setAutocomplete(true),
+      ),
+    async run(ctx) {
+      const extension = ctx.options.string("extension");
+      const report = await ctx.api.reconcileChapters(ctx.actor, extension ? [extension] : []);
+
+      if (report.unavailableRecorded === 0 && report.deletedRecorded === 0) {
+        return {
+          text:
+            ":white_check_mark: Nothing to record — the archives already match MangaDex " +
+            `(${report.unavailableFound} unavailable and ${report.deletedFound} deleted, all known).`,
+        };
+      }
+      const lines = report.groups
+        .filter((group) => group.carded > 0 || group.hiddenOnMangadex > 0)
+        .map(
+          (group) =>
+            `• **${group.extension}** — ${group.carded} of ${group.total} already carded, ` +
+            `${group.recorded} not yet archived` +
+            (group.hiddenOnMangadex > 0
+              ? `, ${group.hiddenOnMangadex} live but unserved by MangaDex`
+              : ""),
+        );
+      return {
+        text:
+          `:mag: **${report.unavailableRecorded}** unavailable and **${report.deletedRecorded}** ` +
+          `deleted chapter(s) are missing from the archives.\n` +
+          (lines.length > 0 ? `${lines.join("\n")}\n` : "") +
+          (report.hiddenOnMangadex.length > 0
+            ? `${report.hiddenOnMangadex.length} chapter(s) carry no card but MangaDex will not ` +
+              "serve them — never archived; queue them unavailable if that is what you want.\n"
+            : "") +
+          "Nothing has been written. Run `padmin chapters reconcile --apply` to record them.",
+      };
+    },
+  },
+  {
     name: "tracked",
     description: "The external-id to MangaDex-id mapping for an extension.",
     sensitivity: { list: "read", set: "mutate", remove: "mutate" },

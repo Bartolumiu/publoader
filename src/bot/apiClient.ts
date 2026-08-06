@@ -272,6 +272,28 @@ export type UploadTaskKind = "UPLOAD" | "EDIT" | "DELETE" | "UNAVAILABLE";
 export type UploadTaskState = "PENDING" | "LEASED" | "DONE" | "FAILED" | "DEAD_LETTER";
 
 /**
+ * What a reconcile pass found. Mirrors ReconcileReport in
+ * core/md/chapterReconcile.ts, narrowed to the fields the bot renders.
+ */
+export interface ChapterReconcileReport {
+  dryRun: boolean;
+  groups: {
+    extension: string;
+    groupId: string;
+    total: number;
+    carded: number;
+    recorded: number;
+    hiddenOnMangadex: number;
+  }[];
+  unavailableFound: number;
+  unavailableRecorded: number;
+  scanned: number;
+  deletedFound: number;
+  deletedRecorded: number;
+  hiddenOnMangadex: string[];
+}
+
+/**
  * What the bot can say about its own credential. `scopes` is populated only if
  * the deployment exposes token introspection; see `tokenSelf()`.
  */
@@ -449,6 +471,25 @@ export class AdminApiClient {
       if (err instanceof AdminApiError && [403, 404, 405].includes(err.status)) return null;
       throw err;
     }
+  }
+
+  /**
+   * Ask what MangaDex has stopped serving or has deleted.
+   *
+   * Dry run only, and not because the bot is untrusted in general: applying is
+   * closed to api tokens at the endpoint (routes/chapters.ts), so a bot token
+   * could not write these rows even if this asked it to. Reporting is the
+   * useful half here anyway — the answer is a number somebody needs to see
+   * before deciding to act on it.
+   */
+  reconcileChapters(actor: string, extensions: string[]): Promise<ChapterReconcileReport> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/chapters/reconcile",
+      scope: "chapters:read",
+      actor,
+      json: { dryRun: true, extensions },
+    });
   }
 
   // ---- pause / resume ----
