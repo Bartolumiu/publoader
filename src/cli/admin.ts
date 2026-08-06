@@ -1015,23 +1015,106 @@ queues
   });
 
 // ---- merged error feed ----
-program
+
+/** What `--cleared` accepts, mapped straight onto the API's query parameter. */
+const CLEARED_FILTERS = ["without", "with", "only"] as const;
+
+type ErrorEntry = {
+  at: string;
+  kind: string;
+  source: string;
+  subject: string;
+  message: string;
+  id: string;
+  cleared?: { at: string; by: string; note: string | null };
+};
+
+/**
+ * The feed, plus clearing the entries that have been dealt with.
+ *
+ * `padmin errors` still lists, so the muscle memory and every existing runbook
+ * keep working; `errors clear` and `errors restore` hang off it as subcommands.
+ * The list is a to-do list by default: cleared entries are hidden and counted, so
+ * an empty list means "nothing needs you", not "nothing ever broke".
+ */
+const errorFeed = program
   .command("errors")
   .description("dead-lettered jobs, failed upload tasks, and quarantined submissions, newest first")
   .option("--limit <n>", "how many rows", "50")
-  .action(async (opts: { limit: string }) => {
-    const res = await api<{
-      errors: { at: string; kind: string; subject: string; message: string; id: string }[];
-    }>("/api/v1/admin/errors", { query: { limit: opts.limit } });
+  .option(`--cleared <${CLEARED_FILTERS.join("|")}>`, "hide cleared entries (default), include them, or show only them", "without")
+  .action(async (opts: { limit: string; cleared: string }) => {
+    if (!CLEARED_FILTERS.includes(opts.cleared as (typeof CLEARED_FILTERS)[number])) {
+      fail(`--cleared must be one of ${CLEARED_FILTERS.join(", ")}`);
+    }
+    const res = await api<{ errors: ErrorEntry[]; clearedHidden: number }>("/api/v1/admin/errors", {
+      query: { limit: opts.limit, cleared: opts.cleared },
+    });
     table(res.errors, [
       { header: "WHEN", get: (e) => e.at },
       { header: "KIND", get: (e) => e.kind },
       { header: "ID", get: (e) => e.id },
       { header: "SUBJECT", get: (e) => e.subject.slice(0, 50) },
       { header: "MESSAGE", get: (e) => e.message.slice(0, 80) || "-" },
-    ], "nothing has failed");
+      {
+        header: "CLEARED",
+        get: (e) => (e.cleared ? `${e.cleared.by}${e.cleared.note ? ` (${e.cleared.note})` : ""}` : "-"),
+      },
+    ], opts.cleared === "only" ? "nothing has been cleared" : "nothing is outstanding");
     console.log("");
+    if (opts.cleared === "without" && res.clearedHidden > 0) {
+      console.log(
+        `${res.clearedHidden} cleared entr${res.clearedHidden === 1 ? "y" : "ies"} hidden — ` +
+          "`padmin errors --cleared only` to review, `errors restore` to un-clear.",
+      );
+    }
     console.log("Container logs are not aggregated here — use `docker compose logs` on the host.");
+  });
+
+errorFeed
+  .command("clear")
+  .description("mark failures as read and dealt with, so they drop out of the feed")
+  .argument("[id...]", "entry ids, or the leading characters of one (as printed by `padmin errors`)")
+  .option("--all", "clear every outstanding failure")
+  .option("--note <text>", "why it is fine — shown to whoever reviews cleared entries")
+  .action(async (ids: string[], opts: { all?: boolean; note?: string }) => {
+    // Both at once is a contradiction worth rejecting rather than resolving: it
+    // reads as "clear these" and would clear everything.
+    if (opts.all && ids.length > 0) fail("pass ids or --all, not both");
+    if (!opts.all && ids.length === 0) fail("pass one or more ids, or --all");
+
+    const res = await api<{
+      cleared: number;
+      entries?: { source: string; id: string }[];
+      skipped?: { source: string | null; id: string; reason: string }[];
+    }>("/api/v1/admin/errors/clear", {
+      method: "POST",
+      json: {
+        ...(opts.all ? { all: true } : { ids }),
+        ...(opts.note ? { note: opts.note } : {}),
+      },
+    });
+
+    for (const skip of res.skipped ?? []) console.log(`skipped ${skip.id}: ${skip.reason}`);
+    ok(
+      `${res.cleared} failure(s) cleared — hidden from the feed. Nothing else changed: ` +
+        "the jobs, tasks and submissions keep their state, anything that fails again reappears, " +
+        "and `errors restore` undoes this.",
+    );
+  });
+
+errorFeed
+  .command("restore")
+  .description("put cleared entries back in the feed")
+  .argument("[id...]", "entry ids, or the leading characters of one")
+  .option("--all", "restore everything that was cleared")
+  .action(async (ids: string[], opts: { all?: boolean }) => {
+    if (opts.all && ids.length > 0) fail("pass ids or --all, not both");
+    if (!opts.all && ids.length === 0) fail("pass one or more ids, or --all");
+    const res = await api<{ restored: number }>("/api/v1/admin/errors/restore", {
+      method: "POST",
+      json: opts.all ? { all: true } : { ids },
+    });
+    ok(`${res.restored} entr${res.restored === 1 ? "y" : "ies"} restored to the feed`);
   });
 
 // ---- MangaDex session ----

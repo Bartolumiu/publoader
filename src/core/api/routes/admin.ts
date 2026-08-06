@@ -15,6 +15,7 @@ import {
 import { sessionAuthenticator } from "../session.js";
 import { Manifest, EXTENSION_NAME_RE } from "../../../contracts/manifest.js";
 import { MANGADEX_LANGUAGES } from "../../../contracts/languages.js";
+import { countOutstandingErrors } from "../../observability/errorFeed.js";
 
 /**
  * The worker image the enrolment snippet tells a new host to run.
@@ -936,17 +937,29 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
 
     // ---- observability ----
     scope.get("/api/v1/admin/stats", { preHandler: requireScope("stats:read") }, async () => {
-      const [jobCounts, taskDepths, workerCount, quarantined] = await Promise.all([
+      const [jobCounts, taskDepths, workerCount, quarantined, outstanding] = await Promise.all([
         ctx.prisma.job.groupBy({ by: ["state"], _count: true }),
         ctx.uploadTasks.depths(),
         ctx.prisma.worker.groupBy({ by: ["status"], _count: true }),
         ctx.prisma.resultSubmission.count({ where: { state: "QUARANTINED" } }),
+        countOutstandingErrors(ctx.prisma),
       ]);
       return {
         jobs: Object.fromEntries(jobCounts.map((r) => [r.state, r._count])),
         uploadTasks: taskDepths,
         workers: Object.fromEntries(workerCount.map((r) => [r.status, r._count])),
         quarantined,
+        /**
+         * Failures nobody has dealt with yet, across all three error sources.
+         *
+         * `quarantined` above is a state count and stays one; this is the triage
+         * number, and the difference is acknowledgements — an operator who has
+         * cleared the feed sees 0 here while `quarantined` still reports the rows
+         * that are, in fact, still quarantined. The dashboard badge uses this one:
+         * a badge that kept counting handled failures teaches people to ignore
+         * badges.
+         */
+        errorsOutstanding: outstanding,
         paused: await ctx.settings.isPaused(),
       };
     });
