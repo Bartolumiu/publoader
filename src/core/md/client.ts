@@ -55,10 +55,60 @@ export class MdRequestError extends Error {
   constructor(
     message: string,
     readonly status?: number,
+    /** Parsed error body, when MangaDex sent one; `optimisticLockVersion` reads it. */
+    readonly body?: Record<string, unknown> | null,
   ) {
     super(message);
     this.name = "MdRequestError";
   }
+}
+
+/**
+ * The version MangaDex says the entity *actually* holds, read off a 409.
+ *
+ * Every versioned write (PUT /chapter, PUT /manga, POST /upload/begin/{id})
+ * carries the version we believe MangaDex holds, and MangaDex rejects the write
+ * when that number is not the current one:
+ *
+ *   409 optimistic_lock_exception
+ *   "The optimistic lock failed, version 2 was expected, but is actually 3"
+ *
+ * The number we send comes from a GET, and a GET is not a reliable reading of
+ * the version *during* a write sequence: MangaDex serves chapter reads from a
+ * cache that lags its own writes, and the commit of an edit session bumps the
+ * version behind that cache. So a task that failed after committing and is now
+ * being retried re-reads the pre-commit version and is rejected on its next
+ * write, every time, for as long as the cache is warm. Re-reading harder does
+ * not fix it; the rejection itself names the current version, and that is the
+ * one authoritative reading available, so the write is replayed with it.
+ *
+ * Null for a 409 that is not a version conflict (an already-open upload
+ * session, say) — those must not be replayed.
+ */
+export function optimisticLockVersion(err: unknown): number | null {
+  if (!(err instanceof MdRequestError) || err.status !== 409) return null;
+  const errors = err.body?.errors;
+  const details: string[] = [];
+  if (Array.isArray(errors)) {
+    for (const entry of errors) {
+      if (entry === null || typeof entry !== "object") continue;
+      const { title, detail } = entry as { title?: unknown; detail?: unknown };
+      if (title !== "optimistic_lock_exception") continue;
+      if (typeof detail === "string") details.push(detail);
+    }
+  }
+  // The message carries the raw body, so a response that failed to parse (or
+  // arrived in some shape other than the documented one) is still readable.
+  if (details.length === 0 && err.message.includes("optimistic_lock_exception")) {
+    details.push(err.message);
+  }
+  for (const detail of details) {
+    const match = /is actually (\d+)/.exec(detail);
+    if (!match?.[1]) continue;
+    const version = Number(match[1]);
+    if (Number.isInteger(version) && version > 0) return version;
+  }
+  return null;
 }
 
 /** Generic MangaDex entity as it comes off the wire. */
@@ -327,10 +377,39 @@ export class MdClient implements MdExtendedApi {
       }
 
       // 4xx other than 401/429 will not change on retry.
-      throw new MdRequestError(`${method} ${url} failed; ${lastError}`, status);
+      throw new MdRequestError(`${method} ${url} failed; ${lastError}`, status, data);
     }
 
     throw new MdRequestError(`${method} ${url} exhausted ${tries} attempts; ${lastError}`);
+  }
+
+  /**
+   * Run a versioned write; if MangaDex rejects the version, run it once more
+   * with the version the rejection names. See `optimisticLockVersion` for why
+   * the error is a better reading of the current version than another GET.
+   *
+   * Once, deliberately. A second conflict means the entity is moving under us
+   * for reasons this flow does not control, and replaying a body built from a
+   * stale read on top of someone else's edit is the failure mode a lock exists
+   * to prevent. One replay recovers our own lagging read of our own write,
+   * which is the case that actually happens here.
+   */
+  private async withVersionRetry<T>(
+    what: string,
+    version: number | null,
+    run: (version: number | null) => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await run(version);
+    } catch (err) {
+      const actual = optimisticLockVersion(err);
+      if (actual === null || actual === version) throw err;
+      this.log.warn(
+        { what, sent: version, actual },
+        "md rejected the version; replaying the write with the version it reports",
+      );
+      return await run(actual);
+    }
   }
 
   // --------------------------------------------------------------------- auth
@@ -706,23 +785,28 @@ export class MdClient implements MdExtendedApi {
    * Correct an existing title. Mirrors `editChapter`: a PUT carrying the
    * version MangaDex currently holds, which it bumps itself.
    *
-   * `tries: 1`, unlike every other write here: a rejection is either a version
-   * conflict (the same stale version can never succeed) or a validation error
-   * (which will not change on retry). Replaying either against a public
-   * catalogue risks applying an edit the operator was told had failed. A 4xx
-   * becomes an MdRequestError carrying the status, so the caller can tell "the
-   * title moved under you" from "MangaDex refused this".
+   * `tries: 1`, unlike every other write here: a rejection is a validation
+   * error, and replaying it against a public catalogue risks applying an edit
+   * the operator was told had failed. A 4xx becomes an MdRequestError carrying
+   * the status, so the caller can tell "the title moved under you" from
+   * "MangaDex refused this".
+   *
+   * The one rejection that IS replayed is a version conflict, and only with the
+   * version MangaDex names in it: the same stale number can never succeed, but
+   * the corrected one is the write the caller asked for.
    */
   async editManga(
     mangaId: string,
     payload: Record<string, unknown>,
     version: number,
   ): Promise<boolean> {
-    const response = await this.request("PUT", `${this.config.mdApiUrl}/manga/${mangaId}`, {
-      json: { ...payload, version },
-      tries: 1,
+    return this.withVersionRetry(`PUT /manga/${mangaId}`, version, async (attempt) => {
+      const response = await this.request("PUT", `${this.config.mdApiUrl}/manga/${mangaId}`, {
+        json: { ...payload, version: attempt },
+        tries: 1,
+      });
+      return response.status === 200;
     });
-    return response.status === 200;
   }
 
   /** Port of fetch_aggregate; returns the `volumes` object, or null on error. */
@@ -788,14 +872,16 @@ export class MdClient implements MdExtendedApi {
    * Unlike /upload/begin this attaches pages to a chapter that already exists.
    */
   async beginEditSession(chapterId: string, version: number | null): Promise<{ id: string }> {
-    const response = await this.request(
-      "POST",
-      `${this.config.mdApiUrl}/upload/begin/${chapterId}`,
-      { json: { version }, tries: 1 },
-    );
-    const id = MdClient.dataId(response.data);
-    if (!id) throw new MdRequestError("edit session response carried no id");
-    return { id };
+    return this.withVersionRetry(`POST /upload/begin/${chapterId}`, version, async (attempt) => {
+      const response = await this.request(
+        "POST",
+        `${this.config.mdApiUrl}/upload/begin/${chapterId}`,
+        { json: { version: attempt }, tries: 1 },
+      );
+      const id = MdClient.dataId(response.data);
+      if (!id) throw new MdRequestError("edit session response carried no id");
+      return { id };
+    });
   }
 
   /**
@@ -894,10 +980,13 @@ export class MdClient implements MdExtendedApi {
   }
 
   async editChapter(chapterId: string, payload: Record<string, unknown>): Promise<boolean> {
-    const response = await this.request("PUT", `${this.config.mdApiUrl}/chapter/${chapterId}`, {
-      json: payload,
+    const sent = typeof payload.version === "number" ? payload.version : null;
+    return this.withVersionRetry(`PUT /chapter/${chapterId}`, sent, async (version) => {
+      const response = await this.request("PUT", `${this.config.mdApiUrl}/chapter/${chapterId}`, {
+        json: version === null ? payload : { ...payload, version },
+      });
+      return response.status === 200;
     });
-    return response.status === 200;
   }
 
   /**
