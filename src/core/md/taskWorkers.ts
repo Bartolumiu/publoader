@@ -460,6 +460,15 @@ export class UploadTaskWorkers {
         }),
       );
 
+      // MangaDex allows one open upload session per account, and this task is
+      // retried: an attempt killed between opening a session and deleting it
+      // leaves one behind that rejects every later begin, edit or upload alike.
+      const openSession = await md.currentUploadSession();
+      if (openSession) {
+        log.warn({ sessionId: openSession.id }, "removing stale upload session before edit");
+        await md.deleteUploadSession(openSession.id);
+      }
+
       const session = await md.beginEditSession(mdChapterId, attrs.version);
       try {
         const pageId = await this.uploadCard(session.id, card, log);
@@ -478,6 +487,10 @@ export class UploadTaskWorkers {
         );
 
         // The commit bumps the version and PUT /chapter needs the current one.
+        // Both readings below can lag the write that just happened — the echo
+        // may predate the bump, the refetch may be served from MangaDex's
+        // cache — so this is a best guess; `editChapter` corrects it from the
+        // 409 rather than failing the task.
         let version = committed?.attributes?.version ?? null;
         if (version === null) {
           const refetched = await md.chapterById(mdChapterId);
