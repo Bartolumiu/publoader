@@ -1909,6 +1909,12 @@ What it will not do, because it commits unattended:
 - **Keeps each file's shape.** mangaplus's `{titleId: [ids]}`, alpha_manga's
   `{id: titleId}` and viz's nested `{namespace: {…}}` all survive; only the
   ordering is normalised (once), so a week with no changes makes no commit.
+- **Keeps each file's layout.** The indent is read from the file, arrays stay on
+  one line, and alpha_manga's right-aligned ids stay aligned. This is not
+  cosmetic: the renderer used to be `JSON.stringify(…, 2)`, which put every id
+  on its own line and reindented everything, so the first run turned mangaplus
+  into a 2565-line file and a commit whose subject said `+7 -1` and whose diff
+  was every line. A diff has to be the change.
 
 Its commits carry `[map-sync]` in the subject, and the push webhook skips a
 delivery whose commits are *all* marked; otherwise the platform would answer

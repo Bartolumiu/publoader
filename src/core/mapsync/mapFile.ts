@@ -29,7 +29,29 @@ export interface MapShape {
   nested: boolean;
   /** `forward` is `{externalId: mdId}`; `inverted` is `{mdId: [externalId, …]}`. */
   inner: "forward" | "inverted";
+  /**
+   * Spaces per level, read from the file. Absent means {@link DEFAULT_INDENT}.
+   *
+   * Optional because it is a layout detail rather than a shape, and because a
+   * caller that only cares about the two axes above should not have to state
+   * it.
+   */
+  indent?: number;
+  /**
+   * Right-align the keys inside an object so their closing quotes line up,
+   * which is how alpha_manga's numeric ids are written. Absent means no.
+   */
+  align?: boolean;
 }
+
+/**
+ * Spaces per level for a file that does not tell us otherwise.
+ *
+ * Four, because all three maps in the wild are written that way. This used to
+ * be the `2` baked into a `JSON.stringify(…, 2)` call, which meant the first
+ * sync reindented every line of every file it touched.
+ */
+export const DEFAULT_INDENT = 4;
 
 /**
  * What a brand-new file would look like. Inverted because that is the shape the
@@ -115,7 +137,105 @@ export function renderMapFile(rows: ParsedIdMapRow[], shape: MapShape = DEFAULT_
       )
     : flat(rows);
 
-  return JSON.stringify(document, null, 2) + "\n";
+  return serialise(document, shape);
+}
+
+/** A JSON string literal. `JSON.stringify` is the escaping rule, not a guess. */
+const quoted = (value: string): string => JSON.stringify(value);
+
+/** `["100001", "200008"]` or `"aaaa-…"`. Always one line, however long. */
+const inlineValue = (value: unknown): string =>
+  Array.isArray(value) ? `[${value.map((item) => quoted(String(item))).join(", ")}]` : quoted(String(value));
+
+/**
+ * Serialise the map document the way these files are actually written.
+ *
+ * This was `JSON.stringify(document, null, 2)`, which is wrong in two ways that
+ * only show up in a diff. It puts every array element on its own line, so a
+ * mapping that reads `"<md id>": ["100001", "200008"]` becomes four lines; and
+ * it hard-codes an indent none of the files use. The first weekly sync
+ * therefore rewrote mangaplus from 761 lines to 2565 — a commit whose subject
+ * said `+7 -1` and whose diff was the entire file. Nothing was wrong with the
+ * data, but the one property that makes an unattended commit reviewable, that
+ * the diff is the change, was gone.
+ *
+ * So: arrays inline, indent taken from the file, and the key alignment
+ * preserved when the file has one. Still deterministic to the byte, which is
+ * what stops a week with no changes from producing a commit.
+ */
+function serialise(document: Record<string, unknown>, shape: MapShape): string {
+  const entries = Object.entries(document);
+  if (entries.length === 0) return "{}\n";
+  return ["{", ...commaJoin(objectBlocks(entries, 1, shape)), "}"].join("\n") + "\n";
+}
+
+/**
+ * One block of lines per entry: a scalar or array is one line, a namespace is
+ * its braces and everything inside them. Blocks rather than lines because only
+ * the block knows which of its lines is the last, and that is the one a comma
+ * goes on.
+ */
+function objectBlocks(entries: [string, unknown][], depth: number, shape: MapShape): string[][] {
+  const base = " ".repeat((shape.indent ?? DEFAULT_INDENT) * depth);
+  // Per object, not per file: each namespace aligns within itself.
+  const widest = shape.align === true ? Math.max(0, ...entries.map(([key]) => key.length)) : 0;
+
+  return entries.map(([key, value]) => {
+    const label = `${base}${" ".repeat(Math.max(0, widest - key.length))}${quoted(key)}: `;
+    if (!isPlainObject(value)) return [`${label}${inlineValue(value)}`];
+    const inner = Object.entries(value);
+    // `{}` on one line: viz has an empty namespace, and three lines to say
+    // nothing is exactly the noise this function exists to remove.
+    if (inner.length === 0) return [`${label}{}`];
+    return [`${label}{`, ...commaJoin(objectBlocks(inner, depth + 1, shape)), `${base}}`];
+  });
+}
+
+/** Flatten blocks into lines, putting a comma after every block but the last. */
+function commaJoin(blocks: string[][]): string[] {
+  return blocks.flatMap((block, index) =>
+    index === blocks.length - 1 ? block : block.map((line, i) => (i === block.length - 1 ? `${line},` : line)),
+  );
+}
+
+/**
+ * Read a file's two whitespace conventions out of its text.
+ *
+ * `JSON.parse` throws both away, and they are most of what a diff shows: a
+ * two-space rewrite of a four-space file is a hundred percent changed lines
+ * that mean nothing at all.
+ *
+ * The indent is the smallest leading run on any key line, which is the width of
+ * one level whether the file is flat or nested. Alignment is only considered
+ * for a flat file: alpha_manga right-aligns its numeric ids so every key ends
+ * in the same column, and the tell is that the leading runs differ while the
+ * ending column does not. Deciding that per-namespace for a nested file would
+ * be more guesswork than it is worth, and viz, the only nested file, does not
+ * align.
+ */
+export function detectLayout(text: string, nested: boolean): { indent: number; align: boolean } {
+  const leads: number[] = [];
+  const ends: number[] = [];
+  for (const line of text.split("\n")) {
+    const match = /^( +)"((?:[^"\\]|\\.)*)"\s*:/.exec(line);
+    if (!match) continue;
+    leads.push(match[1]!.length);
+    ends.push(match[1]!.length + match[2]!.length);
+  }
+  if (leads.length === 0) return { indent: DEFAULT_INDENT, align: false };
+
+  const indent = Math.min(...leads);
+  if (nested || new Set(leads).size === 1) return { indent, align: false };
+  // Every key ending in the same column, with the runs in front of them
+  // differing, is alignment and cannot readily be anything else.
+  const dominant = Math.max(...countBy(ends).values());
+  return { indent, align: dominant / ends.length >= 0.98 };
+}
+
+function countBy(values: number[]): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const value of values) out.set(value, (out.get(value) ?? 0) + 1);
+  return out;
 }
 
 /**
@@ -218,7 +338,12 @@ export function parseMapText(text: string): { rows: ParsedIdMapRow[]; shape: Map
   } catch {
     return { rows: [], shape: null };
   }
-  return { rows: parseMangaIdMapFile(document), shape: detectMapShape(document) };
+  const shape = detectMapShape(document);
+  return {
+    rows: parseMangaIdMapFile(document),
+    // The layout comes from the text because the parse has already lost it.
+    shape: shape ? { ...shape, ...detectLayout(text, shape.nested) } : null,
+  };
 }
 
 /**
