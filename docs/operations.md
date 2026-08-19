@@ -1880,6 +1880,13 @@ padmin maps sync               # do it now
 padmin maps sync --extension mangaplus --extension viz
 ```
 
+The same run is on the dashboard, for the change that should not wait a week:
+**Tracked → Publish to GitHub** covers every extension, and the same card at the
+bottom of **Extensions → *name* → Series map** covers just that one. Preview
+first; it prints the per-extension outcome, the repo and the exact delta, and
+the commit asks for confirmation. Both need the `tracked:write` scope, so a
+CONTRIBUTOR sees the card disabled rather than absent.
+
 | | |
 | --- | --- |
 | **Where it runs** | core-api. It is the only core service with a GitHub token and egress; core-scheduler sits on the internal `data` network. |
