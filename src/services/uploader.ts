@@ -51,19 +51,28 @@ function retryDelaySeconds(attempt: number): number {
   return Math.min(config.retryMaxSeconds, config.retryBaseSeconds * 2 ** Math.max(0, attempt - 1));
 }
 
-/** Drain every due task of one kind. Returns how many were executed. */
-async function drain(kind: UploadTaskKind): Promise<number> {
+/**
+ * Drain every due task of one kind, counting the two outcomes apart.
+ *
+ * They have to be separate: a failed task is requeued with a backoff, so it is
+ * work attempted rather than work completed, and the reporting distinguishes
+ * the two (see UploadTaskWorkers.flushQueueSummary). `claimed` is what decides
+ * whether the loop sleeps, since a pass that only failed still did I/O.
+ */
+async function drain(kind: UploadTaskKind): Promise<{ processed: number; failed: number }> {
   let processed = 0;
+  let failed = 0;
   while (running) {
     const task = await tasks.claim(kind, LEASE_TTL_SECONDS);
     if (!task) break;
-    processed += 1;
     const leaseId = task.leaseId ?? "";
 
     try {
       await workers.execute(task);
       await tasks.completeDone(task.id, leaseId);
+      processed += 1;
     } catch (err) {
+      failed += 1;
       const message = err instanceof Error ? err.message : String(err);
       const disposition = await tasks.fail(task.id, leaseId, message, retryDelaySeconds(task.attempt));
       log.error(
@@ -72,7 +81,7 @@ async function drain(kind: UploadTaskKind): Promise<number> {
       );
     }
   }
-  return processed;
+  return { processed, failed };
 }
 
 async function publishDepths(): Promise<void> {
@@ -113,15 +122,15 @@ while (running) {
     // one batch into two reporting styles.
     await workers.refreshReporting();
 
-    let processed = 0;
+    let claimed = 0;
     // Per-kind counts, so the end-of-drain summary can name the queue that did
     // the work the way the Python worker threads did.
     const drained = new Map<string, { processed: number; failed: number }>();
     for (const kind of KIND_ORDER) {
       if (!running) break;
       const done = await drain(kind);
-      processed += done;
-      if (done > 0) drained.set(kind, { processed: done, failed: 0 });
+      claimed += done.processed + done.failed;
+      if (done.processed > 0 || done.failed > 0) drained.set(kind, done);
     }
 
     // Title creation is its own MangaDex-facing pass; a failure there must not
@@ -136,7 +145,7 @@ while (running) {
     await workers.flushQueueSummary(drained);
     await publishDepths();
 
-    if (processed === 0 && running) await sleep(IDLE_SLEEP_MS);
+    if (claimed === 0 && running) await sleep(IDLE_SLEEP_MS);
   } catch (err) {
     log.error({ err }, "uploader loop iteration failed");
     await sleep(IDLE_SLEEP_MS);

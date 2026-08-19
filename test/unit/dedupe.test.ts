@@ -246,6 +246,26 @@ describe("decideForManga", () => {
     expect(result.toRemove).toEqual([]);
   });
 
+  /**
+   * A carded chapter can never satisfy the "still listed by the publisher"
+   * test: marking it unavailable repointed its url away from the publisher's
+   * chapter. Left in the removal set it is re-queued on every single run, which
+   * under `unavailable` re-renders and re-uploads the card and under `delete`
+   * destroys it.
+   */
+  it("leaves chapters that already carry our unavailable card alone", () => {
+    const carded = mdChapter("md-carded", {
+      externalUrl: "https://pub.example/manga/42",
+      pages: 1,
+    });
+    const result = decide({
+      allMangaChapters: [unchanged],
+      chaptersOnMd: [onMdUnchanged, carded],
+      cleanDb: true,
+    });
+    expect(result.toRemove).toEqual([]);
+  });
+
   it("removes nothing when the extension publishes no full listing", () => {
     const result = decide({
       allMangaChapters: null,
@@ -321,5 +341,51 @@ describe("findDuplicateChapters", () => {
     expect(findDuplicateChapters([first, second], { groupId: "grp" }).map((c) => c.id)).toEqual([
       "img-b",
     ]);
+  });
+
+  /**
+   * The regression this file exists to prevent from recurring. Marking a
+   * chapter unavailable repoints its externalUrl at the publisher's manga page
+   * rather than clearing it, so every carded chapter of a series carries the
+   * SAME url. Keyed on url alone they are one duplicate group, and duplicates
+   * are hard-deleted whatever the removal mode: the platform deleted its own
+   * cards, one per run, for as long as any two existed.
+   */
+  it("never treats two of our own unavailable cards as duplicates", () => {
+    const cardOne = withCreatedAt(
+      mdChapter("card-1", {
+        chapter: "1",
+        externalUrl: "https://pub.example/manga/42",
+        pages: 1,
+      }),
+      "2024-01-01T00:00:00+00:00",
+    );
+    const cardTwo = withCreatedAt(
+      mdChapter("card-2", {
+        chapter: "2",
+        externalUrl: "https://pub.example/manga/42",
+        pages: 1,
+      }),
+      "2025-01-01T00:00:00+00:00",
+    );
+    expect(findDuplicateChapters([cardOne, cardTwo], { groupId: "grp" })).toEqual([]);
+  });
+
+  it("still deletes a live duplicate of a chapter that also has a card", () => {
+    const card = withCreatedAt(
+      mdChapter("card-1", { chapter: "1", externalUrl: "https://pub.example/c/1", pages: 1 }),
+      "2024-01-01T00:00:00+00:00",
+    );
+    const live = withCreatedAt(
+      mdChapter("live-old", { chapter: "1", externalUrl: "https://pub.example/c/1" }),
+      "2024-06-01T00:00:00+00:00",
+    );
+    const liveDupe = withCreatedAt(
+      mdChapter("live-new", { chapter: "1", externalUrl: "https://pub.example/c/1" }),
+      "2025-01-01T00:00:00+00:00",
+    );
+    expect(
+      findDuplicateChapters([card, live, liveDupe], { groupId: "grp" }).map((c) => c.id),
+    ).toEqual(["live-new"]);
   });
 });

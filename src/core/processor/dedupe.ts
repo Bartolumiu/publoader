@@ -1,4 +1,4 @@
-import type { Chapter, MdChapter, MdManga } from "../md/types.js";
+import { isCarded, type Chapter, type MdChapter, type MdManga } from "../md/types.js";
 
 /**
  * Pure decision logic. Nothing here performs I/O or touches Prisma: every
@@ -329,8 +329,15 @@ function findExtraChapters(input: DecideInput): MdChapter[] {
 
   return input.chaptersOnMd.filter(
     (mdChapter) =>
-      !allowedLanguages.has(mdChapter.attributes.translatedLanguage) ||
-      !externalUrls.has(mdChapter.attributes.externalUrl),
+      // A chapter already carrying our card has reached the end state this
+      // pass exists to move chapters towards, and it can never satisfy the url
+      // test below: marking it unavailable repointed its externalUrl away from
+      // the publisher's chapter, so it looks "no longer listed" on every
+      // subsequent run. Left in, it is re-queued forever — re-carded under
+      // `unavailable`, hard-deleted under `delete`.
+      !isCarded(mdChapter) &&
+      (!allowedLanguages.has(mdChapter.attributes.translatedLanguage) ||
+        !externalUrls.has(mdChapter.attributes.externalUrl)),
   );
 }
 
@@ -542,7 +549,16 @@ export function findDuplicateChapters(
 ): MdChapter[] {
   const multiChapters = options.multiChapters ?? {};
 
-  const chaptersToCheck = chapters.filter((c) => scanlationGroups(c).includes(options.groupId));
+  // Cards are excluded before anything is compared. Marking a chapter
+  // unavailable repoints its externalUrl at the publisher's manga page (or its
+  // domain root), which is the SAME url for every carded chapter of that
+  // series, so on `dupeKey` they all collapse into one bucket and every card
+  // but the oldest is queued for deletion. Duplicates are hard-deleted whatever
+  // the removal mode, so that path silently converted "mark unavailable" into
+  // "delete" one chapter at a time, on every run.
+  const chaptersToCheck = chapters.filter(
+    (c) => scanlationGroups(c).includes(options.groupId) && !isCarded(c),
+  );
   if (chaptersToCheck.length <= 1) return [];
 
   const grouped = new Map<string, MdChapter[]>();

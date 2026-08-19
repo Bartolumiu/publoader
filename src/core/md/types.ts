@@ -79,6 +79,32 @@ export interface MdChapter {
   relationships: { id: string; type: string }[];
 }
 
+/**
+ * Does this MangaDex record carry one of our unavailable cards?
+ *
+ * Both halves matter. `pages > 0` alone would sweep in any natively hosted
+ * chapter, and `externalUrl` alone describes every chapter this platform has
+ * ever published, live ones included.
+ *
+ * This lives here rather than beside its first caller because it is load
+ * bearing in three separate places: the reconcile sweep archives on it, the
+ * removal passes must not treat a carded chapter as removable, and duplicate
+ * detection must not treat two cards as duplicates of each other. Marking a
+ * chapter unavailable REPOINTS externalUrl (to the publisher's manga page, or
+ * failing that its domain root) rather than clearing it, so every card in a
+ * manga collides on URL; the page count is the only signal that separates them.
+ */
+export function isCardedAttributes(attributes: Record<string, unknown>): boolean {
+  const external = attributes["externalUrl"];
+  const pages = attributes["pages"];
+  return typeof external === "string" && external !== "" && typeof pages === "number" && pages > 0;
+}
+
+/** `isCardedAttributes` for an already-parsed chapter. */
+export function isCarded(chapter: MdChapter): boolean {
+  return isCardedAttributes(chapter.attributes);
+}
+
 export interface MdManga {
   id: string;
   attributes: {

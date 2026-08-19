@@ -492,7 +492,7 @@ processing is idempotent (`core/processor/processor.ts:116-132`).
    | `toEdit` | on MangaDex but a field differs → enqueue an `EDIT` with both old and new state |
    | `skipped` | on MangaDex and identical → bookkeeping only |
    | `skippedDifferentId` | the `same` override says it was already uploaded under its master id → drop, and surface the count |
-   | `toRemove` | on MangaDex under our group but in a disallowed language, or no longer among the publisher's chapters → removal queue |
+   | `toRemove` | on MangaDex under our group but in a disallowed language, or no longer among the publisher's chapters → removal queue. Chapters already carrying an unavailable card are excluded: the card flow repoints `externalUrl`, so a carded chapter can never look "still listed" and would otherwise be re-queued on every run |
 
    Removal is decided from the *untouched* MangaDex listing, before any dedupe,
    and only when the extension supplied a full listing; `allMangaChapters: null`

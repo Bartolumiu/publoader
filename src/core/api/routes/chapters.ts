@@ -437,8 +437,10 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
      * The upload queue read as chapters rather than as rows.
      *
      * `position` is the place in the claim order across everything matching the
-     * filter, not within the page. Ordering is `not_before ASC` because that is
-     * the claim query's ORDER BY; see `UploadTaskStore.listChapters`.
+     * filter, not within the page, and stays that way whichever direction the
+     * page is read in. Ordering follows the claim query's ORDER BY by default;
+     * `sort=desc` reverses it so the newest queued chapters come first. See
+     * `UploadTaskStore.listChapters`.
      *
      * Defaults to PENDING; pass `state` explicitly to see what has already run.
      */
@@ -458,6 +460,7 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
             language: z.string().min(1).max(32).optional(),
             limit: z.coerce.number().int().min(1).max(MAX_PROJECTION_PAGE).default(100),
             cursor: z.string().max(512).optional(),
+            sort: z.enum(["asc", "desc"]).default("asc"),
           }),
           req.query ?? {},
         );
@@ -478,7 +481,7 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           language: query.language,
         };
         const [page, summary] = await Promise.all([
-          ctx.uploadTasks.listChapters(filter, { limit: query.limit, cursor }),
+          ctx.uploadTasks.listChapters(filter, { limit: query.limit, cursor, sort: query.sort }),
           ctx.uploadTasks.depths(),
         ]);
 
@@ -487,7 +490,9 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           total: page.total,
           limit: query.limit,
           nextCursor: page.nextCursor,
-          order: "notBefore,createdAt,id",
+          sort: query.sort,
+          order:
+            query.sort === "desc" ? "notBefore,createdAt,id DESC" : "notBefore,createdAt,id",
           states: filter.states,
           summary,
         };
