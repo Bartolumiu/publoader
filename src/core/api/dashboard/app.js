@@ -6679,6 +6679,9 @@ function seriesMapPanel(name) {
     extensionTabs(name, "series-map"),
     trackedCard(name, tracked),
     bulkCurationCard(name, tracked),
+    // Last on the page on purpose: it is what an operator reaches for after
+    // making the edits above, not before.
+    mapSyncCard(name),
   );
 }
 
@@ -6898,31 +6901,81 @@ function trackedCard(name, tracked) {
         class: "primary",
         text: "Add mapping",
         onclick: (event) => {
-          if (!mangaId.value.trim() || !mdMangaId.value.trim()) {
+          const externalId = mangaId.value.trim();
+          const target = mdMangaId.value.trim();
+          const namespace = namespaceInput.value.trim();
+          if (!externalId || !target) {
             return void toast("both ids are required", false);
           }
-          return act(
-            "tracked_manga.set",
-            () =>
-              api(`/extensions/${encoded}/tracked`, {
-                method: "PUT",
-                body: {
-                  mangaId: mangaId.value.trim(),
-                  mdMangaId: mdMangaId.value.trim(),
-                  // Omitted rather than sent empty: the server normalises a
-                  // missing namespace to the default catalogue.
-                  ...(namespaceInput.value.trim() ? { namespace: namespaceInput.value.trim() } : {}),
-                },
-              }),
-            { button: event.currentTarget, refresh: [tracked] },
-          ).then((ok) => {
-            if (ok) {
-              mangaId.value = "";
-              mdMangaId.value = "";
-              // The catalogue is deliberately kept: adding several rows to one
-              // catalogue is the common case, and re-typing it every time is
-              // how a row lands in the wrong one.
-            }
+          // Captured now: `currentTarget` is null by the time the confirmation
+          // below resolves, and `act` needs the button to show as pending.
+          const button = event.currentTarget;
+          const send = () =>
+            act(
+              "tracked_manga.set",
+              () =>
+                api(`/extensions/${encoded}/tracked`, {
+                  method: "PUT",
+                  body: {
+                    mangaId: externalId,
+                    mdMangaId: target,
+                    // Omitted rather than sent empty: the server normalises a
+                    // missing namespace to the default catalogue.
+                    ...(namespace ? { namespace } : {}),
+                  },
+                }),
+              { button, refresh: [tracked] },
+            ).then((ok) => {
+              if (ok) {
+                mangaId.value = "";
+                mdMangaId.value = "";
+                // The catalogue is deliberately kept: adding several rows to one
+                // catalogue is the common case, and re-typing it every time is
+                // how a row lands in the wrong one.
+              }
+            });
+
+          /**
+           * The button says Add, but the endpoint is a PUT: an external id that
+           * is already mapped is repointed, and it used to happen silently on
+           * the first click. Repointing is the one edit on this page with no
+           * visible consequence and a large invisible one — the series keeps
+           * publishing, its chapters just start landing on a different title —
+           * so a typo in the id field could quietly redirect a live series.
+           *
+           * The whole map is already in hand for the search and export below,
+           * so the collision is caught here rather than reported afterwards.
+           */
+          const clash = (tracked.data?.tracked ?? []).find(
+            (r) => r.mangaId === externalId && (r.namespace || "") === namespace,
+          );
+          if (!clash) return void send();
+
+          const where = namespace ? `${externalId} in ${namespace}` : externalId;
+          if (clash.mdMangaId === target) {
+            // Not an error the server would reject, just nothing to do; saying
+            // so beats a success toast for a write that changed nothing.
+            return void toast(`${where} is already mapped to that title.`, false);
+          }
+          if (!can("tracked:write")) {
+            // `tracked:append` may add but not move one. Say it here rather
+            // than letting a confirmed repoint come back 403.
+            return void toast(
+              `${where} is already mapped to ${clash.mdMangaId}; repointing needs the "tracked:write" scope.`,
+              false,
+            );
+          }
+          return void confirmDialog({
+            title: "That external id is already mapped",
+            lead: `${where} is already mapped to ${clash.mdMangaId}.`,
+            points: [
+              `Adding it again repoints it to ${target}.`,
+              "The series keeps publishing; new chapters just start landing on the other title.",
+              "Chapters already uploaded stay where they are.",
+            ],
+            confirmLabel: "Repoint it",
+          }).then((confirmed) => {
+            if (confirmed) void send();
           });
         },
       }),
@@ -6930,7 +6983,7 @@ function trackedCard(name, tracked) {
     el("p", {
       class: "dim small",
       text: can("tracked:write")
-        ? "Adding a mapping that already exists repoints it."
+        ? "An external id that is already mapped is not added twice: you are asked to confirm the repoint first."
         : 'Adding a new mapping is allowed. Repointing one that already exists needs the "tracked:write" scope, and is refused with the id it is currently mapped to.',
     }),
     row(
@@ -7167,6 +7220,150 @@ function bulkCurationCard(name, tracked) {
   );
 }
 
+// -------------------------------------------------- publishing the map to git
+
+/**
+ * Run the series-map write-back to GitHub by hand.
+ *
+ * core-api already does this on a weekly timer, and that cadence is what keeps
+ * the files honest without anyone having to think about it. This card exists
+ * for the gap the cadence leaves: an operator who has just repointed a series
+ * or pruned a batch of mappings would otherwise either wait up to a week or go
+ * find a shell to run `publoader-admin maps sync` from. The endpoint and the
+ * CLI have both been there since the timer was written; only the button was
+ * missing, which is what makes the weekly job look broken to anyone who checks
+ * the repo the day after an edit.
+ *
+ * `name` limits the run to one extension; null runs every extension, which is
+ * what the timer does.
+ *
+ * Preview-then-commit is deliberate rather than a single button. This writes to
+ * somebody's repository unattended, and the preview names each file, the repo
+ * it lives in and the exact delta; so what the operator confirms is a diff they
+ * have read, not a verb they have trusted.
+ */
+function mapSyncCard(name) {
+  const writable = can("tracked:write");
+  const results = el("div", {});
+  /**
+   * Kept outside the click handlers so its state survives a preview and the
+   * commit that follows: force is meant to be switched on in answer to a
+   * refusal the operator has just read, not ticked before they know whether the
+   * shrink guard is going to fire at all.
+   */
+  const force = el("input", { type: "checkbox", id: `map-sync-force${name ? `-${name}` : ""}` });
+
+  const requestBody = (dryRun) => ({
+    dryRun,
+    force: force.checked,
+    extensions: name ? [name] : [],
+  });
+
+  /**
+   * Render one report. The per-extension status is the whole value of this
+   * card: `unchanged`, `skipped` and `refused` are all non-failures with very
+   * different meanings, and a bare "ok" would hide the one of them an operator
+   * has to act on.
+   */
+  const draw = (report, dryRun) => {
+    const outcomes = report.outcomes ?? [];
+    setChildren(
+      results,
+      report.skippedReason
+        ? el("p", { class: "error", text: `Nothing to do: ${report.skippedReason}` })
+        : null,
+      outcomes.length
+        ? table(
+            ["Extension", "Status", "Repo", "Mappings", "Delta", "Commit", "Detail"],
+            outcomes.map((o) => [
+              o.extension,
+              o.status,
+              o.repo ?? "-",
+              String(o.mappings ?? 0),
+              `+${o.added ?? 0} -${o.removed ?? 0}`,
+              o.commit ? String(o.commit).slice(0, 7) : "-",
+              o.detail ?? "",
+            ]),
+            { empty: "No extension has tracked mappings." },
+          )
+        : null,
+      el("p", {
+        class: report.failed ? "error" : "dim small",
+        text:
+          `${dryRun ? "Would write" : "Wrote"} ${report.written ?? 0} file(s)` +
+          (report.failed ? `, ${report.failed} failed.` : "."),
+      }),
+    );
+  };
+
+  const previewButton = el("button", {
+    type: "button",
+    text: "Preview",
+    disabled: !writable,
+    onclick: async (event) => {
+      const report = await act(
+        "map_sync.preview",
+        () => api("/maps/sync", { method: "POST", body: requestBody(true) }),
+        { button: event.currentTarget },
+      );
+      if (report) draw(report, true);
+    },
+  });
+
+  const commitButton = el("button", {
+    type: "button",
+    class: "primary",
+    text: "Sync now",
+    disabled: !writable,
+    onclick: async (event) => {
+      const confirmed = await confirmDialog({
+        title: "Write the series map to GitHub",
+        lead: name
+          ? `This commits ${name}'s map file to its extensions repo.`
+          : "This commits every extension's map file to its extensions repo.",
+        points: [
+          "The database is the authority: each file is rewritten from what is tracked now.",
+          "A map file that is not already in the repo is skipped, never created.",
+          force.checked
+            ? "Force is ON, so a write that drops more than half of a file's mappings will NOT be refused."
+            : "A write that would drop more than half of a file's mappings is refused.",
+          "Preview first if you have not; this is a commit to a repository other people read.",
+        ],
+        confirmLabel: "Commit it",
+      });
+      if (!confirmed) return;
+      const report = await act(
+        "map_sync.run",
+        () => api("/maps/sync", { method: "POST", body: requestBody(false) }),
+        { button: event.currentTarget },
+      );
+      if (report) draw(report, false);
+    },
+  });
+
+  return card(
+    "Publish to GitHub",
+    el("p", {
+      class: "dim small",
+      text:
+        (name ? `Write ${name}'s ` : "Write each extension's ") +
+        "map file back to its extensions repo. This is the same job core-api runs weekly, for a change " +
+        "that should not wait for it. A run with nothing to say makes no commit.",
+    }),
+    writable
+      ? null
+      : el("p", { class: "dim small", text: 'Running the sync needs the "tracked:write" scope.' }),
+    el(
+      "label",
+      { class: "assign-row", for: force.id },
+      force,
+      el("span", { text: "Force (allow a write that removes more than half of a file's mappings)" }),
+    ),
+    row(previewButton, commitButton),
+    results,
+  );
+}
+
 // -------------------------------------------------------------------- tracked
 
 /**
@@ -7193,27 +7390,34 @@ VIEWS.tracked = () => {
     return rows;
   });
 
-  return card(
-    "Series map by extension",
-    el("p", {
-      class: "dim small",
-      text: "Open an extension to search, export, edit and bulk-paste its mappings.",
-    }),
-    live(
-      [counts],
-      (rows) =>
-        table(
-          ["Extension", "Mappings", "Most recent", ""],
-          rows.map((r) => [
-            r.name,
-            r.count === null ? "unreadable" : String(r.count),
-            r.newest ? `${r.newest.mangaId} · ${fmtTime(r.newest.createdAt)}` : "-",
-            [routeLink(routeTo("extensions", r.name, "series-map"), "Open map", { class: "button-link inline" })],
-          ]),
-          { empty: "No extension is published, so there is no map to curate yet." },
-        ),
-      { reserve: 200, skeleton: () => skeletonTable(4, 4) },
+  return el(
+    "div",
+    {},
+    card(
+      "Series map by extension",
+      el("p", {
+        class: "dim small",
+        text: "Open an extension to search, export, edit and bulk-paste its mappings.",
+      }),
+      live(
+        [counts],
+        (rows) =>
+          table(
+            ["Extension", "Mappings", "Most recent", ""],
+            rows.map((r) => [
+              r.name,
+              r.count === null ? "unreadable" : String(r.count),
+              r.newest ? `${r.newest.mangaId} · ${fmtTime(r.newest.createdAt)}` : "-",
+              [routeLink(routeTo("extensions", r.name, "series-map"), "Open map", { class: "button-link inline" })],
+            ]),
+            { empty: "No extension is published, so there is no map to curate yet." },
+          ),
+        { reserve: 200, skeleton: () => skeletonTable(4, 4) },
+      ),
     ),
+    // The all-extensions run belongs here rather than on one extension's page:
+    // this is the only view that is about the map as a whole.
+    mapSyncCard(null),
   );
 };
 

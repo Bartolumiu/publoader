@@ -1923,6 +1923,13 @@ padmin maps sync               # do it now
 padmin maps sync --extension mangaplus --extension viz
 ```
 
+The same run is on the dashboard, for the change that should not wait a week:
+**Tracked → Publish to GitHub** covers every extension, and the same card at the
+bottom of **Extensions → *name* → Series map** covers just that one. Preview
+first; it prints the per-extension outcome, the repo and the exact delta, and
+the commit asks for confirmation. Both need the `tracked:write` scope, so a
+CONTRIBUTOR sees the card disabled rather than absent.
+
 | | |
 | --- | --- |
 | **Where it runs** | core-api. It is the only core service with a GitHub token and egress; core-scheduler sits on the internal `data` network. |
@@ -1945,6 +1952,12 @@ What it will not do, because it commits unattended:
 - **Keeps each file's shape.** mangaplus's `{titleId: [ids]}`, alpha_manga's
   `{id: titleId}` and viz's nested `{namespace: {…}}` all survive; only the
   ordering is normalised (once), so a week with no changes makes no commit.
+- **Keeps each file's layout.** The indent is read from the file, arrays stay on
+  one line, and alpha_manga's right-aligned ids stay aligned. This is not
+  cosmetic: the renderer used to be `JSON.stringify(…, 2)`, which put every id
+  on its own line and reindented everything, so the first run turned mangaplus
+  into a 2565-line file and a commit whose subject said `+7 -1` and whose diff
+  was every line. A diff has to be the change.
 
 Its commits carry `[map-sync]` in the subject, and the push webhook skips a
 delivery whose commits are *all* marked; otherwise the platform would answer

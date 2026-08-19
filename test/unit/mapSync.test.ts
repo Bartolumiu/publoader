@@ -6,7 +6,9 @@ import { parseMangaIdMapFile } from "../../src/core/store/bundles.js";
 import { isMapSyncPush, MAP_SYNC_COMMIT_MARKER } from "../../src/core/webhooks/github.js";
 import { encodeRepoPath, isSafeRepoPath, type GithubContentsClient } from "../../src/core/webhooks/repoContents.js";
 import {
+  DEFAULT_INDENT,
   DEFAULT_SHAPE,
+  detectLayout,
   detectMapShape,
   parseMapText,
   planWrite,
@@ -37,8 +39,10 @@ const row = (mangaId: string, mdMangaId: string, namespace = "") => ({ namespace
 describe("renderMapFile", () => {
   it("writes mangaplus's inverted shape, sorted and stable", () => {
     const text = renderMapFile([row("100002", MD_B), row("100001", MD_A), row("100003", MD_B)]);
+    // One line per mapping, four-space indent: the way the file is written by
+    // hand. Rendering each id on its own line turned 761 lines into 2565.
     expect(text).toBe(
-      `{\n  "${MD_A}": [\n    "100001"\n  ],\n  "${MD_B}": [\n    "100002",\n    "100003"\n  ]\n}\n`,
+      `{\n    "${MD_A}": ["100001"],\n    "${MD_B}": ["100002", "100003"]\n}\n`,
     );
     // Same rows in any order render byte-identically, which is what stops a
     // weekly no-op run from producing a commit.
@@ -48,7 +52,42 @@ describe("renderMapFile", () => {
   it("keeps alpha_manga's forward shape when that is what the file uses", () => {
     const text = renderMapFile([row("9", MD_B), row("10", MD_A)], { nested: false, inner: "forward" });
     // Numeric-aware ordering: 9 before 10, not after it.
-    expect(text).toBe(`{\n  "9": "${MD_B}",\n  "10": "${MD_A}"\n}\n`);
+    expect(text).toBe(`{\n    "9": "${MD_B}",\n    "10": "${MD_A}"\n}\n`);
+  });
+
+  it("writes an array on one line however many ids it holds", () => {
+    const rows = ["100003", "100120", "100141", "200020", "600002", "700006"].map((id) => row(id, MD_A));
+    const text = renderMapFile(rows);
+    expect(text).toBe(
+      `{\n    "${MD_A}": ["100003", "100120", "100141", "200020", "600002", "700006"]\n}\n`,
+    );
+    // Three lines per mapping is what the bad render produced; one is the point.
+    expect(text.split("\n")).toHaveLength(4);
+  });
+
+  it("indents to the width the file already uses", () => {
+    const rows = [row("1", MD_A)];
+    expect(renderMapFile(rows, { nested: false, inner: "forward", indent: 2 })).toBe(
+      `{\n  "1": "${MD_A}"\n}\n`,
+    );
+    expect(renderMapFile(rows, { nested: false, inner: "forward", indent: 4 })).toBe(
+      `{\n    "1": "${MD_A}"\n}\n`,
+    );
+  });
+
+  it("keeps alpha_manga's right-aligned keys when the file aligns them", () => {
+    const text = renderMapFile(
+      [row("6000597", MD_A), row("10000372", MD_B)],
+      { nested: false, inner: "forward", indent: 2, align: true },
+    );
+    // Every key ends in the same column; the shorter one is padded, not the
+    // longer one truncated.
+    expect(text).toBe(`{\n   "6000597": "${MD_A}",\n  "10000372": "${MD_B}"\n}\n`);
+  });
+
+  it("nests with the file's indent, and says an empty namespace on one line", () => {
+    const text = renderMapFile([row("709", MD_A, "vizmanga")], { nested: true, inner: "forward", indent: 4 });
+    expect(text).toBe(`{\n    "vizmanga": {\n        "709": "${MD_A}"\n    }\n}\n`);
   });
 
   it("nests a namespaced extension even when asked for a flat shape", () => {
@@ -84,6 +123,65 @@ describe("detectMapShape", () => {
     expect(detectMapShape([])).toBeNull();
     expect(detectMapShape({})).toBeNull();
     expect(parseMapText("not json").shape).toBeNull();
+  });
+});
+
+/**
+ * The layout is read from the text because `JSON.parse` has already lost it,
+ * and getting it wrong is what turns a seven-mapping change into a diff that
+ * replaces every line of the file.
+ */
+describe("detectLayout", () => {
+  it("reads mangaplus: four spaces, keys not aligned", () => {
+    const text = `{\n    "${MD_A}": ["100001"],\n    "${MD_B}": ["100002"]\n}\n`;
+    expect(detectLayout(text, false)).toEqual({ indent: 4, align: false });
+  });
+
+  it("reads alpha_manga: keys right-aligned to a common column", () => {
+    const text = `{\n   "6000597": "${MD_A}",\n  "10000372": "${MD_B}"\n}\n`;
+    expect(detectLayout(text, false)).toEqual({ indent: 2, align: true });
+  });
+
+  it("reads viz: one level is four spaces even though the entries sit at eight", () => {
+    const text = `{\n    "vizmanga": {\n        "709": "${MD_A}"\n    }\n}\n`;
+    expect(detectLayout(text, true)).toEqual({ indent: 4, align: false });
+  });
+
+  it("does not call a nested file aligned, whatever its columns happen to do", () => {
+    // The leading runs differ here only because of nesting, which is not
+    // alignment; reading it as alignment would pad every key in the file.
+    const text = `{\n    "ns": {\n        "70": "${MD_A}"\n    }\n}\n`;
+    expect(detectLayout(text, true).align).toBe(false);
+  });
+
+  it("falls back to the default for a file with no key lines to learn from", () => {
+    expect(detectLayout("{}\n", false)).toEqual({ indent: DEFAULT_INDENT, align: false });
+  });
+
+  it("carries the layout onto the shape parseMapText returns", () => {
+    const text = `{\n  "1": "${MD_A}",\n  "2": "${MD_B}"\n}\n`;
+    expect(parseMapText(text).shape).toEqual({
+      nested: false,
+      inner: "forward",
+      indent: 2,
+      align: false,
+    });
+  });
+
+  /**
+   * The property that matters most: a file the sync has no change to make to
+   * comes back byte-identical, so the run makes no commit at all. This is what
+   * the old renderer broke, and a round trip is the only honest way to state it.
+   */
+  it("round-trips a file it has nothing to change byte for byte", () => {
+    for (const original of [
+      `{\n    "${MD_A}": ["100001", "200008"],\n    "${MD_B}": ["100002"]\n}\n`,
+      `{\n   "6000597": "${MD_A}",\n  "10000372": "${MD_B}"\n}\n`,
+      `{\n    "vizmanga": {\n        "218": "${MD_A}",\n        "709": "${MD_B}"\n    }\n}\n`,
+    ]) {
+      const { rows, shape } = parseMapText(original);
+      expect(renderMapFile(rows, shape!)).toBe(original);
+    }
   });
 });
 
