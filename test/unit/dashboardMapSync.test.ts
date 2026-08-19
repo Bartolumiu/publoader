@@ -4,6 +4,11 @@ import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
+ * The two guards on the dashboard's series-map page: publishing it to GitHub,
+ * and adding a mapping whose external id is already there.
+ *
+ * ---
+ *
  * The series map can be pushed to GitHub from the dashboard.
  *
  * `POST /maps/sync` and `publoader-admin maps sync` both existed from the day
@@ -73,6 +78,10 @@ const REPORT = {
   ],
 };
 
+const MD_A = "aaaaaaaa-0000-4000-8000-000000000001";
+const MD_B = "bbbbbbbb-0000-4000-8000-000000000002";
+const MD_C = "cccccccc-0000-4000-8000-000000000003";
+
 /** Swapped per test so the scope gate can be exercised. */
 let scopes: string[] = ["*"];
 /** Every request app.js made, in order, with the body it sent. */
@@ -100,7 +109,12 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
     { match: /\/maps\/sync$/, body: REPORT },
     {
       match: /\/extensions\/[^/]+\/tracked$/,
-      body: { tracked: [{ mangaId: "100001", mdMangaId: "abc", createdAt: "2026-08-01T00:00:00Z" }] },
+      body: {
+        tracked: [
+          { mangaId: "100001", mdMangaId: MD_A, namespace: "", createdAt: "2026-08-01T00:00:00Z" },
+          { mangaId: "709", mdMangaId: MD_B, namespace: "vizmanga", createdAt: "2026-08-01T00:00:00Z" },
+        ],
+      },
     },
     { match: /\/extensions$/, body: { extensions: [{ name: "mangaplus" }, { name: "viz" }] } },
   ];
@@ -311,5 +325,141 @@ describe("the series map can be pushed to GitHub from the dashboard", () => {
     expect(buttonLabelled(card, "Preview").disabled).toBe(true);
     expect(buttonLabelled(card, "Sync now").disabled).toBe(true);
     expect(card.textContent).toContain('needs the "tracked:write" scope');
+  });
+});
+
+/**
+ * Adding a mapping whose external id is already on the map.
+ *
+ * The button says "Add", but the endpoint behind it is a PUT, so an id that is
+ * already mapped was repointed on the first click with nothing said. Repointing
+ * is the edit with no visible consequence and a large invisible one: the series
+ * carries on publishing and its chapters start landing on a different title. A
+ * mistyped id could redirect a live series and look exactly like success.
+ */
+describe("adding a mapping that already exists asks first", () => {
+  const addForm = () => {
+    const id = doc.getElementById("tracked-manga-id");
+    return {
+      externalId: id,
+      mdId: doc.getElementById("tracked-md-id"),
+      namespace: doc.getElementById("tracked-namespace"),
+      add: buttonLabelled(id.closest("section.card"), "Add mapping"),
+    };
+  };
+
+  /** Only the writes; the view reloads the map with a GET on the same path. */
+  const puts = (): { path: string; method: string; body: any }[] =>
+    calls.filter((c) => c.method === "PUT" && c.path.includes("/tracked"));
+
+  const fill = (externalId: string, mdId: string, namespace = ""): any => {
+    const form = addForm();
+    form.externalId.value = externalId;
+    form.mdId.value = mdId;
+    form.namespace.value = namespace;
+    return form;
+  };
+
+  beforeEach(async () => {
+    calls = [];
+    scopes = ["*"];
+    mount();
+    await settle(10);
+    await goto("#/extensions/mangaplus/series-map");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllTimers();
+  });
+
+  it("adds an id the map does not have without asking", async () => {
+    calls = [];
+    fill("100999", MD_C).add.click();
+    await settle();
+
+    expect(puts()).toHaveLength(1);
+    expect(puts()[0]?.body).toEqual({ mangaId: "100999", mdMangaId: MD_C });
+    expect(doc.getElementById("modal").hasAttribute("open")).toBe(false);
+  });
+
+  it("names the title an existing id is already mapped to, and holds the write", async () => {
+    calls = [];
+    fill("100001", MD_C).add.click();
+    await settle();
+
+    expect(puts()).toHaveLength(0);
+    const modal = doc.getElementById("modal");
+    expect(modal.textContent).toContain("already mapped");
+    // The id it currently points at is the fact the operator needs to see.
+    expect(modal.textContent).toContain(MD_A);
+    expect(modal.textContent).toContain(MD_C);
+  });
+
+  it("writes nothing when the repoint is declined", async () => {
+    calls = [];
+    fill("100001", MD_C).add.click();
+    await settle();
+    buttonLabelled(doc.getElementById("modal"), "Cancel").click();
+    await settle();
+
+    expect(puts()).toHaveLength(0);
+  });
+
+  it("repoints once confirmed", async () => {
+    calls = [];
+    fill("100001", MD_C).add.click();
+    await settle();
+    buttonLabelled(doc.getElementById("modal"), "Repoint it").click();
+    await settle();
+
+    expect(puts()).toHaveLength(1);
+    expect(puts()[0]?.body).toEqual({ mangaId: "100001", mdMangaId: MD_C });
+  });
+
+  it("treats the same id and the same title as nothing to do", async () => {
+    calls = [];
+    fill("100001", MD_A).add.click();
+    await settle();
+
+    // No dialog and no request: a write that changes nothing should not report
+    // success as though it had.
+    expect(puts()).toHaveLength(0);
+    expect(doc.getElementById("modal").hasAttribute("open")).toBe(false);
+  });
+
+  it("matches on the catalogue too, so the same id in another one is new", async () => {
+    calls = [];
+    // 709 is mapped in vizmanga; the same id in shonenjump is a different
+    // series and must not be mistaken for a repoint.
+    fill("709", MD_C, "shonenjump").add.click();
+    await settle();
+
+    expect(puts()).toHaveLength(1);
+    expect(puts()[0]?.body).toEqual({ mangaId: "709", mdMangaId: MD_C, namespace: "shonenjump" });
+  });
+
+  it("still catches the clash when the catalogue matches", async () => {
+    calls = [];
+    fill("709", MD_C, "vizmanga").add.click();
+    await settle();
+
+    expect(puts()).toHaveLength(0);
+    expect(doc.getElementById("modal").textContent).toContain("vizmanga");
+  });
+
+  it("tells an append-only credential to stop rather than offering the repoint", async () => {
+    scopes = ["tracked:append", "extensions:read", "tracked:read"];
+    mount();
+    await settle(10);
+    await goto("#/extensions/mangaplus/series-map");
+
+    calls = [];
+    fill("100001", MD_C).add.click();
+    await settle();
+
+    // No dialog: a confirmed repoint would only come back 403.
+    expect(doc.getElementById("modal").hasAttribute("open")).toBe(false);
+    expect(puts()).toHaveLength(0);
   });
 });

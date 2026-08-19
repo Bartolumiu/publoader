@@ -6900,31 +6900,81 @@ function trackedCard(name, tracked) {
         class: "primary",
         text: "Add mapping",
         onclick: (event) => {
-          if (!mangaId.value.trim() || !mdMangaId.value.trim()) {
+          const externalId = mangaId.value.trim();
+          const target = mdMangaId.value.trim();
+          const namespace = namespaceInput.value.trim();
+          if (!externalId || !target) {
             return void toast("both ids are required", false);
           }
-          return act(
-            "tracked_manga.set",
-            () =>
-              api(`/extensions/${encoded}/tracked`, {
-                method: "PUT",
-                body: {
-                  mangaId: mangaId.value.trim(),
-                  mdMangaId: mdMangaId.value.trim(),
-                  // Omitted rather than sent empty: the server normalises a
-                  // missing namespace to the default catalogue.
-                  ...(namespaceInput.value.trim() ? { namespace: namespaceInput.value.trim() } : {}),
-                },
-              }),
-            { button: event.currentTarget, refresh: [tracked] },
-          ).then((ok) => {
-            if (ok) {
-              mangaId.value = "";
-              mdMangaId.value = "";
-              // The catalogue is deliberately kept: adding several rows to one
-              // catalogue is the common case, and re-typing it every time is
-              // how a row lands in the wrong one.
-            }
+          // Captured now: `currentTarget` is null by the time the confirmation
+          // below resolves, and `act` needs the button to show as pending.
+          const button = event.currentTarget;
+          const send = () =>
+            act(
+              "tracked_manga.set",
+              () =>
+                api(`/extensions/${encoded}/tracked`, {
+                  method: "PUT",
+                  body: {
+                    mangaId: externalId,
+                    mdMangaId: target,
+                    // Omitted rather than sent empty: the server normalises a
+                    // missing namespace to the default catalogue.
+                    ...(namespace ? { namespace } : {}),
+                  },
+                }),
+              { button, refresh: [tracked] },
+            ).then((ok) => {
+              if (ok) {
+                mangaId.value = "";
+                mdMangaId.value = "";
+                // The catalogue is deliberately kept: adding several rows to one
+                // catalogue is the common case, and re-typing it every time is
+                // how a row lands in the wrong one.
+              }
+            });
+
+          /**
+           * The button says Add, but the endpoint is a PUT: an external id that
+           * is already mapped is repointed, and it used to happen silently on
+           * the first click. Repointing is the one edit on this page with no
+           * visible consequence and a large invisible one — the series keeps
+           * publishing, its chapters just start landing on a different title —
+           * so a typo in the id field could quietly redirect a live series.
+           *
+           * The whole map is already in hand for the search and export below,
+           * so the collision is caught here rather than reported afterwards.
+           */
+          const clash = (tracked.data?.tracked ?? []).find(
+            (r) => r.mangaId === externalId && (r.namespace || "") === namespace,
+          );
+          if (!clash) return void send();
+
+          const where = namespace ? `${externalId} in ${namespace}` : externalId;
+          if (clash.mdMangaId === target) {
+            // Not an error the server would reject, just nothing to do; saying
+            // so beats a success toast for a write that changed nothing.
+            return void toast(`${where} is already mapped to that title.`, false);
+          }
+          if (!can("tracked:write")) {
+            // `tracked:append` may add but not move one. Say it here rather
+            // than letting a confirmed repoint come back 403.
+            return void toast(
+              `${where} is already mapped to ${clash.mdMangaId}; repointing needs the "tracked:write" scope.`,
+              false,
+            );
+          }
+          return void confirmDialog({
+            title: "That external id is already mapped",
+            lead: `${where} is already mapped to ${clash.mdMangaId}.`,
+            points: [
+              `Adding it again repoints it to ${target}.`,
+              "The series keeps publishing; new chapters just start landing on the other title.",
+              "Chapters already uploaded stay where they are.",
+            ],
+            confirmLabel: "Repoint it",
+          }).then((confirmed) => {
+            if (confirmed) void send();
           });
         },
       }),
@@ -6932,7 +6982,7 @@ function trackedCard(name, tracked) {
     el("p", {
       class: "dim small",
       text: can("tracked:write")
-        ? "Adding a mapping that already exists repoints it."
+        ? "An external id that is already mapped is not added twice: you are asked to confirm the repoint first."
         : 'Adding a new mapping is allowed. Repointing one that already exists needs the "tracked:write" scope, and is refused with the id it is currently mapped to.',
     }),
     row(
