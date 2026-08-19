@@ -2703,7 +2703,10 @@ VIEWS.queues = (route) => {
   const f = () => store.filters;
 
   const queryString = (extra = {}) => {
-    const q = new URLSearchParams({ limit: "100" });
+    // Newest first. The server's default is the claim order (what drains next);
+    // a queue is read here to see what has just arrived, and the page that
+    // matters is the one at the recent end.
+    const q = new URLSearchParams({ limit: "100", sort: "desc" });
     if (f().queueKind) q.set("kind", f().queueKind);
     if (f().queueState) q.set("state", f().queueState);
     if (f().queueDedupeKey) q.set("dedupeKey", f().queueDedupeKey);
@@ -2900,8 +2903,10 @@ function queueDepthPanel() {
  *
  * `position` comes from the server and is the place in the claim order across
  * everything matching the filter, so "14" means fourteenth in the queue, not
- * fourteenth on this page. Ordering is the uploader's own: `not_before ASC`,
- * which is literally the ORDER BY of the claim query.
+ * fourteenth on this page. The rows are listed newest first (`sort=desc`),
+ * which reverses the claim query's ORDER BY but not `position`: the number
+ * still counts from the front of the queue, so a page here typically runs
+ * downwards through it.
  */
 function queueChaptersPanel() {
   const f = () => store.filters;
@@ -2912,7 +2917,9 @@ function queueChaptersPanel() {
   };
 
   const queryString = () => {
-    const q = new URLSearchParams({ limit: "100" });
+    // Newest first, as on the Tasks tab; `position` is unaffected and still
+    // counts from the front of the claim order.
+    const q = new URLSearchParams({ limit: "100", sort: "desc" });
     if (f().queueChapterKind) q.set("kind", f().queueChapterKind);
     if (f().queueChapterState) q.set("state", f().queueChapterState);
     if (f().queueChapterQuery) q.set("q", f().queueChapterQuery);

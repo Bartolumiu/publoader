@@ -17,6 +17,7 @@ import {
   type ReorderMode,
   type UploadTaskFilter,
   type UploadTaskStateRow,
+  type TaskSort,
 } from "../../store/uploadTasks.js";
 
 /**
@@ -316,10 +317,13 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
     /**
      * The queue in the order it will drain, filtered, with a total and a cursor.
      *
-     * Ordering is `not_before ASC` because that is what the claim query does, so
-     * this list is "what runs next", which is what a reorder is checked against.
+     * Ordering is the claim query's, `not_before` then `created_at` then `id`,
+     * so this list is "what runs next", which is what a reorder is checked
+     * against. `sort=desc` reverses that same total ordering to put the newest
+     * work first, for a reader watching a queue rather than auditing a reorder;
+     * `order` in the response always names the ordering actually applied.
      * routes/ops.ts orders the same rows by `updated_at DESC`, which answers
-     * "what changed last"; the two are not interchangeable. The summary is
+     * "what changed last"; none of the three are interchangeable. The summary is
      * global rather than filtered so a narrow filter cannot hide a queue that is
      * backing up.
      *
@@ -332,6 +336,7 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
             ...FilterShape,
             limit: z.coerce.number().int().min(1).max(500).default(100),
             cursor: z.string().max(512).optional(),
+            sort: z.enum(["asc", "desc"]).default("asc"),
           })
           .refine(
             (value) =>
@@ -350,8 +355,9 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
         });
       }
 
+      const sort: TaskSort = query.sort;
       const [page, summary] = await Promise.all([
-        ctx.uploadTasks.list(toFilter(query), { limit: query.limit, cursor }),
+        ctx.uploadTasks.list(toFilter(query), { limit: query.limit, cursor, sort }),
         ctx.uploadTasks.depths(),
       ]);
 
@@ -360,8 +366,10 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
         total: page.total,
         limit: query.limit,
         nextCursor: page.nextCursor,
-        // The claim order, and what `POST /queues/reorder` rewrites.
-        order: "notBefore,createdAt,id",
+        sort,
+        // The claim order, and what `POST /queues/reorder` rewrites; reversed
+        // when `sort=desc` asked for the newest first.
+        order: sort === "desc" ? "notBefore,createdAt,id DESC" : "notBefore,createdAt,id",
         summary,
       };
     });

@@ -182,6 +182,25 @@ export interface TaskCursor {
   id: string;
 }
 
+/**
+ * Which end of the queue a page starts from.
+ *
+ * `asc` is the claim order: what the uploader runs next, and what a reorder is
+ * checked against. `desc` is the same total ordering reversed, so the most
+ * recently queued work is on the first page — what a reader watching a queue
+ * fill up wants, and what the dashboard asks for.
+ *
+ * Only the direction changes. The keyset stays (not_before, created_at, id) and
+ * the cursor encoding is identical, so a page boundary means the same thing
+ * either way; the comparison flips with the ORDER BY, which is what keeps
+ * paging correct while the uploader mutates not_before underneath.
+ *
+ * `position` in listChapters is deliberately NOT reversed: it is the row's
+ * place in the claim order out of everything matching, and "3rd from the end"
+ * would answer a question nobody asked.
+ */
+export type TaskSort = "asc" | "desc";
+
 export function encodeTaskCursor(row: TaskCursor): string {
   const raw = `${row.notBefore.toISOString()}|${row.createdAt.toISOString()}|${row.id}`;
   return Buffer.from(raw, "utf8").toString("base64url");
@@ -396,12 +415,16 @@ export class UploadTaskStore {
    */
   async list(
     filter: UploadTaskFilter,
-    opts: { limit: number; cursor?: TaskCursor | null },
+    opts: { limit: number; cursor?: TaskCursor | null; sort?: TaskSort },
   ): Promise<{ tasks: UploadTaskRow[]; total: number; nextCursor: string | null }> {
+    const descending = opts.sort === "desc";
     const parts = taskWhere(filter);
     if (opts.cursor) {
+      const position = Prisma.sql`(${opts.cursor.notBefore}, ${opts.cursor.createdAt}, ${opts.cursor.id})`;
       parts.push(
-        Prisma.sql`(t.not_before, t.created_at, t.id) > (${opts.cursor.notBefore}, ${opts.cursor.createdAt}, ${opts.cursor.id})`,
+        descending
+          ? Prisma.sql`(t.not_before, t.created_at, t.id) < ${position}`
+          : Prisma.sql`(t.not_before, t.created_at, t.id) > ${position}`,
       );
     }
     // One row beyond the page, so "is there a next page?" needs no second count.
@@ -409,7 +432,9 @@ export class UploadTaskStore {
       this.prisma.$queryRaw<UploadTaskRow[]>(Prisma.sql`
         SELECT ${TASK_COLUMNS}, ${TASK_IDENTITY} FROM upload_tasks t
         ${combine(parts)}
-        ORDER BY t.not_before ASC, t.created_at ASC, t.id ASC
+        ${descending
+          ? Prisma.sql`ORDER BY t.not_before DESC, t.created_at DESC, t.id DESC`
+          : Prisma.sql`ORDER BY t.not_before ASC, t.created_at ASC, t.id ASC`}
         LIMIT ${opts.limit + 1}
       `),
       this.prisma.$queryRaw<{ total: bigint }[]>(Prisma.sql`
@@ -437,13 +462,17 @@ export class UploadTaskStore {
    */
   async listChapters(
     filter: UploadTaskFilter,
-    opts: { limit: number; cursor?: TaskCursor | null },
+    opts: { limit: number; cursor?: TaskCursor | null; sort?: TaskSort },
   ): Promise<{ chapters: QueuedChapterRow[]; total: number; nextCursor: string | null }> {
+    const descending = opts.sort === "desc";
     const parts = taskWhere(filter);
     const page: Prisma.Sql[] = [];
     if (opts.cursor) {
+      const position = Prisma.sql`(${opts.cursor.notBefore}, ${opts.cursor.createdAt}, ${opts.cursor.id})`;
       page.push(
-        Prisma.sql`(o."notBefore", o."createdAt", o.id) > (${opts.cursor.notBefore}, ${opts.cursor.createdAt}, ${opts.cursor.id})`,
+        descending
+          ? Prisma.sql`(o."notBefore", o."createdAt", o.id) < ${position}`
+          : Prisma.sql`(o."notBefore", o."createdAt", o.id) > ${position}`,
       );
     }
 
@@ -475,7 +504,9 @@ export class UploadTaskStore {
       )
       SELECT o.* FROM ordered o
       ${combine(page)}
-      ORDER BY o."notBefore" ASC, o."createdAt" ASC, o.id ASC
+      ${descending
+        ? Prisma.sql`ORDER BY o."notBefore" DESC, o."createdAt" DESC, o.id DESC`
+        : Prisma.sql`ORDER BY o."notBefore" ASC, o."createdAt" ASC, o.id ASC`}
       LIMIT ${opts.limit + 1}
     `);
 

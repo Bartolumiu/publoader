@@ -151,6 +151,29 @@ RUN apt-get update \
  && apt-get purge -y curl gnupg && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
 
+# Fonts. The unavailable-chapter card (core/md/card.ts) is SVG text rasterised
+# by sharp, and librsvg draws a glyph only if a font on this filesystem has it.
+# A slim base ships NONE, so without this every card renders as a grid of tofu
+# boxes — the layout correct, the text unreadable — and the failure is silent:
+# nothing errors, a PNG is produced, and it goes to MangaDex as a public page.
+#
+#   fontconfig       /etc/fonts, so the renderer can find anything at all
+#   fonts-dejavu-core   DejaVu Sans + Sans Mono, the two families card.ts pins
+#   fonts-liberation2   Liberation Sans, the pinned second choice
+#   fonts-noto-cjk      Japanese/Korean/Chinese series titles, which DejaVu has
+#                       no glyphs for; the biggest package here and the reason
+#                       the card can name a Japanese series at all
+#
+# The two `fc-list` greps fail the build rather than ship an image that renders
+# tofu; a missing font is otherwise invisible until a card reaches MangaDex.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      fontconfig fonts-dejavu-core fonts-liberation2 fonts-noto-cjk \
+ && fc-cache -f \
+ && fc-list | grep -q DejaVuSans \
+ && fc-list | grep -qi NotoSansCJK \
+ && rm -rf /var/lib/apt/lists/*
+
 # postgresql-client is here for ONE reason: the dashboard's backup button, which
 # streams `pg_dump` to the operator. Without it that button answers 503 and a
 # backup means shelling onto the host, which defeats the point of the dashboard.

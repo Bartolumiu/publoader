@@ -142,6 +142,14 @@ link with a generated info card and repoints `externalUrl` away from it;
 hard-deleted regardless of the mode; an "unavailable" card on a duplicate would
 just leave the duplicate in place (`core/processor/processor.ts:575-579`).
 
+A chapter that **already carries a card** is excluded from both the removal pass
+and duplicate detection (`isCarded`, `src/core/md/types.ts`). It has to be: the
+card flow repoints `externalUrl` rather than clearing it, so every card in a
+series ends up carrying the same replacement url. Keyed on url they read as
+duplicates of one another, and duplicates are hard-deleted whatever the mode, so
+"unavailable" quietly became "delete", one chapter per run. `externalUrl` set
+with `pages > 0` is the signature of a card; a live external chapter has none.
+
 **run**: One scheduled or manually triggered execution of one extension, and the
 parent of one or more jobs. A run is created idempotently under a key: the
 scheduler uses `sched:<extension>:<slot>:<kind>`

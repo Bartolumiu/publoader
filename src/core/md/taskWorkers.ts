@@ -8,7 +8,7 @@ import { chapterFromJson, chapterToColumns, uploadedChapterColumns } from "./cha
 import type { MdChapterDetail, MdExtendedApi } from "./client.js";
 import type { DiscordEmbedInput, DiscordNotifier } from "./webhook.js";
 import { queueEmbed, queueFinishedEmbed, queueSummaryEmbed } from "./webhookEmbeds.js";
-import type { Chapter } from "./types.js";
+import { isCarded, type Chapter } from "./types.js";
 import type { SettingsStore } from "../store/settings.js";
 
 /**
@@ -105,6 +105,13 @@ export class UploadTaskWorkers {
    *
    * Nothing is sent when nothing was processed: speak only when there is
    * done something, and a per-tick "finished 0 items" would be constant noise.
+   *
+   * "Finished all items in queue" additionally requires that something actually
+   * SUCCEEDED. A task that fails goes back to the queue with a backoff, so a
+   * pass that only failed has emptied nothing; announcing it as finished, once
+   * per pass, for as long as the failure persists, is how this channel filled
+   * with identical messages. The failures are reported by their own per-chapter
+   * embeds, which is where an operator can act on them.
    */
   async flushQueueSummary(counts: Map<string, { processed: number; failed: number }>): Promise<void> {
     if (!this.deps.notifier.enabled) return;
@@ -116,7 +123,7 @@ export class UploadTaskWorkers {
       if (kind === "UNAVAILABLE") {
         embeds.push(queueSummaryEmbed(kind, count.processed, count.failed));
       }
-      embeds.push(queueFinishedEmbed(kind));
+      if (count.processed > 0) embeds.push(queueFinishedEmbed(kind));
     }
     if (embeds.length > 0) await this.deps.notifier.send(embeds);
   }
@@ -438,9 +445,14 @@ export class UploadTaskWorkers {
     }
 
     const attrs = detail.attributes;
-    if (!attrs.externalUrl && !force) {
-      log.info({ mdChapterId }, "chapter already has no externalUrl, archiving");
-      await this.archiveUnavailable(mdChapterId, chapter, null);
+    // Two ways to already be done, and the second is the common one: the card
+    // flow REPOINTS externalUrl rather than clearing it, so a chapter carded
+    // last week still has one. `isCarded` (externalUrl + pages > 0) is what
+    // actually recognises our own work; without it a re-queued chapter is
+    // re-rendered and re-uploaded on every pass.
+    if ((!attrs.externalUrl || isCarded(detail)) && !force) {
+      log.info({ mdChapterId }, "chapter is already marked unavailable, archiving");
+      await this.archiveUnavailable(mdChapterId, chapter, detail);
       metrics.uploadsTotal.inc({ outcome: "unavailable_already_done" });
       this.queue("Unavailable", chapter, mdChapterId, true, "Already marked unavailable.");
       return;

@@ -22,7 +22,12 @@ import sharp from "sharp";
 const LOGICAL = 1000;
 const SCALE = 2;
 
-const SANS = "DejaVu Sans, Liberation Sans, Helvetica, Arial, sans-serif";
+// Noto Sans CJK sits after the Latin families and before the generic: a series
+// title is frequently Japanese, and DejaVu has no glyph for a single kana. The
+// core image installs all three (docker/core/Dockerfile); on a host missing
+// them the renderer silently draws tofu rather than failing, which is why the
+// image asserts they are present at build time.
+const SANS = "DejaVu Sans, Liberation Sans, Helvetica, Arial, Noto Sans CJK JP, sans-serif";
 const MONO = "DejaVu Sans Mono, Liberation Mono, Menlo, Consolas, monospace";
 
 const ORANGE = "#FF6740";

@@ -624,6 +624,8 @@ export class MdClient implements MdExtendedApi {
       return typeof value === "string" && value !== "" ? value : null;
     };
     const version = attrs.version;
+    const pages = attrs.pages;
+    const isUnavailable = attrs.isUnavailable;
     return {
       id: entity.id,
       attributes: {
@@ -634,6 +636,14 @@ export class MdClient implements MdExtendedApi {
         externalUrl: str("externalUrl"),
         version: typeof version === "number" ? version : 1,
         createdAt: MdClient.createdAt(entity),
+        // Carried, not dropped: `pages` is the ONLY thing that separates a
+        // chapter carrying our unavailable card from a live external one, and
+        // dropping it here made every consumer blind to that (see isCarded).
+        // A carded chapter's externalUrl is repointed rather than cleared, so
+        // without this the removal passes read our own cards as duplicates of
+        // one another and hard-delete them.
+        ...(typeof pages === "number" ? { pages } : {}),
+        ...(isUnavailable === true ? { isUnavailable: true } : {}),
       },
       relationships: (entity.relationships ?? []).map((rel) => ({ id: rel.id, type: rel.type })),
     };

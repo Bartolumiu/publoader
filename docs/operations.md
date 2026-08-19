@@ -857,7 +857,19 @@ curl -fsS "$API/api/v1/admin/queues/tasks?kind=UNAVAILABLE&extension=mangaplus" 
 
 # find a chapter by series, title, number or either MangaDex id
 curl -fsS "$API/api/v1/admin/queues/tasks?q=blue%20lock&language=en" -H "$AUTH"
+
+# newest first instead of claim order: what has just been queued
+curl -fsS "$API/api/v1/admin/queues/tasks?sort=desc&limit=50" -H "$AUTH"
 ```
+
+`?sort=` takes `asc` (the default, and the claim order a reorder is checked
+against) or `desc` (the same total ordering reversed, newest first). Both
+endpoints take it, both echo the applied direction back as `sort`, and paging
+works either way: the cursor keys on the same `(not_before, created_at, id)` and
+only the comparison flips. The dashboard asks for `desc`, because a queue is
+usually being watched rather than audited. `position` on `/queues/chapters` is
+NOT reversed: it always counts from the front of the claim order, so on a
+descending page it counts down.
 
 `GET /queues/chapters` is the same rows and the same ordering as
 `/queues/tasks`, projected through the chapter payload. Reach for it when the

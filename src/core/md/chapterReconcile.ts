@@ -2,6 +2,10 @@ import { Prisma, type PrismaClient } from "@prisma/client";
 import type { Logger } from "../../logging.js";
 import type { AuditLog } from "../store/settings.js";
 import type { MdEntity, MdExtendedApi } from "./client.js";
+// The carded predicate lives in md/types.js beside the `pages` attribute it
+// reads: this sweep, the removal pass and duplicate detection must all give the
+// same answer, and they did not while each owned its own idea of it.
+import { isCardedAttributes } from "./types.js";
 
 /**
  * Rebuild the chapter archives from what MangaDex actually holds.
@@ -50,19 +54,6 @@ import type { MdEntity, MdExtendedApi } from "./client.js";
  * it already has: that instant is when the change was first seen, and a later
  * sweep does not know better.
  */
-
-/**
- * Does this MangaDex record carry one of our cards?
- *
- * Both halves matter. `pages > 0` alone would sweep in any natively hosted
- * chapter, and `externalUrl` alone describes every chapter we have ever
- * published, live ones included.
- */
-export function isCarded(attributes: Record<string, unknown>): boolean {
-  const external = attributes["externalUrl"];
-  const pages = attributes["pages"];
-  return typeof external === "string" && external !== "" && typeof pages === "number" && pages > 0;
-}
 
 export interface ReconcileOptions {
   /** Classify and report, write nothing. */
@@ -189,7 +180,7 @@ export class ChapterReconciler {
     const carded: [string, MdEntity][] = [];
     let hiddenOnMangadex = 0;
     for (const [id, entity] of all) {
-      if (isCarded(entity.attributes ?? {})) {
+      if (isCardedAttributes(entity.attributes ?? {})) {
         carded.push([id, entity]);
         continue;
       }
@@ -250,7 +241,7 @@ export class ChapterReconciler {
           continue;
         }
         const attributes = detail.attributes as unknown as Record<string, unknown>;
-        if (isCarded(attributes)) {
+        if (isCardedAttributes(attributes)) {
           report.unavailableFound += 1;
           if (await this.alreadyArchived(row.mdChapterId)) continue;
           report.unavailableRecorded += 1;
