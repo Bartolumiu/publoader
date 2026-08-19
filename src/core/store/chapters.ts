@@ -199,6 +199,46 @@ export class ChapterStore {
     return rows.map((row) => row.mdChapterId);
   }
 
+  /**
+   * One page of a whole-archive sweep, ordered by primary key.
+   *
+   * Deliberately not `idsMatching`'s newest-first ordering. A sweep that
+   * re-cards what it finds rewrites `unavailable_at` on every row it touches,
+   * so a continuation ordered on that column would resolve the rows it just
+   * processed all over again and never reach the end of the table. `id` is
+   * never rewritten, so a cursor over it is total, stable, and unaffected by
+   * the writes the sweep itself causes.
+   *
+   * `nextAfterId` is null only when this page is the last one; the caller
+   * repeats with it until then, so a sweep is bounded per request without
+   * being bounded overall.
+   */
+  async idsForSweep(
+    archive: ChapterArchive,
+    filter: ChapterFilter,
+    limit: number,
+    afterId?: string | null,
+  ): Promise<{ ids: string[]; nextAfterId: string | null }> {
+    const spec = ARCHIVES[archive];
+    const parts = chapterWhere(filter, spec);
+    if (afterId) parts.push(Prisma.sql`c.id > ${afterId}`);
+
+    // One row beyond the page, so "is there another page?" costs no extra query.
+    const rows = await this.prisma.$queryRaw<{ id: string; mdChapterId: string }[]>(Prisma.sql`
+      SELECT c.id, c.md_chapter_id AS "mdChapterId" FROM ${Prisma.raw(spec.table)} c
+      ${combine(parts)}
+      ORDER BY c.id ASC
+      LIMIT ${limit + 1}
+    `);
+
+    const page = rows.slice(0, limit);
+    const last = page[page.length - 1];
+    return {
+      ids: page.map((row) => row.mdChapterId),
+      nextAfterId: rows.length > limit && last ? last.id : null,
+    };
+  }
+
   async countMatching(archive: ChapterArchive, filter: ChapterFilter): Promise<number> {
     const spec = ARCHIVES[archive];
     const rows = await this.prisma.$queryRaw<{ total: bigint }[]>(Prisma.sql`

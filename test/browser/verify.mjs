@@ -475,7 +475,7 @@ const hashes = [
   "#/queues/tasks", "#/queues/depth", "#/activity", "#/errors/failures", "#/errors/quarantine",
   "#/extensions", "#/tracked", "#/untracked", "#/workers/fleet", "#/workers/enrolment",
   "#/users/accounts", "#/users/sessions", "#/users/signups", "#/tokens/issued", "#/tokens/mint",
-  "#/audit", "#/system/schema", "#/system/mangadex", "#/system/backup",
+  "#/audit", "#/system/schema", "#/system/mangadex", "#/system/cards", "#/system/backup",
   "#/maintenance", "#/docs",
 ];
 for (const hash of hashes) {

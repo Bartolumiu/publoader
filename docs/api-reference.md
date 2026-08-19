@@ -602,6 +602,31 @@ Two refusals are worth knowing about:
   owner-equivalent", not "vetted human". The break-glass `ADMIN_TOKEN` is a
   `root` principal and still works.
 
+Re-posting the card image on chapters that already carry one is its own route,
+not a fourth flag on the bulk ones:
+
+| Method | Path | Scope | Notes |
+| --- | --- | --- | --- |
+| `POST` | `/chapters/unavailable/recard` | `chapters:write` + ADMIN | `{ids?, filter?, footerNote?, dryRun?, confirm?, afterId?, batch?}`. Always the `unavailable` archive and always forced. A chapter with no card refuses as `not_unavailable` rather than being carded for the first time |
+
+It exists because the bulk route gets two things wrong for a re-render:
+
+- **The date.** `/chapters/bulk/unavailable` stamps every card with `new Date()`,
+  which is right for a chapter going unavailable now and wrong for one that went
+  unavailable in March; through it, re-rendering a year-old page rewrites its
+  "available until" line. Here `unavailableAt` comes from the archive row.
+- **Termination.** The bulk cap is 200 with no continuation, ordered on
+  `unavailable_at DESC` — the column the uploader rewrites as it archives. "Re-card
+  everything" through it re-cards the newest 200 for ever. This pages on the
+  primary key and answers `nextAfterId`; the caller repeats with it until it is
+  null, which is exactly what the dashboard panel does.
+
+`filter: {}` means every unavailable chapter; the filter is required-but-emptiable
+so that "re-card everything" has to be typed rather than fallen into. Everything
+else matches the bulk contract: `ids` XOR `filter`, `dryRun` defaulting to true, a
+live run needing `dryRun: false` **and** `confirm: true`, one audit row per chapter
+(`chapter.unavailable.recard`) plus a `chapter.unavailable.recard.sweep` summary.
+
 `routes/chapters.ts`, `store/chapters.ts`, tested at
 `test/integration/chapters.test.ts`.
 

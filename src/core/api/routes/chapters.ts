@@ -1368,6 +1368,330 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
       },
     );
 
+    // ------------------------------------------------- re-card the unavailable
+
+    /**
+     * Re-render the card image on chapters that ALREADY carry one.
+     *
+     * Marking a chapter unavailable and re-carding it queue the same
+     * UNAVAILABLE task, but they are different operator verbs and reading them
+     * as one produced two wrong answers:
+     *
+     *  - `POST /chapters/bulk/unavailable` stamps every card with `new Date()`,
+     *    which is correct when the chapter is going unavailable now and wrong
+     *    when it went unavailable in March; a re-card through it would silently
+     *    rewrite the "available until" line on a year-old page. Here the date
+     *    comes from the archive row, so the card still says when the publisher
+     *    actually pulled the chapter.
+     *  - the bulk cap is 200 with no continuation, and its ordering is
+     *    `unavailable_at DESC` — the very column the uploader rewrites as it
+     *    archives. "Re-card everything" through it re-cards the newest 200 for
+     *    ever and never reaches the rest. This pages on the primary key and
+     *    returns `nextAfterId`, so a sweep terminates.
+     *
+     * Otherwise it is the bulk contract: `ids` XOR `filter`, dry run by default,
+     * a live run needs `dryRun: false` and `confirm: true`, one guarded upsert
+     * per chapter, one audit row per chapter plus a summary.
+     *
+     * `filter: {}` means every unavailable chapter, which is the point of the
+     * endpoint and is why the filter is required-but-emptiable rather than
+     * defaulted: "re-card everything" has to be typed, not fallen into.
+     */
+    const RECARD_BATCH_CAP = 200;
+
+    const RecardFilter = z
+      .object({
+        extension: z.string().max(64).optional(),
+        language: z.string().max(16).optional(),
+        mdMangaId: z.string().max(64).optional(),
+        chapterNumber: z.string().max(32).optional(),
+        search: z.string().min(1).max(256).optional(),
+        since: z.coerce.date().optional(),
+        until: z.coerce.date().optional(),
+      })
+      .strict();
+
+    interface RecardItem {
+      mdChapterId: string;
+      ok: boolean;
+      outcome:
+        | "queued"
+        | "requeued"
+        | "would_queue"
+        | "already_queued"
+        | "leased"
+        | "not_found"
+        | "deleted"
+        | "not_unavailable"
+        | "invalid";
+      taskId?: string;
+      reason?: string;
+      mangaName?: string | null;
+      chapterNumber?: string | null;
+      chapterLanguage?: string | null;
+      extension?: string | null;
+      /** When the chapter was archived; the date its fresh card will carry. */
+      unavailableAt?: string;
+    }
+
+    scope.post(
+      "/api/v1/admin/chapters/unavailable/recard",
+      { preHandler: [requireScope("chapters:write"), requireAdminRole] },
+      async (req, reply) => {
+        const body = parseOrThrow(
+          z
+            .object({
+              ids: z.array(MdChapterId).min(1).max(RECARD_BATCH_CAP).optional(),
+              filter: RecardFilter.optional(),
+              footerNote: z.string().max(600).optional(),
+              dryRun: z.boolean().default(true),
+              confirm: z.boolean().default(false),
+              /** Continuation from a previous page's `nextAfterId`. */
+              afterId: z.string().max(64).optional(),
+              batch: z.number().int().min(1).max(RECARD_BATCH_CAP).default(RECARD_BATCH_CAP),
+            })
+            .strict()
+            .refine((value) => (value.ids ? 1 : 0) + (value.filter ? 1 : 0) === 1, {
+              message:
+                "provide exactly one of `ids` or `filter` (`filter: {}` means every unavailable chapter)",
+            })
+            .refine((value) => !(value.ids && value.afterId), {
+              message: "`afterId` continues a filter sweep; an explicit `ids` list has nothing to continue",
+            }),
+          req.body ?? {},
+        );
+
+        const filter: ChapterFilter | null = body.filter
+          ? {
+              extension: body.filter.extension,
+              chapterLanguage: body.filter.language,
+              mdMangaId: body.filter.mdMangaId,
+              chapterNumber: body.filter.chapterNumber,
+              search: body.filter.search,
+              since: body.filter.since,
+              until: body.filter.until,
+            }
+          : null;
+
+        let ids: string[];
+        let nextAfterId: string | null = null;
+        let matched: number;
+        if (body.ids) {
+          ids = [...new Set(body.ids)];
+          matched = ids.length;
+        } else {
+          const page = await ctx.chapters.idsForSweep(
+            "unavailable",
+            filter!,
+            body.batch,
+            body.afterId ?? null,
+          );
+          ids = page.ids;
+          nextAfterId = page.nextAfterId;
+          matched = await ctx.chapters.countMatching("unavailable", filter!);
+        }
+
+        // The unavailable archive answers "does this chapter have a card to
+        // replace?"; `locateMany` answers "is it recorded as deleted?", which is
+        // the one state where re-carding is meaningless.
+        const [located, unavailableRows, queued] = await Promise.all([
+          locateMany(ids),
+          ctx.chapters.manyByIds("unavailable", ids),
+          ctx.uploadTasks.forDedupeKeys(ids),
+        ]);
+        const archived = new Map(unavailableRows.map((row) => [row.mdChapterId, row]));
+        const taskByChapter = new Map(
+          queued.filter((task) => task.kind === "UNAVAILABLE").map((task) => [task.dedupeKey, task]),
+        );
+
+        const blockedReason = (id: string): { outcome: RecardItem["outcome"]; reason: string } | null => {
+          const hit = located.get(id);
+          if (!hit) return { outcome: "not_found", reason: "no chapter with that MangaDex id" };
+          if (hit.archive === "deleted") return { outcome: "deleted", reason: DELETED_REASON };
+          if (!archived.has(id)) {
+            return {
+              outcome: "not_unavailable",
+              reason:
+                "this chapter has no card to replace; use Mark unavailable, which posts the first one",
+            };
+          }
+          const task = taskByChapter.get(id);
+          if (task?.state === "LEASED") {
+            return {
+              outcome: "leased",
+              reason: "an uploader is executing an UNAVAILABLE for this chapter now",
+            };
+          }
+          if (task?.state === "PENDING") {
+            return {
+              outcome: "already_queued",
+              reason: "an UNAVAILABLE for this chapter is already queued",
+            };
+          }
+          return null;
+        };
+
+        const describe = (id: string): Partial<RecardItem> => {
+          const row = archived.get(id) ?? located.get(id)?.row;
+          return row
+            ? {
+                mangaName: row.mangaName ?? null,
+                chapterNumber: row.chapterNumber ?? null,
+                chapterLanguage: row.chapterLanguage ?? null,
+                extension: row.extension ?? null,
+                ...(archived.has(id) ? { unavailableAt: row.at.toISOString() } : {}),
+              }
+            : {};
+        };
+
+        // ---- dry run: predict, write nothing, audit nothing ----
+        if (body.dryRun) {
+          const preview: RecardItem[] = ids.map((id) => {
+            const blocked = blockedReason(id);
+            return blocked
+              ? { mdChapterId: id, ok: false, ...blocked, ...describe(id) }
+              : { mdChapterId: id, ok: true, outcome: "would_queue", ...describe(id) };
+          });
+          return reply.send({
+            dryRun: true,
+            action: "RECARD",
+            matched,
+            resolved: ids.length,
+            wouldQueue: preview.filter((item) => item.ok).length,
+            blocked: preview.filter((item) => !item.ok).length,
+            batch: body.batch,
+            nextAfterId,
+            breakdown: filter ? await ctx.chapters.byExtension("unavailable", filter) : undefined,
+            results: preview,
+            note:
+              "nothing was changed and nothing was queued. Repeat with {dryRun: false, confirm: true} " +
+              "to queue exactly this set" +
+              (nextAfterId ? ", then repeat with afterId for the rest" : ""),
+          });
+        }
+
+        if (!body.confirm) {
+          return reply.code(400).send({
+            error: "a live re-card needs confirm: true alongside dryRun: false",
+            wouldQueue: ids.filter((id) => blockedReason(id) === null).length,
+          });
+        }
+
+        // ---- live: one guarded upsert per chapter ----
+        const sweepId = randomUUID();
+        const results: RecardItem[] = [];
+        const auditRows: { actor: string; action: string; subject: string; detail: unknown }[] = [];
+        const who = actor(req);
+
+        for (const id of ids) {
+          const blocked = blockedReason(id);
+          if (blocked) {
+            results.push({ mdChapterId: id, ok: false, ...blocked, ...describe(id) });
+            continue;
+          }
+          const row = archived.get(id)!;
+          const chapter = chapterOf(row);
+          const payload: Record<string, unknown> = {
+            ...chapterToTaskPayload(
+              chapter as unknown as Record<string, unknown>,
+              chapter.imageArtifacts,
+            ),
+            // The archive row's own instant, not now: this chapter went
+            // unavailable when it went unavailable, and the card prints it.
+            unavailableAt: row.at.toISOString(),
+            // Without `force` the uploader recognises its own card and archives
+            // the chapter again without touching the page, which is the exact
+            // no-op this endpoint exists to get past.
+            force: true,
+            ...(body.footerNote ? { footerNote: body.footerNote } : {}),
+          };
+          const problems = manualTaskProblems("UNAVAILABLE", payload);
+          const dedupeKey = taskDedupeKey("UNAVAILABLE", chapter);
+          if (problems.length > 0 || dedupeKey === null) {
+            results.push({
+              mdChapterId: id,
+              ok: false,
+              outcome: "invalid",
+              reason: problems[0] ?? "cannot derive a queue key for this chapter",
+              ...describe(id),
+            });
+            continue;
+          }
+
+          const created = await ctx.uploadTasks.requeueForChapter("UNAVAILABLE", dedupeKey, payload);
+          if (!created) {
+            results.push({
+              mdChapterId: id,
+              ok: false,
+              outcome: "already_queued",
+              reason: "a task for this chapter was queued or claimed while this sweep was running",
+              ...describe(id),
+            });
+            continue;
+          }
+          results.push({
+            mdChapterId: id,
+            ok: true,
+            outcome: created.superseded ? "requeued" : "queued",
+            taskId: created.task.id,
+            ...describe(id),
+          });
+          auditRows.push({
+            actor: who,
+            action: "chapter.unavailable.recard",
+            subject: id,
+            detail: {
+              sweep: sweepId,
+              footerNote: body.footerNote ?? null,
+              unavailableAt: row.at.toISOString(),
+              extension: row.extension,
+              mdMangaId: row.mdMangaId,
+              chapterNumber: row.chapterNumber,
+              chapterLanguage: row.chapterLanguage,
+              taskId: created.task.id,
+              supersededCompletedTask: created.superseded,
+            },
+          });
+        }
+
+        const queuedCount = results.filter((item) => item.ok).length;
+        await ctx.audit.recordMany([
+          ...auditRows,
+          {
+            actor: who,
+            action: "chapter.unavailable.recard.sweep",
+            subject: sweepId,
+            detail: {
+              sweep: sweepId,
+              requested: ids.length,
+              queued: queuedCount,
+              refused: results.length - queuedCount,
+              footerNote: body.footerNote ?? null,
+              ...(filter
+                ? { filter: body.filter, afterId: body.afterId ?? null, nextAfterId }
+                : { ids }),
+            },
+          },
+        ]);
+
+        return reply.send({
+          ok: true,
+          dryRun: false,
+          action: "RECARD",
+          sweep: sweepId,
+          matched,
+          requested: ids.length,
+          queued: queuedCount,
+          refused: results.length - queuedCount,
+          // Null once the sweep has reached the end of the archive; until then
+          // the caller repeats with it to continue where this page stopped.
+          nextAfterId,
+          results,
+          note: "core-uploader drains this queue; watch it under Queues, filtered by UNAVAILABLE.",
+        });
+      },
+    );
+
     /**
      * Bulk delete. Nothing extra guards it beyond what the other two have: the
      * existing guards are already the strongest here (ADMIN role, no api tokens,

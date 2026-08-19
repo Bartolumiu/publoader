@@ -1223,6 +1223,49 @@ curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: applic
   "$API/api/v1/admin/chapters/$MD_CHAPTER_ID/unavailable"
 ```
 
+### Re-post the cards already on MangaDex
+
+A card is rendered at the moment it is posted, so every card in the catalogue is
+a fossil of the build that put it there. When the renderer changes — a font that
+was missing, wording that was wrong, a layout that clipped long titles — the only
+fix for the pages already up is to render them again and post them over the top.
+
+**Dashboard → System → Unavailable cards.** Three targets, because the three
+occasions differ: one chapter somebody complained about, a set ticked out of the
+archive, or every card on the site after a renderer fix. Preview first; the
+preview resolves the same rows and checks the same refusals as the live run.
+
+By hand it is one route, always forced, always the `unavailable` archive:
+
+```bash
+# every unavailable chapter, previewed
+curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"filter":{}}' "$API/api/v1/admin/chapters/unavailable/recard"
+
+# and live, one page at a time
+curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d '{"filter":{},"dryRun":false,"confirm":true}' \
+  "$API/api/v1/admin/chapters/unavailable/recard"
+```
+
+The response carries `nextAfterId`; repeat with `{"afterId":"<that>"}` until it
+comes back `null`. The dashboard does that loop for you and reports the running
+count as it goes.
+
+Two things this route does that `/chapters/bulk/unavailable` does not, and the
+reason it is a separate route rather than another flag:
+
+- **The card keeps the date the chapter went unavailable.** The bulk route stamps
+  `new Date()`, which is right for a chapter going unavailable now and wrong for
+  one pulled in March; through it, re-rendering a year-old page rewrites its
+  "available until" line.
+- **A whole-archive sweep terminates.** The uploader rewrites `unavailable_at` as
+  it archives, so paging on that column re-reads the rows it just processed for
+  ever. This pages on the primary key instead.
+
+Chapters that have never been carded refuse as `not_unavailable`: this re-posts,
+it never cards a chapter for the first time. Use the section above for that.
+
 ### Delete it
 
 The one irreversible action. `confirm: true` is required, the reason goes into
