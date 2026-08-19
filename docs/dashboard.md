@@ -166,7 +166,8 @@ the header opens it, a tap outside or Escape closes it, and while closed it is
 `inert` so Tab cannot walk into it.
 
 **Tabs inside a page** are that page's own sections; Overview's Platform and
-MangaDex, System's Schema / MangaDex / Backup, one extension's Overview / Series
+MangaDex, System's Schema / MangaDex / Unavailable cards / Backup, one extension's
+Overview / Series
 map / Schedule / Config / Versions. They are a tablist: arrow keys, Home and End
 move between them.
 
@@ -192,6 +193,7 @@ Routing is hash-based, `#/<destination>[/<thing>][/<tab>]`:
 #/extensions/mangaplus/series-map        one extension, one of its tabs
 #/untracked/<id>                         one untracked series, editable
 #/audit/<id>                             one audit event
+#/system/cards                            re-post the card image on unavailable chapters
 #/system/backup
 ```
 
@@ -224,7 +226,7 @@ leak an id into an access log.
 | **Users** | OWNER | *Accounts*: invite, approve, change role, set a password, delete. *Sessions*: who is signed in, with revoke. *Signups*: the self-signup gate. |
 | **Tokens** | OWNER | *Issued*: every `pa_…` client credential with its scopes, creator, last use and expiry, with revoke. *Mint*: scopes grouped by area, with the shipped presets. |
 | **Audit** | `audit:read` | Who did what, searchable by actor, action, subject, free text and date range; and one event at a time by id. |
-| **System** | `settings:read` | *Schema*: is this database the schema this build expects. *MangaDex*: the saved session. *Backup*: a `pg_dump` download (OWNER only). |
+| **System** | `settings:read` (acting needs `chapters:write` + ADMIN) | *Schema*: is this database the schema this build expects. *MangaDex*: the saved session. *Unavailable cards*: re-render and re-post the card image on chapters already marked unavailable — every one of them, a set ticked out of the archive, or a single chapter id, previewed first. *Backup*: a `pg_dump` download (OWNER only). |
 | **Maintenance** | `bundles:read` | Compare each live bundle against its GitHub branch, install a bundle, restart a service. Lives in `dashboard/sysops.js`. |
 | **Docs** | `stats:read` | The operator handbook that ships with this build, rendered in the page. Lives in `dashboard/docs.js`. |
 

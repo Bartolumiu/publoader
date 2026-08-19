@@ -41,7 +41,7 @@ const MD_CHAPTER = "1c2d3e4f-0000-4000-8000-000000000001";
 const MD_MANGA = "9a1b1c1d-0000-4000-8000-000000000000";
 
 /** Canned API responses, keyed by the path prefix the view requests. */
-function apiRoutes(): { match: RegExp; body: unknown }[] {
+function apiRoutes(): { match: RegExp; body: unknown | ((init?: { body?: string }) => unknown) }[] {
   return [
     { match: /\/session$/, body: { actor: "ardax", role: "OWNER", userId: "u1", email: "a@b.c" } },
     {
@@ -181,6 +181,50 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
     },
     { match: /\/chapters\/extensions/, body: { table: "uploaded", extensions: [{ extension: "mangaplus", count: 902 }] } },
     {
+      // Answers from the request, because the property under test is that the
+      // panel keeps calling while a continuation comes back.
+      match: /\/chapters\/unavailable\/recard/,
+      body: (init?: { body?: string }) => {
+        const sent = JSON.parse(init?.body ?? "{}");
+        const continued = Boolean(sent.afterId);
+        const results = [
+          {
+            mdChapterId: MD_CHAPTER,
+            ok: true,
+            outcome: sent.dryRun === false ? "queued" : "would_queue",
+            mangaName: "Sakamoto Days",
+            chapterNumber: "141",
+            chapterLanguage: "en",
+            unavailableAt: "2026-03-04T05:06:07Z",
+          },
+        ];
+        return sent.dryRun === false
+          ? {
+              ok: true,
+              dryRun: false,
+              action: "RECARD",
+              sweep: "sweep-1",
+              matched: 7,
+              requested: continued ? 3 : 4,
+              queued: continued ? 3 : 4,
+              refused: 0,
+              nextAfterId: continued ? null : "row-4",
+              results,
+            }
+          : {
+              dryRun: true,
+              action: "RECARD",
+              matched: 7,
+              resolved: 4,
+              wouldQueue: 4,
+              blocked: 0,
+              batch: 200,
+              nextAfterId: "row-4",
+              results,
+            };
+      },
+    },
+    {
       match: new RegExp(`/chapters/${MD_CHAPTER}$`),
       body: {
         // The shape `GET /chapters/:mdChapterId` actually returns: the id at the
@@ -250,11 +294,13 @@ let requested: string[] = [];
 
 function installFetch(): void {
   const routes = apiRoutes();
-  win.fetch = vi.fn(async (url: string) => {
+  win.fetch = vi.fn(async (url: string, init?: { body?: string }) => {
     const path = String(url);
     requested.push(path);
     const route = routes.find((r) => r.match.test(path));
-    const body = route ? route.body : {};
+    // A route may answer from the request rather than with a constant, which is
+    // what lets a paged endpoint be stubbed as a page sequence.
+    const body = route ? (typeof route.body === "function" ? route.body(init) : route.body) : {};
     return {
       // `ok` is what api() branches on; a stub without it makes every call throw
       // "200 OK" and the page falls back to the sign-in layer.
@@ -432,5 +478,108 @@ describe("dashboard chapter views", () => {
     // form that submitted all of them would write "unchanged" edits into the
     // chapter's permanent history.
     expect(JSON.parse(call[1].body)).toEqual({ title: "Corrected title" });
+  });
+
+  /**
+   * The re-card panel under Admin → System.
+   *
+   * It is the one control in the dashboard whose apply step is a LOOP: a sweep
+   * of the whole archive is a request per page, continued by `nextAfterId`
+   * until the server stops returning one. A panel that fired once and reported
+   * "done" would silently leave most of the archive un-recarded, which is the
+   * failure this covers.
+   */
+  describe("re-posting unavailable card images", () => {
+    /** Click a button by its label, anywhere in the mounted view. */
+    const click = (label: string): void => {
+      const button = [...doc.querySelectorAll("button")].find(
+        (b: { textContent: string }) => b.textContent === label,
+      );
+      expect(button, `no button labelled ${label}`).toBeTruthy();
+      button.click();
+    };
+
+    const recardCalls = () =>
+      win.fetch.mock.calls.filter(([url]: [string]) => String(url).includes("/unavailable/recard"));
+
+    it("offers the three targets and previews the whole archive by default", async () => {
+      await goto("#/system/cards");
+      const view = text();
+      expect(view).toContain("Re-post unavailable card images");
+      expect(view).toContain("Every unavailable chapter");
+      expect(view).toContain("Pick from the archive");
+      expect(view).toContain("One chapter");
+
+      click("Preview");
+      await settle();
+
+      const [, init] = recardCalls()[0];
+      // A preview is a dry run naming a filter, never an id list, and never a
+      // live write.
+      expect(JSON.parse(init.body)).toEqual({ filter: {}, dryRun: true });
+      expect(text()).toContain("7");
+    });
+
+    it("keeps sweeping until the server stops handing back a continuation", async () => {
+      await goto("#/system/cards");
+      click("Re-post every card…");
+      await settle();
+      // The confirm dialog stands between the click and any write.
+      click("Queue the re-cards");
+      await settle(20);
+
+      const live = recardCalls().filter(
+        ([, init]: [string, { body: string }]) => JSON.parse(init.body).dryRun === false,
+      );
+      // Two pages: the stub returns a continuation for the first call and none
+      // for the second, so a panel that fired once would stop at 4 of 7.
+      expect(live).toHaveLength(2);
+      expect(JSON.parse(live[0][1].body)).toEqual({ filter: {}, dryRun: false, confirm: true });
+      expect(JSON.parse(live[1][1].body).afterId).toBe("row-4");
+      expect(text()).toContain("done");
+    });
+
+    it("re-cards a single chapter named by its MangaDex id", async () => {
+      await goto("#/system/cards");
+      doc.getElementById("recard-mode-one").checked = true;
+      doc.getElementById("recard-mode-one").dispatchEvent(new win.Event("change"));
+      await settle();
+
+      const field = doc.getElementById("recard-chapter-id");
+      field.value = MD_CHAPTER;
+      field.dispatchEvent(new win.Event("input"));
+      await settle();
+
+      // The exact image, rendered by the same code that posts it, so an
+      // operator approves what actually goes up.
+      click("Refresh the preview");
+      expect(doc.querySelector(".card-preview").src).toContain(`/chapters/${MD_CHAPTER}/card.png`);
+
+      click("Preview");
+      await settle();
+      expect(JSON.parse(recardCalls()[0][1].body)).toEqual({ ids: [MD_CHAPTER], dryRun: true });
+    });
+
+    it("re-cards exactly the chapters ticked in the picker", async () => {
+      await goto("#/system/cards");
+      doc.getElementById("recard-mode-selected").checked = true;
+      doc.getElementById("recard-mode-selected").dispatchEvent(new win.Event("change"));
+      await settle();
+      // The archive listing, not the uploaded one: this panel only ever touches
+      // chapters that already carry a card.
+      expect(requested.some((path) => path.includes("archive=unavailable"))).toBe(true);
+
+      const box = doc.querySelector('#view input[type="checkbox"]');
+      box.checked = true;
+      box.dispatchEvent(new win.Event("change"));
+      await settle();
+
+      click("Preview");
+      await settle();
+      expect(JSON.parse(recardCalls()[0][1].body)).toEqual({
+        ids: [MD_CHAPTER],
+        dryRun: true,
+      });
+    });
   });
 });

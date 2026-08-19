@@ -699,6 +699,205 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
     });
   });
 
+
+  // ---- re-carding what is already unavailable ----
+
+  /**
+   * Re-posting the card image on chapters that already carry one.
+   *
+   * The properties here are the two the bulk endpoint gets wrong, which is why
+   * this is a separate route rather than another flag on that one:
+   *
+   *  - the card must carry the date the chapter went unavailable, not today's,
+   *    or re-rendering a year-old page rewrites its "available until" line; and
+   *  - a whole-archive sweep must terminate. The uploader rewrites
+   *    `unavailable_at` as it archives, so paging on that column re-reads the
+   *    rows it just processed for ever; this pages on the primary key, and the
+   *    test below rewrites the dates between pages to prove it.
+   */
+  describe("re-carding the unavailable archive", () => {
+    /** A chapter already carrying a card, archived at a known instant. */
+    async function carded(overrides: Record<string, unknown> = {}) {
+      seq += 1;
+      return prisma.unavailableChapter.create({
+        data: {
+          mdChapterId: uuid(seq),
+          extension: "exampleext",
+          chapterId: `src-${seq}`,
+          chapterNumber: String(seq),
+          chapterTitle: `Chapter ${seq}`,
+          chapterLanguage: "en",
+          mangaName: "Test Series",
+          mdMangaId: uuid(900),
+          mdGroupId: uuid(800),
+          unavailableAt: new Date("2026-03-04T05:06:07.000Z"),
+          ...overrides,
+        },
+      });
+    }
+
+    const recard = (payload: Record<string, unknown>) =>
+      app.inject({
+        method: "POST",
+        url: "/api/v1/admin/chapters/unavailable/recard",
+        headers: root,
+        payload,
+      });
+
+    it("previews by default and writes nothing", async () => {
+      const chapter = await carded();
+
+      const preview = await recard({ ids: [chapter.mdChapterId] });
+      expect(preview.statusCode).toBe(200);
+      expect(preview.json().dryRun).toBe(true);
+      expect(preview.json().wouldQueue).toBe(1);
+      expect(preview.json().results[0].outcome).toBe("would_queue");
+      // The date the card will carry, shown before anything is queued.
+      expect(preview.json().results[0].unavailableAt).toBe("2026-03-04T05:06:07.000Z");
+      expect(await prisma.uploadTask.count()).toBe(0);
+      expect(await prisma.auditEvent.count()).toBe(0);
+
+      const unconfirmed = await recard({ ids: [chapter.mdChapterId], dryRun: false });
+      expect(unconfirmed.statusCode).toBe(400);
+      expect(await prisma.uploadTask.count()).toBe(0);
+    });
+
+    it("queues a forced re-card carrying the date the chapter went unavailable", async () => {
+      const chapter = await carded();
+
+      const res = await recard({
+        ids: [chapter.mdChapterId],
+        dryRun: false,
+        confirm: true,
+        footerNote: "Re-rendered after the font fix.",
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().queued).toBe(1);
+
+      const task = await prisma.uploadTask.findFirstOrThrow({ where: { kind: "UNAVAILABLE" } });
+      const payload = task.chapter as Record<string, unknown>;
+      // Without `force` the uploader recognises its own card and changes
+      // nothing, which would make the whole endpoint a no-op.
+      expect(payload.force).toBe(true);
+      // Today's date here would silently rewrite the window printed on a page
+      // that has been up since March.
+      expect(payload.unavailableAt).toBe("2026-03-04T05:06:07.000Z");
+      expect(payload.footerNote).toBe("Re-rendered after the font fix.");
+
+      const per = await prisma.auditEvent.findFirstOrThrow({
+        where: { action: "chapter.unavailable.recard" },
+      });
+      expect(per.subject).toBe(chapter.mdChapterId);
+      const summary = await prisma.auditEvent.findFirstOrThrow({
+        where: { action: "chapter.unavailable.recard.sweep" },
+      });
+      expect((per.detail as { sweep: string }).sweep).toBe(summary.subject);
+    });
+
+    it("sweeps the whole archive page by page, and finishes even as dates churn", async () => {
+      const chapters = [];
+      for (let i = 0; i < 5; i++) chapters.push(await carded());
+
+      const seen: string[] = [];
+      let afterId: string | null = null;
+      for (let page = 0; page < 10; page++) {
+        const res = await recard({
+          filter: {},
+          batch: 2,
+          dryRun: false,
+          confirm: true,
+          ...(afterId ? { afterId } : {}),
+        });
+        expect(res.statusCode).toBe(200);
+        expect(res.json().matched).toBe(5);
+        for (const item of res.json().results) seen.push(item.mdChapterId);
+        afterId = res.json().nextAfterId;
+
+        // What the uploader does to every row it archives, and the reason a
+        // sweep ordered on `unavailable_at` would restart for ever: the rows
+        // just processed jump back to the top of that ordering.
+        await prisma.unavailableChapter.updateMany({
+          where: { mdChapterId: { in: res.json().results.map((r: { mdChapterId: string }) => r.mdChapterId) } },
+          data: { unavailableAt: new Date() },
+        });
+        if (!afterId) break;
+      }
+
+      expect(afterId).toBeNull();
+      // Every chapter exactly once: no gaps, and nothing carded twice.
+      expect(seen.sort()).toEqual(chapters.map((c) => c.mdChapterId).sort());
+      expect(await prisma.uploadTask.count({ where: { kind: "UNAVAILABLE" } })).toBe(5);
+    });
+
+    it("narrows a sweep by the same filter the archive listing uses", async () => {
+      await carded({ extension: "otherext" });
+      const mine = await carded({ extension: "sweepext" });
+
+      const preview = await recard({ filter: { extension: "sweepext" } });
+      expect(preview.json().matched).toBe(1);
+      expect(preview.json().breakdown).toEqual([{ extension: "sweepext", count: 1 }]);
+
+      const res = await recard({
+        filter: { extension: "sweepext" },
+        dryRun: false,
+        confirm: true,
+      });
+      expect(res.json().queued).toBe(1);
+      const tasks = await prisma.uploadTask.findMany({ where: { kind: "UNAVAILABLE" } });
+      expect(tasks.map((t) => t.dedupeKey)).toEqual([mine.mdChapterId]);
+    });
+
+    it("refuses chapters that have no card to replace, one by one", async () => {
+      const ok = await carded();
+      const live = await uploaded();
+      const gone = await prisma.deletedChapter.create({
+        data: { mdChapterId: uuid((seq += 1)), extension: "exampleext" },
+      });
+      const queuedAlready = await carded();
+      await prisma.uploadTask.create({
+        data: { kind: "UNAVAILABLE", dedupeKey: queuedAlready.mdChapterId, chapter: {} },
+      });
+
+      const ids = [ok.mdChapterId, live.mdChapterId, gone.mdChapterId, queuedAlready.mdChapterId, uuid(999)];
+      const preview = await recard({ ids });
+      const outcomes = Object.fromEntries(
+        preview.json().results.map((r: { mdChapterId: string; outcome: string }) => [r.mdChapterId, r.outcome]),
+      );
+      expect(outcomes[ok.mdChapterId]).toBe("would_queue");
+      // Never carded: this route re-posts, it does not card for the first time.
+      expect(outcomes[live.mdChapterId]).toBe("not_unavailable");
+      expect(outcomes[gone.mdChapterId]).toBe("deleted");
+      expect(outcomes[queuedAlready.mdChapterId]).toBe("already_queued");
+      expect(outcomes[uuid(999)]).toBe("not_found");
+
+      const applied = await recard({ ids, dryRun: false, confirm: true });
+      expect(applied.json().queued).toBe(1);
+      expect(applied.json().refused).toBe(4);
+      expect(await prisma.uploadTask.count({ where: { kind: "UNAVAILABLE" } })).toBe(2);
+    });
+
+    it("refuses a body that names both a selection and a filter, or neither", async () => {
+      const chapter = await carded();
+      expect((await recard({ ids: [chapter.mdChapterId], filter: {} })).statusCode).toBe(400);
+      expect((await recard({})).statusCode).toBe(400);
+      // A continuation only means something for a sweep.
+      expect((await recard({ ids: [chapter.mdChapterId], afterId: "x" })).statusCode).toBe(400);
+    });
+
+    it("keeps re-carding behind the same role gate as every other chapter write", async () => {
+      const chapter = await carded();
+      const writer = await mint(["chapters:write"]);
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/chapters/unavailable/recard",
+        headers: writer,
+        payload: { ids: [chapter.mdChapterId], dryRun: false, confirm: true },
+      });
+      expect(res.statusCode).toBe(403);
+      expect(await prisma.uploadTask.count()).toBe(0);
+    });
+  });
+
   // ---- authorisation ----
 
   it("keeps published chapters out of reach of scopes and roles that should not have them", async () => {

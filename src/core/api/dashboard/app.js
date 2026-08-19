@@ -1092,6 +1092,7 @@ const NAV = [
     tabs: [
       ["schema", "Schema"],
       ["mangadex", "MangaDex"],
+      ["cards", "Unavailable cards"],
       ["backup", "Backup"],
     ],
     blurb: "The things that used to need a shell on the host.",
@@ -8352,6 +8353,7 @@ function auditDetail(id) {
 
 VIEWS.system = (route) => {
   if (route.tab === "mangadex") return mangadexPanel();
+  if (route.tab === "cards") return unavailableCardsPanel();
   if (route.tab === "backup") return backupPanel();
 
   /*
@@ -8416,6 +8418,504 @@ VIEWS.system = (route) => {
     ),
   );
 };
+
+/**
+ * Re-post the card image on chapters that are already marked unavailable.
+ *
+ * The card is rendered at the moment the uploader runs, from that chapter's
+ * own details and this build's fonts and layout. So every card on MangaDex is
+ * a fossil of the build that posted it, and when the renderer changes — a font
+ * that was missing, wording that was wrong, a layout that clipped long titles —
+ * the only fix for the pages already up is to render them again and post them
+ * over the top. That is the whole job of this panel.
+ *
+ * Three targets, because the three occasions are genuinely different: one
+ * chapter somebody complained about, a handful an operator picked out of the
+ * archive, or every card on the site after a renderer fix. The first two are
+ * one request; the last pages through the archive on the primary key until the
+ * server stops returning a continuation, so it terminates and reports as it
+ * goes rather than timing out behind a spinner.
+ */
+function unavailableCardsPanel() {
+  const target = { mode: "all", id: "", running: false, cancel: false };
+  const selected = new Set();
+  const filters = { extension: "", language: "", search: "" };
+  const cursors = [];
+
+  const extensions = new Resource("recard-extensions", () =>
+    api("/chapters/extensions?archive=unavailable"),
+  );
+  const listing = new Resource("recard-listing", () => {
+    const q = new URLSearchParams({ archive: "unavailable", limit: "50" });
+    if (filters.extension) q.set("extension", filters.extension);
+    if (filters.language) q.set("language", filters.language);
+    if (filters.search) q.set("search", filters.search);
+    if (cursors.length) q.set("cursor", cursors[cursors.length - 1]);
+    return api(`/chapters?${q}`);
+  });
+
+  const note = el("textarea", {
+    id: "recard-note",
+    rows: "2",
+    maxlength: "600",
+    placeholder: "Leave blank for the standard wording.",
+  });
+  const progress = el("div", { class: "dim small" });
+  const preview = el("div", {});
+  const modes = el("div", {});
+  const buttons = el("div", { class: "row" });
+
+  /** The request body for the current target, or null when it is not answerable. */
+  const bodyFor = () => {
+    if (target.mode === "one") {
+      const id = target.id.trim();
+      return id ? { ids: [id] } : null;
+    }
+    if (target.mode === "selected") {
+      return selected.size ? { ids: [...selected] } : null;
+    }
+    const filter = {};
+    if (filters.extension) filter.extension = filters.extension;
+    if (filters.language) filter.language = filters.language;
+    if (filters.search) filter.search = filters.search;
+    return { filter };
+  };
+
+  const footerNote = () => {
+    const text = note.value.trim();
+    return text ? { footerNote: text } : {};
+  };
+
+  const call = (extra) =>
+    api("/chapters/unavailable/recard", {
+      method: "POST",
+      body: { ...bodyFor(), ...footerNote(), ...extra },
+    });
+
+  const say = (text, bad = false) => {
+    progress.className = bad ? "error" : "dim small";
+    progress.textContent = text;
+  };
+
+  const runPreview = async (button) => {
+    if (!bodyFor()) {
+      say("Nothing is targeted yet.", true);
+      return;
+    }
+    const result = await act("chapters.recard.preview", () => call({ dryRun: true }), { button });
+    if (!result) return;
+    setChildren(preview, recardPreview(result, target.mode));
+    say(
+      target.mode === "all"
+        ? `${result.matched} unavailable chapter(s) match; this sweep would queue ${result.wouldQueue} ` +
+            `in the first pass of ${result.resolved}` +
+            (result.nextAfterId ? ", and keep going until the archive is exhausted." : ".")
+        : `${result.wouldQueue} of ${result.resolved} chapter(s) would be queued.`,
+    );
+  };
+
+  /**
+   * The live run. For a picked set that is one request; for the whole archive
+   * it is a request per page, continued by `nextAfterId`.
+   *
+   * The loop is here rather than on the server because a sweep over thousands
+   * of chapters is minutes of database writes, and an HTTP request that long is
+   * a request that dies to a proxy timeout having queued an amount nobody can
+   * name. Paging makes every page an answered request, and the count below is
+   * true at every moment rather than only at the end.
+   */
+  const runApply = async () => {
+    const body = bodyFor();
+    if (!body) {
+      say("Nothing is targeted yet.", true);
+      return;
+    }
+    const mode = target.mode;
+    const scope =
+      mode === "all"
+        ? "every unavailable chapter matching the filter"
+        : `${body.ids.length} chapter(s)`;
+    if (
+      !(await confirmDialog({
+        title: "Re-post these card images",
+        lead: `A fresh card will be rendered and posted over the current page of ${scope}.`,
+        points: [
+          "Each chapter keeps its place, its metadata and its date; only the page image changes.",
+          "One upload task per chapter, drained by core-uploader at MangaDex's pace.",
+          "Chapters that have never been carded are skipped, not carded for the first time.",
+        ],
+        confirmLabel: "Queue the re-cards",
+        danger: false,
+      }))
+    ) {
+      return;
+    }
+
+    // Snapshotted, not re-read per page: the sweep outlives the form, and a
+    // continuation sent against a target the operator changed halfway through
+    // is a request that means nothing.
+    const request = { ...body, ...footerNote(), dryRun: false, confirm: true };
+
+    target.running = true;
+    target.cancel = false;
+    redraw();
+    let queued = 0;
+    let refused = 0;
+    let afterId = null;
+    try {
+      for (;;) {
+        const result = await api("/chapters/unavailable/recard", {
+          method: "POST",
+          body: { ...request, ...(afterId ? { afterId } : {}) },
+        });
+        queued += result.queued ?? 0;
+        refused += result.refused ?? 0;
+        setChildren(preview, recardPreview(result, mode));
+        afterId = result.nextAfterId ?? null;
+        say(
+          `${queued} queued, ${refused} skipped` +
+            (afterId ? ` — still sweeping (${result.matched} match in total)…` : " — done."),
+        );
+        if (!afterId || target.cancel) break;
+      }
+      toast(
+        `${queued} chapter(s) queued for a fresh card` + (refused ? `, ${refused} skipped` : ""),
+        refused === 0,
+      );
+      if (target.cancel) say(`Stopped after ${queued} queued; the rest were left alone.`);
+    } catch (err) {
+      say(`Stopped after ${queued} queued: ${err.message}`, true);
+    } finally {
+      target.running = false;
+      selected.clear();
+      redraw();
+    }
+    if (mode === "selected") void listing.load({ force: true });
+  };
+
+  /** The picker, only mounted for the two targets that name chapters. */
+  const picker = () =>
+    target.mode === "selected"
+      ? live(
+          [listing],
+          (data) => {
+            const rows = data.chapters ?? [];
+            const present = new Set(rows.map((entry) => entry.mdChapterId));
+            for (const id of [...selected]) if (!present.has(id)) selected.delete(id);
+            return el(
+              "div",
+              {},
+              el("div", { class: "row" }, [
+                el("span", {
+                  class: "dim small",
+                  text: `${selected.size} selected · ${rows.length} shown of ${data.total ?? 0}`,
+                }),
+                el("span", { class: "grow" }),
+                el("button", {
+                  type: "button",
+                  text: rows.length && selected.size === rows.length ? "Select none" : "Select all on this page",
+                  disabled: rows.length === 0,
+                  onclick: () => {
+                    if (selected.size === rows.length) selected.clear();
+                    else for (const entry of rows) selected.add(entry.mdChapterId);
+                    void listing.load({ force: true });
+                  },
+                }),
+              ]),
+              table(
+                ["", "Series", "Chapter", "Language", "Extension", "Marked unavailable"],
+                rows.map((entry) => [
+                  el("input", {
+                    type: "checkbox",
+                    checked: selected.has(entry.mdChapterId),
+                    "aria-label": `Select ${entry.mangaName ?? entry.mdChapterId} ${chapterLabel(entry)}`,
+                    onchange: (event) => {
+                      if (event.target.checked) selected.add(entry.mdChapterId);
+                      else selected.delete(entry.mdChapterId);
+                      redrawButtons();
+                    },
+                  }),
+                  routeLink(routeTo("chapters", entry.mdChapterId, null), truncate(entry.mangaName || "-", 40)),
+                  chapterLabel(entry),
+                  entry.chapterLanguage || "-",
+                  entry.extension || "-",
+                  fmtTime(entry.at),
+                ]),
+                { empty: "No chapter in the unavailable archive matches this filter." },
+              ),
+              chapterPager(data, cursors, (walked) => {
+                cursors.length = 0;
+                cursors.push(...walked);
+                selected.clear();
+                void listing.load({ force: true });
+              }),
+            );
+          },
+          { reserve: 300, skeleton: () => skeletonTable(6, 6) },
+        )
+      : el("span", {});
+
+  const filterRow = () =>
+    row(
+      live(
+        [extensions],
+        (data) =>
+          el(
+            "span",
+            { class: "row tight" },
+            el("label", { class: "inline", for: "recard-extension", text: "Extension" }),
+            el(
+              "select",
+              {
+                id: "recard-extension",
+                onchange: (event) => {
+                  filters.extension = event.target.value;
+                  cursors.length = 0;
+                  selected.clear();
+                  void listing.load({ force: true });
+                  redraw();
+                },
+              },
+              el("option", { value: "", text: "all", selected: filters.extension === "" }),
+              (data.extensions ?? []).map((entry) =>
+                el("option", {
+                  value: entry.extension,
+                  text: `${entry.extension || "(unattributed)"} · ${entry.count}`,
+                  selected: entry.extension === filters.extension,
+                }),
+              ),
+            ),
+          ),
+        { reserve: 32, skeleton: () => el("span", { class: "dim small", text: "extensions…" }) },
+      ),
+      el("span", { class: "row tight" }, [
+        el("label", { class: "inline", for: "recard-search", text: "Search" }),
+        el("input", {
+          id: "recard-search",
+          type: "text",
+          value: filters.search,
+          placeholder: "title, name, or any id",
+          onchange: (event) => {
+            filters.search = event.target.value;
+            cursors.length = 0;
+            selected.clear();
+            void listing.load({ force: true });
+            redraw();
+          },
+        }),
+      ]),
+      el("span", { class: "row tight" }, [
+        el("label", { class: "inline", for: "recard-language", text: "Language" }),
+        el("input", {
+          id: "recard-language",
+          type: "text",
+          value: filters.language,
+          placeholder: "e.g. en",
+          onchange: (event) => {
+            filters.language = event.target.value;
+            cursors.length = 0;
+            selected.clear();
+            void listing.load({ force: true });
+            redraw();
+          },
+        }),
+      ]),
+    );
+
+  const modeRadio = (mode, label, hint) =>
+    el(
+      "label",
+      { class: "inline", for: `recard-mode-${mode}` },
+      el("input", {
+        id: `recard-mode-${mode}`,
+        type: "radio",
+        name: "recard-mode",
+        checked: target.mode === mode,
+        disabled: target.running,
+        onchange: (event) => {
+          if (!event.target.checked) return;
+          target.mode = mode;
+          cardImage.hidden = true;
+          setChildren(preview);
+          say("");
+          redraw();
+          if (mode === "selected") void listing.load();
+        },
+      }),
+      ` ${label}`,
+      el("span", { class: "dim small", text: ` — ${hint}` }),
+    );
+
+  /**
+   * The card image itself, kept as one element rather than rebuilt.
+   *
+   * Rendering it is a server-side render of a real PNG, so it is asked for when
+   * the operator asks — the same "Refresh the preview" button the single-chapter
+   * dialog has — and not once per keystroke in the id box.
+   */
+  const cardImage = el("img", {
+    class: "card-preview",
+    alt: "The card that would be posted as this chapter's only page",
+    hidden: true,
+  });
+
+  const showCard = () => {
+    const id = target.id.trim();
+    cardImage.hidden = !id;
+    if (id) cardImage.src = previewSrc(id, note.value.trim());
+  };
+
+  const oneChapterField = () =>
+    target.mode === "one"
+      ? el(
+          "div",
+          {},
+          el("label", { for: "recard-chapter-id", text: "MangaDex chapter id" }),
+          el("input", {
+            id: "recard-chapter-id",
+            type: "text",
+            value: target.id,
+            placeholder: "paste it from the chapter URL",
+            oninput: (event) => {
+              target.id = event.target.value;
+              redrawButtons();
+            },
+          }),
+          row(
+            el("button", {
+              type: "button",
+              text: "Refresh the preview",
+              onclick: showCard,
+            }),
+            el("span", {
+              class: "dim small",
+              text: "Renders the exact image this would post, footer note included.",
+            }),
+          ),
+          cardImage,
+        )
+      : el("span", {});
+
+  const redrawButtons = () => {
+    const ready = Boolean(bodyFor()) && !target.running;
+    setChildren(
+      buttons,
+      gatedButton("chapters:read", {
+        text: "Preview",
+        disabled: !ready,
+        title: ready ? "Resolve the target and report what would be queued" : "Nothing is targeted yet",
+        onclick: (event) => runPreview(event.currentTarget),
+      }),
+      gatedButton("chapters:write", {
+        class: "primary",
+        text: target.mode === "all" ? "Re-post every card…" : "Re-post these cards…",
+        disabled: !ready,
+        onclick: () => runApply(),
+      }),
+      target.running
+        ? el("button", {
+            type: "button",
+            text: "Stop after this page",
+            onclick: () => {
+              target.cancel = true;
+              say("Stopping after the page in flight…");
+            },
+          })
+        : null,
+    );
+  };
+
+  const redraw = () => {
+    setChildren(
+      modes,
+      oneChapterField(),
+      target.mode === "one" ? el("span", {}) : filterRow(),
+      picker(),
+    );
+    redrawButtons();
+  };
+
+  redraw();
+
+  return el(
+    "div",
+    {},
+    card(
+      "Re-post unavailable card images",
+      el("p", {
+        class: "dim small",
+        text:
+          "A card is rendered when it is posted, so every card on MangaDex is a fossil of the build " +
+          "that put it there. After a fix to the renderer — a missing font, wrong wording, a clipped " +
+          "title — this is what brings the pages already up in line with it.",
+      }),
+      el("p", {
+        class: "dim small",
+        text:
+          "Each chapter keeps its place, its metadata and the date it went unavailable; the fresh card " +
+          "carries that original date rather than today's. Only chapters already in the unavailable " +
+          "archive are touched: this never cards a chapter for the first time.",
+      }),
+      el(
+        "div",
+        { class: "row" },
+        modeRadio("all", "Every unavailable chapter", "optionally narrowed by the filter below"),
+        modeRadio("selected", "Pick from the archive", "tick the ones to re-post"),
+        modeRadio("one", "One chapter", "by MangaDex chapter id"),
+      ),
+      modes,
+      el("label", { for: "recard-note", text: "Footer note" }),
+      note,
+      el("p", {
+        class: "dim small",
+        text: "Replaces the standard explanatory paragraph on every card this queues.",
+      }),
+      buttons,
+      progress,
+      preview,
+    ),
+  );
+}
+
+/** What one page of a re-card resolved to, previewed or already queued. */
+function recardPreview(result, mode) {
+  const blocked = (result.results ?? []).filter((item) => !item.ok);
+  return el(
+    "div",
+    {},
+    el("h3", { text: result.dryRun ? "Preview" : "Queued" }),
+    defs([
+      ["Unavailable chapters matching", String(result.matched ?? 0)],
+      ["This page", String(result.resolved ?? result.requested ?? 0)],
+      [result.dryRun ? "Would be queued" : "Queued", String(result.wouldQueue ?? result.queued ?? 0)],
+      ["Skipped", String(blocked.length)],
+    ]),
+    result.nextAfterId
+      ? el("p", {
+          class: "dim small",
+          text:
+            mode === "all"
+              ? "More chapters remain after this page; the sweep continues automatically until none do."
+              : "More chapters remain after this page.",
+        })
+      : null,
+    table(
+      ["Series", "Chapter", "Unavailable since", result.dryRun ? "Would happen" : "Outcome"],
+      (result.results ?? []).slice(0, 100).map((item) => [
+        truncate(item.mangaName || item.mdChapterId, 40),
+        item.chapterNumber ? `Ch. ${item.chapterNumber}` : "-",
+        item.unavailableAt ? fmtTime(item.unavailableAt) : "-",
+        item.ok
+          ? chip(result.dryRun ? "queued" : item.outcome)
+          : el("span", { class: "dim small", text: item.reason ?? item.outcome }),
+      ]),
+      { empty: "Nothing in the unavailable archive matched." },
+    ),
+    (result.results ?? []).length > 100
+      ? el("p", { class: "dim small", text: `…and ${result.results.length - 100} more.` })
+      : null,
+  );
+}
 
 function backupPanel() {
   // The dump contains every password hash and the saved MangaDex session, so the
