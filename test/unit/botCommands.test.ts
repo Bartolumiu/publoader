@@ -1054,3 +1054,92 @@ describe("retired pointers stay accurate as endpoints land", () => {
     expect(reply.text).toContain("/queue cancel");
   });
 });
+
+
+/**
+ * `/recard`: the half of a re-card the bot can actually do.
+ *
+ * Queuing card images is closed to api tokens at the endpoint, so the command
+ * reports and hands over a command line rather than pretending it can act. The
+ * property worth holding is that it never hands over a command line aimed at a
+ * title nobody chose.
+ */
+describe("recard", () => {
+  const series = (over: Record<string, unknown> = {}) => ({
+    mdMangaId: "9a1b1c1d-0000-4000-8000-000000000000",
+    mangaName: "Sakamoto Days",
+    extensions: ["mangaplus"],
+    count: 12,
+    at: "2026-03-04T05:06:07.000Z",
+    ...over,
+  });
+
+  it("names the title, the size of the job, and how to run it", async () => {
+    const archiveSeries = vi.fn().mockResolvedValue({
+      archive: "unavailable",
+      series: [series()],
+      limit: 5,
+      capped: false,
+    });
+    const reply = await invoke("recard", fakeApi({ archiveSeries }), { series: "sakamoto" });
+
+    expect(archiveSeries).toHaveBeenCalledWith("discord:ardax", {
+      archive: "unavailable",
+      search: "sakamoto",
+      extension: undefined,
+      limit: 5,
+    });
+    expect(reply.text).toContain("Sakamoto Days");
+    expect(reply.text).toContain("12");
+    expect(reply.text).toContain(
+      "padmin chapters recard --series 9a1b1c1d-0000-4000-8000-000000000000 --apply",
+    );
+    // Said plainly rather than discovered as a 403 after the fact.
+    expect(reply.text).toContain("cannot post card images");
+  });
+
+  it("shortlists rather than guessing when a name matches several titles", async () => {
+    const archiveSeries = vi.fn().mockResolvedValue({
+      archive: "unavailable",
+      series: [series(), series({ mdMangaId: "other-id", mangaName: "Sakamoto Days Gaiden", count: 3 })],
+      limit: 5,
+      capped: false,
+    });
+    const reply = await invoke("recard", fakeApi({ archiveSeries }), { series: "sakamoto" });
+
+    expect(reply.text).toContain("Sakamoto Days Gaiden");
+    // No command line: running one against the wrong title is the failure this
+    // shortlist exists to prevent.
+    expect(reply.text).not.toContain("--apply");
+    expect(reply.text).toContain("Name one of them");
+  });
+
+  it("carries the extension into the command line it hands over", async () => {
+    const archiveSeries = vi.fn().mockResolvedValue({
+      archive: "unavailable",
+      series: [series()],
+      limit: 5,
+      capped: false,
+    });
+    const reply = await invoke("recard", fakeApi({ archiveSeries }), {
+      series: "sakamoto",
+      extension: "mangaplus",
+    });
+    expect(reply.text).toContain("--extension mangaplus --apply");
+  });
+
+  it("says so when nothing is carded at all", async () => {
+    const archiveSeries = vi.fn().mockResolvedValue({
+      archive: "unavailable",
+      series: [],
+      limit: 10,
+      capped: false,
+    });
+    const reply = await invoke("recard", fakeApi({ archiveSeries }), {});
+    expect(reply.text).toContain("no card to re-post");
+  });
+
+  it("stays a read command; it has no write to gate", () => {
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("recard")!, null)).toBe("read");
+  });
+});

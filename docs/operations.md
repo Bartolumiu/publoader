@@ -1230,14 +1230,37 @@ a fossil of the build that put it there. When the renderer changes — a font th
 was missing, wording that was wrong, a layout that clipped long titles — the only
 fix for the pages already up is to render them again and post them over the top.
 
-**Dashboard → System → Unavailable cards.** Three targets, because the three
-occasions differ: one chapter somebody complained about, a set ticked out of the
-archive, or every card on the site after a renderer fix. Preview first; the
-preview resolves the same rows and checks the same refusals as the live run.
+**Dashboard → System → Unavailable cards.** Four targets, because the occasions
+differ: one chapter somebody complained about, **one series**, a set ticked out
+of the archive, or every card on the site after a renderer fix. Preview first;
+the preview resolves the same rows and checks the same refusals as the live run.
+
+The series target is the one most complaints arrive as — a reader reports that a
+title's pages are wrong, not that chapter `1c2d…`'s are. Picking it out of the
+list shows how many cards that title has up before anything is queued; from the
+CLI it is one command that follows its own continuation to the end:
+
+```bash
+# which titles have cards up, largest first
+padmin chapters series --archive unavailable --search sakamoto
+
+# what re-carding one of them would do, then doing it
+padmin chapters recard --series "$MD_MANGA_ID"
+padmin chapters recard --series "$MD_MANGA_ID" --apply
+```
+
+`/recard` in Discord answers the same question and hands back that command line;
+it cannot queue the work itself, because card images are closed to api tokens at
+the endpoint.
 
 By hand it is one route, always forced, always the `unavailable` archive:
 
 ```bash
+# one series, previewed
+curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  -d "{\"filter\":{\"mdMangaId\":\"$MD_MANGA_ID\"}}" \
+  "$API/api/v1/admin/chapters/unavailable/recard"
+
 # every unavailable chapter, previewed
 curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
   -d '{"filter":{}}' "$API/api/v1/admin/chapters/unavailable/recard"

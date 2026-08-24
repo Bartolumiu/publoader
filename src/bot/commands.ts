@@ -1381,6 +1381,86 @@ const commands: BotCommand[] = [
     },
   },
   {
+    name: "recard",
+    description: "Which titles have unavailable card images up, and how to re-post them.",
+    // Read, and not by choice: queuing card images is closed to api tokens at
+    // the endpoint, so a `pa_…` token could not re-post a card even if this
+    // asked it to. What the bot can do is the half that happens in a channel
+    // anyway — somebody reports a bad card, and the answer is which title it
+    // is, how many pages would move, and the one line that moves them.
+    sensitivity: "read",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("recard")
+      .setDescription("Which titles have unavailable card images up, and how to re-post them.")
+      .addStringOption((o) =>
+        o
+          .setName("series")
+          .setDescription("A title, by name or MangaDex id. Omit for the titles with the most cards up.")
+          .setAutocomplete(true),
+      )
+      .addStringOption((o) =>
+        o.setName("extension").setDescription("Only chapters this extension uploaded.").setAutocomplete(true),
+      ),
+    async run(ctx) {
+      const series = ctx.options.string("series");
+      const extension = ctx.options.string("extension");
+      const report = await ctx.api.archiveSeries(ctx.actor, {
+        archive: "unavailable",
+        search: series ?? undefined,
+        extension: extension ?? undefined,
+        limit: series ? 5 : 10,
+      });
+
+      const where = extension ? ` uploaded by **${extension}**` : "";
+      if (report.series.length === 0) {
+        return {
+          text: series
+            ? `:mag: No title${where} matching \`${series}\` has a card image up.`
+            : `:white_check_mark: No chapter${where} is marked unavailable, so there is no card to re-post.`,
+        };
+      }
+
+      // An exact id, or a name that matched one title and only one, is a
+      // target; anything else is a shortlist, and offering a command line for a
+      // title the operator has not actually chosen is how the wrong series gets
+      // re-carded.
+      const exact =
+        report.series.length === 1
+          ? report.series[0]
+          : report.series.find((entry) => entry.mdMangaId === series?.trim());
+
+      const lines = report.series.map(
+        (entry) =>
+          `• **${entry.mangaName ?? "(unnamed)"}** — ${entry.count} card(s) up, ` +
+          `${entry.extensions.map((name) => name || "(unattributed)").join(", ")}\n` +
+          `  \`${entry.mdMangaId}\``,
+      );
+
+      if (!exact) {
+        return {
+          text:
+            `:mag: ${report.series.length} title(s)${where} with card images up` +
+            (report.capped ? ", the largest shown" : "") +
+            `:\n${lines.join("\n")}\n` +
+            "Name one of them to get the command that re-posts its cards.",
+        };
+      }
+
+      const narrow = extension ? ` --extension ${extension}` : "";
+      return {
+        text:
+          `:card_index: **${exact.mangaName ?? exact.mdMangaId}** has **${exact.count}** ` +
+          `unavailable card image(s) up${where}, most recently ${exact.at}.\n` +
+          "Re-rendering them replaces each page with a fresh card and keeps the chapter's own " +
+          "unavailable-since date; it never cards a chapter for the first time.\n" +
+          "Nothing has been queued: the bot's token cannot post card images. Do it from " +
+          "**System → Unavailable cards** on the dashboard, or run\n" +
+          `\`\`\`\npadmin chapters recard --series ${exact.mdMangaId}${narrow} --apply\n\`\`\``,
+      };
+    },
+  },
+  {
     name: "tracked",
     description: "The external-id to MangaDex-id mapping for an extension.",
     sensitivity: { list: "read", set: "mutate", remove: "mutate" },

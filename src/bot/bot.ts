@@ -285,9 +285,13 @@ export class PubloaderBot {
   }
 
   /**
-   * Extension-name autocomplete. Backed by the published-bundle list, which is
-   * the authority now; the legacy bot listed directories on the scheduler's
-   * disk, which could offer a name that had never been published.
+   * Option autocomplete.
+   *
+   * Extension names come from the published-bundle list, which is the authority
+   * now; the legacy bot listed directories on the scheduler's disk, which could
+   * offer a name that had never been published. Series come from the archive
+   * itself, uncached: the set changes every time the uploader archives a
+   * chapter, and a stale title list is a re-card aimed at the wrong id.
    */
   private async onAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
     const invoker = invokerOf(interaction);
@@ -298,6 +302,10 @@ export class PubloaderBot {
       return;
     }
     const focused = interaction.options.getFocused(true);
+    if (focused.name === "series") {
+      await this.respondWithSeries(interaction, String(focused.value ?? ""));
+      return;
+    }
     if (focused.name !== "extension") {
       await interaction.respond([]).catch(() => undefined);
       return;
@@ -313,6 +321,37 @@ export class PubloaderBot {
       .filter((n) => !needle || n.toLowerCase().includes(needle))
       .slice(0, 25)
       .map((n) => ({ name: n, value: n }));
+    await interaction.respond(choices).catch(() => undefined);
+  }
+
+  /**
+   * Titles in the unavailable archive, largest first, as autocomplete choices.
+   *
+   * The value is the MangaDex id and the label carries the count, because the
+   * two things an operator needs to see before choosing are which title it is
+   * and how many pages a re-card would move. Failure answers an empty list: a
+   * missing suggestion is a worse UX, a thrown autocomplete is a broken one.
+   */
+  private async respondWithSeries(
+    interaction: AutocompleteInteraction,
+    needle: string,
+  ): Promise<void> {
+    let choices: { name: string; value: string }[] = [];
+    try {
+      const { series } = await this.api.archiveSeries("discord:autocomplete", {
+        archive: "unavailable",
+        search: needle.trim() || undefined,
+        limit: 25,
+      });
+      choices = series.map((entry) => ({
+        // Discord rejects a choice name over 100 characters outright, taking
+        // the whole response with it.
+        name: `${entry.mangaName ?? entry.mdMangaId} · ${entry.count} card(s)`.slice(0, 100),
+        value: entry.mdMangaId,
+      }));
+    } catch (err) {
+      this.log.debug({ err }, "autocomplete could not list series");
+    }
     await interaction.respond(choices).catch(() => undefined);
   }
 

@@ -69,6 +69,9 @@ const MAX_PROJECTION_PAGE = 500;
 /** Titles shown in a run's per-series breakdown. */
 const MANGA_BREAKDOWN_LIMIT = 200;
 
+/** Titles one `/chapters/series` answer carries. */
+const SERIES_LIMIT = 500;
+
 /**
  * Hard ceiling on one bulk action. Lower than the 1000 routes/queues.ts allows,
  * because that cap bounds a change to queue rows and this one bounds a change to
@@ -634,6 +637,53 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           req.query ?? {},
         );
         return { archive, extensions: await ctx.chapters.byExtension(archive) };
+      },
+    );
+
+    /**
+     * The series present in one archive, most-affected first.
+     *
+     * The counterpart to `/chapters/extensions`, for the axis an operator
+     * actually arrives on when one title is wrong: "this series' cards are
+     * stale" is the shape of the complaint, and a series-scoped re-card is the
+     * answer to it. Answering here rather than by paging `/chapters` is the
+     * difference between reading one row and reading every chapter of a title
+     * to count them.
+     */
+    scope.get(
+      "/api/v1/admin/chapters/series",
+      { preHandler: requireScope("chapters:read") },
+      async (req) => {
+        const query = parseOrThrow(
+          z
+            .object({
+              archive: z.enum(CHAPTER_ARCHIVES).default("uploaded"),
+              extension: z.string().max(64).optional(),
+              language: z.string().max(16).optional(),
+              search: z.string().min(1).max(256).optional(),
+              limit: z.coerce.number().int().min(1).max(SERIES_LIMIT).default(100),
+            })
+            .strict(),
+          req.query ?? {},
+        );
+        const series = await ctx.chapters.bySeries(
+          query.archive,
+          {
+            extension: query.extension,
+            chapterLanguage: query.language,
+            search: query.search,
+          },
+          query.limit,
+        );
+        return {
+          archive: query.archive,
+          series,
+          limit: query.limit,
+          // A `LIMIT`, not a page: the ordering is by count, so the caller's
+          // next move when this is true is to narrow the search rather than to
+          // walk a tail that is by construction the least interesting end.
+          capped: series.length === query.limit,
+        };
       },
     );
 

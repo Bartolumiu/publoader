@@ -8641,14 +8641,29 @@ VIEWS.system = (route) => {
  * goes rather than timing out behind a spinner.
  */
 function unavailableCardsPanel() {
-  const target = { mode: "all", id: "", running: false, cancel: false };
+  const target = { mode: "all", id: "", series: "", seriesName: "", running: false, cancel: false };
   const selected = new Set();
   const filters = { extension: "", language: "", search: "" };
   const cursors = [];
 
+  /** The filter, as the query string both listings and the sweep body share. */
+  const activeFilter = () => {
+    const filter = {};
+    if (filters.extension) filter.extension = filters.extension;
+    if (filters.language) filter.language = filters.language;
+    return filter;
+  };
+
   const extensions = new Resource("recard-extensions", () =>
     api("/chapters/extensions?archive=unavailable"),
   );
+  const seriesList = new Resource("recard-series", () => {
+    const q = new URLSearchParams({ archive: "unavailable", limit: "100" });
+    if (filters.extension) q.set("extension", filters.extension);
+    if (filters.language) q.set("language", filters.language);
+    if (filters.search) q.set("search", filters.search);
+    return api(`/chapters/series?${q}`);
+  });
   const listing = new Resource("recard-listing", () => {
     const q = new URLSearchParams({ archive: "unavailable", limit: "50" });
     if (filters.extension) q.set("extension", filters.extension);
@@ -8678,9 +8693,14 @@ function unavailableCardsPanel() {
     if (target.mode === "selected") {
       return selected.size ? { ids: [...selected] } : null;
     }
-    const filter = {};
-    if (filters.extension) filter.extension = filters.extension;
-    if (filters.language) filter.language = filters.language;
+    if (target.mode === "series") {
+      const id = target.series.trim();
+      // Extension and language ride along when they are set, because the list
+      // this title was picked out of was narrowed by them: a sweep wider than
+      // the list it was chosen from would act on chapters never shown.
+      return id ? { filter: { ...activeFilter(), mdMangaId: id } } : null;
+    }
+    const filter = activeFilter();
     if (filters.search) filter.search = filters.search;
     return { filter };
   };
@@ -8701,6 +8721,19 @@ function unavailableCardsPanel() {
     progress.textContent = text;
   };
 
+  /**
+   * The filter changed, so every listing that was narrowed by it is stale and
+   * every selection made under it may no longer be shown. Reloading only the
+   * mounted list keeps a mode switch from paying for the other one's fetch.
+   */
+  const refilter = () => {
+    cursors.length = 0;
+    selected.clear();
+    if (target.mode === "selected") void listing.load({ force: true });
+    if (target.mode === "series") void seriesList.load({ force: true });
+    redraw();
+  };
+
   const runPreview = async (button) => {
     if (!bodyFor()) {
       say("Nothing is targeted yet.", true);
@@ -8710,10 +8743,10 @@ function unavailableCardsPanel() {
     if (!result) return;
     setChildren(preview, recardPreview(result, target.mode));
     say(
-      target.mode === "all"
+      target.mode === "all" || target.mode === "series"
         ? `${result.matched} unavailable chapter(s) match; this sweep would queue ${result.wouldQueue} ` +
             `in the first pass of ${result.resolved}` +
-            (result.nextAfterId ? ", and keep going until the archive is exhausted." : ".")
+            (result.nextAfterId ? ", and keep going until every one has been reached." : ".")
         : `${result.wouldQueue} of ${result.resolved} chapter(s) would be queued.`,
     );
   };
@@ -8738,7 +8771,9 @@ function unavailableCardsPanel() {
     const scope =
       mode === "all"
         ? "every unavailable chapter matching the filter"
-        : `${body.ids.length} chapter(s)`;
+        : mode === "series"
+          ? `every unavailable chapter of ${target.seriesName || target.series}`
+          : `${body.ids.length} chapter(s)`;
     if (
       !(await confirmDialog({
         title: "Re-post these card images",
@@ -8795,11 +8830,14 @@ function unavailableCardsPanel() {
       redraw();
     }
     if (mode === "selected") void listing.load({ force: true });
+    if (mode === "series") void seriesList.load({ force: true });
   };
 
-  /** The picker, only mounted for the two targets that name chapters. */
+  /** The picker, only mounted for the targets that name something. */
   const picker = () =>
-    target.mode === "selected"
+    target.mode === "series"
+      ? seriesPicker()
+      : target.mode === "selected"
       ? live(
           [listing],
           (data) => {
@@ -8874,10 +8912,7 @@ function unavailableCardsPanel() {
                 id: "recard-extension",
                 onchange: (event) => {
                   filters.extension = event.target.value;
-                  cursors.length = 0;
-                  selected.clear();
-                  void listing.load({ force: true });
-                  redraw();
+                  refilter();
                 },
               },
               el("option", { value: "", text: "all", selected: filters.extension === "" }),
@@ -8901,10 +8936,7 @@ function unavailableCardsPanel() {
           placeholder: "title, name, or any id",
           onchange: (event) => {
             filters.search = event.target.value;
-            cursors.length = 0;
-            selected.clear();
-            void listing.load({ force: true });
-            redraw();
+            refilter();
           },
         }),
       ]),
@@ -8917,10 +8949,7 @@ function unavailableCardsPanel() {
           placeholder: "e.g. en",
           onchange: (event) => {
             filters.language = event.target.value;
-            cursors.length = 0;
-            selected.clear();
-            void listing.load({ force: true });
-            redraw();
+            refilter();
           },
         }),
       ]),
@@ -8944,6 +8973,7 @@ function unavailableCardsPanel() {
           say("");
           redraw();
           if (mode === "selected") void listing.load();
+          if (mode === "series") void seriesList.load();
         },
       }),
       ` ${label}`,
@@ -8968,6 +8998,85 @@ function unavailableCardsPanel() {
     cardImage.hidden = !id;
     if (id) cardImage.src = previewSrc(id, note.value.trim());
   };
+
+  /**
+   * The series target: a title picked out of the archive, or an id pasted in.
+   *
+   * Both, because the two ways an operator arrives here are different. Somebody
+   * reports that one title's cards are wrong and the id is in the URL they were
+   * sent; or a renderer fix landed and the question is which titles carry the
+   * most stale cards, which is what the list answers and no id in hand can.
+   */
+  const seriesField = () =>
+    target.mode === "series"
+      ? el(
+          "div",
+          {},
+          el("label", { for: "recard-series-id", text: "MangaDex title id" }),
+          el("input", {
+            id: "recard-series-id",
+            type: "text",
+            value: target.series,
+            placeholder: "paste it from the title URL, or pick one below",
+            oninput: (event) => {
+              target.series = event.target.value;
+              target.seriesName = "";
+              redrawButtons();
+            },
+          }),
+          el("p", {
+            class: "dim small",
+            text:
+              "Every chapter of this title in the unavailable archive gets a fresh card, " +
+              "narrowed by the filter below where one is set.",
+          }),
+        )
+      : el("span", {});
+
+  const seriesPicker = () =>
+    live(
+      [seriesList],
+      (data) => {
+        const rows = data.series ?? [];
+        return el(
+          "div",
+          {},
+          el("div", { class: "row" }, [
+            el("span", {
+              class: "dim small",
+              text: target.series
+                ? `Targeting ${target.seriesName || target.series}`
+                : `${rows.length} title(s) with cards up${data.capped ? ", the largest shown" : ""}`,
+            }),
+          ]),
+          table(
+            ["", "Series", "Cards up", "Extension", "Most recent"],
+            rows.map((entry) => [
+              el("input", {
+                type: "radio",
+                name: "recard-series-pick",
+                checked: target.series.trim() === entry.mdMangaId,
+                "aria-label": `Target ${entry.mangaName ?? entry.mdMangaId}`,
+                onchange: (event) => {
+                  if (!event.target.checked) return;
+                  target.series = entry.mdMangaId;
+                  target.seriesName = entry.mangaName ?? "";
+                  setChildren(preview);
+                  say("");
+                  redraw();
+                },
+              }),
+              truncate(entry.mangaName || entry.mdMangaId, 40),
+              String(entry.count),
+              (entry.extensions ?? []).map((name) => name || "(unattributed)").join(", ") || "-",
+              fmtTime(entry.at),
+            ]),
+            { empty: "No title in the unavailable archive matches this filter." },
+          ),
+        );
+      },
+      { reserve: 300, skeleton: () => skeletonTable(5, 6) },
+    );
 
   const oneChapterField = () =>
     target.mode === "one"
@@ -9012,7 +9121,12 @@ function unavailableCardsPanel() {
       }),
       gatedButton("chapters:write", {
         class: "primary",
-        text: target.mode === "all" ? "Re-post every card…" : "Re-post these cards…",
+        text:
+          target.mode === "all"
+            ? "Re-post every card…"
+            : target.mode === "series"
+              ? "Re-post this series' cards…"
+              : "Re-post these cards…",
         disabled: !ready,
         onclick: () => runApply(),
       }),
@@ -9033,6 +9147,7 @@ function unavailableCardsPanel() {
     setChildren(
       modes,
       oneChapterField(),
+      seriesField(),
       target.mode === "one" ? el("span", {}) : filterRow(),
       picker(),
     );
@@ -9064,6 +9179,7 @@ function unavailableCardsPanel() {
         "div",
         { class: "row" },
         modeRadio("all", "Every unavailable chapter", "optionally narrowed by the filter below"),
+        modeRadio("series", "One series", "every card this title has up"),
         modeRadio("selected", "Pick from the archive", "tick the ones to re-post"),
         modeRadio("one", "One chapter", "by MangaDex chapter id"),
       ),
@@ -9098,7 +9214,7 @@ function recardPreview(result, mode) {
       ? el("p", {
           class: "dim small",
           text:
-            mode === "all"
+            mode === "all" || mode === "series"
               ? "More chapters remain after this page; the sweep continues automatically until none do."
               : "More chapters remain after this page.",
         })

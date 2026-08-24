@@ -700,6 +700,118 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
   });
 
 
+  /**
+   * The per-title breakdown of an archive.
+   *
+   * The axis a complaint actually arrives on: a reader reports that one title's
+   * pages are wrong, and the operator needs that title's id and the size of the
+   * job before deciding to do anything. Counting by paging the chapter listing
+   * would mean reading every chapter of the title to learn how many there are.
+   */
+  it("groups an archive by title, most-affected first", async () => {
+    const otherManga = uuid(901);
+    await prisma.unavailableChapter.createMany({
+      data: [
+        {
+          mdChapterId: uuid(601),
+          extension: "exampleext",
+          chapterNumber: "1",
+          chapterLanguage: "en",
+          mangaName: "Old spelling",
+          mdMangaId: uuid(900),
+          unavailableAt: new Date("2026-01-01T00:00:00.000Z"),
+        },
+        {
+          mdChapterId: uuid(602),
+          extension: "otherext",
+          chapterNumber: "2",
+          chapterLanguage: "en",
+          mangaName: "Test Series",
+          mdMangaId: uuid(900),
+          unavailableAt: new Date("2026-05-05T00:00:00.000Z"),
+        },
+        {
+          mdChapterId: uuid(603),
+          extension: "exampleext",
+          chapterNumber: "3",
+          chapterLanguage: "ja",
+          mangaName: "Second Series",
+          mdMangaId: otherManga,
+          unavailableAt: new Date("2026-02-02T00:00:00.000Z"),
+        },
+        // No MangaDex title id: a series filter cannot address it, so it is not
+        // offered as a group nothing can act on.
+        {
+          mdChapterId: uuid(604),
+          extension: "exampleext",
+          chapterNumber: "4",
+          unavailableAt: new Date("2026-02-02T00:00:00.000Z"),
+        },
+      ],
+    });
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/chapters/series?archive=unavailable",
+      headers: root,
+    });
+    expect(res.statusCode).toBe(200);
+    const series = res.json().series;
+    expect(series).toHaveLength(2);
+    expect(res.json().capped).toBe(false);
+
+    // Two chapters beats one, and the name comes from the newest row: one title
+    // recorded under two spellings should read as the one an operator has seen.
+    expect(series[0]).toMatchObject({
+      mdMangaId: uuid(900),
+      mangaName: "Test Series",
+      count: 2,
+      extensions: ["exampleext", "otherext"],
+    });
+    expect(series[0].at).toBe("2026-05-05T00:00:00.000Z");
+    expect(series[1]).toMatchObject({ mdMangaId: otherManga, count: 1 });
+
+    // The same narrowing the listing takes, so the list an operator picks from
+    // and the sweep they then run cover the same rows.
+    const narrowed = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/chapters/series?archive=unavailable&extension=otherext",
+      headers: root,
+    });
+    expect(narrowed.json().series).toEqual([
+      expect.objectContaining({ mdMangaId: uuid(900), count: 1 }),
+    ]);
+
+    const searched = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/chapters/series?archive=unavailable&search=Second",
+      headers: root,
+    });
+    expect(searched.json().series).toEqual([
+      expect.objectContaining({ mdMangaId: otherManga, count: 1 }),
+    ]);
+
+    // A limit reached is said so, because the ordering is by count and the
+    // caller's next move is to narrow rather than to walk a tail.
+    const capped = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/chapters/series?archive=unavailable&limit=1",
+      headers: root,
+    });
+    expect(capped.json().series).toHaveLength(1);
+    expect(capped.json().capped).toBe(true);
+  });
+
+  it("keeps the series breakdown behind the read scope", async () => {
+    const reader = await mint(["runs:read"]);
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/chapters/series?archive=unavailable",
+      headers: reader,
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
   // ---- re-carding what is already unavailable ----
 
   /**
@@ -845,6 +957,63 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
       expect(res.json().queued).toBe(1);
       const tasks = await prisma.uploadTask.findMany({ where: { kind: "UNAVAILABLE" } });
       expect(tasks.map((t) => t.dedupeKey)).toEqual([mine.mdChapterId]);
+    });
+
+    /**
+     * The whole point of the series target: one title's cards, all of them,
+     * and nothing belonging to another title.
+     */
+    it("re-cards one title and leaves every other title alone", async () => {
+      const otherManga = uuid(902);
+      const mine = [
+        await carded({ chapterNumber: "1" }),
+        await carded({ chapterNumber: "2" }),
+      ];
+      const theirs = await carded({ mdMangaId: otherManga, mangaName: "Somebody Else" });
+
+      const preview = await recard({ filter: { mdMangaId: uuid(900) } });
+      expect(preview.json().matched).toBe(2);
+      expect(preview.json().wouldQueue).toBe(2);
+      expect(await prisma.uploadTask.count()).toBe(0);
+
+      const res = await recard({
+        filter: { mdMangaId: uuid(900) },
+        dryRun: false,
+        confirm: true,
+      });
+      expect(res.json().queued).toBe(2);
+      const tasks = await prisma.uploadTask.findMany({ where: { kind: "UNAVAILABLE" } });
+      expect(tasks.map((t) => t.dedupeKey).sort()).toEqual(mine.map((c) => c.mdChapterId).sort());
+      expect(tasks.map((t) => t.dedupeKey)).not.toContain(theirs.mdChapterId);
+    });
+
+    it("sweeps a title bigger than one page to the end", async () => {
+      const chapters = [];
+      for (let i = 0; i < 4; i += 1) chapters.push(await carded({ chapterNumber: String(i) }));
+      await carded({ mdMangaId: uuid(903) });
+
+      const seen: string[] = [];
+      let afterId: string | null = null;
+      for (let page = 0; page < 10; page += 1) {
+        const res = await recard({
+          filter: { mdMangaId: uuid(900) },
+          dryRun: false,
+          confirm: true,
+          batch: 2,
+          ...(afterId ? { afterId } : {}),
+        });
+        expect(res.statusCode).toBe(200);
+        // The count is the title's, not the archive's: the number an operator
+        // watches to know the title is done.
+        expect(res.json().matched).toBe(4);
+        for (const item of res.json().results) seen.push(item.mdChapterId);
+        afterId = res.json().nextAfterId;
+        if (!afterId) break;
+      }
+      expect(afterId).toBeNull();
+      expect(seen.sort()).toEqual(chapters.map((c) => c.mdChapterId).sort());
+      // The other title's chapter was never in the sweep.
+      expect(await prisma.uploadTask.count({ where: { kind: "UNAVAILABLE" } })).toBe(4);
     });
 
     it("refuses chapters that have no card to replace, one by one", async () => {
