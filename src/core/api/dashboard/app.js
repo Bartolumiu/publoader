@@ -4102,11 +4102,13 @@ VIEWS.chapters = (route) => {
 };
 
 /**
- * Bring the archives back in line with what MangaDex actually holds.
+ * Bring our record of the chapters back in line with what MangaDex actually
+ * holds.
  *
- * Only on the two archives it can write, because offering it while reading
- * `uploaded` or `edited` would imply it reconciles those, and it does not; it
- * moves rows *into* unavailable and deleted.
+ * On `uploaded` as well as the two archives, because it writes all three now:
+ * the adoption pass records the live chapters MangaDex has that this platform
+ * never uploaded, and `uploaded` is the table that is missing them. Still not
+ * on `edited`, which it does not touch.
  *
  * Check first, then apply, and never the other way round: the check is the only
  * thing that says how many rows are about to move, and unlike the bulk actions
@@ -4114,13 +4116,17 @@ VIEWS.chapters = (route) => {
  * has left `uploaded_chapters`.
  */
 function reconcileCard(archive, reload) {
-  if (archive !== "unavailable" && archive !== "deleted") return el("span", {});
+  if (archive !== "unavailable" && archive !== "deleted" && archive !== "uploaded") {
+    return el("span", {});
+  }
   const output = el("div", { class: "dim small" });
   let checked = null;
 
   const render = (report) => {
     checked = report;
-    const groups = (report.groups ?? []).filter((g) => g.carded > 0 || g.hiddenOnMangadex > 0);
+    const groups = (report.groups ?? []).filter(
+      (g) => g.carded > 0 || g.hiddenOnMangadex > 0 || g.untracked > 0,
+    );
     setChildren(
       output,
       el("div", {}, [
@@ -4130,13 +4136,31 @@ function reconcileCard(archive, reload) {
             `chapter(s) are not in the archives ` +
             `(found ${report.unavailableFound} and ${report.deletedFound}; the rest are already recorded).`,
         }),
+        el("div", {
+          text:
+            `${report.untrackedFound ?? 0} live chapter(s) on MangaDex have no row here at all; ` +
+            `${report.idsRecorded ?? 0} of them would recover a publisher chapter id.`,
+        }),
         ...groups.map((g) =>
           el("div", {
             text:
               `${g.extension}: ${g.carded} of ${g.total} already carded on MangaDex, ${g.recorded} new` +
+              (g.untracked > 0 ? `, ${g.untracked} of ${g.live} live untracked` : "") +
               (g.hiddenOnMangadex > 0 ? `, ${g.hiddenOnMangadex} live but unserved` : ""),
           }),
         ),
+        // An adopted row with no chapter id is the quiet failure here: it shows
+        // up in the listing and still leaves the extension re-fetching the
+        // chapter forever, so say so rather than let the count imply success.
+        ...groups
+          .filter((g) => g.untracked > 0 && !g.idRule)
+          .map((g) =>
+            el("div", {
+              text:
+                `${g.extension}: no chapter id can be read from its chapter URLs, so adopted rows ` +
+                "will carry none and those chapters stay outside postedChapterIds.",
+            }),
+          ),
         report.hiddenOnMangadex?.length
           ? el("div", {
               text:
@@ -4148,6 +4172,126 @@ function reconcileCard(archive, reload) {
     );
   };
 
+  /**
+   * Record the live chapters MangaDex has that no table here knows about.
+   *
+   * The deletion sweep and the carded-archiving pass are both switched off:
+   * this button's label promises one thing, and the sweep in particular is the
+   * slow half, one MangaDex call per row it cannot rule out.
+   */
+  const adoptButton = () =>
+    el("button", {
+      type: "button",
+      class: "primary",
+      text: "Track them",
+      onclick: async (event) => {
+        const button = event.currentTarget;
+        if (!checked) {
+          toast("Check first; nothing should be written before you have seen the count.", false);
+          return;
+        }
+        const adopting = checked.untrackedFound ?? 0;
+        if (adopting === 0) {
+          toast("Nothing to track; every live chapter on MangaDex already has a row.", true);
+          return;
+        }
+        // Naming the extensions that recovered no id is the point of the
+        // dialog: those rows land visible but still outside postedChapterIds,
+        // and that is the half an operator would otherwise never learn.
+        const blind = (checked.groups ?? [])
+          .filter((g) => g.untracked > 0 && !g.idRule)
+          .map((g) => g.extension);
+        if (
+          !(await confirmDialog({
+            title: "Track the chapters MangaDex has and we do not",
+            lead: `${adopting} live chapter(s) will be recorded as uploaded.`,
+            points: [
+              "Nothing is sent to MangaDex; this only corrects our record of it.",
+              "Only chapters no table here knows about are added; a chapter this platform " +
+                "actually uploaded keeps the row it already has, with its publisher-side ids.",
+              `${checked.idsRecorded ?? 0} of them recover a publisher chapter id, which is what ` +
+                "stops the extension re-fetching the chapter on every run.",
+              blind.length
+                ? `No chapter id can be read from the URLs of: ${blind.join(", ")}. Those rows will ` +
+                  "be added without one, so those chapters stay outside postedChapterIds."
+                : "Every one of them recovers a chapter id.",
+            ],
+            confirmLabel: "Add the rows",
+          }))
+        ) {
+          return;
+        }
+        await act(
+          "chapters.reconcile.adopt",
+          async () => {
+            render(
+              await api("/chapters/reconcile", {
+                method: "POST",
+                body: { dryRun: false, skipDeleted: true, skipUnavailable: true },
+              }),
+            );
+            checked = null;
+            // The listing below now has rows it did not have a moment ago.
+            reload();
+          },
+          { button },
+        );
+      },
+    });
+
+  /**
+   * Move the chapters MangaDex has carded or dropped into their archives.
+   *
+   * `skipAdopt` because this button is offered on the unavailable and deleted
+   * archives: adopting here would write thousands of rows into a third table
+   * the operator is not looking at. The uploaded archive has its own button.
+   */
+  const archiveButton = () =>
+    el("button", {
+      type: "button",
+      class: "primary",
+      text: "Record them",
+      onclick: async (event) => {
+        const button = event.currentTarget;
+        if (!checked) {
+          toast("Check first; nothing should be written before you have seen the count.", false);
+          return;
+        }
+        const moving = checked.unavailableRecorded + checked.deletedRecorded;
+        if (
+          !(await confirmDialog({
+            title: "Record what MangaDex changed",
+            lead: `${moving} chapter(s) will move into the unavailable and deleted archives.`,
+            points: [
+              "Nothing is sent to MangaDex; this only corrects our record of it.",
+              "Rows that move leave uploaded_chapters, so a chapter lives in exactly one table.",
+              "Chapters already archived keep the date they were first recorded.",
+              `The ${checked.untrackedFound ?? 0} untracked live chapter(s) are NOT written here; ` +
+                "that is the Uploaded archive's own button.",
+            ],
+            confirmLabel: "Move the rows",
+          }))
+        ) {
+          return;
+        }
+        await act(
+          "chapters.reconcile.apply",
+          async () => {
+            render(
+              await api("/chapters/reconcile", {
+                method: "POST",
+                body: { dryRun: false, skipAdopt: true },
+              }),
+            );
+            checked = null;
+            // The listing below now has rows it did not have a moment ago.
+            reload();
+          },
+          { button },
+        );
+      },
+    });
+
   return card(
     "Reconcile with MangaDex",
     el(
@@ -4156,9 +4300,17 @@ function reconcileCard(archive, reload) {
       el("p", {
         class: "dim small",
         text:
-          "These archives record what the workers did as they did it. This rebuilds them from " +
-          "MangaDex itself: the chapters already carrying an unavailable card, and the ones " +
-          "that are gone, so history the tables never captured is recorded too.",
+          "These tables record what the workers did as they did it, so they describe this " +
+          "platform's own history rather than the catalogue. Check reads MangaDex and reports " +
+          "the whole drift; the button beside it writes only the table you are looking at." +
+          (archive === "uploaded"
+            ? " Here that is the live chapters MangaDex has for our groups that we have never " +
+              "had a row for -- mostly chapters the previous uploader posted. Tracking them is " +
+              "not only about this listing: their ids are what an extension is given as " +
+              "postedChapterIds, and until they are recorded it re-fetches those chapters on " +
+              "every run."
+            : " Here that is the chapters already carrying an unavailable card and the ones " +
+              "MangaDex no longer has."),
       }),
       el(
         "div",
@@ -4173,43 +4325,12 @@ function reconcileCard(archive, reload) {
               { button: event.currentTarget },
             ),
         }),
-        el("button", {
-          type: "button",
-          class: "primary",
-          text: "Record them",
-          onclick: async (event) => {
-            const button = event.currentTarget;
-            if (!checked) {
-              toast("Check first; nothing should be written before you have seen the count.", false);
-              return;
-            }
-            const total = checked.unavailableRecorded + checked.deletedRecorded;
-            if (
-              !(await confirmDialog({
-                title: "Record what MangaDex changed",
-                lead: `${total} chapter(s) will move into the unavailable and deleted archives.`,
-                points: [
-                  "Nothing is sent to MangaDex; this only corrects our record of it.",
-                  "Rows that move leave uploaded_chapters, so a chapter lives in exactly one table.",
-                  "Chapters already archived keep the date they were first recorded.",
-                ],
-                confirmLabel: "Record them",
-              }))
-            ) {
-              return;
-            }
-            await act(
-              "chapters.reconcile.apply",
-              async () => {
-                render(await api("/chapters/reconcile", { method: "POST", body: { dryRun: false } }));
-                checked = null;
-                // The listing below now has rows it did not have a moment ago.
-                reload();
-              },
-              { button },
-            );
-          },
-        }),
+        // One button per archive, each running only the pass that writes the
+        // table being looked at. A single "do everything" button would have
+        // meant clicking "Record them" on the deleted archive and silently
+        // writing several thousand rows into `uploaded`, which is not what the
+        // label says and not what the operator is looking at.
+        archive === "uploaded" ? adoptButton() : archiveButton(),
       ),
       output,
     ),
