@@ -608,6 +608,7 @@ not a fourth flag on the bulk ones:
 | Method | Path | Scope | Notes |
 | --- | --- | --- | --- |
 | `POST` | `/chapters/unavailable/recard` | `chapters:write` + ADMIN | `{ids?, filter?, footerNote?, dryRun?, confirm?, afterId?, batch?}`. Always the `unavailable` archive and always forced. A chapter with no card refuses as `not_unavailable` rather than being carded for the first time |
+| `GET` | `/chapters/series` | `chapters:read` | `?archive=&extension=&language=&search=&limit=`. The titles present in one archive, most-affected first: `{mdMangaId, mangaName, extensions[], count, at}` plus `capped`. Aims the `mdMangaId` filter above; read-only, so unlike the re-card itself it is reachable on a `pa_…` token |
 
 It exists because the bulk route gets two things wrong for a re-render:
 
@@ -620,6 +621,12 @@ It exists because the bulk route gets two things wrong for a re-render:
   everything" through it re-cards the newest 200 for ever. This pages on the
   primary key and answers `nextAfterId`; the caller repeats with it until it is
   null, which is exactly what the dashboard panel does.
+
+`filter: {mdMangaId}` is the single-series trigger: every card one title has up,
+swept to the end by the same continuation as a whole-archive pass. `GET
+/chapters/series` is how a title is found — `count` is the size of the job, and
+extension and language narrow both it and the sweep identically, so the list an
+operator picks from and the rows the sweep touches are the same set.
 
 `filter: {}` means every unavailable chapter; the filter is required-but-emptiable
 so that "re-card everything" has to be typed rather than fallen into. Everything

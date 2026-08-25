@@ -296,6 +296,22 @@ export type UploadTaskState = "PENDING" | "LEASED" | "DONE" | "FAILED" | "DEAD_L
  * What a reconcile pass found. Mirrors ReconcileReport in
  * core/md/chapterReconcile.ts, narrowed to the fields the bot renders.
  */
+/** One title's footprint in an archive, as `/chapters/series` reports it. */
+export interface ArchiveSeries {
+  mdMangaId: string;
+  mangaName: string | null;
+  extensions: string[];
+  count: number;
+  at: string;
+}
+
+export interface ArchiveSeriesReport {
+  archive: string;
+  series: ArchiveSeries[];
+  limit: number;
+  capped: boolean;
+}
+
 export interface ChapterReconcileReport {
   dryRun: boolean;
   groups: {
@@ -538,6 +554,36 @@ export class AdminApiClient {
       scope: "chapters:read",
       actor,
       json: { dryRun: true, extensions },
+    });
+  }
+
+  /**
+   * The titles present in an archive, most-affected first.
+   *
+   * Read-only and therefore reachable on a `pa_…` token, unlike the re-card it
+   * exists to aim: queuing card images is closed to api tokens at the endpoint,
+   * so what the bot can usefully do is answer "which title, and how many pages
+   * would move?" — the question somebody asks in a channel before going to the
+   * dashboard or the CLI to do it.
+   */
+  archiveSeries(
+    actor: string,
+    opts: { archive: string; search?: string | undefined; extension?: string | undefined; limit?: number },
+  ): Promise<ArchiveSeriesReport> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/chapters/series",
+      scope: "chapters:read",
+      actor,
+      query: {
+        archive: opts.archive,
+        search: opts.search,
+        extension: opts.extension,
+        limit: opts.limit ?? 25,
+      },
+      // Autocomplete calls this on the keystroke and Discord closes the window
+      // at three seconds; a slow answer is worth abandoning, not waiting for.
+      timeoutMs: 2500,
     });
   }
 

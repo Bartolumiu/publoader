@@ -650,6 +650,201 @@ chapters
     );
   });
 
+chapters
+  .command("series")
+  .description("the titles present in an archive, most-affected first")
+  .option("--archive <name>", "uploaded | unavailable | deleted | edited", "unavailable")
+  .option("--extension <name>", "only chapters this extension uploaded")
+  .option("--language <code>", "only chapters in this language")
+  .option("--search <text>", "substring of the title name, or any id")
+  .option("--limit <n>", "how many titles to list", "50")
+  .action(
+    async (opts: {
+      archive: string;
+      extension?: string;
+      language?: string;
+      search?: string;
+      limit: string;
+    }) => {
+      const res = await api<{
+        archive: string;
+        series: {
+          mdMangaId: string;
+          mangaName: string | null;
+          extensions: string[];
+          count: number;
+          at: string;
+        }[];
+        capped: boolean;
+      }>("/api/v1/admin/chapters/series", {
+        query: {
+          archive: opts.archive,
+          extension: opts.extension,
+          language: opts.language,
+          search: opts.search,
+          limit: opts.limit,
+        },
+      });
+
+      table(
+        res.series,
+        [
+          { header: "TITLE", get: (row) => (row.mangaName ?? "-").slice(0, 44) },
+          { header: "MD MANGA ID", get: (row) => row.mdMangaId },
+          { header: "CHAPTERS", get: (row) => row.count },
+          { header: "EXTENSION", get: (row) => row.extensions.map((e) => e || "(none)").join(",") },
+          { header: "MOST RECENT", get: (row) => ago(row.at) },
+        ],
+        `no title has a chapter in the ${res.archive} archive matching that filter`,
+      );
+      if (res.capped) {
+        console.error("  the list is capped; narrow it with --search or raise --limit");
+      }
+    },
+  );
+
+/**
+ * Re-render and re-post the card images of chapters already marked unavailable.
+ *
+ * The one target that is worth having a command for rather than a dashboard
+ * panel is `--series`: a stale card is nearly always reported one title at a
+ * time, and a title is the unit somebody complains in. The sweep pages on the
+ * primary key and follows its own continuation, so a title with four hundred
+ * chapters is one command rather than three requests an operator has to chain.
+ */
+chapters
+  .command("recard")
+  .description("re-render and re-post the card image of chapters already marked unavailable")
+  .option("--series <mdMangaId>", "every unavailable chapter of one MangaDex title")
+  .option("--chapter <mdChapterId...>", "these MangaDex chapter ids and no others")
+  .option("--all", "every unavailable chapter, narrowed by the filters below")
+  .option("--extension <name>", "narrow to one extension")
+  .option("--language <code>", "narrow to one language")
+  .option("--search <text>", "narrow by substring of the title name, or any id")
+  .option("--note <text>", "replace the card's standard explanatory paragraph")
+  .option("--batch <n>", "chapters per request while sweeping", "200")
+  .option("--apply", "queue the re-cards (default is a dry run that queues nothing)")
+  .action(
+    async (opts: {
+      series?: string;
+      chapter?: string[];
+      all?: boolean;
+      extension?: string;
+      language?: string;
+      search?: string;
+      note?: string;
+      batch: string;
+      apply?: boolean;
+    }) => {
+      const targets = [opts.series, opts.chapter?.length ? opts.chapter : undefined, opts.all].filter(
+        (value) => value !== undefined && value !== false,
+      );
+      if (targets.length !== 1) {
+        fail("give exactly one of --series, --chapter or --all");
+      }
+      const narrowing = opts.extension || opts.language || opts.search;
+      if (opts.chapter?.length && narrowing) {
+        fail("--extension, --language and --search narrow a sweep; an explicit --chapter list is already exact");
+      }
+
+      const filter = {
+        ...(opts.series ? { mdMangaId: opts.series } : {}),
+        ...(opts.extension ? { extension: opts.extension } : {}),
+        ...(opts.language ? { language: opts.language } : {}),
+        ...(opts.search ? { search: opts.search } : {}),
+      };
+      const target = opts.chapter?.length ? { ids: opts.chapter } : { filter };
+      const request = {
+        ...target,
+        ...(opts.note ? { footerNote: opts.note } : {}),
+        batch: Number(opts.batch),
+      };
+
+      interface RecardItem {
+        mdChapterId: string;
+        ok: boolean;
+        outcome: string;
+        reason?: string;
+        mangaName?: string | null;
+        chapterNumber?: string | null;
+        unavailableAt?: string;
+      }
+      interface RecardPage {
+        matched: number;
+        resolved?: number;
+        requested?: number;
+        wouldQueue?: number;
+        queued?: number;
+        blocked?: number;
+        refused?: number;
+        nextAfterId: string | null;
+        results: RecardItem[];
+      }
+
+      const call = (afterId: string | null) =>
+        api<RecardPage>("/api/v1/admin/chapters/unavailable/recard", {
+          method: "POST",
+          json: {
+            ...request,
+            dryRun: opts.apply !== true,
+            confirm: opts.apply === true,
+            ...(afterId ? { afterId } : {}),
+          },
+        });
+
+      // A dry run reports the first page only: it is a description of what the
+      // sweep would do, and paging the whole archive to describe it costs the
+      // same as doing it. The live run follows the continuation to the end,
+      // because a half-swept title is the outcome nobody asked for.
+      let afterId: string | null = null;
+      let acted = 0;
+      let skipped = 0;
+      let matched = 0;
+      let pages = 0;
+      const shown: RecardItem[] = [];
+      for (;;) {
+        const page: RecardPage = await call(afterId);
+        pages += 1;
+        matched = page.matched;
+        acted += page.wouldQueue ?? page.queued ?? 0;
+        skipped += page.blocked ?? page.refused ?? 0;
+        for (const item of page.results) if (shown.length < 50) shown.push(item);
+        afterId = page.nextAfterId;
+        if (!afterId || opts.apply !== true) break;
+        console.error(`  … ${acted} queued so far of ${matched} matching`);
+      }
+
+      table(
+        shown,
+        [
+          { header: "TITLE", get: (row) => (row.mangaName ?? "-").slice(0, 30) },
+          { header: "CHAPTER", get: (row) => (row.chapterNumber ? `Ch. ${row.chapterNumber}` : "-") },
+          { header: "MD CHAPTER ID", get: (row) => row.mdChapterId },
+          { header: "UNAVAILABLE", get: (row) => ago(row.unavailableAt) },
+          { header: "OUTCOME", get: (row) => row.outcome },
+          { header: "WHY", get: (row) => (row.reason ?? "").slice(0, 44) || "-" },
+        ],
+        "nothing matched",
+      );
+
+      kv({
+        matched,
+        pages,
+        [opts.apply === true ? "queued" : "wouldQueue"]: acted,
+        skipped,
+        ...(afterId ? { nextAfterId: afterId } : {}),
+      });
+      ok(
+        opts.apply === true
+          ? `queued ${acted} re-card(s)${skipped > 0 ? `, skipped ${skipped}` : ""}; ` +
+              "core-uploader drains the UNAVAILABLE queue at MangaDex's pace"
+          : `would queue ${acted} re-card(s) of ${matched} matching` +
+              (afterId ? " in the first page alone" : "") +
+              `${skipped > 0 ? `, skipping ${skipped}` : ""}; re-run with --apply to queue`,
+      );
+    },
+  );
+
 // ---- extension config (the database replacement for override_options.json) ----
 const extConfig = program
   .command("ext-config")

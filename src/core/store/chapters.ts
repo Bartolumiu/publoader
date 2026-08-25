@@ -98,6 +98,19 @@ export function decodeChapterCursor(raw: string): ChapterCursor | null {
   return { at: when, id };
 }
 
+/**
+ * One title's footprint in an archive: what a series-scoped action would cover.
+ */
+export interface SeriesGroup {
+  mdMangaId: string;
+  mangaName: string | null;
+  /** Every extension that put a chapter of this title into the archive. */
+  extensions: string[];
+  count: number;
+  /** The most recent instant of the archive, for this title. */
+  at: Date;
+}
+
 /** Where a MangaDex chapter id appears across the four tables. */
 export interface ChapterHistory {
   uploaded: ChapterRow | null;
@@ -300,6 +313,53 @@ export class ChapterStore {
     // (the column is NOT NULL there); the other three tables allow NULL. Both
     // mean the same thing to a reader, so both surface as "".
     return rows.map((row) => ({ extension: row.extension ?? "", count: Number(row.count) }));
+  }
+
+  /**
+   * The series present in one archive, most-affected first.
+   *
+   * The per-extension breakdown answers "who uploaded this?"; this answers "what
+   * is this about?", which is the question an operator arrives with when one
+   * title is wrong and the rest of the archive is fine. Grouping happens here
+   * rather than in the caller because the set is a page of a table with tens of
+   * thousands of rows in it, and paging a listing until every chapter of one
+   * title has been seen is not a way to learn how many there are.
+   *
+   * A row whose `md_manga_id` is NULL cannot be targeted by a series filter, so
+   * it is left out entirely rather than offered as a group nothing can act on.
+   */
+  async bySeries(
+    archive: ChapterArchive,
+    filter: ChapterFilter = {},
+    limit = 100,
+  ): Promise<SeriesGroup[]> {
+    const spec = ARCHIVES[archive];
+    const parts = chapterWhere(filter, spec);
+    parts.push(Prisma.sql`c.md_manga_id IS NOT NULL AND c.md_manga_id <> ''`);
+    // The name is taken from the newest row rather than an arbitrary one: a
+    // title can have been recorded under several spellings over the years, and
+    // the one an operator will recognise is the one most recently written.
+    const rows = await this.prisma.$queryRaw<
+      { mdMangaId: string; mangaName: string | null; extensions: string[]; count: bigint; at: Date }[]
+    >(Prisma.sql`
+      SELECT c.md_manga_id AS "mdMangaId",
+             (array_agg(c.manga_name ORDER BY ${Prisma.raw(`c.${spec.instant}`)} DESC))[1] AS "mangaName",
+             array_agg(DISTINCT coalesce(c.extension, '')) AS "extensions",
+             count(*) AS count,
+             max(${Prisma.raw(`c.${spec.instant}`)}) AS at
+      FROM ${Prisma.raw(spec.table)} c
+      ${combine(parts)}
+      GROUP BY c.md_manga_id
+      ORDER BY count(*) DESC, max(${Prisma.raw(`c.${spec.instant}`)}) DESC, c.md_manga_id ASC
+      LIMIT ${limit}
+    `);
+    return rows.map((row) => ({
+      mdMangaId: row.mdMangaId,
+      mangaName: row.mangaName ?? null,
+      extensions: [...row.extensions].sort(),
+      count: Number(row.count),
+      at: row.at,
+    }));
   }
 
   /** Row counts for all four archives; the header of the Chapters view. */

@@ -181,6 +181,23 @@ function apiRoutes(): { match: RegExp; body: unknown | ((init?: { body?: string 
     },
     { match: /\/chapters\/extensions/, body: { table: "uploaded", extensions: [{ extension: "mangaplus", count: 902 }] } },
     {
+      match: /\/chapters\/series/,
+      body: {
+        archive: "unavailable",
+        limit: 100,
+        capped: false,
+        series: [
+          {
+            mdMangaId: MD_MANGA,
+            mangaName: "Sakamoto Days",
+            extensions: ["mangaplus"],
+            count: 12,
+            at: "2026-03-04T05:06:07Z",
+          },
+        ],
+      },
+    },
+    {
       // Answers from the request, because the property under test is that the
       // panel keeps calling while a continuation comes back.
       match: /\/chapters\/unavailable\/recard/,
@@ -502,11 +519,12 @@ describe("dashboard chapter views", () => {
     const recardCalls = () =>
       win.fetch.mock.calls.filter(([url]: [string]) => String(url).includes("/unavailable/recard"));
 
-    it("offers the three targets and previews the whole archive by default", async () => {
+    it("offers the four targets and previews the whole archive by default", async () => {
       await goto("#/system/cards");
       const view = text();
       expect(view).toContain("Re-post unavailable card images");
       expect(view).toContain("Every unavailable chapter");
+      expect(view).toContain("One series");
       expect(view).toContain("Pick from the archive");
       expect(view).toContain("One chapter");
 
@@ -578,6 +596,98 @@ describe("dashboard chapter views", () => {
       await settle();
       expect(JSON.parse(recardCalls()[0][1].body)).toEqual({
         ids: [MD_CHAPTER],
+        dryRun: true,
+      });
+    });
+
+    /**
+     * The series target, which is the one somebody reaches for after a reader
+     * reports that a title's pages are wrong.
+     *
+     * It is a filter sweep, not an id list: a title with four hundred chapters
+     * is more than one page, so it has to page like the whole-archive target
+     * and not like the picker.
+     */
+    const pickSeriesMode = async (): Promise<void> => {
+      doc.getElementById("recard-mode-series").checked = true;
+      doc.getElementById("recard-mode-series").dispatchEvent(new win.Event("change"));
+      await settle();
+    };
+
+    it("lists the titles with cards up, largest first", async () => {
+      await goto("#/system/cards");
+      await pickSeriesMode();
+      expect(requested.some((path) => path.includes("/chapters/series?"))).toBe(true);
+      expect(requested.some((path) => path.includes("archive=unavailable"))).toBe(true);
+      const view = text();
+      expect(view).toContain("Sakamoto Days");
+      // The count is the reason to pick this title over another one.
+      expect(view).toContain("12");
+    });
+
+    it("re-cards one title picked out of that list", async () => {
+      await goto("#/system/cards");
+      await pickSeriesMode();
+
+      const pick = doc.querySelector('#view input[type="radio"][name="recard-series-pick"]');
+      pick.checked = true;
+      pick.dispatchEvent(new win.Event("change"));
+      await settle();
+
+      click("Preview");
+      await settle();
+      expect(JSON.parse(recardCalls()[0][1].body)).toEqual({
+        filter: { mdMangaId: MD_MANGA },
+        dryRun: true,
+      });
+    });
+
+    it("takes a title id pasted in, and sweeps it to the end", async () => {
+      await goto("#/system/cards");
+      await pickSeriesMode();
+
+      const field = doc.getElementById("recard-series-id");
+      field.value = MD_MANGA;
+      field.dispatchEvent(new win.Event("input"));
+      await settle();
+
+      click("Re-post this series' cards…");
+      await settle();
+      click("Queue the re-cards");
+      await settle(20);
+
+      const live = recardCalls().filter(
+        ([, init]: [string, { body: string }]) => JSON.parse(init.body).dryRun === false,
+      );
+      // Same two-page continuation as the whole-archive sweep: a series is a
+      // filter, so stopping at the first page would leave the title half done.
+      expect(live).toHaveLength(2);
+      expect(JSON.parse(live[0][1].body)).toEqual({
+        filter: { mdMangaId: MD_MANGA },
+        dryRun: false,
+        confirm: true,
+      });
+      expect(JSON.parse(live[1][1].body).afterId).toBe("row-4");
+    });
+
+    it("carries the extension filter into the series sweep it was chosen under", async () => {
+      await goto("#/system/cards");
+      await pickSeriesMode();
+
+      const picker = doc.getElementById("recard-extension");
+      picker.value = "mangaplus";
+      picker.dispatchEvent(new win.Event("change"));
+      await settle();
+
+      const field = doc.getElementById("recard-series-id");
+      field.value = MD_MANGA;
+      field.dispatchEvent(new win.Event("input"));
+      await settle();
+
+      click("Preview");
+      await settle();
+      expect(JSON.parse(recardCalls()[0][1].body)).toEqual({
+        filter: { extension: "mangaplus", mdMangaId: MD_MANGA },
         dryRun: true,
       });
     });
