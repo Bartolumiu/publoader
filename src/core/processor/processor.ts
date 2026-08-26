@@ -3,7 +3,7 @@ import type { Logger } from "../../logging.js";
 import { ResultEnvelope } from "../../contracts/envelope.js";
 import { type MangaRecord } from "../../contracts/records.js";
 import { Manifest } from "../../contracts/manifest.js";
-import { uploadedChapterColumns } from "../md/chapterRows.js";
+import { chapterFromMdChapter, uploadedChapterColumns } from "../md/chapterRows.js";
 import type { DiscordEmbedInput } from "../md/webhook.js";
 import {
   foundChaptersEmbed,
@@ -887,46 +887,3 @@ function applyMangaNames(byManga: Map<string, Chapter[]>, names: Map<string, str
   }
 }
 
-/**
- * The md-chapter to Chapter conversion for removals. `unavailableAt` rides
- * along on the queued JSON for the unavailable worker, which stamps it on the
- * generated chapter card.
- *
- * `chapterTimestamp` and `chapterExpire` are null: removal is queue-driven and
- * the uploaded row is deleted outright, so a sentinel date would only mislead.
- */
-export function chapterFromMdChapter(
-  mdChapter: MdChapter,
-  context: {
-    mdMangaId: string;
-    extension: string;
-    groupId: string;
-    mangaName: string | null;
-    mode: RemovalMode;
-  },
-): Chapter & { unavailableAt?: string } {
-  const attrs = mdChapter.attributes;
-  const now = new Date().toISOString();
-
-  const chapter: Chapter & { unavailableAt?: string } = {
-    chapterLookup: now,
-    chapterTimestamp: null,
-    chapterExpire: null,
-    chapterLanguage: attrs.translatedLanguage,
-    chapterNumber: attrs.chapter,
-    chapterTitle: attrs.title,
-    chapterVolume: attrs.volume,
-    chapterId: null,
-    chapterUrl: attrs.externalUrl,
-    mdChapterId: mdChapter.id,
-    mangaId: null,
-    mdMangaId: context.mdMangaId,
-    mdGroupId: context.groupId,
-    mangaName: context.mangaName,
-    mangaUrl: null,
-    extensionName: context.extension,
-    imageArtifacts: [],
-  };
-  if (context.mode === "unavailable") chapter.unavailableAt = now;
-  return chapter;
-}

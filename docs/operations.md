@@ -1753,6 +1753,81 @@ already done.
 
 ---
 
+## Find the chapters MangaDex is holding twice
+
+A duplicate is the same chapter published to MangaDex more than once: same
+series, same language, same publisher link. They accumulate quietly — a retried
+upload that actually succeeded the first time, a chapter re-fetched under a
+changed id, a series adopted from a predecessor who had already posted it.
+
+The platform has always deleted duplicates *during a run*: `deleteDuplicates` in
+the processor checks the series that run visited. That catches the duplicate a
+run just made, and it cannot answer the question an operator actually arrives
+with. "Does this series have duplicates?" needs, that way, the extension to be
+runnable, its publisher reachable, and the series to have been in the run's
+scope — and the series that accumulate duplicates are exactly the ones that fail
+those tests.
+
+So there is a lookup that needs none of it:
+
+```bash
+padmin chapters duplicates                       # every group we have uploaded to
+padmin chapters duplicates --extension mangaplus
+padmin chapters duplicates --manga 0aea9f43-…    # one title
+padmin chapters duplicates --chapters            # every id, not just the counts
+```
+
+```
+EXTENSION  GROUP     ON MD  SERIES  AFFECTED  DUPLICATES  QUEUED
+mangaplus  6941197f   6220     412         7          14       0
+
+TITLE                    MD MANGA ID                           EXTENSION  ON MD  DUPLICATES
+One Piece                0aea9f43-…                            mangaplus    412           4
+```
+
+Nothing here touches the publisher. It reads MangaDex, groups the chapters by
+series, and asks `findDuplicateChapters` — **the same function the processor
+uses**, so a scan and a run can never disagree about what a duplicate is:
+
+- two chapters match on language + `externalUrl`, or, for chapters whose pages
+  MangaDex hosts, on language + volume + number;
+- the **oldest** survives and every later copy is surplus;
+- chapters carrying an unavailable card are excluded, because marking one
+  unavailable repoints its `externalUrl` at the series page — the same URL for
+  every card of that series, which on the duplicate key would collapse them all
+  into one bucket;
+- a `multi_chapters` override spares one chapter per declared number, which is
+  how a merged release keeps the several MangaDex chapters it legitimately backs.
+
+Scoping changes the cost as well as the answer. Unfiltered, one walk of the
+group is ~60 paginated requests for 6000 chapters; `--manga` asks per series and
+pays for exactly what it looked at, so a single-title check is seconds.
+
+Deleting is a second, deliberate step:
+
+```bash
+padmin chapters duplicates --apply
+```
+
+Every surplus chapter gets a `DELETE` upload task — core-uploader drains that
+queue, and until it does the deletions are still cancellable from **Queues**.
+Duplicates are **always hard-deleted, never carded**, whatever the extension's
+removal mode: a card on a duplicate leaves the duplicate in place and adds a
+page to it. A chapter that already has a `PENDING` or `LEASED` task is left
+alone and counted under `blocked` — the deletion is already coming, and
+re-arming a row an uploader is mid-flight against is how a chapter gets deleted
+twice.
+
+The scan runs in the background behind the same step queue as reconcile, with
+its own lock and its own `settings` row, so the two never wait on each other.
+Every surface watches it: the dashboard card under **Chapters → uploaded** ("Find
+the chapters MangaDex has twice", scan then delete, and the delete button is
+gated on having scanned), `padmin chapters duplicates`, and `/duplicates` in
+Discord, which reports and cannot delete — queueing is closed to api tokens at
+the endpoint.
+
+---
+
 ## Clear a bad MangaDex session
 
 The MangaDex token pair lives in the `settings` table (`mdauth_access` /
