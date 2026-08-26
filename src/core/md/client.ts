@@ -128,6 +128,26 @@ export interface MdEntity {
  * drops, and once MangaDex stops serving a chapter this snapshot is the only
  * remaining answer to what it looked like.
  */
+/**
+ * Called after each page of a group walk.
+ *
+ * A group walk is the slowest thing this platform asks MangaDex for: two full
+ * paginations at `mdRatelimitMs` apart, which on the live group is ~124 requests
+ * and about four minutes. Anything driving it needs to say what it is doing
+ * while it happens, or it is indistinguishable from a hang.
+ *
+ * `total` is MangaDex's own count for the query, taken from the `total` field
+ * every list response carries. It is what turns the walk from a rising number
+ * into a real proportion. Null when MangaDex omitted it, and null again once
+ * the walk has to restart its window past the offset ceiling, because from then
+ * on the count describes a different query than the one being collected.
+ */
+export type WalkProgress = (
+  collected: number,
+  total: number | null,
+  pass: "all" | "served",
+) => void;
+
 export interface MdGroupAvailability {
   /** Every chapter id the group has, including the unserved ones. */
   all: Map<string, MdEntity>;
@@ -167,7 +187,10 @@ export interface MdUploadedImage {
  */
 export interface MdExtendedApi extends MdApi {
   chapterById(chapterId: string, includes?: string[]): Promise<MdChapterDetail | null>;
-  chapterAvailabilityForGroup(groupId: string): Promise<MdGroupAvailability>;
+  chapterAvailabilityForGroup(
+    groupId: string,
+    onPage?: WalkProgress,
+  ): Promise<MdGroupAvailability>;
   beginEditSession(chapterId: string, version: number | null): Promise<{ id: string }>;
   uploadImages(
     sessionId: string,
@@ -567,6 +590,12 @@ export class MdClient implements MdExtendedApi {
 
   // -------------------------------------------------------------- pagination
 
+  /** MangaDex's own count for a list query, when it sent a usable one. */
+  private static reportedTotal(data: Record<string, unknown> | null): number | null {
+    const total = data?.["total"];
+    return typeof total === "number" && Number.isFinite(total) && total >= 0 ? total : null;
+  }
+
   private static entities(data: Record<string, unknown> | null): MdEntity[] {
     const list = data?.data;
     if (!Array.isArray(list)) return [];
@@ -589,10 +618,13 @@ export class MdClient implements MdExtendedApi {
   private async paginate(
     route: string,
     params: Record<string, string | string[] | number>,
+    onPage?: (collected: number, total: number | null) => void,
   ): Promise<MdEntity[]> {
     const collected: MdEntity[] = [];
     let offset = 0;
     let createdAtSince = CREATED_AT_EPOCH;
+    /** True once the offset ceiling has forced the query to be narrowed. */
+    let windowed = false;
 
     for (let page = 0; page < MAX_PAGES; page++) {
       const response = await this.request("GET", `${this.config.mdApiUrl}/${route}`, {
@@ -600,6 +632,11 @@ export class MdClient implements MdExtendedApi {
       });
       const entities = MdClient.entities(response.data);
       collected.push(...entities);
+      // MangaDex reports the size of the whole result set on every page. Once
+      // the window has been restarted past the offset ceiling that number
+      // describes a narrowed query rather than this walk, so it is dropped
+      // rather than quietly shown as a total it is no longer the total of.
+      onPage?.(collected.length, windowed ? null : MdClient.reportedTotal(response.data));
       if (entities.length === 0) break;
 
       offset += PAGE_LIMIT;
@@ -611,6 +648,7 @@ export class MdClient implements MdExtendedApi {
         // newest item we have (dropping the timezone suffix as misc.py does).
         createdAtSince = stamp.split("+")[0] ?? CREATED_AT_EPOCH;
         offset = 0;
+        windowed = true;
       }
     }
 
@@ -737,13 +775,22 @@ export class MdClient implements MdExtendedApi {
    * this compares. Both passes are otherwise identical so the difference
    * between them can only mean the one thing.
    */
-  async chapterAvailabilityForGroup(groupId: string): Promise<MdGroupAvailability> {
+  async chapterAvailabilityForGroup(
+    groupId: string,
+    onPage?: WalkProgress,
+  ): Promise<MdGroupAvailability> {
     const page = async (includeUnavailable: boolean): Promise<MdEntity[]> =>
-      this.paginate("chapter", {
-        "groups[]": [groupId],
-        "order[createdAt]": "asc",
-        ...(includeUnavailable ? INCLUDE_UNAVAILABLE : {}),
-      });
+      this.paginate(
+        "chapter",
+        {
+          "groups[]": [groupId],
+          "order[createdAt]": "asc",
+          ...(includeUnavailable ? INCLUDE_UNAVAILABLE : {}),
+        },
+        onPage
+          ? (collected, total) => onPage(collected, total, includeUnavailable ? "all" : "served")
+          : undefined,
+      );
 
     const all = new Map<string, MdEntity>();
     for (const entity of await page(true)) all.set(entity.id, entity);

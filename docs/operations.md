@@ -1570,23 +1570,98 @@ above, and closed to api tokens, so it is the dashboard or the break-glass
 `ADMIN_TOKEN`.
 
 **In the dashboard** the card is **Chapters → Reconcile with MangaDex**, on
-every archive it can rebuild. **Check** reads MangaDex and reports the whole
-drift; the button beside it writes only the table you are looking at, and there
-is deliberately no button that writes all three:
+every archive it can rebuild. Each archive gets one button, which rebuilds only
+the table you are looking at; there is deliberately no button that writes all
+three:
 
-| Archive | Button | What it posts |
+| Archive | Button | What it runs |
 |---|---|---|
 | On MangaDex (`uploaded`) | **Track them** | `skipDeleted`, `skipUnavailable` — adoption alone |
 | Unavailable, Deleted | **Record them** | `skipAdopt` — the archiving passes alone |
 | Edited | — | the card is not offered; nothing here rebuilds it |
 
-Check first: neither button writes before it has a count to show you, and the
-**Track them** dialog names any extension whose chapter ids could not be
-recovered, because those rows land visible and still outside `postedChapterIds`.
+**Check** is the same pass with the writing switched off, for when you want the
+numbers first. **Neither button requires it.** Check is itself a full pass, so
+requiring one meant walking MangaDex twice — eight minutes — to do one thing.
+The confirm dialogs carry the warning instead, and they are the stronger guard
+anyway: what makes either button safe is not that a number was on screen first,
+it is that MangaDex is the authority for every row they touch. A chapter is only
+ever recorded as deleted on a 404 from its own endpoint, never because it went
+missing from a listing.
+
+You usually get the count without asking regardless: the card reads the last
+pass's report when it mounts, so the dialogs show real numbers whenever a pass
+has run before. **Track them**'s dialog also names any extension whose chapter
+ids could not be recovered, because those rows land visible and still outside
+`postedChapterIds`.
+
 A single "do everything" button was the obvious shape and the wrong one — it
 meant clicking **Record them** on the deleted archive and silently adding several
 thousand rows to `uploaded`, which is neither what the label says nor what is on
 screen.
+
+### A pass runs in the background
+
+**Nothing about reconcile happens inside the request that asks for it.** A group
+walk is two full paginations at `MANGADEX_RATELIMIT_MS` (2s by default), which on
+the mangaplus group is ~124 requests and about **four minutes**. Held open, that
+request dies to the proxy in front of the API long before it answers — the
+symptom is a Check button that "keeps failing" while the platform is perfectly
+healthy, because a timeout and a fault look identical from the browser.
+
+So `POST /chapters/reconcile` **starts** a pass and answers `202` immediately;
+`GET /chapters/reconcile` reports where it is up to. Everything polls that.
+
+### The pass is a queue of steps
+
+A pass declares its whole plan before running any of it, then works down the
+list. That is the difference between a four-minute wait and a four-minute wait
+you can read: at the first poll you already know what is coming, and each row
+ticks `pending → running → done` where you can watch it.
+
+```
+✓ Find which groups we have uploaded to
+· Read mangaplus's chapters on MangaDex          (4820/12440) — reading the catalogue
+  Archive mangaplus's carded and unavailable chapters
+  Record mangaplus's untracked chapters
+  Check our own rows against MangaDex
+```
+
+One step per group per job, plus the sweep. The walk counts both of its
+paginations as one bar — the second re-reads the same chapters to learn which
+are still served, so letting its count restart at zero would look like lost
+progress. Its denominator is MangaDex's own `total` for the query, not a guess;
+where MangaDex gives none (the walk restarting its window past the offset
+ceiling), the row shows a bare count and no bar, because a bar drawn from an
+invented denominator is worse than no bar at all. Adoption reports per write
+batch, so the number climbing *is* the table below filling up.
+
+Each surface renders the same list:
+
+- the dashboard card draws it live, and picks a running pass back up if you
+  navigate away and return rather than offering to start a second;
+- `padmin chapters reconcile` prints each step as it finishes and keeps the
+  running one on a line below — so the transcript ends up being the plan, in
+  order, with each result. Ctrl-C stops the *watching*, not the pass;
+- `/reconcile` in Discord answers "step 3 of 5" with the running one named,
+  because an interaction cannot be left open for minutes. Run it again for the
+  numbers.
+
+A pass that dies marks its running step **failed** and everything after it
+skipped, so a dead pass never reads as one still working — and the card shows
+*which* step died rather than replacing the queue with one error line.
+
+**One pass at a time.** A second start joins the one in flight and answers
+`started: false`; that is not an error, it is the honest answer to a second click
+on a four-minute button. Two passes racing would walk the same group twice and
+then decide what to adopt from separate snapshots.
+
+A pass whose progress has not moved for five minutes is treated as abandoned —
+a restart mid-walk would otherwise leave `running` in the `settings` table
+forever, and that row is a permanent lock on every button. It is a heartbeat,
+not a deadline: progress is written on every MangaDex page, so a genuinely long
+pass over many groups refreshes it far more often than the window and is never
+stolen from under itself.
 
 **Why this one writes directly** instead of queueing an upload task like every
 other action on a published chapter: it changes nothing on MangaDex. Queueing

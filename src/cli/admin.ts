@@ -583,6 +583,134 @@ maps
   });
 
 // ---- chapter archives vs. what MangaDex actually holds ----
+
+interface ReconcileReportShape {
+  dryRun: boolean;
+  groups: {
+    extension: string;
+    groupId: string;
+    total: number;
+    carded: number;
+    recorded: number;
+    hiddenOnMangadex: number;
+    live: number;
+    untracked: number;
+    adopted: number;
+    adoptedWithId: number;
+    idRule: { segments: number; samples: number; agreement: number } | null;
+  }[];
+  unavailableFound: number;
+  unavailableRecorded: number;
+  untrackedFound: number;
+  adoptedRecorded: number;
+  idsRecorded: number;
+  scanned: number;
+  skippedByGroupWalk: number;
+  deletedFound: number;
+  deletedRecorded: number;
+  hiddenOnMangadex: string[];
+}
+
+/** Mirrors ReconcileStep in core/md/reconcilePlan.ts. */
+interface ReconcileStepShape {
+  id: string;
+  label: string;
+  state: "pending" | "running" | "done" | "skipped" | "failed";
+  done: number;
+  total: number | null;
+  note: string | null;
+}
+
+/** Mirrors ReconcileRunState in core/md/reconcileRunner.ts. */
+interface ReconcileStatus {
+  state: "idle" | "running" | "done" | "failed";
+  progress?: { steps: ReconcileStepShape[] };
+  report?: ReconcileReportShape;
+  error?: string;
+}
+
+/** How often to ask how a pass is getting on. */
+const RECONCILE_POLL_MS = 2000;
+
+/**
+ * Watch a reconcile pass to its end, printing progress, and return its report.
+ *
+ * The pass belongs to the server, not to this process: it was started by a
+ * request that has already been answered, so quitting here leaves it running
+ * and re-running the command picks it back up. That is the point of polling
+ * rather than holding one long request open -- a group walk is minutes of
+ * MangaDex calls, and a request that long dies to the proxy in front of the API
+ * having done all the work and delivered none of it.
+ */
+async function follow(): Promise<ReconcileReportShape> {
+  const tty = process.stderr.isTTY === true;
+  let lastLine = "";
+  /** Steps already reported as finished, so each is announced exactly once. */
+  const announced = new Set<string>();
+
+  const clear = (): void => {
+    if (tty && lastLine) process.stderr.write("\r" + " ".repeat(lastLine.length) + "\r");
+    lastLine = "";
+  };
+
+  /**
+   * Print the steps that have finished since the last poll, then leave the
+   * running one on the line below.
+   *
+   * A finished step scrolls; the running one is rewritten in place on a
+   * terminal. That way the transcript ends up being the plan -- what ran, in
+   * order, with its result -- rather than a megabyte of carriage returns, which
+   * is also what makes it readable when piped into a file.
+   */
+  const draw = (steps: ReconcileStepShape[]): void => {
+    for (const step of steps) {
+      if (step.state === "pending" || step.state === "running") continue;
+      if (announced.has(step.id)) continue;
+      announced.add(step.id);
+      clear();
+      const mark = step.state === "done" ? "✓" : step.state === "skipped" ? "-" : "✗";
+      console.error(`  ${mark} ${step.label}${step.note ? `: ${step.note}` : ""}`);
+    }
+
+    const running = steps.find((step) => step.state === "running");
+    if (!running) return;
+    const line =
+      `  · ${running.label}` +
+      (running.total !== null
+        ? ` (${running.done}/${running.total})`
+        : running.done > 0
+          ? ` (${running.done})`
+          : "") +
+      (running.note ? ` — ${running.note}` : "");
+    if (tty) {
+      process.stderr.write("\r" + " ".repeat(lastLine.length) + "\r" + line);
+      lastLine = line;
+    } else if (line !== lastLine) {
+      console.error(line);
+      lastLine = line;
+    }
+  };
+
+  for (;;) {
+    const status = await api<ReconcileStatus>("/api/v1/admin/chapters/reconcile");
+    if (status.progress) draw(status.progress.steps);
+
+    if (status.state === "done" && status.report) {
+      clear();
+      return status.report;
+    }
+    if (status.state === "failed") {
+      clear();
+      throw new Error(status.error ?? "the reconcile pass failed");
+    }
+    if (status.state === "idle") {
+      clear();
+      throw new Error("the reconcile pass is not running and left no report");
+    }
+    await new Promise((resolve) => setTimeout(resolve, RECONCILE_POLL_MS));
+  }
+}
+
 const chapters = program
   .command("chapters")
   .description("the record of what is on MangaDex, and what has happened to it");
@@ -602,41 +730,29 @@ chapters
     skipAdopt?: boolean;
     skipUnavailable?: boolean;
   }) => {
-    const res = await api<{
-      dryRun: boolean;
-      groups: {
-        extension: string;
-        groupId: string;
-        total: number;
-        carded: number;
-        recorded: number;
-        hiddenOnMangadex: number;
-        live: number;
-        untracked: number;
-        adopted: number;
-        adoptedWithId: number;
-        idRule: { segments: number; samples: number; agreement: number } | null;
-      }[];
-      unavailableFound: number;
-      unavailableRecorded: number;
-      untrackedFound: number;
-      adoptedRecorded: number;
-      idsRecorded: number;
-      scanned: number;
-      skippedByGroupWalk: number;
-      deletedFound: number;
-      deletedRecorded: number;
-      hiddenOnMangadex: string[];
-    }>("/api/v1/admin/chapters/reconcile", {
-      method: "POST",
-      json: {
-        dryRun: opts.apply !== true,
-        extensions: opts.extension ?? [],
-        skipDeleted: opts.skipDeleted === true,
-        skipAdopt: opts.skipAdopt === true,
-        skipUnavailable: opts.skipUnavailable === true,
+    const start = await api<ReconcileStatus & { started: boolean }>(
+      "/api/v1/admin/chapters/reconcile",
+      {
+        method: "POST",
+        json: {
+          dryRun: opts.apply !== true,
+          extensions: opts.extension ?? [],
+          skipDeleted: opts.skipDeleted === true,
+          skipAdopt: opts.skipAdopt === true,
+          skipUnavailable: opts.skipUnavailable === true,
+        },
       },
-    });
+    );
+    if (!start.started) {
+      console.error("  a reconcile pass was already running; following that one instead");
+    }
+
+    // The pass runs on the server and this polls it. A group walk is ~124
+    // MangaDex requests at the client's rate limit -- minutes -- and a request
+    // held open that long dies to the proxy in front of the API with nothing to
+    // show for it. Polling also means Ctrl-C here abandons the *watching*, not
+    // the work.
+    const res = await follow();
 
     table(res.groups, [
       { header: "EXTENSION", get: (g) => g["extension"] },

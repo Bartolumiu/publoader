@@ -35,6 +35,8 @@ const API = "/api/v1/admin";
 const CSRF_HEADER = "x-requested-with";
 const CSRF_VALUE = "publoader-dash";
 const SUMMARY_MS = 10_000;
+/** How often the reconcile card asks how a running pass is getting on. */
+const RECONCILE_POLL_MS = 2_000;
 const WILDCARD = "*";
 const NAV_KEY = "publoader.nav.collapsed";
 
@@ -4115,12 +4117,149 @@ VIEWS.chapters = (route) => {
  * above this one cannot be previewed row by row afterwards; an archived row
  * has left `uploaded_chapters`.
  */
+/**
+ * A reconcile pass drawn as the queue of steps it actually is.
+ *
+ * The pass declares its whole plan before running any of it, so this is a list
+ * from the first second: what is done, what is going, what is still to come.
+ * That is the difference between a four-minute wait and a four-minute wait you
+ * can read. Each row carries its own count, and the running one fills as it
+ * goes.
+ *
+ * A step with no `total` gets no fill, deliberately. The only number available
+ * mid-step is sometimes "how many so far", and a bar drawn from a denominator
+ * nobody has would be the one dishonest thing on the card.
+ */
+function stepQueue(progress, emptyText) {
+  const steps = (progress && progress.steps) || [];
+  if (steps.length === 0) return el("p", { class: "dim small", text: emptyText });
+
+  return el(
+    "div",
+    { class: "steps" },
+    ...steps.map((step) => {
+      const known = typeof step.total === "number" && step.total > 0;
+      // Clamped: a step can finish on a count above the total MangaDex
+      // predicted, and a bar spilling past its row reads as a rendering bug.
+      const pct = known ? Math.min(100, Math.round((step.done / step.total) * 100)) : 0;
+      const count =
+        step.state === "pending"
+          ? ""
+          : known
+            ? `${step.done} / ${step.total}`
+            : step.done > 0
+              ? String(step.done)
+              : "";
+      return el(
+        "div",
+        { class: `step ${step.state}` },
+        step.state === "running" && known
+          ? el("div", { class: "step-fill", style: { width: `${pct}%` } })
+          : el("span", {}),
+        el("span", { class: "step-label", text: step.label }),
+        el("span", { class: "step-count", text: count }),
+        el("span", { class: "step-note", text: step.note ?? "" }),
+      );
+    }),
+  );
+}
+
 function reconcileCard(archive, reload) {
   if (archive !== "unavailable" && archive !== "deleted" && archive !== "uploaded") {
     return el("span", {});
   }
   const output = el("div", { class: "dim small" });
   let checked = null;
+  /** Set while this card is following a pass, so two clicks do not poll twice. */
+  let following = false;
+
+  /**
+   * Start a pass and follow it to the end.
+   *
+   * The request only *starts* the work. A pass is minutes long -- the group
+   * walk alone is ~124 MangaDex requests at the client's rate limit -- and a
+   * request held open that long dies to the proxy in front of the API, which is
+   * what "Check keeps failing" was: not an error, a timeout with nothing to
+   * show. Now the server owns the pass, this polls it, and closing the tab
+   * abandons the watching rather than four minutes of MangaDex calls.
+   */
+  const runPass = async (body) => {
+    if (following) {
+      toast("A pass is already being followed here.", true);
+      return null;
+    }
+    following = true;
+    try {
+      const started = await api("/chapters/reconcile", { method: "POST", body });
+      if (started && started.started === false) {
+        toast("A pass was already running; following that one.", true);
+      }
+      return await follow();
+    } finally {
+      following = false;
+    }
+  };
+
+  /**
+   * Poll until the pass ends, drawing progress as it goes.
+   *
+   * `first` lets a caller that has already read the state hand it over rather
+   * than asking again; without it the mount check below would fetch twice, and
+   * the second answer could differ from the one it decided to follow on.
+   */
+  const follow = async (first) => {
+    let status = first;
+    // Never on the first turn: a card is built before it is inserted, so its
+    // nodes are legitimately detached at the moment this starts, and checking
+    // then would stop every poller before it made a single request.
+    let started = false;
+    for (;;) {
+      // Stop once this card has left the page. The pass itself carries on
+      // server-side -- that is the whole design -- but a poller for a card
+      // nobody is looking at is a request every two seconds forever, and
+      // navigating back would start a second one beside it.
+      if (started && !output.isConnected) return null;
+      started = true;
+      if (!status) status = await api("/chapters/reconcile");
+      if (status.state === "done" && status.report) {
+        render(status.report);
+        return status.report;
+      }
+      if (status.state === "failed") {
+        // The steps as they stood, so the row that died is visible rather than
+        // the whole queue collapsing into one error line.
+        setChildren(
+          output,
+          el("div", {}, [
+            el("p", { class: "error", text: `The pass failed: ${status.error}` }),
+            stepQueue(status.progress, ""),
+          ]),
+        );
+        return null;
+      }
+      if (status.state === "idle") {
+        setChildren(
+          output,
+          el("p", { class: "error", text: "The pass is not running and left no report." }),
+        );
+        return null;
+      }
+      drawProgress(status.progress);
+      status = null;
+      await new Promise((resolve) => setTimeout(resolve, RECONCILE_POLL_MS));
+    }
+  };
+
+  /**
+   * What is happening right now.
+   *
+   * A count with no total during the walk, because MangaDex reports no total up
+   * front and inventing one would be the only dishonest number on the card.
+   */
+  const drawProgress = (progress) => {
+    checked = null;
+    setChildren(output, stepQueue(progress, "Working out what there is to do…"));
+  };
 
   const render = (report) => {
     checked = report;
@@ -4186,35 +4325,43 @@ function reconcileCard(archive, reload) {
       text: "Track them",
       onclick: async (event) => {
         const button = event.currentTarget;
-        if (!checked) {
-          toast("Check first; nothing should be written before you have seen the count.", false);
-          return;
-        }
-        const adopting = checked.untrackedFound ?? 0;
-        if (adopting === 0) {
+        // Deliberately NOT gated on a prior Check, unlike Record them. Check is
+        // a four-minute pass, so requiring it meant paying for the walk twice
+        // to do one thing; and the discipline it enforces is about writes that
+        // cannot be inspected afterwards. This one only ever ADDS rows, for
+        // chapters MangaDex says our own group published, and every row it adds
+        // is marked `adopted` and listed on the page below. If the count still
+        // matters first, Check is right there.
+        const seen = checked ? (checked.untrackedFound ?? 0) : null;
+        if (seen === 0) {
           toast("Nothing to track; every live chapter on MangaDex already has a row.", true);
           return;
         }
         // Naming the extensions that recovered no id is the point of the
         // dialog: those rows land visible but still outside postedChapterIds,
         // and that is the half an operator would otherwise never learn.
-        const blind = (checked.groups ?? [])
-          .filter((g) => g.untracked > 0 && !g.idRule)
-          .map((g) => g.extension);
+        const blind = checked
+          ? (checked.groups ?? []).filter((g) => g.untracked > 0 && !g.idRule).map((g) => g.extension)
+          : [];
         if (
           !(await confirmDialog({
             title: "Track the chapters MangaDex has and we do not",
-            lead: `${adopting} live chapter(s) will be recorded as uploaded.`,
+            lead:
+              seen === null
+                ? "Every live chapter MangaDex has for our groups that has no row here will be " +
+                  "recorded as uploaded. Reading MangaDex takes a few minutes."
+                : `${seen} live chapter(s) will be recorded as uploaded.`,
             points: [
               "Nothing is sent to MangaDex; this only corrects our record of it.",
               "Only chapters no table here knows about are added; a chapter this platform " +
                 "actually uploaded keeps the row it already has, with its publisher-side ids.",
-              `${checked.idsRecorded ?? 0} of them recover a publisher chapter id, which is what ` +
-                "stops the extension re-fetching the chapter on every run.",
+              "Where the publisher's chapter id can be read from its URL it is recorded too, " +
+                "which is what stops the extension re-fetching the chapter on every run.",
               blind.length
                 ? `No chapter id can be read from the URLs of: ${blind.join(", ")}. Those rows will ` +
                   "be added without one, so those chapters stay outside postedChapterIds."
-                : "Every one of them recovers a chapter id.",
+                : "Rows for an extension whose ids cannot be read from its URLs are added without " +
+                  "one, and the report below names it.",
             ],
             confirmLabel: "Add the rows",
           }))
@@ -4224,15 +4371,13 @@ function reconcileCard(archive, reload) {
         await act(
           "chapters.reconcile.adopt",
           async () => {
-            render(
-              await api("/chapters/reconcile", {
-                method: "POST",
-                body: { dryRun: false, skipDeleted: true, skipUnavailable: true },
-              }),
-            );
-            checked = null;
+            const report = await runPass({
+              dryRun: false,
+              skipDeleted: true,
+              skipUnavailable: true,
+            });
             // The listing below now has rows it did not have a moment ago.
-            reload();
+            if (report) reload();
           },
           { button },
         );
@@ -4253,21 +4398,33 @@ function reconcileCard(archive, reload) {
       text: "Record them",
       onclick: async (event) => {
         const button = event.currentTarget;
-        if (!checked) {
-          toast("Check first; nothing should be written before you have seen the count.", false);
-          return;
-        }
-        const moving = checked.unavailableRecorded + checked.deletedRecorded;
+        // Not gated on a prior Check either. Check is itself a full pass, so
+        // requiring it meant walking MangaDex twice to do one thing, and the
+        // walk is four minutes. The dialog carries the warning instead, and it
+        // is the stronger guard anyway: what makes this safe is not that a
+        // number was on screen first, it is that MangaDex is the authority for
+        // every row it moves.
+        const moving = checked ? checked.unavailableRecorded + checked.deletedRecorded : null;
+        const untracked = checked ? (checked.untrackedFound ?? 0) : null;
         if (
           !(await confirmDialog({
             title: "Record what MangaDex changed",
-            lead: `${moving} chapter(s) will move into the unavailable and deleted archives.`,
+            lead:
+              moving === null
+                ? "Every chapter MangaDex has carded, and every one it no longer has, will move " +
+                  "into the archives. Reading MangaDex takes a few minutes."
+                : `${moving} chapter(s) will move into the unavailable and deleted archives.`,
             points: [
               "Nothing is sent to MangaDex; this only corrects our record of it.",
               "Rows that move leave uploaded_chapters, so a chapter lives in exactly one table.",
+              "A chapter is only recorded as deleted when MangaDex 404s its own endpoint, never " +
+                "because it went missing from a listing.",
               "Chapters already archived keep the date they were first recorded.",
-              `The ${checked.untrackedFound ?? 0} untracked live chapter(s) are NOT written here; ` +
-                "that is the Uploaded archive's own button.",
+              untracked === null
+                ? "Untracked live chapters are NOT written here; that is the Uploaded archive's " +
+                  "own button."
+                : `The ${untracked} untracked live chapter(s) are NOT written here; that is the ` +
+                  "Uploaded archive's own button.",
             ],
             confirmLabel: "Move the rows",
           }))
@@ -4277,20 +4434,39 @@ function reconcileCard(archive, reload) {
         await act(
           "chapters.reconcile.apply",
           async () => {
-            render(
-              await api("/chapters/reconcile", {
-                method: "POST",
-                body: { dryRun: false, skipAdopt: true },
-              }),
-            );
-            checked = null;
+            const report = await runPass({ dryRun: false, skipAdopt: true });
             // The listing below now has rows it did not have a moment ago.
-            reload();
+            if (report) reload();
           },
           { button },
         );
       },
     });
+
+  // A pass outlives the page that started it, so the card asks once on mount
+  // whether one is in flight and picks it up. Without this, navigating away and
+  // back showed an idle card over four minutes of running MangaDex calls, and
+  // the obvious next move was to start a second one.
+  void (async () => {
+    try {
+      const status = await api("/chapters/reconcile");
+      if (status.state === "running" && !following) {
+        following = true;
+        try {
+          await follow(status);
+        } finally {
+          following = false;
+        }
+      } else if (status.state === "done" && status.report) {
+        // The last pass's numbers, so Record them has something to gate on
+        // without re-walking MangaDex.
+        render(status.report);
+      }
+    } catch {
+      // A card that cannot ask is just a card with no report yet; the buttons
+      // still work and will say so themselves.
+    }
+  })();
 
   return card(
     "Reconcile with MangaDex",
@@ -4301,8 +4477,9 @@ function reconcileCard(archive, reload) {
         class: "dim small",
         text:
           "These tables record what the workers did as they did it, so they describe this " +
-          "platform's own history rather than the catalogue. Check reads MangaDex and reports " +
-          "the whole drift; the button beside it writes only the table you are looking at." +
+          "platform's own history rather than the catalogue. The button beside Check rebuilds " +
+          "only the table you are looking at, straight from MangaDex; Check is the same pass " +
+          "with the writing switched off, for when you want the numbers first." +
           (archive === "uploaded"
             ? " Here that is the live chapters MangaDex has for our groups that we have never " +
               "had a row for -- mostly chapters the previous uploader posted. Tracking them is " +
@@ -4311,6 +4488,15 @@ function reconcileCard(archive, reload) {
               "every run."
             : " Here that is the chapters already carrying an unavailable card and the ones " +
               "MangaDex no longer has."),
+      }),
+      el("p", {
+        class: "dim small",
+        // Said up front because either button may now be the first thing
+        // clicked, and a four-minute wait nobody was warned about is the same
+        // thing as a hang.
+        text:
+          "Any of these reads our groups' whole catalogue on MangaDex, which takes a few " +
+          "minutes. It keeps going if you leave the page, and this card picks it back up.",
       }),
       el(
         "div",
@@ -4321,7 +4507,7 @@ function reconcileCard(archive, reload) {
           onclick: (event) =>
             act(
               "chapters.reconcile.check",
-              async () => render(await api("/chapters/reconcile", { method: "POST", body: { dryRun: true } })),
+              () => runPass({ dryRun: true }),
               { button: event.currentTarget },
             ),
         }),
