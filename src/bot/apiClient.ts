@@ -312,15 +312,21 @@ export interface ArchiveSeriesReport {
   capped: boolean;
 }
 
-/** What a series re-check would cover, and the run it started if it did. */
+/** What a re-check would cover, and the run it started if it did. */
 export interface SeriesRecheck {
   dryRun: boolean;
+  /** Which instrument answered: one title, or a whole extension. */
+  target: "series" | "extension";
   extension: string;
-  mangaId: string;
   removalMode: string;
+  /** Series target only: the publisher's own id for the title. */
+  mangaId?: string;
   onMangadex: number | null;
   carded: number | null;
   candidates: number | null;
+  /** Extension target only. */
+  trackedSeries?: number;
+  knownChapters?: number;
   publishesCatalogue: boolean;
   runId?: string;
   created?: boolean;
@@ -666,6 +672,32 @@ export class AdminApiClient {
       actor,
       json: {
         ...(opts.extension ? { extension: opts.extension } : {}),
+        dryRun: !opts.apply,
+        confirm: opts.apply,
+        ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
+      },
+    });
+  }
+
+  /**
+   * The same question over a whole extension: a plain CLEAN run.
+   *
+   * Kept distinct from `recheckSeries` rather than folded into it with an
+   * optional id, because they are not the same size of action. This one can
+   * mark every chapter of every series the extension tracks, and a caller that
+   * can reach it by leaving a field out is a caller that can reach it by
+   * accident.
+   */
+  recheckExtension(
+    actor: string,
+    opts: { extension: string; apply: boolean; idempotencyKey?: string },
+  ): Promise<SeriesRecheck> {
+    return this.request({
+      method: "POST",
+      path: `/api/v1/admin/chapters/extensions/${encodeURIComponent(opts.extension)}/recheck`,
+      scope: "runs:write",
+      actor,
+      json: {
         dryRun: !opts.apply,
         confirm: opts.apply,
         ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),

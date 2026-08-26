@@ -759,7 +759,11 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
     expect(res.statusCode).toBe(200);
     const series = res.json().series;
     expect(series).toHaveLength(2);
-    expect(res.json().capped).toBe(false);
+    // The count is of every matching title, not of this page: a list that stops
+    // at its limit and says nothing about the rest reads as "there are only
+    // this many", which is exactly how the first version of this misled.
+    expect(res.json().total).toBe(2);
+    expect(res.json().hasMore).toBe(false);
 
     // Two chapters beats one, and the name comes from the newest row: one title
     // recorded under two spellings should read as the one an operator has seen.
@@ -792,15 +796,28 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
       expect.objectContaining({ mdMangaId: otherManga, count: 1 }),
     ]);
 
-    // A limit reached is said so, because the ordering is by count and the
-    // caller's next move is to narrow rather than to walk a tail.
-    const capped = await app.inject({
+    // Paged, and honest about it: the first page says how many there are in
+    // total and that more remain, and the second reaches them.
+    const first = await app.inject({
       method: "GET",
       url: "/api/v1/admin/chapters/series?archive=unavailable&limit=1",
       headers: root,
     });
-    expect(capped.json().series).toHaveLength(1);
-    expect(capped.json().capped).toBe(true);
+    expect(first.json().series).toHaveLength(1);
+    expect(first.json().total).toBe(2);
+    expect(first.json().hasMore).toBe(true);
+    expect(first.json().series[0].mdMangaId).toBe(uuid(900));
+
+    const second = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/chapters/series?archive=unavailable&limit=1&offset=1",
+      headers: root,
+    });
+    expect(second.json().series).toHaveLength(1);
+    expect(second.json().offset).toBe(1);
+    expect(second.json().hasMore).toBe(false);
+    // The tail an unpaged listing used to drop on the floor.
+    expect(second.json().series[0].mdMangaId).toBe(otherManga);
   });
 
   it("keeps the series breakdown behind the read scope", async () => {
@@ -1450,6 +1467,100 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
         payload: { dryRun: false, confirm: true },
       });
       expect(allowed.statusCode).toBe(201);
+    });
+
+    /**
+     * The same question over a whole extension: a plain CLEAN run.
+     *
+     * Unscoped on purpose — here the publisher's listing really is a statement
+     * about the catalogue, which is what licenses the two catalogue-wide
+     * removal passes a series re-check has to skip. That also makes it the
+     * largest action this API offers, so the preview is the deliverable as much
+     * as the run is.
+     */
+    describe("over a whole extension", () => {
+      const recheckExt = (extension: string, payload: Record<string, unknown> = {}) =>
+        app.inject({
+          method: "POST",
+          url: `/api/v1/admin/chapters/extensions/${extension}/recheck`,
+          headers: root,
+          payload,
+        });
+
+      it("previews how much is in range, and starts nothing", async () => {
+        await publish("exampleext");
+        await prisma.trackedManga.createMany({
+          data: [
+            { extension: "exampleext", mangaId: "a1", mdMangaId: MD_MANGA },
+            { extension: "exampleext", mangaId: "a2", mdMangaId: uuid(901) },
+          ],
+        });
+        await uploaded();
+        await uploaded();
+        await uploaded({ extension: "otherext" });
+
+        const res = await recheckExt("exampleext");
+        expect(res.statusCode).toBe(200);
+        expect(res.json()).toMatchObject({
+          dryRun: true,
+          target: "extension",
+          extension: "exampleext",
+          trackedSeries: 2,
+          // This extension's rows only: the ceiling is what it published, not
+          // what the platform has.
+          knownChapters: 2,
+        });
+        expect(await prisma.run.count()).toBe(0);
+      });
+
+      /**
+       * The distinction the whole feature rests on: a scoped run must skip the
+       * catalogue-wide removal passes, and a whole-extension one must not, or
+       * it is no better than running the series version in a loop.
+       */
+      it("starts an UNSCOPED clean run, unlike the series target", async () => {
+        await publish("exampleext");
+        await prisma.trackedManga.create({
+          data: { extension: "exampleext", mangaId: "a1", mdMangaId: MD_MANGA },
+        });
+
+        const res = await recheckExt("exampleext", { dryRun: false, confirm: true });
+        expect(res.statusCode).toBe(201);
+
+        const run = await prisma.run.findUniqueOrThrow({ where: { id: res.json().runId } });
+        expect(run.kind).toBe("CLEAN");
+        expect(run.extension).toBe("exampleext");
+        expect(run.scopeMangaIds).toEqual([]);
+
+        const jobs = await prisma.job.findMany({ where: { runId: run.id } });
+        expect(jobs).toHaveLength(1);
+        // No subset: the worker fetches the whole catalogue.
+        expect(jobs[0]!.segmentMangaIds).toEqual([]);
+
+        const audited = await prisma.auditEvent.findFirst({
+          where: { action: "chapter.extension.recheck" },
+        });
+        expect(audited?.subject).toBe("exampleext");
+      });
+
+      it("refuses an unconfirmed live run, and an extension with no bundle", async () => {
+        await publish("exampleext");
+        expect((await recheckExt("exampleext", { dryRun: false })).statusCode).toBe(400);
+        expect((await recheckExt("neverpublished")).statusCode).toBe(404);
+        expect(await prisma.run.count()).toBe(0);
+      });
+
+      it("needs runs:write, like every other way of starting a run", async () => {
+        await publish("exampleext");
+        const reader = await mint(["chapters:read"]);
+        const res = await app.inject({
+          method: "POST",
+          url: "/api/v1/admin/chapters/extensions/exampleext/recheck",
+          headers: reader,
+          payload: {},
+        });
+        expect(res.statusCode).toBe(403);
+      });
     });
   });
 });

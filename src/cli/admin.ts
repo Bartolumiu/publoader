@@ -1011,6 +1011,63 @@ chapters
     },
   );
 
+interface RecheckReport {
+  dryRun: boolean;
+  target: "series" | "extension";
+  extension: string;
+  removalMode: string;
+  mangaId?: string;
+  onMangadex: number | null;
+  carded: number | null;
+  candidates: number | null;
+  trackedSeries?: number;
+  knownChapters?: number;
+  publishesCatalogue: boolean;
+  runId?: string;
+  created?: boolean;
+  note: string;
+}
+
+/** Shared by both re-check targets: they differ only in what they aim at. */
+async function reportRecheck(path: string, apply: boolean, extra: Record<string, unknown> = {}) {
+  const res = await api<RecheckReport>(path, {
+    method: "POST",
+    json: { ...extra, dryRun: !apply, confirm: apply },
+  });
+
+  kv(
+    res.target === "extension"
+      ? {
+          extension: res.extension,
+          trackedSeries: res.trackedSeries ?? "-",
+          chaptersWeKnowOf: res.knownChapters ?? "-",
+          removalMode: res.removalMode,
+          ...(res.runId ? { runId: res.runId, created: res.created } : {}),
+        }
+      : {
+          extension: res.extension,
+          publisherId: res.mangaId ?? "-",
+          onMangadex: res.onMangadex ?? "unknown (no MangaDex credentials on the API)",
+          alreadyCarded: res.carded ?? "-",
+          couldBeMarked: res.candidates ?? "-",
+          removalMode: res.removalMode,
+          ...(res.runId ? { runId: res.runId, created: res.created } : {}),
+        },
+  );
+  if (!res.publishesCatalogue) {
+    console.error(
+      `  warning: ${res.extension} has not sent a full catalogue listing recently; ` +
+        "removal detection needs one, so this may find nothing",
+    );
+  }
+  ok(
+    res.dryRun
+      ? `${res.note} Re-run with --apply to start it.`
+      : `run ${res.runId} queued; watch it with \`padmin runs show ${res.runId}\`, ` +
+          "then the UNAVAILABLE queue",
+  );
+}
+
 /**
  * Ask the publisher whether a series' chapters are still there.
  *
@@ -1025,50 +1082,30 @@ chapters
   .description("ask the publisher whether one series' chapters are still there, and mark what is not")
   .option("--extension <name>", "which extension to ask, when more than one tracks the title")
   .option("--apply", "start the run (default is a dry run that starts nothing)")
-  .action(async (mdMangaId: string, opts: { extension?: string; apply?: boolean }) => {
-    const res = await api<{
-      dryRun: boolean;
-      extension: string;
-      mangaId: string;
-      removalMode: string;
-      onMangadex: number | null;
-      carded: number | null;
-      candidates: number | null;
-      publishesCatalogue: boolean;
-      runId?: string;
-      created?: boolean;
-      note: string;
-    }>(`/api/v1/admin/chapters/series/${mdMangaId}/recheck`, {
-      method: "POST",
-      json: {
-        ...(opts.extension ? { extension: opts.extension } : {}),
-        dryRun: opts.apply !== true,
-        confirm: opts.apply === true,
-      },
-    });
+  .action((mdMangaId: string, opts: { extension?: string; apply?: boolean }) =>
+    reportRecheck(
+      `/api/v1/admin/chapters/series/${mdMangaId}/recheck`,
+      opts.apply === true,
+      opts.extension ? { extension: opts.extension } : {},
+    ),
+  );
 
-    kv({
-      extension: res.extension,
-      publisherId: res.mangaId,
-      onMangadex: res.onMangadex ?? "unknown (no MangaDex credentials on the API)",
-      alreadyCarded: res.carded ?? "-",
-      couldBeMarked: res.candidates ?? "-",
-      removalMode: res.removalMode,
-      ...(res.runId ? { runId: res.runId, created: res.created } : {}),
-    });
-    if (!res.publishesCatalogue) {
-      console.error(
-        `  warning: ${res.extension} has not sent a full catalogue listing recently; ` +
-          "removal detection needs one, so this may find nothing",
-      );
-    }
-    ok(
-      res.dryRun
-        ? `${res.note} Re-run with --apply to start it.`
-        : `run ${res.runId} queued; watch it with \`padmin runs show ${res.runId}\`, ` +
-            "then the UNAVAILABLE queue",
-    );
-  });
+/**
+ * The same question over a whole extension.
+ *
+ * A plain CLEAN run, unscoped — here the publisher's listing really is a
+ * statement about the catalogue, which is what licenses the catalogue-wide
+ * removal passes a one-series re-check has to skip. Which also makes it the
+ * largest blast radius this CLI can produce: an empty answer from the publisher
+ * marks everything. Hence the dry run first, and the count it reports.
+ */
+chapters
+  .command("recheck-extension <name>")
+  .description("re-scrape a whole extension and mark everything its publisher no longer lists")
+  .option("--apply", "start the run (default is a dry run that starts nothing)")
+  .action((name: string, opts: { apply?: boolean }) =>
+    reportRecheck(`/api/v1/admin/chapters/extensions/${name}/recheck`, opts.apply === true),
+  );
 
 // ---- extension config (the database replacement for override_options.json) ----
 const extConfig = program

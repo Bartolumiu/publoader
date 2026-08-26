@@ -609,8 +609,9 @@ not a fourth flag on the bulk ones:
 | Method | Path | Scope | Notes |
 | --- | --- | --- | --- |
 | `POST` | `/chapters/unavailable/recard` | `chapters:write` + ADMIN | `{ids?, filter?, footerNote?, dryRun?, confirm?, afterId?, batch?}`. Always the `unavailable` archive and always forced. A chapter with no card refuses as `not_unavailable` rather than being carded for the first time |
-| `POST` | `/chapters/series/:mdMangaId/recheck` | `runs:write` | `{extension?, dryRun?, confirm?, idempotencyKey?}`. Asks the publisher whether one series' chapters are still there, by starting a run scoped to it; the processor queues whatever MangaDex still holds that the extension no longer lists, as `UNAVAILABLE` or `DELETE` per the removal mode. `409` when several extensions track the title and none is named, or when the title's external id lives in a named catalogue (a run's manga subset travels as a bare id and cannot name one) |
-| `GET` | `/chapters/series` | `chapters:read` | `?archive=&extension=&language=&search=&limit=`. The titles present in one archive, most-affected first: `{mdMangaId, mangaName, extensions[], count, at}` plus `capped`. Aims the `mdMangaId` filter above; read-only, so unlike the re-card itself it is reachable on a `pa_…` token |
+| `POST` | `/chapters/series/:mdMangaId/recheck` | `runs:write` | `{extension?, dryRun?, confirm?, idempotencyKey?}`. Asks the publisher whether one series' chapters are still there, by starting a run **scoped** to it; the processor queues whatever MangaDex still holds that the extension no longer lists, as `UNAVAILABLE` or `DELETE` per the removal mode. `409` when several extensions track the title and none is named, or when the title's external id lives in a named catalogue (a run's manga subset travels as a bare id and cannot name one) |
+| `POST` | `/chapters/extensions/:extension/recheck` | `runs:write` | `{dryRun?, confirm?, idempotencyKey?}`. The same question over a whole extension: an **unscoped** CLEAN run, so the catalogue-wide removal passes a scoped run must skip are back in play. The preview reports `trackedSeries` and `knownChapters` — the ceiling on what a wrong answer from the publisher could mark |
+| `GET` | `/chapters/series` | `chapters:read` | `?archive=&extension=&language=&search=&limit=&offset=`. The titles present in one archive, most-affected first: `{mdMangaId, mangaName, extensions[], count, at}` plus `total` and `hasMore`. Offset-paged, because the ordering is an aggregate over the whole set and there is no row-level key to resume from. Aims the `mdMangaId` filter above; read-only, so unlike the re-card itself it is reachable on a `pa_…` token |
 
 It exists because the bulk route gets two things wrong for a re-render:
 
@@ -636,7 +637,7 @@ else matches the bulk contract: `ids` XOR `filter`, `dryRun` defaulting to true,
 live run needing `dryRun: false` **and** `confirm: true`, one audit row per chapter
 (`chapter.unavailable.recard`) plus a `chapter.unavailable.recard.sweep` summary.
 
-### Re-checking a series at the publisher
+### Re-checking at the publisher
 
 The re-card above re-renders the page of a chapter already known to be gone.
 `POST /chapters/series/:mdMangaId/recheck` asks the question before it — *is* it
@@ -652,6 +653,16 @@ can be computed from; and it is **scoped** (`runs.scope_manga_ids`), because the
 processor must not read the resulting snapshot as a statement about the whole
 catalogue. Without that flag this endpoint would unpublish every title the run
 never asked about.
+
+`POST /chapters/extensions/:extension/recheck` asks the same thing of everything
+an extension tracks. It is the same CLEAN run **without** a scope, which is the
+whole difference: over a catalogue the snapshot really is a statement about the
+catalogue, so the two passes a scoped run has to skip — the untracked sweep, and
+"tracked but absent from the listing" — are back in play, and a full sweep is
+worth more than the series version run in a loop. It is also the largest action
+this API offers, and can mark every chapter of every series the extension
+publishes if the listing comes back empty; hence a preview that reports
+`trackedSeries` and `knownChapters` before anything starts.
 
 The dry run is worth reading first: it names the extension that will be asked,
 how many chapters MangaDex holds under our group for the title, how many of those
