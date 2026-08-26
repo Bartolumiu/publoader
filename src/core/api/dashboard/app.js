@@ -4800,24 +4800,34 @@ function recheckCard(archive, filter, filterHooks = []) {
     redraw();
   });
 
+  // Folded away rather than removed. This is an occasional instrument — the
+  // largest blast radius the dashboard can produce — and it sat expanded above
+  // every one of the four archives, pushing the listing an operator actually
+  // came for below the fold on every visit. A closed disclosure keeps it one
+  // click away without spending the top of the page on it every time.
   return card(
-    "Ask the publisher what is still there",
-    el("p", {
-      class: "dim small",
-      text:
-        "The card above reads MangaDex and writes these tables. This reads the publisher and " +
-        "writes MangaDex: the extension is asked for its current listing, and whatever MangaDex " +
-        "still holds that it no longer lists is queued — marked unavailable, or deleted, per the " +
-        "removal mode.",
-    }),
-    el("p", {
-      class: "dim small",
-      text:
-        "Nothing else asks this on demand. Removals are noticed by runs, and a run only visits " +
-        "series that reported an update, so a series quiet for a year can lose its back catalogue " +
-        "silently.",
-    }),
-    body,
+    null,
+    el(
+      "details",
+      { class: "card-fold" },
+      el("summary", {}, el("h2", { text: "Ask the publisher what is still there" })),
+      el("p", {
+        class: "dim small",
+        text:
+          "The card above reads MangaDex and writes these tables. This reads the publisher and " +
+          "writes MangaDex: the extension is asked for its current listing, and whatever MangaDex " +
+          "still holds that it no longer lists is queued — marked unavailable, or deleted, per the " +
+          "removal mode.",
+      }),
+      el("p", {
+        class: "dim small",
+        text:
+          "Nothing else asks this on demand. Removals are noticed by runs, and a run only visits " +
+          "series that reported an update, so a series quiet for a year can lose its back catalogue " +
+          "silently.",
+      }),
+      body,
+    ),
   );
 }
 

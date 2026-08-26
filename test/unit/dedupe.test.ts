@@ -389,3 +389,147 @@ describe("findDuplicateChapters", () => {
     ).toEqual(["live-new"]);
   });
 });
+
+/**
+ * What makes a clean run clean.
+ *
+ * An update run asks "what did the publisher flag as new?"; a clean run asks
+ * "what does the publisher have?" and re-derives the whole answer from that.
+ * The difference only shows on a chapter the extension does NOT flag — one that
+ * was missed when it was new, or whose title drifted since — which is exactly
+ * the chapter a clean run exists to catch and the one an update run never sees
+ * again.
+ */
+describe("decideForManga on a clean run", () => {
+  const onMd = (id: string, over: Partial<MdChapter["attributes"]> = {}) =>
+    mdChapter(id, { chapter: "1", title: "T", externalUrl: "https://pub.example/c/1", ...over });
+
+  const listed = (id: string, over: Partial<Chapter> = {}) =>
+    chapter({
+      chapterId: id,
+      chapterNumber: id,
+      chapterTitle: "T",
+      chapterUrl: `https://pub.example/c/${id}`,
+      ...over,
+    });
+
+  it("uploads a chapter the publisher lists that never reached MangaDex", () => {
+    const result = decide({
+      // The extension flagged nothing: this chapter is old news to it.
+      updatedChapters: [],
+      allMangaChapters: [listed("1"), listed("2")],
+      chaptersOnMd: [onMd("md-1")],
+      cleanDb: true,
+    });
+
+    expect(result.toUpload.map((c) => c.chapterId)).toEqual(["2"]);
+    expect(result.missingWithoutPages).toEqual([]);
+  });
+
+  it("edits a chapter the extension never flagged as changed", () => {
+    const result = decide({
+      updatedChapters: [],
+      allMangaChapters: [listed("1", { chapterTitle: "Corrected" })],
+      chaptersOnMd: [onMd("md-1", { title: "Wrong" })],
+      cleanDb: true,
+    });
+
+    expect(result.toEdit).toHaveLength(1);
+    expect(result.toEdit[0]!.oldInfo.title).toBe("Wrong");
+    expect(result.toEdit[0]!.payload.title).toBe("Corrected");
+  });
+
+  /**
+   * The control. Same inputs, an update run: the listing is read for removal
+   * detection and for nothing else, so the gap stays invisible. If this ever
+   * starts uploading, clean and update have stopped being different runs.
+   */
+  it("is what separates a clean run from an update run", () => {
+    const input = {
+      updatedChapters: [],
+      allMangaChapters: [listed("1"), listed("2")],
+      chaptersOnMd: [onMd("md-1")],
+    };
+    expect(decide({ ...input, cleanDb: false }).toUpload).toEqual([]);
+    expect(decide({ ...input, cleanDb: true }).toUpload).toHaveLength(1);
+  });
+
+  /**
+   * A catalogue listing carries chapter metadata, never chapter images. For an
+   * external-link extension that is a whole chapter; for an extension that
+   * uploads pages it is not, and committing it would put a pageless chapter on
+   * a public page. The gap is real either way, so it is reported rather than
+   * dropped.
+   */
+  it("refuses to publish a listing entry when the extension deals in pages", () => {
+    const result = decide({
+      updatedChapters: [listed("1", { imageArtifacts: ["11111111-1111-4111-8111-111111111111"] })],
+      allMangaChapters: [listed("1"), listed("2")],
+      chaptersOnMd: [],
+      cleanDb: true,
+    });
+
+    expect(result.toUpload.map((c) => c.chapterId)).toEqual(["1"]);
+    expect(result.missingWithoutPages.map((c) => c.chapterId)).toEqual(["2"]);
+  });
+
+  it("publishes listing entries for an extension that only ever links out", () => {
+    const result = decide({
+      updatedChapters: [],
+      allMangaChapters: [listed("1"), listed("2")],
+      chaptersOnMd: [],
+      cleanDb: true,
+    });
+
+    expect(result.toUpload.map((c) => c.chapterId)).toEqual(["1", "2"]);
+    expect(result.missingWithoutPages).toEqual([]);
+  });
+
+  /**
+   * The case the per-manga guess gets wrong, and the reason the signal is taken
+   * over the whole run. This series reported nothing, so nothing about IT says
+   * whether the extension fetches pages — and it is exactly the series a clean
+   * run is asked about. Judged locally the answer would be "no pages, publish
+   * away", which is how a pageless chapter reaches a public page.
+   */
+  it("trusts the run, not the manga, when a dormant series carries no evidence", () => {
+    const result = decide({
+      updatedChapters: [],
+      allMangaChapters: [listed("1"), listed("2")],
+      chaptersOnMd: [],
+      cleanDb: true,
+      extensionPublishesPages: true,
+    });
+
+    expect(result.toUpload).toEqual([]);
+    expect(result.missingWithoutPages.map((c) => c.chapterId)).toEqual(["1", "2"]);
+  });
+
+  it("never publishes a listing entry with neither pages nor a link", () => {
+    const result = decide({
+      updatedChapters: [],
+      allMangaChapters: [listed("1", { chapterUrl: null })],
+      chaptersOnMd: [],
+      cleanDb: true,
+      extensionPublishesPages: false,
+    });
+
+    expect(result.toUpload).toEqual([]);
+    expect(result.missingWithoutPages.map((c) => c.chapterId)).toEqual(["1"]);
+  });
+
+  it("keeps this run's fetched pages when a chapter is in both lists", () => {
+    const withPages = listed("2", { imageArtifacts: ["22222222-2222-4222-8222-222222222222"] });
+    const result = decide({
+      updatedChapters: [withPages],
+      allMangaChapters: [listed("1"), listed("2")],
+      chaptersOnMd: [onMd("md-1")],
+      cleanDb: true,
+    });
+
+    expect(result.toUpload.map((c) => c.chapterId)).toEqual(["2"]);
+    expect(result.toUpload[0]!.imageArtifacts).toEqual([
+      "22222222-2222-4222-8222-222222222222",
+    ]);
+  });
+});

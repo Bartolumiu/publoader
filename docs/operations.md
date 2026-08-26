@@ -1226,10 +1226,10 @@ curl -s -X POST -H "authorization: Bearer $ADMIN_TOKEN" -H 'content-type: applic
 ### Ask whether a series is still on the publisher
 
 Nothing on this platform notices a chapter being pulled from the publisher except
-a run, and a run only visits series that reported an update. A series that has
-been quiet for a year can lose its back catalogue with nobody hearing about it,
-and re-carding will not find it: that re-renders the page of a chapter *already*
-known to be gone. This is how to ask whether it is gone.
+a run, and an *update* run only visits series that reported an update. A series
+that has been quiet for a year can lose its back catalogue with nobody hearing
+about it, and re-carding will not find it: that re-renders the page of a chapter
+*already* known to be gone. This is how to ask whether it is gone.
 
 **Dashboard → Chapters → Ask the publisher what is still there**, the card
 directly under *Reconcile with MangaDex*. The two share the filter above them and
@@ -1267,6 +1267,56 @@ holds under our group and queues the difference as `UNAVAILABLE` or `DELETE`, pe
 the removal mode. Watch it as `padmin runs show <id>`, then the `UNAVAILABLE`
 queue.
 
+#### What a clean run decides, and where to read it
+
+A clean run — a series re-check, an extension re-check, or a scheduled
+`kind: CLEAN` — decides all four kinds of work, and decides them the same way
+whichever of the three started it:
+
+| | Where it comes from |
+| --- | --- |
+| chapters to **upload** | the publisher lists it and MangaDex has no chapter for it |
+| chapters to **edit** | MangaDex has it, and its number, title, volume or language no longer matches the publisher |
+| duplicates to **delete** | two of our chapters on MangaDex answer to the same publisher chapter |
+| chapters to **mark unavailable** | MangaDex has it under our group and the publisher no longer lists it |
+
+All four are decided from `allChapters`, the publisher's full current listing,
+and **not** from `updatedChapters`. That distinction is the whole difference
+between a clean run and an update run. An extension is asked for everything on a
+clean run — `postedChapterIds` is sent empty, which is the contract's way of
+saying so — but an extension that keeps its own cursor, or that reads updates off
+a feed endpoint and its catalogue off another, answers with its usual handful
+anyway. The listing is the part the contract actually defines as "everything the
+publisher has", so the core decides from that and does not depend on the
+extension having understood the request.
+
+The queued work is what to read, not the run:
+
+```bash
+# what a run decided, by kind — this is the answer to "what got marked unavailable"
+padmin queues list --kind UNAVAILABLE
+padmin queues list --kind UPLOAD
+padmin queues list --kind EDIT
+padmin queues list --kind DELETE
+```
+
+**Dashboard → Queues** is the same list. The run's own *Chapters found* card is
+not this: it is read straight out of the result envelopes and shows what the
+extension reported, before the processor decided anything. A run whose card says
+"96 new or changed, 6580 seen in catalogue" and whose queues are empty means the
+processor compared all 6580 and found nothing to do — not that it did not look.
+The run's `run processed` log line carries the counts it decided, `visited`
+included, which is how many titles it actually compared.
+
+One thing a clean run can find but not fix: a chapter the publisher lists that
+MangaDex has never had, for an extension that uploads *pages*. A catalogue
+listing carries chapter metadata and never chapter images, so publishing from it
+would commit a pageless chapter to a public page. Those are counted as
+`unfetchable` and logged per series at `warn` — the gap is real, and filling it
+needs a run that actually fetches those chapters. For an extension that only ever
+links out (`externalUrl` and no pages), a listing entry *is* a whole chapter, and
+it is uploaded.
+
 Three things worth knowing before you run it:
 
 - **A series re-check is scoped, and that is load-bearing.** It is a CLEAN run —
@@ -1276,7 +1326,10 @@ Three things worth knowing before you run it:
   snapshot as "the publisher dropped it". Those passes are correct for a
   whole-catalogue run and would unpublish everything else for a one-series one.
   The extension-wide re-check carries no scope for exactly that reason: there,
-  the snapshot really does speak for the catalogue.
+  the snapshot really does speak for the catalogue. What the scope does *not*
+  change is the per-series comparison — scoped or not, a clean run compares every
+  series its snapshot covers, so the two targets differ in reach and never in
+  what they decide about a series both of them reach.
 - **An extension that publishes no catalogue listing cannot be re-checked.**
   Removal detection is a comparison, and there is nothing to compare against if
   the extension only ever reports its updates. The dry run says so when the
