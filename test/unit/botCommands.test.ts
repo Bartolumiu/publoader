@@ -1156,6 +1156,7 @@ describe("recheck", () => {
   const MD_MANGA = "9a1b1c1d-0000-4000-8000-000000000000";
   const report = (over: Record<string, unknown> = {}) => ({
     dryRun: true,
+    target: "series",
     extension: "mangaplus",
     mangaId: "100191",
     removalMode: "unavailable",
@@ -1219,5 +1220,75 @@ describe("recheck", () => {
 
   it("is gated as a mutation; it queues real changes to public pages", () => {
     expect(resolveSensitivity(COMMANDS_BY_NAME.get("recheck")!, null)).toBe("mutate");
+  });
+
+  /**
+   * The whole-extension target: a full CLEAN re-scrape. Reachable by naming an
+   * extension and no series, which is the only shape Discord's flat options
+   * allow — so the reply has to be loud about what it is, and it still cannot
+   * start without the confirm.
+   */
+  describe("over a whole extension", () => {
+    const extReport = (over: Record<string, unknown> = {}) => ({
+      dryRun: true,
+      target: "extension",
+      extension: "mangaplus",
+      removalMode: "unavailable",
+      trackedSeries: 214,
+      knownChapters: 6084,
+      onMangadex: null,
+      carded: null,
+      candidates: null,
+      publishesCatalogue: true,
+      note: "note",
+      ...over,
+    });
+
+    it("reports the size of the blast radius and starts nothing", async () => {
+      const recheckExtension = vi.fn().mockResolvedValue(extReport());
+      const recheckSeries = vi.fn();
+      const reply = await invoke("recheck", fakeApi({ recheckExtension, recheckSeries }), {
+        extension: "mangaplus",
+      });
+
+      expect(recheckSeries).not.toHaveBeenCalled();
+      expect(recheckExtension).toHaveBeenCalledWith("discord:ardax", {
+        extension: "mangaplus",
+        apply: false,
+        idempotencyKey: "discord:interaction-1",
+      });
+      expect(reply.text).toContain("214");
+      expect(reply.text).toContain("6084");
+      // The consequence, said plainly, because this is the one target that can
+      // unpublish an entire extension.
+      expect(reply.text).toContain("listing comes back empty");
+      expect(reply.text).toContain("Nothing has been started");
+    });
+
+    it("starts the full re-scrape when confirmed", async () => {
+      const recheckExtension = vi
+        .fn()
+        .mockResolvedValue(extReport({ dryRun: false, runId: "run-ext", created: true }));
+      const reply = await invoke("recheck", fakeApi({ recheckExtension }), {
+        extension: "mangaplus",
+        confirm: true,
+      });
+      expect(recheckExtension).toHaveBeenCalledWith("discord:ardax", {
+        extension: "mangaplus",
+        apply: true,
+        idempotencyKey: "discord:interaction-1",
+      });
+      expect(reply.text).toContain("Full re-check started");
+      expect(reply.text).toContain("run-ext");
+    });
+
+    it("needs one target or the other", async () => {
+      const recheckSeries = vi.fn();
+      const recheckExtension = vi.fn();
+      const reply = await invoke("recheck", fakeApi({ recheckSeries, recheckExtension }), {});
+      expect(recheckSeries).not.toHaveBeenCalled();
+      expect(recheckExtension).not.toHaveBeenCalled();
+      expect(reply.text).toContain("Name a `series`");
+    });
   });
 });

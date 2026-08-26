@@ -1231,19 +1231,34 @@ been quiet for a year can lose its back catalogue with nobody hearing about it,
 and re-carding will not find it: that re-renders the page of a chapter *already*
 known to be gone. This is how to ask whether it is gone.
 
-**Dashboard → System → Unavailable cards → Re-check a series at the publisher.**
-Pick the series, read what it would cover, start it. From a terminal:
+**Dashboard → Chapters → Ask the publisher what is still there**, the card
+directly under *Reconcile with MangaDex*. The two share the filter above them and
+point in opposite directions: reconcile reads MangaDex and writes these tables,
+this reads the publisher and writes MangaDex. Pick a series out of the archive
+you are looking at, read what it would cover, start it.
+
+Naming an extension in the filter also unlocks the second target: **all of it**.
+That is a full CLEAN re-scrape rather than a scoped run, which is the point —
+over a whole catalogue the publisher's listing really is a statement about the
+catalogue, so the two passes a scoped run must skip are back in play. It is also
+the largest action the dashboard offers. Preview it: the count it reports is the
+ceiling on what a wrong answer from the publisher could mark.
+
+From a terminal:
 
 ```bash
 # what would this ask, and of whom
 padmin chapters recheck "$MD_MANGA_ID"
-
-# ask it
 padmin chapters recheck "$MD_MANGA_ID" --apply
+
+# the same question over everything one extension tracks
+padmin chapters recheck-extension mangaplus
+padmin chapters recheck-extension mangaplus --apply
 ```
 
-`/recheck series:<name>` does the same from Discord, and needs `confirm: true`
-before it starts anything.
+`/recheck series:<name>` does the same from Discord; `/recheck extension:<name>`
+with no series re-checks the whole extension. Both need `confirm: true` before
+they start anything.
 
 The answer does not come back in the response. Reading the publisher happens on a
 worker running the extension, so this starts a run and hands back its id; the
@@ -1254,12 +1269,14 @@ queue.
 
 Three things worth knowing before you run it:
 
-- **The run is scoped, and that is load-bearing.** It is a CLEAN run — the
-  contract's way of asking an extension for its full listing — narrowed to one
-  title and recorded as such in `runs.scope_manga_ids`. The processor reads that
-  and skips the two passes that treat a tracked title's absence from a snapshot
-  as "the publisher dropped it". Those passes are correct for a whole-catalogue
-  run and would unpublish everything else for a one-series one.
+- **A series re-check is scoped, and that is load-bearing.** It is a CLEAN run —
+  the contract's way of asking an extension for its full listing — narrowed to
+  one title and recorded as such in `runs.scope_manga_ids`. The processor reads
+  that and skips the two passes that treat a tracked title's absence from a
+  snapshot as "the publisher dropped it". Those passes are correct for a
+  whole-catalogue run and would unpublish everything else for a one-series one.
+  The extension-wide re-check carries no scope for exactly that reason: there,
+  the snapshot really does speak for the catalogue.
 - **An extension that publishes no catalogue listing cannot be re-checked.**
   Removal detection is a comparison, and there is nothing to compare against if
   the extension only ever reports its updates. The dry run says so when the

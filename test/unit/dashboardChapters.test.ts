@@ -179,6 +179,29 @@ function apiRoutes(): { match: RegExp; body: unknown | ((init?: { body?: string 
         ],
       },
     },
+    {
+      // Before the extensions facet: `/chapters/extensions/<name>/recheck`
+      // starts with the same path.
+      match: /\/chapters\/extensions\/[^/]+\/recheck/,
+      body: (init?: { body?: string }) => {
+        const sent = JSON.parse(init?.body ?? "{}");
+        return {
+          dryRun: sent.dryRun !== false,
+          action: "RECHECK",
+          target: "extension",
+          extension: "mangaplus",
+          removalMode: "unavailable",
+          trackedSeries: 214,
+          knownChapters: 6084,
+          onMangadex: null,
+          carded: null,
+          candidates: null,
+          publishesCatalogue: true,
+          ...(sent.dryRun === false ? { ok: true, runId: "run-recheck-ext", created: true } : {}),
+          note: "note",
+        };
+      },
+    },
     { match: /\/chapters\/extensions/, body: { table: "uploaded", extensions: [{ extension: "mangaplus", count: 902 }] } },
     {
       // Ordered before the series listing: its path starts the same way.
@@ -204,8 +227,12 @@ function apiRoutes(): { match: RegExp; body: unknown | ((init?: { body?: string 
       match: /\/chapters\/series/,
       body: {
         archive: "unavailable",
-        limit: 100,
-        capped: false,
+        limit: 25,
+        offset: 0,
+        // More than one page: the pager is the fix for a list that used to stop
+        // at a hard limit and say nothing about the rest.
+        total: 214,
+        hasMore: true,
         series: [
           {
             mdMangaId: MD_MANGA,
@@ -850,15 +877,16 @@ describe("dashboard chapter views", () => {
   });
 
   /**
-   * The re-check panel, which shares the tab with the re-card one.
+   * The re-check card, which lives beside Reconcile on the Chapters view.
    *
-   * It is the question before a card exists: a run only visits series that
-   * published something, so a quiet series can lose its back catalogue with
-   * nothing noticing. The property worth holding is that the panel never starts
-   * a run without an explicit confirmation, and never starts one at all from
-   * the preview button.
+   * They answer the same worry from opposite directions — reconcile reads
+   * MangaDex into these tables, this asks the publisher and writes MangaDex —
+   * so they share the one filter rather than each growing their own. The
+   * properties worth holding are that the filter really does drive it, that a
+   * whole-extension re-scrape is impossible to start by accident, and that
+   * nothing is started at all from the preview button.
    */
-  describe("re-checking a series at the publisher", () => {
+  describe("asking the publisher what is still there", () => {
     const click = (label: string): void => {
       const button = [...doc.querySelectorAll("button")].find(
         (b: { textContent: string }) => b.textContent === label,
@@ -878,20 +906,50 @@ describe("dashboard chapter views", () => {
       await settle();
     };
 
-    it("lists published series, not just the ones with cards up", async () => {
-      await goto("#/system/cards");
-      expect(text()).toContain("Re-check a series at the publisher");
-      // The uploaded archive: a series worth re-checking need not have anything
-      // marked unavailable yet.
+    const filterToExtension = async (name: string): Promise<void> => {
+      const select = doc.getElementById("chapter-extension");
+      select.value = name;
+      select.dispatchEvent(new win.Event("change"));
+      await settle();
+    };
+
+    it("sits beside Reconcile and lists the archive being looked at", async () => {
+      await goto("#/chapters");
+      const view = text();
+      expect(view).toContain("Reconcile with MangaDex");
+      expect(view).toContain("Ask the publisher what is still there");
+      // The tab's archive, not a fixed one.
       expect(
         requested.some(
           (path) => path.includes("/chapters/series?") && path.includes("archive=uploaded"),
         ),
       ).toBe(true);
+
+      await goto("#/chapters/unavailable");
+      expect(
+        requested.some(
+          (path) => path.includes("/chapters/series?") && path.includes("archive=unavailable"),
+        ),
+      ).toBe(true);
     });
 
-    it("reports what a re-check would cover without starting one", async () => {
-      await goto("#/system/cards");
+    /**
+     * The complaint this replaces: the list stopped at a hard limit and said
+     * nothing about the rest, which reads as "there are only this many".
+     */
+    it("says how many series there are in total, and pages through them", async () => {
+      await goto("#/chapters");
+      expect(text()).toContain("214");
+
+      click("Next");
+      await settle();
+      expect(
+        requested.some((path) => path.includes("/chapters/series?") && path.includes("offset=25")),
+      ).toBe(true);
+    });
+
+    it("reports what a series re-check would cover without starting one", async () => {
+      await goto("#/chapters");
       await pickSeries();
 
       click("What would this cover?");
@@ -899,19 +957,31 @@ describe("dashboard chapter views", () => {
 
       const [url, init] = recheckCalls()[0];
       expect(String(url)).toContain(`/chapters/series/${MD_MANGA}/recheck`);
-      // A preview names the extension to ask and starts nothing.
-      expect(JSON.parse(init.body)).toEqual({ extension: "mangaplus", dryRun: true });
+      expect(JSON.parse(init.body)).toEqual({ dryRun: true });
       const view = text();
       expect(view).toContain("mangaplus");
       expect(view).toContain("38");
       expect(view).toContain("Nothing has been started");
     });
 
-    it("starts the run only after the confirmation", async () => {
-      await goto("#/system/cards");
+    it("names the filtered extension, which is how an ambiguous title is resolved", async () => {
+      await goto("#/chapters");
+      await filterToExtension("mangaplus");
       await pickSeries();
 
-      click("Start the re-check…");
+      click("What would this cover?");
+      await settle();
+      expect(JSON.parse(recheckCalls()[0][1].body)).toEqual({
+        extension: "mangaplus",
+        dryRun: true,
+      });
+    });
+
+    it("starts a series re-check only after the confirmation", async () => {
+      await goto("#/chapters");
+      await pickSeries();
+
+      click("Re-check this series…");
       await settle();
       // Still nothing sent: the dialog stands between the click and the run.
       expect(recheckCalls()).toHaveLength(0);
@@ -923,12 +993,57 @@ describe("dashboard chapter views", () => {
         ([, init]: [string, { body: string }]) => JSON.parse(init.body).dryRun === false,
       );
       expect(live).toHaveLength(1);
-      expect(JSON.parse(live[0][1].body)).toEqual({
-        extension: "mangaplus",
-        dryRun: false,
-        confirm: true,
-      });
+      expect(JSON.parse(live[0][1].body)).toEqual({ dryRun: false, confirm: true });
       expect(text()).toContain("run-recheck-1");
+    });
+
+    /**
+     * The whole-extension target is a full CLEAN re-scrape, the largest blast
+     * radius this view can produce. It is unreachable until an extension has
+     * actually been chosen in the filter.
+     */
+    it("keeps the whole-extension target disabled until the filter names one", async () => {
+      await goto("#/chapters");
+      expect(doc.getElementById("recheck-mode-extension").disabled).toBe(true);
+
+      await filterToExtension("mangaplus");
+      expect(doc.getElementById("recheck-mode-extension").disabled).toBe(false);
+      expect(text()).toContain("All of mangaplus");
+    });
+
+    it("re-checks a whole extension, and says how much is in range first", async () => {
+      await goto("#/chapters");
+      await filterToExtension("mangaplus");
+
+      const mode = doc.getElementById("recheck-mode-extension");
+      mode.checked = true;
+      mode.dispatchEvent(new win.Event("change"));
+      await settle();
+
+      click("What would this cover?");
+      await settle();
+      const [url, init] = recheckCalls()[0];
+      expect(String(url)).toContain("/chapters/extensions/mangaplus/recheck");
+      expect(JSON.parse(init.body)).toEqual({ dryRun: true });
+      // The ceiling on what a wrong answer from the publisher could mark.
+      const view = text();
+      expect(view).toContain("214");
+      expect(view).toContain("6084");
+
+      click("Re-check the whole extension…");
+      await settle();
+      expect(
+        recheckCalls().filter(([, i]: [string, { body: string }]) => JSON.parse(i.body).dryRun === false),
+      ).toHaveLength(0);
+
+      click("Re-scrape the extension");
+      await settle(20);
+      const live = recheckCalls().filter(
+        ([, i]: [string, { body: string }]) => JSON.parse(i.body).dryRun === false,
+      );
+      expect(live).toHaveLength(1);
+      expect(String(live[0][0])).toContain("/chapters/extensions/mangaplus/recheck");
+      expect(text()).toContain("run-recheck-ext");
     });
   });
 });

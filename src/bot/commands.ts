@@ -1496,47 +1496,61 @@ const commands: BotCommand[] = [
   },
   {
     name: "recheck",
-    description: "Ask the publisher whether one series' chapters are still there.",
+    description: "Ask the publisher whether chapters are still there, for one series or a whole extension.",
     // Mutate, not read: what comes back from the publisher is turned into real
     // UNAVAILABLE (or DELETE) tasks against live MangaDex pages. It is the same
-    // machinery /run drives, narrowed to one title, and it is gated the same
-    // way — including the explicit confirm a CLEAN needs there.
+    // machinery /run drives, and it is gated the same way — including the
+    // explicit confirm a CLEAN needs there.
     sensitivity: "mutate",
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("recheck")
-      .setDescription("Ask the publisher whether one series' chapters are still there.")
+      .setDescription("Ask the publisher whether chapters are still there, for one series or a whole extension.")
       .addStringOption((o) =>
         o
           .setName("series")
-          .setDescription("The series, by name or MangaDex id.")
-          .setRequired(true)
+          .setDescription("One series, by name or MangaDex id. Omit to re-check a whole extension.")
           .setAutocomplete(true),
       )
       .addStringOption((o) =>
         o
           .setName("extension")
-          .setDescription("Which extension to ask, when more than one tracks the title.")
+          .setDescription("With a series: which extension to ask. Without one: re-check all of it.")
           .setAutocomplete(true),
       )
       .addBooleanOption((o) =>
         o.setName("confirm").setDescription("Start the run. Without it this only reports what it would cover."),
       ),
     async run(ctx) {
-      const series = requireSeriesId(ctx.options.string("series"));
+      const rawSeries = ctx.options.string("series");
       const extension = ctx.options.string("extension");
       const apply = ctx.options.boolean("confirm") === true;
-      const result = await ctx.api.recheckSeries(ctx.actor, {
-        mdMangaId: series,
-        extension: extension ?? undefined,
-        apply,
-        // One key per interaction, for the same reason /run has one: a Discord
-        // retry must collapse into the same run rather than scrape twice.
-        idempotencyKey: `discord:${ctx.interactionId}`,
-      });
+      if (!rawSeries && !extension) {
+        throw new UserError(
+          "Name a `series` to re-check one title, or an `extension` on its own to re-check all of it.",
+        );
+      }
+      // One key per interaction, for the same reason /run has one: a Discord
+      // retry must collapse into the same run rather than scrape twice.
+      const idempotencyKey = `discord:${ctx.interactionId}`;
+      const result = rawSeries
+        ? await ctx.api.recheckSeries(ctx.actor, {
+            mdMangaId: requireSeriesId(rawSeries),
+            extension: extension ?? undefined,
+            apply,
+            idempotencyKey,
+          })
+        : await ctx.api.recheckExtension(ctx.actor, {
+            extension: requireExtensionName(extension),
+            apply,
+            idempotencyKey,
+          });
 
-      const holdings =
-        result.onMangadex === null
+      const whole = result.target === "extension";
+      const holdings = whole
+        ? `**${result.trackedSeries ?? 0}** tracked series, ${result.knownChapters ?? 0} chapter(s) ` +
+          "we have a row for"
+        : result.onMangadex === null
           ? "MangaDex holdings unknown (the API holds no MangaDex credentials)"
           : `**${result.onMangadex}** chapter(s) on MangaDex, ${result.carded ?? 0} already carded, ` +
             `**${result.candidates ?? 0}** that this could mark`;
@@ -1544,21 +1558,33 @@ const commands: BotCommand[] = [
         ? ""
         : `\n:warning: \`${result.extension}\` has not sent a full catalogue listing recently. ` +
           "Removal detection is computed from one, so this will probably find nothing.";
+      const queued = `**${result.removalMode === "delete" ? "DELETE" : "UNAVAILABLE"}**`;
 
       if (!apply) {
         return {
-          text:
-            `:mag: Re-checking this series would ask \`${result.extension}\` (as \`${result.mangaId}\`) ` +
-            `for its current listing.\n${holdings}; anything it no longer lists is queued as ` +
-            `**${result.removalMode === "delete" ? "DELETE" : "UNAVAILABLE"}**.${caveat}\n` +
-            "Nothing has been started. Re-issue with `confirm: true` to start the run.",
+          text: whole
+            ? `:warning: This would re-scrape **all of \`${result.extension}\`** and ask it for its ` +
+              `current listing of every series it tracks.\n${holdings}; anything on MangaDex it no ` +
+              `longer lists is queued as ${queued}. If its listing comes back empty, so is ` +
+              `everything we have published for it.${caveat}\n` +
+              "Nothing has been started. Re-issue with `confirm: true` to start the run."
+            : `:mag: Re-checking this series would ask \`${result.extension}\` (as \`${result.mangaId}\`) ` +
+              `for its current listing.\n${holdings}; anything it no longer lists is queued as ` +
+              `${queued}.${caveat}\n` +
+              "Nothing has been started. Re-issue with `confirm: true` to start the run.",
+        };
+      }
+      if (!result.created) {
+        return {
+          text: `:information_source: A run for that exact request already existed: \`${result.runId}\` (nothing new was created).`,
         };
       }
       return {
-        text: result.created
-          ? `:satellite: Re-check started for this series via \`${result.extension}\`: run \`${result.runId}\`.\n` +
-            `${holdings}.${caveat}\nFollow it with \`/runs show id:${result.runId}\`, then \`/queue list kind:UNAVAILABLE\`.`
-          : `:information_source: A run for that exact request already existed: \`${result.runId}\` (nothing new was created).`,
+        text:
+          (whole
+            ? `:satellite: Full re-check started for \`${result.extension}\`: run \`${result.runId}\`.\n`
+            : `:satellite: Re-check started for this series via \`${result.extension}\`: run \`${result.runId}\`.\n`) +
+          `${holdings}.${caveat}\nFollow it with \`/runs show id:${result.runId}\`, then \`/queue list kind:UNAVAILABLE\`.`,
       };
     },
   },

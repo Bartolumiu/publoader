@@ -4051,10 +4051,17 @@ VIEWS.chapters = (route) => {
   );
 
   const reload = () => void chapters.load({ force: true });
+  // Cards below the filter that have their own view of it. The listing reloads
+  // itself through its Resource; a card whose *controls* depend on the filter —
+  // the re-check card's whole-extension target is only offered once an
+  // extension is named — has to be told, or it keeps rendering the answer to
+  // the previous question.
+  const filterHooks = [];
   const resetPaging = () => {
     setFilter({ chapterCursors: { ...f().chapterCursors, [archive]: [] } });
     selected.clear();
     reload();
+    for (const hook of filterHooks) hook();
   };
   const page = (walked) => {
     setFilter({ chapterCursors: { ...f().chapterCursors, [archive]: walked } });
@@ -4080,6 +4087,9 @@ VIEWS.chapters = (route) => {
     {},
     chapterFilterCard(extensions, resetPaging),
     reconcileCard(archive, reload),
+    // Same filter, opposite direction: reconcile reads MangaDex into these
+    // tables, this asks the publisher and writes MangaDex.
+    recheckCard(archive, activeFilter, filterHooks),
     card(
       null,
       live(
@@ -4334,6 +4344,294 @@ function reconcileCard(archive, reload) {
       ),
       output,
     ),
+  );
+}
+
+/**
+ * Ask the publisher whether chapters are still there.
+ *
+ * The sibling of `reconcileCard`, and deliberately beside it, because the two
+ * answer the same worry from opposite directions. Reconcile reads MangaDex and
+ * writes *these* tables: what does MangaDex hold that we have no row for.
+ * This reads the *publisher* and writes MangaDex: what did the publisher drop
+ * that MangaDex still shows. Neither can stand in for the other, and an
+ * operator who wants one usually wants to have looked at the other.
+ *
+ * Nothing on this platform notices a chapter being pulled from the publisher
+ * except a run, and a run only visits series that reported an update. A series
+ * quiet for a year can lose its back catalogue with nobody hearing about it,
+ * and re-carding will not find it: that re-renders the page of a chapter
+ * already known to be gone.
+ *
+ * It cannot answer here — reading the publisher happens on a worker running the
+ * extension — so it starts a run and hands back where to watch it. The two
+ * targets are genuinely different instruments. One series is the precise one.
+ * A whole extension is a full CLEAN re-scrape, the largest blast radius this
+ * dashboard can produce: it can mark every chapter of every series unavailable
+ * if the publisher's listing comes back empty, which is exactly why the preview
+ * is not optional decoration.
+ *
+ * The filter above drives it: the archive tab chooses which series are offered,
+ * and the extension picker is what makes the whole-extension target available
+ * at all. That is the same filter the listing and the bulk bar use, so the set
+ * an operator is looking at is the set they act on.
+ */
+function recheckCard(archive, filter, filterHooks = []) {
+  const target = { mode: "series", series: "", seriesName: "" };
+  const preview = el("div", {});
+  const progress = el("div", { class: "dim small" });
+  const buttons = el("div", { class: "row" });
+  const body = el("div", {});
+
+  const extension = () => filter().extension ?? "";
+
+  const page = {
+    offset: 0,
+    limit: 25,
+    go: (offset) => {
+      page.offset = offset;
+      void series.load({ force: true });
+      redraw();
+    },
+  };
+
+  // The archive being looked at, not a fixed one: "which series has lost
+  // chapters" and "which series have we published at all" are different
+  // questions and the tabs already ask them.
+  const series = new Resource(`recheck-series:${archive}`, () => {
+    const active = filter();
+    const q = new URLSearchParams({
+      archive,
+      limit: String(page.limit),
+      offset: String(page.offset),
+    });
+    // Every part of the filter, chapter number included: this card says it
+    // follows the one above it, and a filter it silently ignores makes that a
+    // lie in the one case an operator would notice.
+    if (active.extension) q.set("extension", active.extension);
+    if (active.language) q.set("language", active.language);
+    if (active.chapterNumber) q.set("chapterNumber", active.chapterNumber);
+    if (active.search) q.set("search", active.search);
+    return api(`/chapters/series?${q}`);
+  });
+
+  const say = (text, bad = false) => {
+    progress.className = bad ? "error" : "dim small";
+    progress.textContent = text;
+  };
+
+  /** The path for the current target, or null when it is not answerable. */
+  const path = () => {
+    if (target.mode === "extension") {
+      return extension() ? `/chapters/extensions/${encodeURIComponent(extension())}/recheck` : null;
+    }
+    const id = target.series.trim();
+    return id ? `/chapters/series/${encodeURIComponent(id)}/recheck` : null;
+  };
+
+  // The filter's extension rides along on a series re-check: a title two
+  // extensions publish is refused until one is named, and the operator has
+  // already named one just by looking at it.
+  const call = (extra) =>
+    api(path(), {
+      method: "POST",
+      body: target.mode === "series" && extension() ? { extension: extension(), ...extra } : extra,
+    });
+
+  const render = (result) => {
+    setChildren(
+      preview,
+      el("h3", { text: result.dryRun ? "What this would cover" : "Started" }),
+      defs([
+        ["Extension asked", result.extension],
+        ...(result.target === "extension"
+          ? [
+              ["Tracked series", String(result.trackedSeries ?? 0)],
+              ["Chapters we have a row for", String(result.knownChapters ?? 0)],
+            ]
+          : [
+              ["Known to it as", result.mangaId],
+              ["Chapters on MangaDex", result.onMangadex === null ? "unknown" : String(result.onMangadex)],
+              ["Already carded", String(result.carded ?? 0)],
+              ["Could be marked", result.candidates === null ? "unknown" : String(result.candidates)],
+            ]),
+        ["Removal mode", result.removalMode],
+        ...(result.runId ? [["Run", result.runId]] : []),
+      ]),
+      result.publishesCatalogue
+        ? null
+        : el("p", {
+            class: "error",
+            text:
+              `${result.extension} has not sent a full catalogue listing in its recent runs. ` +
+              "Removal detection is computed from one, so this will probably find nothing to " +
+              "mark. Running it harms nothing.",
+          }),
+      result.runId
+        ? routeLink(routeTo("runs", result.runId, null), "Follow the run", { class: "button-link inline" })
+        : null,
+    );
+  };
+
+  const runPreview = async (button) => {
+    const result = await act("chapters.recheck.preview", () => call({ dryRun: true }), { button });
+    if (!result) return;
+    render(result);
+    say("Nothing has been started.");
+  };
+
+  const runApply = async () => {
+    const whole = target.mode === "extension";
+    if (
+      !(await confirmDialog({
+        title: whole ? `Re-check every series in ${extension()}` : "Re-check this series at the publisher",
+        lead: whole
+          ? `A full CLEAN run will re-scrape ${extension()} and ask it for its current listing of ` +
+            "every series it tracks."
+          : `A run will ask ${target.seriesName || "this series"}' extension for its current listing.`,
+        points: [
+          "Whatever MangaDex still holds that the publisher no longer lists is queued: an " +
+            "unavailable card, or a deletion, per the removal mode.",
+          whole
+            ? "Every tracked series is in range. If the publisher's listing comes back empty, so is " +
+              "everything we have published for it."
+            : "Only this series is asked about; the rest of the catalogue is not touched.",
+          "Chapters already carrying our card are left alone.",
+        ],
+        confirmLabel: whole ? "Re-scrape the extension" : "Start the re-check",
+        danger: whole,
+      }))
+    ) {
+      return;
+    }
+    const result = await act("chapters.recheck.start", () => call({ dryRun: false, confirm: true }));
+    if (!result) return;
+    render(result);
+    say(
+      result.created
+        ? "Run queued. A worker executes it, then the processor queues what the publisher dropped."
+        : "A run for that exact request already existed; nothing new was created.",
+    );
+    toast("Re-check started", true);
+  };
+
+  const redrawButtons = () => {
+    const ready = Boolean(path());
+    setChildren(
+      buttons,
+      gatedButton("chapters:read", {
+        text: "What would this cover?",
+        disabled: !ready,
+        title: ready ? "Ask without starting anything" : "Choose a target first",
+        onclick: (event) => runPreview(event.currentTarget),
+      }),
+      gatedButton("runs:write", {
+        class: "primary",
+        text: target.mode === "extension" ? "Re-check the whole extension…" : "Re-check this series…",
+        disabled: !ready,
+        onclick: () => runApply(),
+      }),
+    );
+  };
+
+  const modeRadio = (mode, label, hint, disabled) =>
+    el(
+      "label",
+      { class: "inline", for: `recheck-mode-${mode}` },
+      el("input", {
+        id: `recheck-mode-${mode}`,
+        type: "radio",
+        name: "recheck-mode",
+        checked: target.mode === mode,
+        disabled,
+        onchange: (event) => {
+          if (!event.target.checked) return;
+          target.mode = mode;
+          setChildren(preview);
+          say("");
+          redraw();
+        },
+      }),
+      ` ${label}`,
+      el("span", { class: "dim small", text: ` — ${hint}` }),
+    );
+
+  const redraw = () => {
+    const ext = extension();
+    redrawButtons();
+    setChildren(
+      body,
+      el(
+        "div",
+        { class: "row" },
+        modeRadio("series", "One series", "picked from the archive below", false),
+        modeRadio(
+          "extension",
+          ext ? `All of ${ext}` : "A whole extension",
+          ext ? "a full CLEAN re-scrape of every tracked series" : "pick one in the filter above first",
+          !ext,
+        ),
+      ),
+      target.mode === "series"
+        ? seriesPickerBlock({
+            resource: series,
+            name: "recheck-series-pick",
+            selectedId: () => target.series.trim(),
+            page,
+            countNoun: `title(s) in this archive`,
+            countHeader: "Chapters",
+            empty: "No series in this archive matches the filter above.",
+            onPick: (entry) => {
+              target.series = entry.mdMangaId;
+              target.seriesName = entry.mangaName ?? "";
+              setChildren(preview);
+              say("");
+              redraw();
+            },
+          })
+        : el("p", {
+            class: "dim small",
+            text: ext
+              ? `Every series ${ext} tracks will be re-scraped and compared. Preview it first: the ` +
+                "count it reports is the ceiling on what a wrong answer from the publisher could mark."
+              : "Choose an extension in the filter above to enable this.",
+          }),
+      buttons,
+      progress,
+      preview,
+    );
+  };
+
+  redraw();
+  void series.load();
+
+  filterHooks.push(() => {
+    // A series picked under the old filter may not be in the new one, and a
+    // whole-extension target survives only as long as an extension is named.
+    page.offset = 0;
+    if (target.mode === "extension" && !extension()) target.mode = "series";
+    void series.load({ force: true });
+    redraw();
+  });
+
+  return card(
+    "Ask the publisher what is still there",
+    el("p", {
+      class: "dim small",
+      text:
+        "The card above reads MangaDex and writes these tables. This reads the publisher and " +
+        "writes MangaDex: the extension is asked for its current listing, and whatever MangaDex " +
+        "still holds that it no longer lists is queued — marked unavailable, or deleted, per the " +
+        "removal mode.",
+    }),
+    el("p", {
+      class: "dim small",
+      text:
+        "Nothing else asks this on demand. Removals are noticed by runs, and a run only visits " +
+        "series that reported an update, so a series quiet for a year can lose its back catalogue " +
+        "silently.",
+    }),
+    body,
   );
 }
 
@@ -8678,12 +8976,7 @@ function auditDetail(id) {
 
 VIEWS.system = (route) => {
   if (route.tab === "mangadex") return mangadexPanel();
-  if (route.tab === "cards") {
-    // Two halves of one job, in the order an operator meets them: "is this
-    // chapter actually gone?" is answered by asking the publisher, and only
-    // then is there a card to keep in good repair.
-    return el("div", {}, seriesRecheckPanel(), unavailableCardsPanel());
-  }
+  if (route.tab === "cards") return unavailableCardsPanel();
   if (route.tab === "backup") return backupPanel();
 
   /*
@@ -8767,215 +9060,74 @@ VIEWS.system = (route) => {
  * goes rather than timing out behind a spinner.
  */
 /**
- * Ask the publisher whether one series' chapters are still there.
+ * A pageable list of series to pick one out of.
  *
- * The other panel on this tab re-renders a card on a chapter already known to
- * be gone. This is the question before it: nothing on this platform notices a
- * chapter being pulled from the publisher except a run, and a run only visits
- * series that published something. A series that has been quiet for a year is
- * exactly the one whose back catalogue can rot without anybody hearing about
- * it, and this is how an operator asks.
+ * Shared because the first version of this was a bare `LIMIT 100` with a "the
+ * largest shown" footnote, on the theory that the tail of a count-ordered list
+ * is the least interesting end. That is true of the tail and false of the
+ * question: an operator looking for one series does not care that it is 300th,
+ * and a list that stops at 100 reads as "there are only 100".
  *
- * It cannot answer here — reading the publisher happens on a worker running the
- * extension — so it starts a run scoped to the one series and hands back where
- * to watch it. The preview is worth having anyway: it names the extension that
- * will be asked, how many chapters are on MangaDex to be judged, and whether
- * that extension publishes the full listing the comparison needs at all.
+ * `page` is a live object, not a value: the caller owns the offset because the
+ * caller owns the Resource whose query string carries it.
  */
-function seriesRecheckPanel() {
-  const target = { series: "", seriesName: "", extension: "" };
-  const preview = el("div", {});
-  const progress = el("div", { class: "dim small" });
-  const buttons = el("div", { class: "row" });
-  const picker = el("div", {});
-
-  // The `uploaded` archive, not `unavailable`: the series worth re-checking is
-  // one we have published, whether or not anything of it has been pulled yet.
-  const series = new Resource("recheck-series", () => {
-    const q = new URLSearchParams({ archive: "uploaded", limit: "100" });
-    if (target.extension) q.set("extension", target.extension);
-    if (search.value.trim()) q.set("search", search.value.trim());
-    return api(`/chapters/series?${q}`);
-  });
-
-  const search = el("input", {
-    id: "recheck-search",
-    type: "text",
-    placeholder: "title, name, or any id",
-    onchange: () => void series.load({ force: true }),
-  });
-
-  const say = (text, bad = false) => {
-    progress.className = bad ? "error" : "dim small";
-    progress.textContent = text;
-  };
-
-  const call = (extra) =>
-    api(`/chapters/series/${encodeURIComponent(target.series.trim())}/recheck`, {
-      method: "POST",
-      body: { ...(target.extension ? { extension: target.extension } : {}), ...extra },
-    });
-
-  const render = (result) => {
-    setChildren(
-      preview,
-      el("h3", { text: result.dryRun ? "What this would cover" : "Started" }),
-      defs([
-        ["Extension asked", result.extension],
-        ["Known to it as", result.mangaId],
-        ["Chapters on MangaDex", result.onMangadex === null ? "unknown" : String(result.onMangadex)],
-        ["Already carded", String(result.carded ?? 0)],
-        ["Could be marked", result.candidates === null ? "unknown" : String(result.candidates)],
-        ["Removal mode", result.removalMode],
-        ...(result.runId ? [["Run", result.runId]] : []),
-      ]),
-      result.publishesCatalogue
-        ? null
-        : el("p", {
-            class: "error",
+function seriesPickerBlock({ resource, name, selectedId, onPick, page, countNoun, empty, countHeader }) {
+  return live(
+    [resource],
+    (data) => {
+      const rows = data.series ?? [];
+      const total = data.total ?? rows.length;
+      const first = page.offset + 1;
+      const last = page.offset + rows.length;
+      return el(
+        "div",
+        {},
+        el(
+          "div",
+          { class: "row" },
+          el("span", {
+            class: "dim small",
             text:
-              `${result.extension} has not sent a full catalogue listing in its recent runs. ` +
-              "Removal detection is computed from one, so this will probably find nothing to mark. " +
-              "Running it harms nothing.",
+              total === 0
+                ? `No ${countNoun}`
+                : `${first}\u2013${last} of ${total} ${countNoun}`,
           }),
-      result.runId
-        ? routeLink(routeTo("runs", result.runId, null), "Follow the run", { class: "button-link inline" })
-        : null,
-    );
-  };
-
-  const runPreview = async (button) => {
-    const result = await act("chapters.recheck.preview", () => call({ dryRun: true }), { button });
-    if (!result) return;
-    render(result);
-    say("Nothing has been started.");
-  };
-
-  const runApply = async () => {
-    if (
-      !(await confirmDialog({
-        title: "Re-check this series at the publisher",
-        lead:
-          `A run will ask ${target.seriesName || "this series"}' extension for its current listing, ` +
-          "and queue whatever MangaDex still holds that the publisher no longer lists.",
-        points: [
-          "The queued work is real: an unavailable card, or a deletion, per the removal mode.",
-          "Only this series is asked about; the rest of the catalogue is not touched.",
-          "Chapters already carrying our card are left alone.",
-        ],
-        confirmLabel: "Start the re-check",
-        danger: false,
-      }))
-    ) {
-      return;
-    }
-    const result = await act("chapters.recheck.start", () => call({ dryRun: false, confirm: true }));
-    if (!result) return;
-    render(result);
-    say(
-      result.created
-        ? "Run queued. It is executed by a worker, then the processor queues what the publisher dropped."
-        : "A run for that exact request already existed; nothing new was created.",
-    );
-    toast("Re-check started", true);
-  };
-
-  const redrawButtons = () => {
-    const ready = Boolean(target.series.trim());
-    setChildren(
-      buttons,
-      gatedButton("chapters:read", {
-        text: "What would this cover?",
-        disabled: !ready,
-        title: ready ? "Ask without starting anything" : "Pick a series first",
-        onclick: (event) => runPreview(event.currentTarget),
-      }),
-      gatedButton("runs:write", {
-        class: "primary",
-        text: "Start the re-check…",
-        disabled: !ready,
-        onclick: () => runApply(),
-      }),
-    );
-  };
-
-  const idField = el("input", {
-    id: "recheck-series-id",
-    type: "text",
-    placeholder: "paste it from the title URL, or pick one below",
-    oninput: (event) => {
-      target.series = event.target.value;
-      target.seriesName = "";
-      redrawButtons();
+          el("span", { class: "grow" }),
+          el("button", {
+            type: "button",
+            text: "Previous",
+            disabled: page.offset === 0,
+            onclick: () => page.go(Math.max(0, page.offset - page.limit)),
+          }),
+          el("button", {
+            type: "button",
+            text: "Next",
+            disabled: !data.hasMore,
+            onclick: () => page.go(page.offset + page.limit),
+          }),
+        ),
+        table(
+          ["", "Series", countHeader, "Extension", "Most recent"],
+          rows.map((entry) => [
+            el("input", {
+              type: "radio",
+              name,
+              checked: selectedId() === entry.mdMangaId,
+              "aria-label": `Select ${entry.mangaName ?? entry.mdMangaId}`,
+              onchange: (event) => {
+                if (event.target.checked) onPick(entry);
+              },
+            }),
+            truncate(entry.mangaName || entry.mdMangaId, 40),
+            String(entry.count),
+            (entry.extensions ?? []).map((n) => n || "(unattributed)").join(", ") || "-",
+            fmtTime(entry.at),
+          ]),
+          { empty },
+        ),
+      );
     },
-  });
-
-  const redrawPicker = () =>
-    setChildren(
-      picker,
-      live(
-        [series],
-        (data) =>
-          table(
-            ["", "Series", "Chapters up", "Extension", "Most recent"],
-            (data.series ?? []).map((entry) => [
-              el("input", {
-                type: "radio",
-                name: "recheck-series-pick",
-                checked: target.series.trim() === entry.mdMangaId,
-                "aria-label": `Re-check ${entry.mangaName ?? entry.mdMangaId}`,
-                onchange: (event) => {
-                  if (!event.target.checked) return;
-                  target.series = entry.mdMangaId;
-                  target.seriesName = entry.mangaName ?? "";
-                  // One extension in the row is the one to ask; more than one
-                  // and the server refuses until told which, so pre-fill the
-                  // unambiguous case and leave the ambiguous one to say so.
-                  target.extension = (entry.extensions ?? []).length === 1 ? entry.extensions[0] : "";
-                  idField.value = entry.mdMangaId;
-                  setChildren(preview);
-                  say("");
-                  redrawButtons();
-                },
-              }),
-              truncate(entry.mangaName || entry.mdMangaId, 40),
-              String(entry.count),
-              (entry.extensions ?? []).map((name) => name || "(unattributed)").join(", ") || "-",
-              fmtTime(entry.at),
-            ]),
-            { empty: "No published series matches this filter." },
-          ),
-        { reserve: 300, skeleton: () => skeletonTable(5, 6) },
-      ),
-    );
-
-  redrawButtons();
-  redrawPicker();
-  void series.load();
-
-  return card(
-    "Re-check a series at the publisher",
-    el("p", {
-      class: "dim small",
-      text:
-        "Nothing notices a chapter being pulled from the publisher except a run, and a run only " +
-        "looks at series that published something. A series that has been quiet for a year can " +
-        "lose its back catalogue without anybody hearing about it; this is how to ask.",
-    }),
-    el("p", {
-      class: "dim small",
-      text:
-        "The extension is asked for its current listing of this one series. Chapters MangaDex still " +
-        "holds that it no longer lists are queued — marked unavailable, or deleted, per the removal " +
-        "mode. Nothing else in the catalogue is looked at or touched.",
-    }),
-    el("label", { for: "recheck-series-id", text: "MangaDex title id" }),
-    idField,
-    row(el("label", { class: "inline", for: "recheck-search", text: "Search" }), search),
-    picker,
-    buttons,
-    progress,
-    preview,
+    { reserve: 300, skeleton: () => skeletonTable(5, 6) },
   );
 }
 
@@ -8996,8 +9148,21 @@ function unavailableCardsPanel() {
   const extensions = new Resource("recard-extensions", () =>
     api("/chapters/extensions?archive=unavailable"),
   );
+  const seriesPage = {
+    offset: 0,
+    limit: 25,
+    go: (offset) => {
+      seriesPage.offset = offset;
+      void seriesList.load({ force: true });
+      redraw();
+    },
+  };
   const seriesList = new Resource("recard-series", () => {
-    const q = new URLSearchParams({ archive: "unavailable", limit: "100" });
+    const q = new URLSearchParams({
+      archive: "unavailable",
+      limit: String(seriesPage.limit),
+      offset: String(seriesPage.offset),
+    });
     if (filters.extension) q.set("extension", filters.extension);
     if (filters.language) q.set("language", filters.language);
     if (filters.search) q.set("search", filters.search);
@@ -9067,6 +9232,7 @@ function unavailableCardsPanel() {
    */
   const refilter = () => {
     cursors.length = 0;
+    seriesPage.offset = 0;
     selected.clear();
     if (target.mode === "selected") void listing.load({ force: true });
     if (target.mode === "series") void seriesList.load({ force: true });
@@ -9373,49 +9539,22 @@ function unavailableCardsPanel() {
       : el("span", {});
 
   const seriesPicker = () =>
-    live(
-      [seriesList],
-      (data) => {
-        const rows = data.series ?? [];
-        return el(
-          "div",
-          {},
-          el("div", { class: "row" }, [
-            el("span", {
-              class: "dim small",
-              text: target.series
-                ? `Targeting ${target.seriesName || target.series}`
-                : `${rows.length} title(s) with cards up${data.capped ? ", the largest shown" : ""}`,
-            }),
-          ]),
-          table(
-            ["", "Series", "Cards up", "Extension", "Most recent"],
-            rows.map((entry) => [
-              el("input", {
-                type: "radio",
-                name: "recard-series-pick",
-                checked: target.series.trim() === entry.mdMangaId,
-                "aria-label": `Target ${entry.mangaName ?? entry.mdMangaId}`,
-                onchange: (event) => {
-                  if (!event.target.checked) return;
-                  target.series = entry.mdMangaId;
-                  target.seriesName = entry.mangaName ?? "";
-                  setChildren(preview);
-                  say("");
-                  redraw();
-                },
-              }),
-              truncate(entry.mangaName || entry.mdMangaId, 40),
-              String(entry.count),
-              (entry.extensions ?? []).map((name) => name || "(unattributed)").join(", ") || "-",
-              fmtTime(entry.at),
-            ]),
-            { empty: "No title in the unavailable archive matches this filter." },
-          ),
-        );
+    seriesPickerBlock({
+      resource: seriesList,
+      name: "recard-series-pick",
+      selectedId: () => target.series.trim(),
+      page: seriesPage,
+      countNoun: "title(s) with cards up",
+      countHeader: "Cards up",
+      empty: "No title in the unavailable archive matches this filter.",
+      onPick: (entry) => {
+        target.series = entry.mdMangaId;
+        target.seriesName = entry.mangaName ?? "";
+        setChildren(preview);
+        say("");
+        redraw();
       },
-      { reserve: 300, skeleton: () => skeletonTable(5, 6) },
-    );
+    });
 
   const oneChapterField = () =>
     target.mode === "one"

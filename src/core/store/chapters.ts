@@ -331,35 +331,56 @@ export class ChapterStore {
   async bySeries(
     archive: ChapterArchive,
     filter: ChapterFilter = {},
-    limit = 100,
-  ): Promise<SeriesGroup[]> {
+    page: { limit?: number; offset?: number } = {},
+  ): Promise<{ series: SeriesGroup[]; total: number }> {
+    const limit = page.limit ?? 100;
+    const offset = page.offset ?? 0;
     const spec = ARCHIVES[archive];
     const parts = chapterWhere(filter, spec);
     parts.push(Prisma.sql`c.md_manga_id IS NOT NULL AND c.md_manga_id <> ''`);
+    const where = combine(parts);
+    const instant = Prisma.raw(`c.${spec.instant}`);
+    const from = Prisma.raw(spec.table);
+
     // The name is taken from the newest row rather than an arbitrary one: a
     // title can have been recorded under several spellings over the years, and
     // the one an operator will recognise is the one most recently written.
-    const rows = await this.prisma.$queryRaw<
-      { mdMangaId: string; mangaName: string | null; extensions: string[]; count: bigint; at: Date }[]
-    >(Prisma.sql`
-      SELECT c.md_manga_id AS "mdMangaId",
-             (array_agg(c.manga_name ORDER BY ${Prisma.raw(`c.${spec.instant}`)} DESC))[1] AS "mangaName",
-             array_agg(DISTINCT coalesce(c.extension, '')) AS "extensions",
-             count(*) AS count,
-             max(${Prisma.raw(`c.${spec.instant}`)}) AS at
-      FROM ${Prisma.raw(spec.table)} c
-      ${combine(parts)}
-      GROUP BY c.md_manga_id
-      ORDER BY count(*) DESC, max(${Prisma.raw(`c.${spec.instant}`)}) DESC, c.md_manga_id ASC
-      LIMIT ${limit}
-    `);
-    return rows.map((row) => ({
-      mdMangaId: row.mdMangaId,
-      mangaName: row.mangaName ?? null,
-      extensions: [...row.extensions].sort(),
-      count: Number(row.count),
-      at: row.at,
-    }));
+    //
+    // Counted as well as paged, because the first version of this returned a
+    // bare LIMIT on the theory that the tail of a count-ordered list is the
+    // least interesting end. That is true of the tail and false of the
+    // question: an operator looking for one series does not care that it is
+    // 300th, and "the list stops at 100" reads as "we only have 100".
+    const [rows, counted] = await Promise.all([
+      this.prisma.$queryRaw<
+        { mdMangaId: string; mangaName: string | null; extensions: string[]; count: bigint; at: Date }[]
+      >(Prisma.sql`
+        SELECT c.md_manga_id AS "mdMangaId",
+               (array_agg(c.manga_name ORDER BY ${instant} DESC))[1] AS "mangaName",
+               array_agg(DISTINCT coalesce(c.extension, '')) AS "extensions",
+               count(*) AS count,
+               max(${instant}) AS at
+        FROM ${from} c
+        ${where}
+        GROUP BY c.md_manga_id
+        ORDER BY count(*) DESC, max(${instant}) DESC, c.md_manga_id ASC
+        LIMIT ${limit} OFFSET ${offset}
+      `),
+      this.prisma.$queryRaw<{ total: bigint }[]>(Prisma.sql`
+        SELECT count(DISTINCT c.md_manga_id) AS total FROM ${from} c ${where}
+      `),
+    ]);
+
+    return {
+      series: rows.map((row) => ({
+        mdMangaId: row.mdMangaId,
+        mangaName: row.mangaName ?? null,
+        extensions: [...row.extensions].sort(),
+        count: Number(row.count),
+        at: row.at,
+      })),
+      total: Number(counted[0]?.total ?? 0),
+    };
   }
 
   /** Row counts for all four archives; the header of the Chapters view. */
