@@ -27,8 +27,6 @@ import {
   AdminApiError,
   describeApiError,
   type AdminApiClient,
-  type ChapterReconcileReport,
-  type ChapterReconcileStatus,
   type ErrorClearedFilter,
   type RemovalMode,
   type RunKind,
@@ -365,26 +363,59 @@ const RECONCILE_WAIT_MS = 30_000;
 const RECONCILE_POLL_MS = 2_000;
 
 /**
- * Wait for a reconcile pass, or return null when it is still going.
+ * Wait for a background pass, or return null when it is still going.
  *
  * Returns the report the moment one exists -- including a report from a pass
  * that finished before this command ran, which is what makes "ask again in a
  * minute" work.
+ *
+ * Generic over the report because the reconcile pass and the duplicate scan
+ * publish the same envelope to two endpoints; `poll` is whichever status call
+ * belongs to the one being watched.
  */
-async function waitForReconcile(
-  ctx: { api: { reconcileStatus(actor: string): Promise<ChapterReconcileStatus> }; actor: string },
-  started: ChapterReconcileStatus,
-): Promise<ChapterReconcileReport | null> {
+async function waitForPass<T>(
+  started: { state: string; report?: T },
+  poll: () => Promise<{ state: string; report?: T }>,
+): Promise<T | null> {
   if (started.state === "done" && started.report) return started.report;
 
   const deadline = Date.now() + RECONCILE_WAIT_MS;
   for (;;) {
     if (Date.now() >= deadline) return null;
     await new Promise((resolve) => setTimeout(resolve, RECONCILE_POLL_MS));
-    const status = await ctx.api.reconcileStatus(ctx.actor);
+    const status = await poll();
     if (status.state === "done" && status.report) return status.report;
     if (status.state === "failed" || status.state === "idle") return null;
   }
+}
+
+/**
+ * The "still working" answer: which steps are behind it, and which one is in
+ * flight. One status line was barely better than a spinner, and both passes
+ * publish the same step list, so both say it the same way.
+ */
+function stillWorkingText(
+  steps: { label: string; state: string; done: number; total: number | null }[],
+  opts: { what: string; alreadyRunning: boolean; command: string },
+): string {
+  const finished = steps.filter((step) => step.state === "done" || step.state === "skipped");
+  const running = steps.find((step) => step.state === "running");
+  return (
+    `:hourglass: Still ${opts.what}` +
+    (opts.alreadyRunning ? " (a pass was already running)" : "") +
+    (steps.length > 0 ? `: step ${finished.length + 1} of ${steps.length}` : "") +
+    ".\n" +
+    (running
+      ? `• **${running.label}**` +
+        (running.total !== null
+          ? ` — ${running.done} of ${running.total}`
+          : running.done > 0
+            ? ` — ${running.done} so far`
+            : "") +
+        "\n"
+      : "") +
+    `It keeps going without me. Run \`${opts.command}\` again in a minute for the numbers.`
+  );
 }
 
 const commands: BotCommand[] = [
@@ -1413,34 +1444,18 @@ const commands: BotCommand[] = [
       // client's rate limit -- and a Discord interaction cannot be left that
       // long. So this waits as long as it safely can and then reports where the
       // pass got to; the pass itself carries on, and asking again picks it up.
-      const report = await waitForReconcile(ctx, started);
+      const report = await waitForPass(started, () => ctx.api.reconcileStatus(ctx.actor));
       if (!report) {
         const status = await ctx.api.reconcileStatus(ctx.actor);
         if (status.state === "failed") {
           return { text: `:x: The reconcile pass failed: \`${status.error ?? "no reason given"}\`` };
         }
-        // The queue as it stands, not one status line: the useful answer to
-        // "is it doing anything" is which steps are behind it and which are
-        // still to come.
-        const steps = status.progress?.steps ?? [];
-        const finished = steps.filter((step) => step.state === "done" || step.state === "skipped");
-        const running = steps.find((step) => step.state === "running");
         return {
-          text:
-            ":hourglass: Still reading MangaDex" +
-            (started.started ? "" : " (a pass was already running)") +
-            (steps.length > 0 ? `: step ${finished.length + 1} of ${steps.length}` : "") +
-            ".\n" +
-            (running
-              ? `• **${running.label}**` +
-                (running.total !== null
-                  ? ` — ${running.done} of ${running.total}`
-                  : running.done > 0
-                    ? ` — ${running.done} so far`
-                    : "") +
-                "\n"
-              : "") +
-            "It keeps going without me. Run `/reconcile` again in a minute for the numbers.",
+          text: stillWorkingText(status.progress?.steps ?? [], {
+            what: "reading MangaDex",
+            alreadyRunning: !started.started,
+            command: "/reconcile",
+          }),
         };
       }
 
@@ -1484,6 +1499,86 @@ const commands: BotCommand[] = [
               "serve them, never archived; queue them unavailable if that is what you want.\n"
             : "") +
           "Nothing has been written. Run `padmin chapters reconcile --apply` to record them.",
+      };
+    },
+  },
+  {
+    name: "duplicates",
+    description: "Find the chapters MangaDex holds twice, per series.",
+    // Read, like /reconcile and for the same reason: the scan itself writes
+    // nothing, and queuing the deletions is closed to api tokens at the
+    // endpoint. What belongs in a channel is the finding — "these 14 chapters
+    // are duplicated" — and the one line that acts on it.
+    sensitivity: "read",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("duplicates")
+      .setDescription("Find the chapters MangaDex holds twice, per series.")
+      .addStringOption((o) =>
+        o
+          .setName("extension")
+          .setDescription("Only this extension. Omit for every group we have uploaded to.")
+          .setAutocomplete(true),
+      )
+      .addStringOption((o) =>
+        o
+          .setName("manga")
+          .setDescription("Only this MangaDex title id. Much faster than a whole-group scan."),
+      ),
+    async run(ctx) {
+      const extension = ctx.options.string("extension");
+      const manga = ctx.options.string("manga");
+      const started = await ctx.api.startChapterDuplicates(
+        ctx.actor,
+        extension ? [extension] : [],
+        manga ? [manga] : [],
+      );
+
+      // Same shape as /reconcile: an unscoped scan walks a whole group, which
+      // is minutes of MangaDex requests and longer than an interaction may be
+      // left unanswered. Scoped to one title it usually answers first time.
+      const report = await waitForPass(started, () => ctx.api.duplicatesStatus(ctx.actor));
+      if (!report) {
+        const status = await ctx.api.duplicatesStatus(ctx.actor);
+        if (status.state === "failed") {
+          return { text: `:x: The duplicate scan failed: \`${status.error ?? "no reason given"}\`` };
+        }
+        return {
+          text: stillWorkingText(status.progress?.steps ?? [], {
+            what: "reading MangaDex",
+            alreadyRunning: !started.started,
+            command: "/duplicates",
+          }),
+        };
+      }
+
+      if (report.duplicatesFound === 0) {
+        return {
+          text:
+            ":white_check_mark: No duplicates: " +
+            `${report.seriesScanned} series checked and every chapter appears once.`,
+        };
+      }
+
+      const lines = report.series
+        .slice(0, 10)
+        .map(
+          (series) =>
+            `• **${series.mangaName ?? series.mdMangaId}** — ${series.removeCount} duplicate(s) ` +
+            `of ${series.chaptersOnMd} chapter(s) (\`${series.mdMangaId}\`)`,
+        );
+      const listed = Math.min(report.series.length, 10);
+      const rest = report.seriesWithDuplicates - listed;
+
+      return {
+        text:
+          `:mag: **${report.duplicatesFound}** duplicate chapter(s) across ` +
+          `**${report.seriesWithDuplicates}** of ${report.seriesScanned} series.\n` +
+          `${lines.join("\n")}\n` +
+          (rest > 0 ? `…and ${rest} more series.\n` : "") +
+          "The oldest copy of each is the one that would survive. Nothing has been deleted: " +
+          "run `padmin chapters duplicates --chapters` to see every id, then " +
+          "`padmin chapters duplicates --apply` to queue the deletions.",
       };
     },
   },

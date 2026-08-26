@@ -343,6 +343,44 @@ export interface ChapterReconcileStep {
   note: string | null;
 }
 
+/** Mirrors DuplicateRunState in core/md/duplicateRunner.ts. */
+export interface ChapterDuplicateStatus {
+  state: "idle" | "running" | "done" | "failed";
+  progress?: { steps: ChapterReconcileStep[] };
+  report?: ChapterDuplicateReport;
+  error?: string;
+}
+
+/**
+ * What a duplicate scan found. Mirrors DuplicateScanReport in
+ * core/md/duplicateScan.ts, narrowed to the fields the bot renders.
+ */
+export interface ChapterDuplicateReport {
+  apply: boolean;
+  groups: {
+    extension: string;
+    groupId: string;
+    chaptersOnMd: number;
+    seriesScanned: number;
+    seriesWithDuplicates: number;
+    duplicatesFound: number;
+    queued: number;
+  }[];
+  series: {
+    extension: string;
+    mdMangaId: string;
+    mangaName: string | null;
+    chaptersOnMd: number;
+    removeCount: number;
+  }[];
+  seriesScanned: number;
+  seriesWithDuplicates: number;
+  duplicatesFound: number;
+  queued: number;
+  blocked: number;
+  truncatedSeries: number;
+}
+
 /** Mirrors ReconcileRunState in core/md/reconcileRunner.ts. */
 export interface ChapterReconcileStatus {
   state: "idle" | "running" | "done" | "failed";
@@ -618,6 +656,39 @@ export class AdminApiClient {
     return this.request({
       method: "GET",
       path: "/api/v1/admin/chapters/reconcile",
+      scope: "chapters:read",
+      actor,
+    });
+  }
+
+  /**
+   * Start a duplicate scan: which chapters MangaDex holds twice, per series.
+   *
+   * Report only, and for the same reason as the reconcile pass above: `apply`
+   * is closed to api tokens at the endpoint, so a bot token could not queue the
+   * deletions even if this asked it to. Reporting is the half that belongs in
+   * chat anyway — "these 14 chapters are duplicated" is the thing somebody
+   * needs to see before deciding to run `padmin chapters duplicates --apply`.
+   */
+  startChapterDuplicates(
+    actor: string,
+    extensions: string[],
+    mangaIds: string[] = [],
+  ): Promise<ChapterDuplicateStatus & { started: boolean }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/chapters/duplicates",
+      scope: "chapters:read",
+      actor,
+      json: { apply: false, extensions, mangaIds },
+    });
+  }
+
+  /** Where the current or last duplicate scan is up to. */
+  duplicatesStatus(actor: string): Promise<ChapterDuplicateStatus> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/chapters/duplicates",
       scope: "chapters:read",
       actor,
     });

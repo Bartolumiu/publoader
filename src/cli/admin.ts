@@ -621,19 +621,25 @@ interface ReconcileStepShape {
   note: string | null;
 }
 
-/** Mirrors ReconcileRunState in core/md/reconcileRunner.ts. */
-interface ReconcileStatus {
+/**
+ * Mirrors ReconcileRunState in core/md/reconcileRunner.ts, and
+ * DuplicateRunState in core/md/duplicateRunner.ts: the two are the same
+ * envelope around different reports, which is what lets `follow` watch either.
+ */
+interface FollowStatus<T> {
   state: "idle" | "running" | "done" | "failed";
   progress?: { steps: ReconcileStepShape[] };
-  report?: ReconcileReportShape;
+  report?: T;
   error?: string;
 }
+
+type ReconcileStatus = FollowStatus<ReconcileReportShape>;
 
 /** How often to ask how a pass is getting on. */
 const RECONCILE_POLL_MS = 2000;
 
 /**
- * Watch a reconcile pass to its end, printing progress, and return its report.
+ * Watch a background pass to its end, printing progress, and return its report.
  *
  * The pass belongs to the server, not to this process: it was started by a
  * request that has already been answered, so quitting here leaves it running
@@ -641,8 +647,12 @@ const RECONCILE_POLL_MS = 2000;
  * rather than holding one long request open -- a group walk is minutes of
  * MangaDex calls, and a request that long dies to the proxy in front of the API
  * having done all the work and delivered none of it.
+ *
+ * Shared by every pass built this way (reconcile, duplicate scan): they all
+ * publish the same step list to the same kind of settings-backed status
+ * endpoint, so the watching is the same code and only the URL differs.
  */
-async function follow(): Promise<ReconcileReportShape> {
+async function follow<T>(path: string, what: string): Promise<T> {
   const tty = process.stderr.isTTY === true;
   let lastLine = "";
   /** Steps already reported as finished, so each is announced exactly once. */
@@ -692,7 +702,7 @@ async function follow(): Promise<ReconcileReportShape> {
   };
 
   for (;;) {
-    const status = await api<ReconcileStatus>("/api/v1/admin/chapters/reconcile");
+    const status = await api<FollowStatus<T>>(path);
     if (status.progress) draw(status.progress.steps);
 
     if (status.state === "done" && status.report) {
@@ -701,11 +711,11 @@ async function follow(): Promise<ReconcileReportShape> {
     }
     if (status.state === "failed") {
       clear();
-      throw new Error(status.error ?? "the reconcile pass failed");
+      throw new Error(status.error ?? `the ${what} failed`);
     }
     if (status.state === "idle") {
       clear();
-      throw new Error("the reconcile pass is not running and left no report");
+      throw new Error(`the ${what} is not running and left no report`);
     }
     await new Promise((resolve) => setTimeout(resolve, RECONCILE_POLL_MS));
   }
@@ -752,7 +762,10 @@ chapters
     // held open that long dies to the proxy in front of the API with nothing to
     // show for it. Polling also means Ctrl-C here abandons the *watching*, not
     // the work.
-    const res = await follow();
+    const res = await follow<ReconcileReportShape>(
+      "/api/v1/admin/chapters/reconcile",
+      "reconcile pass",
+    );
 
     table(res.groups, [
       { header: "EXTENSION", get: (g) => g["extension"] },
@@ -813,6 +826,161 @@ chapters
         `and ${res.dryRun ? "would adopt" : "adopted"} ${res.adoptedRecorded} live chapter(s) ` +
         `(${res.idsRecorded} with a recovered chapter id; ${res.untrackedFound} untracked in total)` +
         (res.dryRun ? "; re-run with --apply to write" : ""),
+    );
+  });
+
+/** Mirrors DuplicateScanReport in core/md/duplicateScan.ts. */
+interface DuplicateReportShape {
+  apply: boolean;
+  groups: {
+    extension: string;
+    groupId: string;
+    chaptersOnMd: number;
+    seriesScanned: number;
+    seriesWithDuplicates: number;
+    duplicatesFound: number;
+    queued: number;
+  }[];
+  series: {
+    extension: string;
+    mdMangaId: string;
+    mangaName: string | null;
+    chaptersOnMd: number;
+    removeCount: number;
+    duplicates: {
+      matchedOn: "url" | "number";
+      language: string;
+      keep: { mdChapterId: string; chapterNumber: string | null; createdAt: string };
+      remove: {
+        mdChapterId: string;
+        chapterNumber: string | null;
+        chapterVolume: string | null;
+        chapterLanguage: string;
+        chapterUrl: string | null;
+        createdAt: string;
+        outcome: string;
+        reason?: string;
+      }[];
+    }[];
+  }[];
+  seriesScanned: number;
+  seriesWithDuplicates: number;
+  duplicatesFound: number;
+  queued: number;
+  blocked: number;
+  truncatedSeries: number;
+}
+
+chapters
+  .command("duplicates")
+  .description("find the chapters MangaDex holds twice, per series; no extension run needed")
+  .option("--apply", "queue a delete for every duplicate (default reports and writes nothing)")
+  .option("--extension <name...>", "only these extensions (default: every group we have uploaded to)")
+  .option(
+    "--manga <mdMangaId...>",
+    "only these MangaDex titles; also makes the scan ask per series instead of walking the group",
+  )
+  .option("--chapters", "list every duplicate chapter, not just the per-series counts")
+  .action(async (opts: {
+    apply?: boolean;
+    extension?: string[];
+    manga?: string[];
+    chapters?: boolean;
+  }) => {
+    const start = await api<{ started: boolean }>("/api/v1/admin/chapters/duplicates", {
+      method: "POST",
+      json: {
+        apply: opts.apply === true,
+        // The API asks for this separately so a stray --apply in a shell
+        // history cannot delete anything; the CLI supplies it because the flag
+        // was typed here, deliberately, on this invocation.
+        confirm: opts.apply === true,
+        extensions: opts.extension ?? [],
+        mangaIds: opts.manga ?? [],
+      },
+    });
+    if (!start.started) {
+      console.error("  a duplicate scan was already running; following that one instead");
+    }
+
+    const res = await follow<DuplicateReportShape>(
+      "/api/v1/admin/chapters/duplicates",
+      "duplicate scan",
+    );
+
+    table(
+      res.groups,
+      [
+        { header: "EXTENSION", get: (g) => g.extension },
+        { header: "GROUP", get: (g) => g.groupId.slice(0, 8) },
+        { header: "ON MD", get: (g) => g.chaptersOnMd },
+        { header: "SERIES", get: (g) => g.seriesScanned },
+        { header: "AFFECTED", get: (g) => g.seriesWithDuplicates },
+        { header: "DUPLICATES", get: (g) => g.duplicatesFound },
+        { header: "QUEUED", get: (g) => g.queued },
+      ],
+      "no extension has uploaded anything, so there are no groups to ask about",
+    );
+
+    if (res.series.length > 0) {
+      console.log("");
+      table(
+        res.series,
+        [
+          { header: "TITLE", get: (row) => (row.mangaName ?? row.mdMangaId).slice(0, 44) },
+          { header: "MD MANGA ID", get: (row) => row.mdMangaId },
+          { header: "EXTENSION", get: (row) => row.extension },
+          { header: "ON MD", get: (row) => row.chaptersOnMd },
+          { header: "DUPLICATES", get: (row) => row.removeCount },
+        ],
+        "",
+      );
+    }
+
+    // Off by default: an unscoped scan can find hundreds, and the per-series
+    // counts are what an operator reads first. --chapters is for the moment
+    // before an --apply, when the question is "which id survives?".
+    if (opts.chapters === true) {
+      for (const series of res.series) {
+        console.log("");
+        console.log(`${series.mangaName ?? series.mdMangaId}  (${series.mdMangaId})`);
+        for (const set of series.duplicates) {
+          console.log(
+            `  ${set.language} ch.${set.keep.chapterNumber ?? "-"} ` +
+              `[same ${set.matchedOn}]  keep ${set.keep.mdChapterId} (${set.keep.createdAt})`,
+          );
+          for (const gone of set.remove) {
+            console.log(
+              `    remove ${gone.mdChapterId} (${gone.createdAt})  ${gone.outcome}` +
+                (gone.reason ? `: ${gone.reason}` : ""),
+            );
+          }
+        }
+      }
+    }
+
+    if (res.truncatedSeries > 0) {
+      // The counts above are complete; only this listing is trimmed, and an
+      // --apply acted on everything it found rather than on what is shown.
+      console.error(
+        `  ${res.truncatedSeries} further affected series are not listed (the report is capped); ` +
+          "narrow the scan with --extension or --manga to see them",
+      );
+    }
+    if (res.blocked > 0) {
+      console.error(
+        `  ${res.blocked} duplicate(s) already had a delete queued or in flight; left alone`,
+      );
+    }
+
+    ok(
+      `${res.duplicatesFound} duplicate chapter(s) across ${res.seriesWithDuplicates} of ` +
+        `${res.seriesScanned} series` +
+        (res.apply
+          ? `; queued ${res.queued} for deletion — core-uploader drains that queue`
+          : res.duplicatesFound > 0
+            ? "; nothing has been deleted, re-run with --apply to queue the deletions"
+            : ""),
     );
   });
 

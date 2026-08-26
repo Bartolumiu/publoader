@@ -9,6 +9,7 @@ import { EXTENSION_NAME_RE, Manifest, hostAllowed } from "../../../contracts/man
 import type { RemovalMode } from "../../store/settings.js";
 import { chapterToTaskPayload } from "../../md/chapterRows.js";
 import { ReconcileRunner } from "../../md/reconcileRunner.js";
+import { DuplicateRunner } from "../../md/duplicateRunner.js";
 import type { MdExtendedApi } from "../../md/client.js";
 import { generateChapterCard } from "../../md/card.js";
 import { unavailableCardOptions } from "../../md/unavailableCard.js";
@@ -187,6 +188,16 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
      */
     const runner = (md: MdExtendedApi): ReconcileRunner =>
       new ReconcileRunner({
+        prisma: ctx.prisma,
+        md,
+        log: ctx.log,
+        audit: ctx.audit,
+        settings: ctx.settings,
+      });
+
+    /** The background duplicate scanner; same shape, its own lock. */
+    const duplicates = (md: MdExtendedApi): DuplicateRunner =>
+      new DuplicateRunner({
         prisma: ctx.prisma,
         md,
         log: ctx.log,
@@ -617,6 +628,91 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           return { ok: true, state: "idle", note: "this deployment has no MangaDex client" };
         }
         return { ok: true, ...(await runner(ctx.md).status()) };
+      },
+    );
+
+    /**
+     * Find the chapters MangaDex holds twice, per series.
+     *
+     * Deliberately independent of an extension run. `deleteDuplicates` in the
+     * processor already catches the duplicate a run just created, but it can
+     * only look at the series that run visited, with the overrides that run
+     * carried — so "does this series have duplicates?" was unanswerable for
+     * exactly the series that accumulate them: the ones whose publisher is
+     * gone, and the ones no recent run was scoped to. This reads MangaDex and
+     * nothing else, so it answers at any time, for any series.
+     *
+     * The auth split is the reconcile pass's, for the same reason. Reporting
+     * reads MangaDex and writes nothing, so it sits at `chapters:read` and any
+     * scoped token may run it. `apply` queues a hard delete per duplicate,
+     * which is the most destructive thing this module can be asked to do, so it
+     * takes the delete route's full guard: ADMIN-or-above, closed to api
+     * tokens, and `confirm: true` on top — deletion cannot be undone, and an
+     * unscoped scan can find hundreds at once.
+     */
+    scope.post(
+      "/api/v1/admin/chapters/duplicates",
+      { preHandler: requireScope("chapters:read") },
+      async (req, reply) => {
+        const body = parseOrThrow(
+          z.object({
+            /** Queue a DELETE for every duplicate. Default reports only. */
+            apply: z.boolean().default(false),
+            confirm: z.boolean().default(false),
+            extensions: z.array(z.string().max(64)).max(50).default([]),
+            /** Scope to these MangaDex titles; also makes the scan ask per series. */
+            mangaIds: z.array(z.string().uuid()).max(200).default([]),
+          }),
+          req.body ?? {},
+        );
+
+        if (!ctx.md) {
+          return reply.code(503).send({ error: "this deployment has no MangaDex client" });
+        }
+        // Body-dependent, so it cannot be a preHandler: that would refuse the
+        // report as well, which is the half everything else here is built on.
+        if (body.apply) {
+          if (req.principal?.kind === "api-token") {
+            return reply.code(403).send({ error: TOKEN_REFUSAL, requiredRole: "ADMIN" });
+          }
+          if (req.adminRole !== "OWNER" && req.adminRole !== "ADMIN") {
+            return reply.code(403).send({ error: ROLE_REFUSAL, requiredRole: "ADMIN" });
+          }
+          if (!body.confirm) {
+            return reply.code(400).send({
+              error:
+                "deleting duplicates from MangaDex cannot be undone; pass confirm: true",
+              alternative:
+                "the same call without `apply` reports every duplicate it would delete, " +
+                "including which chapter of each pair would survive",
+            });
+          }
+        }
+
+        const { started, status } = await duplicates(ctx.md).start(
+          { apply: body.apply, extensions: body.extensions, mangaIds: body.mangaIds },
+          actor(req),
+        );
+        // 202: the scan has not happened yet, and with `apply` neither has the
+        // deletion — core-uploader drains the DELETE tasks it queues.
+        return reply.code(202).send({ ok: true, started, ...status });
+      },
+    );
+
+    /**
+     * Where the current or last duplicate scan is up to.
+     *
+     * Read-only and cheap, because it is polled: one `settings` row, no
+     * MangaDex call.
+     */
+    scope.get(
+      "/api/v1/admin/chapters/duplicates",
+      { preHandler: requireScope("chapters:read") },
+      async () => {
+        if (!ctx.md) {
+          return { ok: true, state: "idle", note: "this deployment has no MangaDex client" };
+        }
+        return { ok: true, ...(await duplicates(ctx.md).status()) };
       },
     );
 

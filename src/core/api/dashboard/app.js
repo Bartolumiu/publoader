@@ -4089,6 +4089,10 @@ VIEWS.chapters = (route) => {
     {},
     chapterFilterCard(extensions, resetPaging),
     reconcileCard(archive, reload),
+    // The third question about the same catalogue: reconcile asks what
+    // MangaDex has that we have no row for, the re-check asks what the
+    // publisher dropped, and this asks what MangaDex is holding twice.
+    duplicatesCard(archive, activeFilter, filterHooks),
     // Same filter, opposite direction: reconcile reads MangaDex into these
     // tables, this asks the publisher and writes MangaDex.
     recheckCard(archive, activeFilter, filterHooks),
@@ -4527,6 +4531,271 @@ function reconcileCard(archive, reload) {
         // writing several thousand rows into `uploaded`, which is not what the
         // label says and not what the operator is looking at.
         archive === "uploaded" ? adoptButton() : archiveButton(),
+      ),
+      output,
+    ),
+  );
+}
+
+/**
+ * The chapters MangaDex is holding twice.
+ *
+ * WHY IT IS ITS OWN CARD. Duplicates were only ever found as a side effect of
+ * a run: the processor checks the series that run visited, with the overrides
+ * that run carried. That catches the duplicate a run just made, and cannot
+ * answer the question an operator actually arrives with — "this series has the
+ * same chapter twice, why" — because answering it that way needs the extension
+ * to be runnable, its publisher reachable, and the series to be in scope. The
+ * series that accumulate duplicates are exactly the ones that fail those tests.
+ *
+ * Nothing here runs an extension. A duplicate is a property of what MangaDex
+ * holds: the same series, the same language, the same publisher link. So the
+ * scan reads MangaDex and stops.
+ *
+ * Scan first, then delete, and unlike the reconcile card that order is
+ * enforced. Deletion is the one irreversible thing this platform does, the
+ * dialog has to be able to say how many chapters and which series, and the scan
+ * is the only thing that knows.
+ */
+function duplicatesCard(archive, filter, filterHooks = []) {
+  // Only on `uploaded`. A duplicate is two live chapters on MangaDex, which is
+  // what that tab lists; on the archives the rows describe chapters that have
+  // already been carded or deleted, and offering a delete button over them
+  // would aim at ids that are no longer there.
+  if (archive !== "uploaded") return el("span", {});
+
+  const output = el("div", { class: "dim small" });
+  let scanned = null;
+  /** Set while this card is following a scan, so two clicks do not poll twice. */
+  let following = false;
+
+  const extension = () => filter().extension ?? "";
+
+  /**
+   * Start a scan and follow it to the end.
+   *
+   * The request only starts the work: an unscoped scan walks a whole group,
+   * which is minutes of MangaDex requests, and a request held open that long
+   * dies to the proxy in front of the API with nothing to show for it.
+   */
+  const runScan = async (body) => {
+    if (following) {
+      toast("A scan is already being followed here.", true);
+      return null;
+    }
+    following = true;
+    try {
+      const started = await api("/chapters/duplicates", {
+        method: "POST",
+        body: { extensions: extension() ? [extension()] : [], ...body },
+      });
+      if (started && started.started === false) {
+        toast("A scan was already running; following that one.", true);
+      }
+      return await follow();
+    } finally {
+      following = false;
+    }
+  };
+
+  const follow = async (first) => {
+    let status = first;
+    // Never on the first turn: a card is built before it is inserted, so its
+    // nodes are legitimately detached at the moment this starts.
+    let started = false;
+    for (;;) {
+      // Stop once this card has left the page. The scan carries on server-side.
+      if (started && !output.isConnected) return null;
+      started = true;
+      if (!status) status = await api("/chapters/duplicates");
+      if (status.state === "done" && status.report) {
+        render(status.report);
+        return status.report;
+      }
+      if (status.state === "failed") {
+        setChildren(
+          output,
+          el("div", {}, [
+            el("p", { class: "error", text: `The scan failed: ${status.error}` }),
+            stepQueue(status.progress, ""),
+          ]),
+        );
+        return null;
+      }
+      if (status.state === "idle") {
+        setChildren(
+          output,
+          el("p", { class: "error", text: "The scan is not running and left no report." }),
+        );
+        return null;
+      }
+      setChildren(output, stepQueue(status.progress, "Working out what there is to do…"));
+      // A report from the previous scan must not stay armed behind a running
+      // one: the delete button reads its numbers off `scanned`.
+      scanned = null;
+      status = null;
+      await new Promise((resolve) => setTimeout(resolve, RECONCILE_POLL_MS));
+    }
+  };
+
+  const render = (report) => {
+    scanned = report;
+    if (!report.duplicatesFound) {
+      setChildren(
+        output,
+        el("div", {
+          text: `No duplicates: ${report.seriesScanned} series checked and every chapter appears once.`,
+        }),
+      );
+      return;
+    }
+    setChildren(
+      output,
+      el("div", {}, [
+        el("div", {
+          text:
+            `${report.duplicatesFound} duplicate chapter(s) across ` +
+            `${report.seriesWithDuplicates} of ${report.seriesScanned} series. ` +
+            "The oldest copy of each survives.",
+        }),
+        ...(report.series ?? []).slice(0, 25).map((series) =>
+          el("div", {
+            text:
+              `${series.mangaName ?? series.mdMangaId}: ${series.removeCount} duplicate(s) ` +
+              `of ${series.chaptersOnMd} chapter(s) — ${series.mdMangaId}`,
+          }),
+        ),
+        report.truncatedSeries
+          ? el("div", {
+              // The counts above are complete; only this listing is trimmed,
+              // and a delete acts on everything the scan found rather than on
+              // what is drawn here.
+              text:
+                `…and ${report.truncatedSeries} further series not listed. ` +
+                "Filter to one extension to see them; deleting still covers every one.",
+            })
+          : el("span", {}),
+        report.apply && report.blocked
+          ? el("div", {
+              text: `${report.blocked} of them already had a delete queued or in flight.`,
+            })
+          : el("span", {}),
+        report.apply
+          ? el("div", {
+              text:
+                `${report.queued} delete(s) queued. core-uploader drains that queue; watch it ` +
+                "under Queues.",
+            })
+          : el("span", {}),
+      ]),
+    );
+  };
+
+  const deleteButton = () =>
+    el("button", {
+      type: "button",
+      class: "danger",
+      text: "Delete the duplicates",
+      onclick: async (event) => {
+        const button = event.currentTarget;
+        // Gated on a scan, unlike the reconcile card's buttons. Those move rows
+        // between our own tables; this deletes public pages, and the dialog
+        // cannot honestly say how many without a report to read it off.
+        if (!scanned) {
+          toast("Scan first: the dialog has to be able to say what would be deleted.", true);
+          return;
+        }
+        if (!scanned.duplicatesFound) {
+          toast("Nothing to delete; the last scan found no duplicates.", true);
+          return;
+        }
+        const worst = (scanned.series ?? [])
+          .slice(0, 3)
+          .map((series) => `${series.mangaName ?? series.mdMangaId} (${series.removeCount})`);
+        if (
+          !(await confirmDialog({
+            title: "Delete the duplicate chapters from MangaDex",
+            lead:
+              `${scanned.duplicatesFound} chapter(s) across ${scanned.seriesWithDuplicates} ` +
+              "series will be queued for deletion.",
+            points: [
+              "Deleting from MangaDex cannot be undone. The oldest copy of each duplicate is " +
+                "kept; every later one goes.",
+              "Duplicates are always hard-deleted, never carded, whatever the removal mode: a " +
+                "card on a duplicate leaves the duplicate in place.",
+              worst.length ? `Worst affected: ${worst.join(", ")}.` : "",
+              "The scan runs again as part of this, so what is deleted is what MangaDex holds " +
+                "now rather than what the last scan saw.",
+            ].filter(Boolean),
+            confirmLabel: "Queue the deletions",
+          }))
+        ) {
+          return;
+        }
+        await act("chapters.duplicates.delete", () => runScan({ apply: true, confirm: true }), {
+          button,
+        });
+      },
+    });
+
+  // A scan outlives the page that started it, so the card asks once on mount
+  // whether one is in flight and picks it up.
+  void (async () => {
+    try {
+      const status = await api("/chapters/duplicates");
+      if (status.state === "running" && !following) {
+        following = true;
+        try {
+          await follow(status);
+        } finally {
+          following = false;
+        }
+      } else if (status.state === "done" && status.report) {
+        render(status.report);
+      }
+    } catch {
+      // A card that cannot ask is just a card with no report yet.
+    }
+  })();
+
+  filterHooks.push(() => {
+    // The scan is scoped by the extension filter, so a report taken under a
+    // different one must not be what the delete button reads its numbers off.
+    scanned = null;
+    setChildren(output, el("span", {}));
+  });
+
+  return card(
+    null,
+    el(
+      "details",
+      { class: "card-fold" },
+      el("summary", {}, el("h2", { text: "Find the chapters MangaDex has twice" })),
+      el("p", {
+        class: "dim small",
+        text:
+          "Per series, straight from MangaDex: two chapters of the same series, in the same " +
+          "language, pointing at the same publisher link are the same chapter twice. No " +
+          "extension is run and no publisher is asked, so this answers for a series whose " +
+          "source is long gone.",
+      }),
+      el("p", {
+        class: "dim small",
+        text:
+          "Unfiltered this reads our groups' whole catalogue on MangaDex, which takes a few " +
+          "minutes; it keeps going if you leave the page, and this card picks it back up. " +
+          "Naming an extension in the filter above scopes it.",
+      }),
+      el(
+        "div",
+        { class: "row" },
+        el("button", {
+          type: "button",
+          text: "Scan",
+          onclick: (event) =>
+            act("chapters.duplicates.scan", () => runScan({}), { button: event.currentTarget }),
+        }),
+        deleteButton(),
       ),
       output,
     ),

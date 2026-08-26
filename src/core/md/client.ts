@@ -191,6 +191,7 @@ export interface MdExtendedApi extends MdApi {
     groupId: string,
     onPage?: WalkProgress,
   ): Promise<MdGroupAvailability>;
+  chaptersForGroup(groupId: string, onPage?: WalkProgress): Promise<MdChapter[]>;
   beginEditSession(chapterId: string, version: number | null): Promise<{ id: string }>;
   uploadImages(
     sessionId: string,
@@ -746,6 +747,32 @@ export class MdClient implements MdExtendedApi {
       "order[createdAt]": "desc",
       ...INCLUDE_UNAVAILABLE,
     });
+    return entities.map(MdClient.toChapter);
+  }
+
+  /**
+   * Every chapter MangaDex holds for one group, unavailable ones included.
+   *
+   * The whole-group walk rather than a request per series, because that is the
+   * cheaper shape by a wide margin: a group with 6000 chapters across 400
+   * titles is ~60 paginated requests here against 400 there, and the duplicate
+   * scan wants the same chapters either way. Callers that only care about a
+   * handful of titles still use `chaptersForManga`; this is for the sweep.
+   *
+   * Ascending by createdAt, so a bucket of duplicates arrives oldest-first and
+   * `findDuplicateChapters` keeps the right one even when MangaDex omitted the
+   * timestamps it sorts on.
+   */
+  async chaptersForGroup(groupId: string, onPage?: WalkProgress): Promise<MdChapter[]> {
+    const entities = await this.paginate(
+      "chapter",
+      {
+        "groups[]": [groupId],
+        "order[createdAt]": "asc",
+        ...INCLUDE_UNAVAILABLE,
+      },
+      onPage ? (collected, total) => onPage(collected, total, "all") : undefined,
+    );
     return entities.map(MdClient.toChapter);
   }
 
