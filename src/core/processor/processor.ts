@@ -293,33 +293,63 @@ export class RunProcessor {
     const updatedByManga = groupByMdManga(merged.updatedChapters);
     const allByManga = merged.allChapters === null ? null : groupByMdManga(merged.allChapters);
     const trackedIds = new Set(merged.trackedMangadexIds);
-
-    // The scope is included even where it has no updates: a removal queued for
-    // a dormant title still prints the title's name on its card, and an
-    // unresolved name would put a blank there.
-    await this.resolveMangaNames([...new Set([...updatedByManga.keys(), ...scope])]);
-    applyMangaNames(updatedByManga, this.mangaNames);
-    if (allByManga) applyMangaNames(allByManga, this.mangaNames);
-
-    // Every MangaDex chapter seen this run, keyed by manga.
-    const chaptersOnMdByManga = new Map<string, MdChapter[]>();
-    const totals = { upload: 0, edit: 0, skip: 0, remove: 0 };
+    // Judged once over the whole run: see `extensionPublishesPages`. Read off
+    // the updates, which are the only chapters a run actually fetches — a
+    // catalogue listing never carries images even for an extension whose every
+    // chapter has them.
+    const extensionPublishesPages = merged.updatedChapters.some(
+      (chapter) => chapter.imageArtifacts.length > 0,
+    );
 
     // Normally the manga worth visiting are the ones with updates: with no new
     // chapter there is nothing to upload, and a run that reported no snapshot
     // has nothing to remove either.
     //
-    // A scoped run is the exception, and it is the whole point of one. "Is this
+    // Both exceptions are the same observation from opposite ends. "Is this
     // series still on the publisher?" is asked precisely about series that have
-    // published nothing lately, and the answer lives in `allChapters`, not in
-    // the updates. Visiting the scope regardless is what lets a re-check of a
-    // dormant title find the chapters that were pulled from under it.
+    // published nothing lately, so the answer lives in `allChapters` and never
+    // in the updates. A title that lost half its back catalogue while gaining
+    // no new chapter appears in both lists exactly as it did before, and is
+    // invisible to a pass that only walks the updates.
+    //
+    // A scoped run covers that by visiting its scope regardless — that is the
+    // whole point of one. An unscoped CLEAN run covers it by visiting every
+    // title its own snapshot names: there, `allChapters` really is "everything
+    // the publisher has", which is the same licence the two catalogue-wide
+    // passes below run on. Without this the extension-wide re-check could only
+    // ever notice a series the publisher dropped *entirely* (that case is
+    // `removeMangaWithoutExternalChapters`, which keys off absence from the
+    // snapshot) and would silently pass over every partial removal.
+    //
+    // The extra MangaDex reads are one `chaptersForManga` per title in the
+    // snapshot. A CLEAN run already pays per-title MangaDex cost of the same
+    // order in `deleteDuplicates`, which walks every tracked id.
     const visiting: [string, Chapter[]][] = [...updatedByManga];
     if (scoped) {
       for (const mangaId of scope) {
         if (!updatedByManga.has(mangaId)) visiting.push([mangaId, []]);
       }
+    } else if (run.kind === "CLEAN" && allByManga !== null) {
+      for (const mangaId of allByManga.keys()) {
+        if (!updatedByManga.has(mangaId)) visiting.push([mangaId, []]);
+      }
     }
+
+    // Names are resolved over everything that will be visited, not just what
+    // had updates: a removal queued for a dormant title still prints the
+    // title's name on its card, and an unresolved name would put a blank there.
+    await this.resolveMangaNames([
+      ...new Set([...visiting.map(([mangaId]) => mangaId), ...scope]),
+    ]);
+    applyMangaNames(updatedByManga, this.mangaNames);
+    if (allByManga) applyMangaNames(allByManga, this.mangaNames);
+
+    // Every MangaDex chapter seen this run, keyed by manga.
+    const chaptersOnMdByManga = new Map<string, MdChapter[]>();
+    // `visited` is the one that answers "did the re-check actually look at this
+    // catalogue, or just at the handful of series with new chapters?" — a
+    // question the per-manga lines below cannot answer once they are quiet.
+    const totals = { visited: 0, upload: 0, edit: 0, skip: 0, remove: 0, unfetchable: 0 };
 
     for (const [mangaId, updatedChapters] of visiting) {
       const chaptersOnMd = await this.md.chaptersForManga(mangaId, groupId);
@@ -344,6 +374,7 @@ export class RunProcessor {
         languages: merged.languages,
         groupId,
         cleanDb: run.kind === "CLEAN",
+        extensionPublishesPages,
       });
 
       for (const chapter of decision.toUpload) {
@@ -362,10 +393,28 @@ export class RunProcessor {
         run.extension,
       );
 
+      totals.visited += 1;
       totals.upload += decision.toUpload.length;
       totals.edit += decision.toEdit.length;
       totals.skip += decision.skipped.length;
       totals.remove += decision.toRemove.length;
+      totals.unfetchable += decision.missingWithoutPages.length;
+
+      // The one thing a clean run can find but not fix. Logged per manga at
+      // warn because "the publisher has 12 chapters we never published, and
+      // this run could not publish them either" is not a detail an operator
+      // should have to go looking for.
+      if (decision.missingWithoutPages.length > 0) {
+        log.warn(
+          {
+            mangaId,
+            mangaName: this.mangaNames.get(mangaId) ?? null,
+            count: decision.missingWithoutPages.length,
+            chapters: decision.missingWithoutPages.slice(0, 20).map((c) => c.chapterNumber),
+          },
+          "publisher lists chapters we have not published, but this run fetched no pages for them",
+        );
+      }
 
       if (decision.skippedDifferentId.length > 0) {
         log.debug(
@@ -373,7 +422,17 @@ export class RunProcessor {
           "chapters already uploaded under their master id (same override)",
         );
       }
-      log.info(
+      // An unscoped CLEAN run now visits every title in the snapshot, and most
+      // of them decide nothing. Logging all of those at info would bury the
+      // handful that did decide something under a page of zeroes, so a quiet
+      // visit drops to debug; the run summary still counts it under `visited`.
+      const decided =
+        decision.toUpload.length +
+          decision.toEdit.length +
+          decision.toRemove.length +
+          decision.missingWithoutPages.length >
+        0;
+      log[decided ? "info" : "debug"](
         {
           mangaId,
           mangaName: this.mangaNames.get(mangaId) ?? null,

@@ -99,6 +99,13 @@ describe.skipIf(!dbReady())("scoped runs", () => {
   async function runWithEnvelope(opts: {
     scopeMangaIds: string[];
     stillListed: { mdMangaId: string; mangaId: string; chapterId: string; url: string }[];
+    /**
+     * What the extension flagged as new or changed, when that is not simply
+     * everything it lists. A real extension keeping its own cursor answers a
+     * clean run with its usual handful even though `postedChapterIds` was sent
+     * empty, and the gap between the two lists is where a missed chapter hides.
+     */
+    updated?: { mdMangaId: string; mangaId: string; chapterId: string; url: string }[];
   }) {
     for (const [mangaId, mdMangaId] of [
       ["series-a", SERIES_A],
@@ -136,25 +143,29 @@ describe.skipIf(!dbReady())("scoped runs", () => {
       },
     });
 
-    const chapters = opts.stillListed.map((entry) => ({
-      chapterLookup: null,
-      chapterTimestamp: null,
-      chapterExpire: null,
-      chapterLanguage: "en",
-      chapterNumber: "1",
-      chapterTitle: "A chapter",
-      chapterVolume: null,
-      chapterId: entry.chapterId,
-      chapterUrl: entry.url,
-      mdChapterId: null,
-      mangaId: entry.mangaId,
-      mdMangaId: entry.mdMangaId,
-      mdGroupId: GROUP,
-      mangaName: "A series",
-      mangaUrl: null,
-      extensionName: "testext",
-      imageArtifacts: [],
-    }));
+    const asRecords = (entries: typeof opts.stillListed) =>
+      entries.map((entry) => ({
+        chapterLookup: null,
+        chapterTimestamp: null,
+        chapterExpire: null,
+        chapterLanguage: "en",
+        chapterNumber: "1",
+        chapterTitle: "A chapter",
+        chapterVolume: null,
+        chapterId: entry.chapterId,
+        chapterUrl: entry.url,
+        mdChapterId: null,
+        mangaId: entry.mangaId,
+        mdMangaId: entry.mdMangaId,
+        mdGroupId: GROUP,
+        mangaName: "A series",
+        mangaUrl: null,
+        extensionName: "testext",
+        imageArtifacts: [],
+      }));
+
+    const chapters = asRecords(opts.stillListed);
+    const updatedChapters = asRecords(opts.updated ?? opts.stillListed);
 
     await prisma.resultSubmission.create({
       data: {
@@ -177,7 +188,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
           // On a clean run the extension has no posted ids to exclude, so what
           // it still lists is reported in both arrays. `allChapters` is the one
           // removal is computed from.
-          updatedChapters: chapters,
+          updatedChapters,
           allChapters: chapters,
           untrackedManga: [],
           trackedMangadexIds: [SERIES_A, SERIES_B],
@@ -303,6 +314,78 @@ describe.skipIf(!dbReady())("scoped runs", () => {
     ]);
     // And still nothing belonging to the series it never asked about.
     expect(queued.filter((key) => key.includes("bbbb"))).toEqual([]);
+  });
+
+
+  /**
+   * The gap between the two catalogue-wide passes, and the reason an
+   * extension-wide re-check could come back having changed nothing.
+   *
+   * Series B is still listed by the publisher, so it is not a series that was
+   * dropped, and `removeMangaWithoutExternalChapters` correctly leaves it
+   * alone. It also reported no new chapter, so under the old rule the per-manga
+   * pass never visited it either — and the chapter the publisher quietly pulled
+   * from under it was seen by neither. That is precisely the series this whole
+   * feature exists for: the one that has been quiet for a year.
+   */
+  it("marks what a series lost when it loses chapters but not the whole series", async () => {
+    const { run } = await runWithEnvelope({
+      scopeMangaIds: [],
+      // Both series still listed, each having lost its second chapter.
+      stillListed: [
+        { mdMangaId: SERIES_A, mangaId: "series-a", chapterId: "a1", url: "https://publisher.example/a/1" },
+        { mdMangaId: SERIES_B, mangaId: "series-b", chapterId: "b1", url: "https://publisher.example/b/1" },
+      ],
+      // And the extension flagged nothing as new, the way a dormant series goes.
+      updated: [],
+    });
+
+    const processor = new RunProcessor(prisma, fakeMd(), log);
+    await processor.processRun({
+      id: run.id,
+      extension: "testext",
+      bundleSha256: BUNDLE,
+      kind: "CLEAN",
+      scopeMangaIds: [],
+    });
+
+    expect((await queuedFor()).sort()).toEqual([
+      "UNAVAILABLE:aaaa2222-0000-4000-8000-000000000002",
+      "UNAVAILABLE:bbbb2222-0000-4000-8000-000000000002",
+    ]);
+  });
+
+  /**
+   * The other half of the same claim: a clean run finds a chapter that was
+   * never uploaded, without the extension flagging it. Series A's second
+   * chapter is listed by the publisher and absent from MangaDex.
+   */
+  it("uploads a chapter the publisher lists that MangaDex never got", async () => {
+    const { run } = await runWithEnvelope({
+      scopeMangaIds: [],
+      stillListed: [
+        { mdMangaId: SERIES_A, mangaId: "series-a", chapterId: "a1", url: "https://publisher.example/a/1" },
+        { mdMangaId: SERIES_A, mangaId: "series-a", chapterId: "a3", url: "https://publisher.example/a/3" },
+        { mdMangaId: SERIES_B, mangaId: "series-b", chapterId: "b1", url: "https://publisher.example/b/1" },
+        { mdMangaId: SERIES_B, mangaId: "series-b", chapterId: "b2", url: "https://publisher.example/b/2" },
+      ],
+      updated: [],
+    });
+
+    const processor = new RunProcessor(prisma, fakeMd(), log);
+    await processor.processRun({
+      id: run.id,
+      extension: "testext",
+      bundleSha256: BUNDLE,
+      kind: "CLEAN",
+      scopeMangaIds: [],
+    });
+
+    const uploads = await prisma.uploadTask.findMany({
+      where: { kind: "UPLOAD" },
+      select: { chapter: true },
+    });
+    expect(uploads.map((task) => (task.chapter as { chapterId: string }).chapterId)).toEqual(["a3"]);
   });
 
   it("marks the run processed either way", async () => {

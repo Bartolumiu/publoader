@@ -57,6 +57,16 @@ export interface DecideInput {
   languages: string[];
   groupId: string;
   cleanDb: boolean;
+  /**
+   * Whether this extension fetches chapter images at all, judged over the whole
+   * run rather than this manga.
+   *
+   * It has to be run-wide. The judgement is needed precisely for a series that
+   * reported no updates — a dormant one — and such a series contributes no
+   * evidence of its own either way, so deciding it from this manga's chapters
+   * would answer "no pages" for exactly the series the question is about.
+   */
+  extensionPublishesPages?: boolean;
 }
 
 export interface DecideResult {
@@ -72,6 +82,18 @@ export interface DecideResult {
   skippedDifferentId: Chapter[];
   /** Chapters on MangaDex that no longer belong there. */
   toRemove: MdChapter[];
+  /**
+   * Clean runs only: chapters the publisher still lists, that are not on
+   * MangaDex, and that this run cannot publish because it holds no pages for
+   * them and the extension is one that uploads pages.
+   *
+   * Not an error and not silently dropped. The clean run genuinely found a gap;
+   * it just cannot fill it from a catalogue listing, because a listing carries
+   * chapter metadata and not chapter images. Filling it needs a run that
+   * actually fetches those chapters. Reported so an operator sees the gap
+   * exists rather than reading "0 uploads" as "nothing was missing".
+   */
+  missingWithoutPages: Chapter[];
 }
 
 // ---------------------------------------------------------------------------
@@ -471,11 +493,22 @@ export function decideForManga(input: DecideInput): DecideResult {
   // constructor regardless.
   const toRemove = input.chaptersOnMd.length > 0 ? findExtraChapters(input) : [];
 
-  const updated = input.updatedChapters
+  const { candidates, fromListingOnly } = decideCandidates(input);
+  const updated = candidates
     .filter((chapter) => chapter.mdMangaId !== null)
     .map((chapter) => ({ ...chapter }));
 
+  // A clean run may publish a chapter it holds no pages for only when there is
+  // nothing missing from it. An external-link extension publishes an
+  // `externalUrl` and nothing else, so a listing entry is already a whole
+  // chapter. For an extension that uploads pages it is not, and committing it
+  // would put a pageless chapter on a public page — and an entry with neither
+  // pages nor a url is not a chapter at all, whatever the extension does.
+  const publishesPages =
+    input.extensionPublishesPages ?? candidates.some((c) => c.imageArtifacts.length > 0);
+
   const toUpload: Chapter[] = [];
+  const missingWithoutPages: Chapter[] = [];
   const skippedDifferentId: Chapter[] = [];
   const dupes: { chapter: Chapter; mdChapter: MdChapter }[] = [];
 
@@ -485,6 +518,12 @@ export function decideForManga(input: DecideInput): DecideResult {
       dupes.push(dupe);
     } else if (checkUploadedDifferentId(chapter, input, sameChapterIds)) {
       skippedDifferentId.push(chapter);
+    } else if (
+      chapter.imageArtifacts.length === 0 &&
+      fromListingOnly.has(chapterIdentity(chapter)) &&
+      (publishesPages || !chapter.chapterUrl)
+    ) {
+      missingWithoutPages.push(chapter);
     } else {
       toUpload.push(chapter);
     }
@@ -509,7 +548,48 @@ export function decideForManga(input: DecideInput): DecideResult {
     chapter.mdGroupId = input.groupId;
   }
 
-  return { toUpload, toEdit, skipped, skippedDifferentId, toRemove };
+  return { toUpload, toEdit, skipped, skippedDifferentId, toRemove, missingWithoutPages };
+}
+
+/**
+ * What a run compares against MangaDex.
+ *
+ * An update run compares what the extension flagged as new or changed, which is
+ * the whole point of one. A clean run compares the publisher's entire current
+ * listing, which is the whole point of THAT: "clean" is the run that re-derives
+ * the answer from scratch instead of trusting the incremental record, and it is
+ * the only run that can find a chapter which was missed, or whose title drifted,
+ * back when it was the new one.
+ *
+ * The core does this rather than trusting the extension to. `postedChapterIds`
+ * is already sent empty on a clean run, which is the contract's way of asking
+ * an extension to report everything — but an extension that keeps its own
+ * cursor, or that reads updates off a feed endpoint and the catalogue off a
+ * different one, answers with its usual handful anyway. `allChapters` is the
+ * listing either way, and it is the thing the contract actually defines as
+ * "everything the publisher has".
+ *
+ * The updated record wins on collision: both describe the same chapter, but
+ * only the updated one carries the image artifacts this run fetched.
+ */
+function decideCandidates(input: DecideInput): {
+  candidates: Chapter[];
+  /** Identities present only in the listing, so never fetched this run. */
+  fromListingOnly: Set<string>;
+} {
+  if (!input.cleanDb || input.allMangaChapters === null) {
+    return { candidates: input.updatedChapters, fromListingOnly: new Set() };
+  }
+
+  const byIdentity = new Map<string, Chapter>();
+  for (const chapter of input.allMangaChapters) byIdentity.set(chapterIdentity(chapter), chapter);
+  const fromListingOnly = new Set(byIdentity.keys());
+  for (const chapter of input.updatedChapters) {
+    const identity = chapterIdentity(chapter);
+    byIdentity.set(identity, chapter);
+    fromListingOnly.delete(identity);
+  }
+  return { candidates: [...byIdentity.values()], fromListingOnly };
 }
 
 // ---------------------------------------------------------------------------

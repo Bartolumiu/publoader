@@ -1107,6 +1107,45 @@ input[type="search"] {
   border-bottom: 1px solid var(--line);
 }
 
+/* A card whose whole body folds away behind its own caption.
+   The summary IS the caption strip — the same full-bleed faceplate `.card > h2`
+   draws — so a folded card still reads as the same object on the page, and not
+   as one of the dim sub-disclosures `.card details > summary` styles. Closed,
+   the card is the strip and nothing else: it eats its own bottom padding so it
+   does not leave an empty band under the caption. */
+.card > .card-fold > summary {
+  margin: -12px -12px -12px;
+  padding: 7px 12px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line-2);
+  color: var(--text);
+  font-size: inherit;
+  cursor: pointer;
+}
+
+.card > .card-fold[open] > summary {
+  margin-bottom: 12px;
+}
+
+.card > .card-fold > summary:hover {
+  color: var(--text);
+  background: var(--line-2);
+}
+
+/* The heading rides inside the summary, so it must not draw a second strip. */
+.card > .card-fold > summary > h2 {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: 0;
+}
+
+/* `.card details[open]` adds bottom padding meant for a nested disclosure. */
+.card > .card-fold[open] {
+  padding-bottom: 0;
+}
+
 .card > h2 + h3,
 .card > h3:first-child {
   margin-top: 0;
