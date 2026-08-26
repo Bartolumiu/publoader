@@ -1184,7 +1184,13 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
         mangaById: unexpected("mangaById"),
         searchManga: unexpected("searchManga"),
         mangaAggregate: unexpected("mangaAggregate"),
-        currentUploadSession: unexpected("currentUploadSession"),
+        // The uploader clears any stale session before opening an edit one;
+        // nothing is left over here, so this is the answer production gets on a
+        // clean account.
+        currentUploadSession: async () => {
+          calls.push("currentUploadSession");
+          return null;
+        },
         deleteUploadSession: async () => {
           calls.push("deleteUploadSession");
         },
