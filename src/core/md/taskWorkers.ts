@@ -984,6 +984,10 @@ export class UploadTaskWorkers {
       { ...chapter, mdChapterId },
       detail ? { mdAttributes: detail.attributes } : {},
     );
+    // Last honest moment for the url. The chapter is not carded yet, so even a
+    // payload rebuilt from MangaDex still carries the publisher's real link;
+    // one commit later it carries the replacement.
+    await this.rememberOrigin(chapter, mdChapterId);
     await this.deps.prisma.unavailableChapter.upsert({
       where: { mdChapterId },
       create: { mdChapterId, ...columns },
@@ -994,9 +998,49 @@ export class UploadTaskWorkers {
 
   // ------------------------------------------------------------- shared
 
+  /**
+   * Keep the chapter as the publisher described it, once and for good.
+   *
+   * Write-once by design: `update: {}` so a later pass can never overwrite it.
+   * That is the entire value. Everything else about a chapter degrades as it
+   * moves -- a chapter rebuilt from a MangaDex record takes its url from
+   * `externalUrl`, which on a carded chapter is the REPLACEMENT link -- so
+   * without this the publisher's real link is lost the first time a carded
+   * chapter is archived, and there is nothing left to recover it from.
+   *
+   * Never throws: losing provenance is bad, failing the upload that produced it
+   * is worse.
+   */
+  private async rememberOrigin(chapter: Chapter, mdChapterId: string): Promise<void> {
+    const extension = chapter.extensionName;
+    if (!extension) return;
+    try {
+      await this.deps.prisma.chapterOrigin.upsert({
+        where: { mdChapterId },
+        create: {
+          mdChapterId,
+          extension,
+          chapterId: chapter.chapterId ?? null,
+          chapterUrl: chapter.chapterUrl ?? null,
+          mangaId: chapter.mangaId ?? null,
+          mdMangaId: chapter.mdMangaId ?? null,
+          mangaName: chapter.mangaName ?? null,
+          chapterNumber: chapter.chapterNumber ?? null,
+          chapterVolume: chapter.chapterVolume ?? null,
+          chapterTitle: chapter.chapterTitle ?? null,
+          chapterLanguage: chapter.chapterLanguage ?? null,
+        },
+        update: {},
+      });
+    } catch (err) {
+      this.deps.log.warn({ err, mdChapterId }, "could not record the chapter's origin");
+    }
+  }
+
   private async recordUploadedChapter(chapter: Chapter, mdChapterId: string): Promise<void> {
     const { prisma } = this.deps;
     const columns = uploadedChapterColumns({ ...chapter, mdChapterId });
+    await this.rememberOrigin(chapter, mdChapterId);
 
     await prisma.uploadedChapter.upsert({
       where: { mdChapterId },

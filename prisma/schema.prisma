@@ -875,6 +875,40 @@ model ClearedError {
   @@map("cleared_errors")
 }
 
+/// The chapter as the PUBLISHER first described it. Written once, never updated.
+///
+/// Everything else about a chapter degrades as it moves. `uploaded_chapters`
+/// and `unavailable_chapters` hold the extension's own data, but a chapter
+/// rebuilt from a MangaDex record (`chapterFromMdChapter`) takes its url from
+/// MangaDex's `externalUrl` -- and on a carded chapter that is the REPLACEMENT
+/// link, because carding repoints it. Archive such a chapter and the original
+/// publisher link is gone, with nothing left holding it.
+///
+/// So this is the one row that is written at first sight and never touched
+/// again. Later passes may record whatever MangaDex currently says; the answer
+/// to "what did the publisher actually give us" stays here.
+model ChapterOrigin {
+  /// The MangaDex chapter, which is the id every later flow has in hand.
+  mdChapterId     String   @id @map("md_chapter_id")
+  extension       String
+  /// The publisher's own chapter id, when the extension supplies one.
+  chapterId       String?  @map("chapter_id")
+  /// THE POINT OF THIS TABLE: the publisher's real chapter link.
+  chapterUrl      String?  @map("chapter_url")
+  mangaId         String?  @map("manga_id")
+  mdMangaId       String?  @map("md_manga_id")
+  mangaName       String?  @map("manga_name")
+  chapterNumber   String?  @map("chapter_number")
+  chapterVolume   String?  @map("chapter_volume")
+  chapterTitle    String?  @map("chapter_title")
+  chapterLanguage String?  @map("chapter_language")
+  firstSeenAt     DateTime @default(now()) @map("first_seen_at")
+
+  @@index([extension, chapterId])
+  @@index([mdMangaId])
+  @@map("chapter_origins")
+}
+
 /// How much discussion a MangaDex chapter carries, remembered so the duplicate
 /// scan does not re-ask about every chapter on every run.
 ///
