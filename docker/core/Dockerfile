@@ -158,20 +158,29 @@ RUN apt-get update \
 # nothing errors, a PNG is produced, and it goes to MangaDex as a public page.
 #
 #   fontconfig       /etc/fonts, so the renderer can find anything at all
-#   fonts-dejavu-core   DejaVu Sans + Sans Mono, the two families card.ts pins
-#   fonts-liberation2   Liberation Sans, the pinned second choice
+#   fonts-dejavu-core   DejaVu Sans + Sans Mono, a broad Latin/Cyrillic/Greek
+#                       fallback behind the vendored display faces
+#   fonts-liberation2   Liberation Sans, the next fallback
 #   fonts-noto-cjk      Japanese/Korean/Chinese series titles, which DejaVu has
 #                       no glyphs for; the biggest package here and the reason
 #                       the card can name a Japanese series at all
+#   fonts-noto-core     everything else the catalogue publishes in. Thai is the
+#                       one that bit: MangaPlus publishes `th`, no package here
+#                       covered it, and a Thai One Piece card failed to render
+#                       with "no installed font covers them" -- which is the
+#                       renderer refusing to draw boxes, working as intended,
+#                       but a card that cannot be drawn is still a card nobody
+#                       gets. Also covers Vietnamese diacritics and Greek.
 #
-# The two `fc-list` greps fail the build rather than ship an image that renders
+# The `fc-list` greps fail the build rather than ship an image that renders
 # tofu; a missing font is otherwise invisible until a card reaches MangaDex.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      fontconfig fonts-dejavu-core fonts-liberation2 fonts-noto-cjk \
+      fontconfig fonts-dejavu-core fonts-liberation2 fonts-noto-cjk fonts-noto-core \
  && fc-cache -f \
  && fc-list | grep -q DejaVuSans \
  && fc-list | grep -qi NotoSansCJK \
+ && fc-list | grep -qi NotoSansThai \
  && rm -rf /var/lib/apt/lists/*
 
 # postgresql-client is here for ONE reason: the dashboard's backup button, which
