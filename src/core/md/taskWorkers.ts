@@ -844,9 +844,28 @@ function cardOnUpload(
   };
 }
 
+/**
+ * Where a carded chapter's `externalUrl` should point, best first: the
+ * chapter itself, then the series page, then the publisher's homepage.
+ *
+ * The chapter link leads: it is the most specific answer, and a reader who
+ * follows it gets the publisher's own page for exactly the chapter the card
+ * describes -- which may well have come back, since publishers rotate chapters
+ * in and out of free access rather than deleting them. The series page is the
+ * next best thing when the chapter link was never recorded, and the domain root
+ * is the last resort that at least reaches the publisher.
+ *
+ * This does not weaken `isCarded`, which recognises our work by
+ * `externalUrl && pages > 0` -- the card supplies the page, so the url is free
+ * to stay useful.
+ */
 function resolveReplacementUrl(liveExternalUrl: string | null, chapter: Chapter): string | null {
+  const chapterUrl = (chapter.chapterUrl ?? "").trim();
+  if (isHttpUrl(chapterUrl)) return chapterUrl;
+
   const mangaUrl = (chapter.mangaUrl ?? "").trim();
   if (isHttpUrl(mangaUrl)) return mangaUrl;
+
   for (const candidate of [liveExternalUrl, chapter.chapterUrl, chapter.mangaUrl]) {
     const root = domainRoot(candidate);
     if (root) return root;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildChapterCardSvg, type ChapterCardOptions } from "../../src/core/md/card.js";
 import { measureText, missingGlyphs, assertRenderable } from "../../src/core/md/fonts.js";
+import { unavailableCardOptions } from "../../src/core/md/unavailableCard.js";
 
 const base = (over: Partial<ChapterCardOptions> = {}): ChapterCardOptions => ({
   mangaName: "Black Clover",
@@ -94,6 +95,50 @@ describe("chapter card", () => {
     // itself, and the row is the more believable half.
     expect(paywalled).not.toContain("AVAILABLE");
     expect(buildChapterCardSvg(base())).toContain("AVAILABLE");
+  });
+});
+
+describe("card source url on a re-card", () => {
+  const row = {
+    chapterUrl: "https://mangaplus.shueisha.co.jp/viewer/1018557",
+    mangaUrl: "https://mangaplus.shueisha.co.jp/titles/100246",
+    chapterNumber: "42",
+    chapterTitle: "A chapter",
+    chapterLanguage: "en",
+    extensionName: "mangaplus",
+    chapterTimestamp: null,
+    chapterExpire: null,
+  } as unknown as Parameters<typeof unavailableCardOptions>[0]["chapter"];
+
+  /** A chapter that has ALREADY been carded: its externalUrl was repointed. */
+  const carded = {
+    attributes: {
+      chapter: "42",
+      title: "A chapter",
+      translatedLanguage: "en",
+      // The series page, written by the previous carding — not the chapter.
+      externalUrl: "https://mangaplus.shueisha.co.jp/titles/100246",
+      pages: 1,
+      version: 2,
+    },
+    relationships: [],
+  } as unknown as Parameters<typeof unavailableCardOptions>[0]["detail"];
+
+  it("keeps the original chapter link as the card's source", () => {
+    // Carding repoints externalUrl, so on a re-card MangaDex's value is the
+    // replacement. Preferring it would print the series page under SOURCE and
+    // lose where the chapter actually was — permanently, and again on every
+    // subsequent re-card.
+    const options = unavailableCardOptions({ chapter: row, detail: carded });
+    expect(options.chapterUrl).toBe("https://mangaplus.shueisha.co.jp/viewer/1018557");
+  });
+
+  it("falls back to MangaDex only when the row never had a chapter url", () => {
+    const options = unavailableCardOptions({
+      chapter: { ...row, chapterUrl: null } as typeof row,
+      detail: carded,
+    });
+    expect(options.chapterUrl).toBe("https://mangaplus.shueisha.co.jp/titles/100246");
   });
 });
 

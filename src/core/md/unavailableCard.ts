@@ -14,6 +14,14 @@ import type { Chapter } from "./types.js";
  * MangaDex is preferred over the stored row wherever both have an answer,
  * because the row is a mirror that may be days old while the card is about to
  * become the chapter's only page.
+ *
+ * The chapter URL is the one exception, and it inverts for a reason. Marking a
+ * chapter unavailable REPOINTS its externalUrl away from the chapter -- to the
+ * series page, or the publisher's homepage -- so on anything already carded the
+ * live value is that replacement, not the chapter. Preferring MangaDex there
+ * would print the series page under "SOURCE" and lose the original chapter link
+ * for good, and every re-card would do it again. The stored row still holds
+ * where the chapter actually was, so it wins.
  */
 export function unavailableCardOptions(input: {
   chapter: Chapter;
@@ -39,7 +47,10 @@ export function unavailableCardOptions(input: {
     chapterTitle: attrs?.title ?? chapter.chapterTitle,
     extensionName: chapter.extensionName ?? "Unknown",
     chapterLanguage: attrs?.translatedLanguage || chapter.chapterLanguage,
-    chapterUrl: attrs?.externalUrl ?? chapter.chapterUrl,
+    // The row first: see the note above. MangaDex's value is only used when the
+    // row never recorded a chapter url, and even then it may already be a
+    // replacement rather than the chapter.
+    chapterUrl: chapter.chapterUrl ?? attrs?.externalUrl ?? null,
     availableFrom: chapter.chapterTimestamp,
     availableTo: input.unavailableAt ?? chapter.chapterExpire,
     footerNote: input.footerNote ?? null,
