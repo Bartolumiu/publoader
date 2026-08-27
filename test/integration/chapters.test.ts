@@ -1163,7 +1163,7 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
      * able to describe both sides of that: the chapter before it is carded, and
      * the chapter after.
      */
-    const detail = (pages = 0, hash = "card-hash"): MdChapterDetail => ({
+    const detail = (pages = 0, version = 3): MdChapterDetail => ({
       id: uuid(1),
       attributes: {
         volume: null,
@@ -1171,9 +1171,9 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
         title: "Chapter one",
         translatedLanguage: "en",
         externalUrl: null,
-        version: 3,
+        version,
         createdAt: "2026-01-01T00:00:00.000Z",
-        ...(pages > 0 ? { pages, hash } : {}),
+        ...(pages > 0 ? { pages } : {}),
       },
       relationships: [
         { id: uuid(800), type: "scanlation_group" },
@@ -1196,7 +1196,9 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
       return {
         chapterById: async () => {
           calls.push("chapterById");
-          return detail(carded ? 1 : 0);
+          // A committed card means a page and a bumped version, which is what
+          // the uploader re-reads to confirm the work actually landed.
+          return carded ? detail(1, 4) : detail(0, 3);
         },
         beginEditSession: async () => {
           calls.push("beginEditSession");

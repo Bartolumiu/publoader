@@ -678,7 +678,7 @@ export class UploadTaskWorkers {
         // every one of them regenerated and change none.
         await this.confirmCardLanded(
           mdChapterId,
-          { pages: attrs.pages ?? 0, hash: attrs.hash ?? null },
+          { pages: attrs.pages ?? 0, version: attrs.version },
           log,
         );
 
@@ -710,10 +710,20 @@ export class UploadTaskWorkers {
    *
    *  - a chapter with no pages must come back with at least one. That is a card
    *    where there was none.
-   *  - a chapter that already had a card must come back with a DIFFERENT page
-   *    hash. The count stays at one either way, so it says nothing about
-   *    whether the image was replaced, and re-carding thousands of chapters
-   *    whose commits all quietly did nothing would look identical to success.
+   *  - a chapter that already had a card must come back with a HIGHER version.
+   *    The page count stays at one either way, so it says nothing about whether
+   *    the image was replaced, and re-carding thousands of chapters whose
+   *    commits all quietly did nothing would look identical to success.
+   *
+   * The version is the available signal for that second case, and it is a sound
+   * one: a commit that does real work bumps it, and the no-op commit behind the
+   * un-carding bug leaves it untouched -- that chapter sat at version 7 across
+   * repeated attempts while MangaDex answered 200 every time.
+   *
+   * Page CONTENT would be the more direct thing to compare, and it is not
+   * available: `GET /chapter/{id}` returns no `hash` field at all. Comparing it
+   * was the first attempt here and it failed every re-card it saw, because the
+   * value was absent rather than merely unchanged.
    *
    * Re-read a few times before giving up. MangaDex serves chapter reads from a
    * cache that lags its own writes, so the first read after a commit can still
@@ -722,11 +732,11 @@ export class UploadTaskWorkers {
    */
   private async confirmCardLanded(
     mdChapterId: string,
-    before: { pages: number; hash: string | null },
+    before: { pages: number; version: number },
     log: Logger,
   ): Promise<void> {
     let pages: number | null = null;
-    let hash: string | null = null;
+    let version: number | null = null;
 
     for (let attempt = 1; attempt <= CARD_CONFIRM_ATTEMPTS; attempt += 1) {
       if (attempt > 1) {
@@ -737,16 +747,17 @@ export class UploadTaskWorkers {
       }
       const after = await this.deps.md.chapterById(mdChapterId);
       pages = after?.attributes.pages ?? null;
-      hash = after?.attributes.hash ?? null;
+      version = after?.attributes.version ?? null;
 
       const gainedAPage = before.pages === 0 && (pages ?? 0) > 0;
-      const replacedTheImage = before.pages > 0 && hash !== null && hash !== before.hash;
-      if (gainedAPage || replacedTheImage) return;
+      const commitDidWork = before.pages > 0 && version !== null && version > before.version;
+      if (gainedAPage || commitDidWork) return;
     }
 
     throw new TaskError(
       `the card did not land on chapter ${mdChapterId}: pages ${before.pages} -> ` +
-        `${pages === null ? "unknown" : pages}, hash ${before.hash ?? "none"} -> ${hash ?? "none"}`,
+        `${pages === null ? "unknown" : pages}, version ${before.version} -> ` +
+        `${version === null ? "unknown" : version}`,
     );
   }
 

@@ -353,6 +353,46 @@ describe("findDuplicateChapters", () => {
   });
 
   /**
+   * A link naming only the publisher is not a chapter identity.
+   *
+   * Carding repoints externalUrl at the chapter, else the series, else the
+   * publisher's bare domain. Chapters that fell through to that last one all
+   * carry the same url while being different chapters, so keying duplicates on
+   * it buckets them together and hard-deletes all but the oldest.
+   *
+   * A scan of 773 series found three "duplicates" and all three were this:
+   * distinct RuriDragon chapters sharing `https://mangaplus.shueisha.co.jp/`.
+   * Applying it would have deleted three live chapters.
+   */
+  it("does not treat a bare publisher domain as chapter identity", () => {
+    const five = mdChapter("ruri-5", {
+      chapter: "5",
+      externalUrl: "https://mangaplus.shueisha.co.jp/",
+    });
+    const six = mdChapter("ruri-6", {
+      chapter: "6",
+      externalUrl: "https://mangaplus.shueisha.co.jp/",
+    });
+    expect(findDuplicateChapters([five, six], { groupId: "grp", botUserId: BOT })).toEqual([]);
+  });
+
+  it("still dedupes on a url that does name a chapter", () => {
+    // The protection above must not cost the detection it exists to make safe:
+    // a real link still buckets, which is also what `multi_chapters` relies on.
+    const first = withCreatedAt(
+      mdChapter("same-old", { chapter: "7", externalUrl: "https://pub.example/c/7" }),
+      "2024-01-01T00:00:00+00:00",
+    );
+    const second = withCreatedAt(
+      mdChapter("same-new", { chapter: "8", externalUrl: "https://pub.example/c/7" }),
+      "2025-01-01T00:00:00+00:00",
+    );
+    expect(
+      findDuplicateChapters([first, second], { groupId: "grp", botUserId: BOT }).map((c) => c.id),
+    ).toEqual(["same-new"]);
+  });
+
+  /**
    * The regression this file exists to prevent from recurring. Marking a
    * chapter unavailable repoints its externalUrl at the publisher's manga page
    * rather than clearing it, so every carded chapter of a series carries the
