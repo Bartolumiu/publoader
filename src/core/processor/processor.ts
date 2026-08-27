@@ -13,10 +13,10 @@ import {
   updatesEmbeds,
   type UntrackedMangaLike,
 } from "../md/webhookEmbeds.js";
-import { chapterFromRecord, type Chapter, type MdApi, type MdChapter } from "../md/types.js";
+import { chapterFromRecord, uploaderId, type Chapter, type MdApi, type MdChapter } from "../md/types.js";
 import { ExtensionConfigStore } from "../store/extensionConfig.js";
 import { ResultStore } from "../store/results.js";
-import { SettingsStore, type RemovalMode } from "../store/settings.js";
+import { AuditLog, SettingsStore, type RemovalMode } from "../store/settings.js";
 import { UploadTaskStore, uploadDedupeKey } from "../store/uploadTasks.js";
 import {
   aggregateChapterIds,
@@ -58,6 +58,22 @@ interface ClaimedRun {
    */
   scopeMangaIds: string[];
 }
+
+/**
+ * Which pass decided a removal.
+ *
+ * Recorded on every audited removal because the passes fail in different ways
+ * and the distinction is invisible afterwards: `duplicates` hard-deletes
+ * whatever the removal mode, `no-longer-listed` acts on the publisher's
+ * catalogue, and the two untracked passes act on a series leaving the tracked
+ * map entirely. "132 chapters were deleted" is not an answerable complaint
+ * without it.
+ */
+export type RemovalPass =
+  | "no-longer-listed"
+  | "duplicates"
+  | "manga-untracked"
+  | "manga-without-external-chapters";
 
 export interface MergedResults {
   updatedChapters: Chapter[];
@@ -117,6 +133,7 @@ export class RunProcessor {
   private readonly maxRunsPerTick: number;
   private readonly notifier: { enabled: boolean; send(embeds: DiscordEmbedInput[]): Promise<void> } | null;
   private readonly botUserId: string | null;
+  private readonly audit: AuditLog;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -128,6 +145,7 @@ export class RunProcessor {
     this.tasks = new UploadTaskStore(prisma);
     this.settings = new SettingsStore(prisma);
     this.config = new ExtensionConfigStore(prisma);
+    this.audit = new AuditLog(prisma);
     this.maxRunsPerTick = options.maxRunsPerTick ?? 10;
     this.notifier = options.notifier ?? null;
     this.botUserId = options.botUserId ?? null;
@@ -436,7 +454,14 @@ export class RunProcessor {
           payload: edit.payload,
         });
       }
-      await this.enqueueRemovals(decision.toRemove, mangaId, run.extension, groupId, removalMode);
+      await this.enqueueRemovals(
+        decision.toRemove,
+        mangaId,
+        run.extension,
+        groupId,
+        removalMode,
+        "no-longer-listed",
+      );
       await this.recordUploaded(
         [...decision.toEdit.map((edit) => edit.chapter), ...decision.skipped],
         run.extension,
@@ -747,6 +772,7 @@ export class RunProcessor {
     extension: string,
     groupId: string,
     mode: RemovalMode,
+    pass: RemovalPass,
   ): Promise<void> {
     if (mdChapters.length === 0) return;
     const kind: UploadTaskKind = mode === "delete" ? "DELETE" : "UNAVAILABLE";
@@ -759,6 +785,47 @@ export class RunProcessor {
         chapterFromMdChapter(mdChapter, { mdMangaId, extension, groupId, mangaName, mode }),
       );
       await this.prisma.uploadedChapter.deleteMany({ where: { mdChapterId: mdChapter.id } });
+    }
+
+    // Audited here, where the decision is made, not where the task runs.
+    //
+    // Until now only operator-initiated bulk actions wrote audit rows, so the
+    // destructive path that runs unattended was the one with no trail: 132
+    // chapters were removed in a single session with nothing recording which
+    // pass chose them, on what evidence, or who had uploaded them. After the
+    // fact that is unanswerable -- a deleted chapter 404s on MangaDex, so even
+    // its uploader cannot be recovered. One row per chapter rather than a
+    // summary, because "why was THIS chapter removed?" is the question actually
+    // asked, and it is a lookup by subject.
+    //
+    // Never allowed to fail the run: losing an audit row is bad, failing a run
+    // that has already queued its work and deleted its bookkeeping rows is
+    // worse, and would replay the removals on the next attempt.
+    try {
+      await this.audit.recordMany(
+        mdChapters.map((mdChapter) => ({
+          actor: `processor:${extension}`,
+          action: mode === "delete" ? "chapter.delete.auto" : "chapter.unavailable.auto",
+          subject: mdChapter.id,
+          detail: {
+            pass,
+            mode,
+            kind,
+            extension,
+            mdMangaId,
+            mangaName,
+            chapter: mdChapter.attributes.chapter,
+            language: mdChapter.attributes.translatedLanguage,
+            externalUrl: mdChapter.attributes.externalUrl,
+            // The question that could not be answered retrospectively when
+            // publoader was found queueing other people's chapters.
+            uploaderId: uploaderId(mdChapter),
+            botUserId: this.botUserId,
+          },
+        })),
+      );
+    } catch (error) {
+      this.log.warn({ error, mdMangaId, pass }, "could not write removal audit rows");
     }
   }
 
@@ -794,7 +861,14 @@ export class RunProcessor {
     let removed = 0;
     for (const mangaId of untracked) {
       const mdChapters = chaptersOnMdByManga.get(mangaId) ?? [];
-      await this.enqueueRemovals(mdChapters, mangaId, extension, groupId, mode);
+      await this.enqueueRemovals(
+        mdChapters,
+        mangaId,
+        extension,
+        groupId,
+        mode,
+        "manga-untracked",
+      );
       removed += mdChapters.length;
     }
     return removed;
@@ -821,7 +895,14 @@ export class RunProcessor {
       const mdChapters = await this.md.chaptersForManga(mangaId, groupId);
       if (mdChapters.length === 0) continue;
       await this.resolveMangaNames([mangaId]);
-      await this.enqueueRemovals(mdChapters, mangaId, extension, groupId, mode);
+      await this.enqueueRemovals(
+        mdChapters,
+        mangaId,
+        extension,
+        groupId,
+        mode,
+        "manga-without-external-chapters",
+      );
       removed += mdChapters.length;
       removedFrom.push(mangaId);
     }
@@ -877,7 +958,7 @@ export class RunProcessor {
 
       log.info({ mangaId, dupes: dupes.map((c) => c.id) }, "found duplicate chapters to delete");
       await this.resolveMangaNames([mangaId]);
-      await this.enqueueRemovals(dupes, mangaId, run.extension, groupId, "delete");
+      await this.enqueueRemovals(dupes, mangaId, run.extension, groupId, "delete", "duplicates");
       deleted += dupes.length;
     }
     return deleted;
