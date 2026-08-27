@@ -954,6 +954,105 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     });
 
     /**
+     * Put skipped series back in the queue.
+     *
+     * Skipping was a one-way door: `approve` refuses anything that is not NEW
+     * or FAILED, the CLI's `--state` only filters a listing, and nothing else
+     * writes the column. A series parked by mistake — or one skipped while its
+     * publisher was misbehaving, which is the common case — could only be
+     * recovered by editing the database by hand.
+     *
+     * Rows whose series is ALREADY TRACKED are reported rather than reset. A
+     * skipped row goes stale the moment someone maps that series manually, and
+     * moving it back to NEW would have the title service create a second
+     * MangaDex entry for a series that already has one. That has already
+     * happened once here by a different route, and cleaning it up meant
+     * deleting chapters off a live title.
+     */
+    scope.post("/api/v1/admin/untracked/unskip", { preHandler: requireScope("untracked:write") }, async (req) => {
+      const body = z
+        .object({
+          ids: z.array(z.string().uuid()).max(500).optional(),
+          extension: z.string().max(64).optional(),
+          dryRun: z.boolean().default(true),
+        })
+        .strict()
+        .parse(req.body ?? {});
+
+      const candidates = await ctx.prisma.untrackedManga.findMany({
+        where: {
+          state: "SKIPPED",
+          ...(body.ids ? { id: { in: body.ids } } : {}),
+          ...(body.extension ? { extension: body.extension } : {}),
+        },
+      });
+
+      // One query rather than per row: the tracked map is the authority on
+      // whether a series already has a MangaDex title, and it is what makes
+      // "already tracked" answerable without asking MangaDex.
+      const tracked = await ctx.prisma.trackedManga.findMany({
+        where: { mangaId: { in: candidates.map((row) => row.mangaId) } },
+        select: { extension: true, mangaId: true, mdMangaId: true },
+      });
+      const trackedBy = new Map(tracked.map((row) => [`${row.extension}:${row.mangaId}`, row.mdMangaId]));
+
+      const requeue: typeof candidates = [];
+      const alreadyTracked: { id: string; mangaId: string; mangaName: string; mdMangaId: string }[] = [];
+      for (const row of candidates) {
+        const mdMangaId = trackedBy.get(`${row.extension}:${row.mangaId}`);
+        if (mdMangaId) {
+          alreadyTracked.push({
+            id: row.id,
+            mangaId: row.mangaId,
+            mangaName: row.mangaName,
+            mdMangaId,
+          });
+        } else {
+          requeue.push(row);
+        }
+      }
+
+      const summary = {
+        matched: candidates.length,
+        requeued: requeue.length,
+        alreadyTracked,
+        series: requeue.map((row) => ({
+          id: row.id,
+          extension: row.extension,
+          mangaId: row.mangaId,
+          mangaName: row.mangaName,
+          mangaLanguage: row.mangaLanguage,
+        })),
+      };
+
+      if (body.dryRun) {
+        return {
+          ok: true,
+          dryRun: true,
+          ...summary,
+          note: "nothing was changed. Repeat with {dryRun: false} to move these back to NEW",
+        };
+      }
+
+      // Back to NEW with a fresh budget: a row skipped after a failure kept its
+      // attempt count, and re-queueing it with the budget already spent would
+      // fail it again on the first try.
+      const updated = await ctx.prisma.untrackedManga.updateMany({
+        where: { id: { in: requeue.map((row) => row.id) }, state: "SKIPPED" },
+        data: { state: "NEW", attempts: 0, lastError: null },
+      });
+      await ctx.audit.recordMany(
+        requeue.map((row) => ({
+          actor: actor(req),
+          action: "untracked.unskip",
+          subject: row.id,
+          detail: { extension: row.extension, mangaId: row.mangaId, mangaName: row.mangaName },
+        })),
+      );
+      return { ok: true, dryRun: false, ...summary, updated: updated.count };
+    });
+
+    /**
      * Yank a bundle version. `latest()` then resolves to the previous non-yanked
      * version, so this rolls back a bad extension release without touching the
      * core or deleting anything. Jobs already pinned to the yanked sha keep
