@@ -81,6 +81,14 @@ enum UploadTaskKind {
   EDIT
   DELETE
   UNAVAILABLE
+  /// Take the card back off a chapter: strip the card image and leave the
+  /// chapter as an ordinary external link again.
+  ///
+  /// Carding was a one-way door until this existed. findExtraChapters skips
+  /// anything already carded, so nothing ever revisited one, and a chapter
+  /// carded by mistake stayed carded — which is how 213 live RuriDragon
+  /// chapters ended up with "no longer available" over a working link.
+  RESTORE
 }
 
 enum UploadOutcome {

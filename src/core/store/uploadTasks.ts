@@ -22,7 +22,7 @@ import {
  * read-then-write anywhere, and nothing here can touch a LEASED row.
  */
 
-export const UPLOAD_TASK_KINDS = ["UPLOAD", "EDIT", "DELETE", "UNAVAILABLE"] as const;
+export const UPLOAD_TASK_KINDS = ["UPLOAD", "EDIT", "DELETE", "UNAVAILABLE", "RESTORE"] as const;
 export const UPLOAD_TASK_STATES = ["PENDING", "LEASED", "DONE", "FAILED", "DEAD_LETTER"] as const;
 
 /** States an operator may retry back into the queue. */
