@@ -9,6 +9,7 @@ import type { MdChapterDetail, MdExtendedApi } from "./client.js";
 import type { DiscordEmbedInput, DiscordNotifier } from "./webhook.js";
 import { queueEmbed, queueFinishedEmbed, queueSummaryEmbed } from "./webhookEmbeds.js";
 import { isCarded, type Chapter } from "./types.js";
+import type { UnavailableReason } from "./card.js";
 import type { SettingsStore } from "../store/settings.js";
 
 /**
@@ -76,7 +77,7 @@ export class UploadTaskWorkers {
 
     switch (task.kind) {
       case "UPLOAD":
-        return this.runUpload(task, chapter, log);
+        return this.runUpload(task, chapter, raw, log);
       case "EDIT":
         return this.runEdit(chapter, raw, log);
       case "DELETE":
@@ -130,7 +131,12 @@ export class UploadTaskWorkers {
 
   // -------------------------------------------------------------- UPLOAD
 
-  private async runUpload(task: UploadTask, chapter: Chapter, log: Logger): Promise<void> {
+  private async runUpload(
+    task: UploadTask,
+    chapter: Chapter,
+    raw: Record<string, unknown>,
+    log: Logger,
+  ): Promise<void> {
     const { prisma, md } = this.deps;
     const mdMangaId = chapter.mdMangaId;
     const mdGroupId = chapter.mdGroupId;
@@ -171,13 +177,45 @@ export class UploadTaskWorkers {
 
     let mdChapterId: string | null = null;
     try {
-      const files = await this.loadImages(chapter.imageArtifacts);
+      // A chapter known to be unreadable is published already carded, rather
+      // than published live and carded afterwards. The two-step version leaves
+      // a window -- however short -- in which MangaDex shows readers a working
+      // link to a page that gives them nothing, which is the exact thing the
+      // card exists to prevent. `runUnavailable` cannot do this: it opens an
+      // EDIT session against a chapter that must already exist.
+      const carded = cardOnUpload(raw);
+      const files = carded
+        ? [
+            {
+              name: "0.png",
+              data: await generateChapterCard(
+                unavailableCardOptions({
+                  chapter,
+                  detail: null,
+                  footerNote: readString(raw, "footerNote"),
+                  reason: carded.reason,
+                  subscriptionName: carded.subscriptionName,
+                }),
+              ),
+            },
+          ]
+        : await this.loadImages(chapter.imageArtifacts);
+
       const { pageOrder, failed } = await this.uploadPages(session.id, files, log);
       if (failed) {
         // uploader.py still commits when pages fail: the chapter lands as an
         // external-only entry rather than being lost entirely.
         log.error({ sessionId: session.id }, "some pages failed to upload, committing without pages");
       }
+      // A carded chapter whose card failed to upload would commit with no
+      // pages and a live publisher link -- indistinguishable from a healthy
+      // external chapter, and pointing at nothing. Fail instead and retry.
+      if (carded && failed) {
+        throw new TaskError(
+          `couldn't upload the unavailable card for a chapter being published as unavailable`,
+        );
+      }
+
       const committed = await md.commitUploadSession(
         session.id,
         {
@@ -185,11 +223,22 @@ export class UploadTaskWorkers {
           chapter: chapter.chapterNumber,
           title: chapter.chapterTitle,
           translatedLanguage: chapter.chapterLanguage ?? "",
-          externalUrl: chapter.chapterUrl,
+          // Repointed away from the chapter nobody can open, exactly as the
+          // card flow does, so `isCarded` recognises this as already handled
+          // and no later pass re-cards or deletes it.
+          externalUrl: carded
+            ? resolveReplacementUrl(chapter.chapterUrl, chapter)
+            : chapter.chapterUrl,
         },
         failed ? [] : pageOrder,
       );
       mdChapterId = committed?.id ?? null;
+      if (carded) {
+        log.info(
+          { mdChapterId, reason: carded.reason },
+          "chapter published already marked unavailable",
+        );
+      }
     } catch (err) {
       const message = errorMessage(err);
       await this.safeDeleteSession(session.id, log);
@@ -683,6 +732,32 @@ function domainRoot(url: string | null | undefined): string | null {
  * publisher's manga page if we have one, else the publisher's site root, else
  * nothing; port of `_resolve_replacement_url`.
  */
+/**
+ * Should this upload be published already carded, and why?
+ *
+ * Set by whoever queues the task, for a chapter already known to be unreadable
+ * -- one the publisher lists but will not serve, typically because it moved
+ * behind a subscription. Absent for every ordinary upload, which is all of them
+ * unless an extension says otherwise.
+ *
+ * `reason` is validated rather than trusted: it selects the wording a reader
+ * sees, and an unrecognised value silently falling through to "removed" would
+ * tell them a chapter is gone when it is merely paid for.
+ */
+function cardOnUpload(
+  raw: Record<string, unknown>,
+): { reason: UnavailableReason; subscriptionName: string | null } | null {
+  if (raw["uploadAsUnavailable"] !== true) return null;
+  const reason = readString(raw, "reason");
+  const known: UnavailableReason[] = ["removed", "subscriber-only", "region-locked"];
+  return {
+    reason: known.includes(reason as UnavailableReason)
+      ? (reason as UnavailableReason)
+      : "removed",
+    subscriptionName: readString(raw, "subscriptionName"),
+  };
+}
+
 function resolveReplacementUrl(liveExternalUrl: string | null, chapter: Chapter): string | null {
   const mangaUrl = (chapter.mangaUrl ?? "").trim();
   if (isHttpUrl(mangaUrl)) return mangaUrl;
