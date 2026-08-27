@@ -1068,6 +1068,19 @@ export class MdClient implements MdExtendedApi {
     }
     const typed = entity as MdEntity;
     if (typeof typed.id !== "string") return null;
+    // What the commit actually produced, not what it was asked for. A commit
+    // that changes nothing answers 2xx exactly like one that works, so the page
+    // count coming back is the only thing here that distinguishes them -- and
+    // it is what an empty pageOrder failing to drop the pages looks like.
+    this.log.info(
+      {
+        sessionId,
+        chapterId: typed.id,
+        requestedPages: pageOrder.length,
+        resultingPages: typed.attributes?.pages ?? null,
+      },
+      "upload session committed",
+    );
     const version = typed.attributes?.version;
     return {
       id: typed.id,
