@@ -62,6 +62,13 @@ const store = {
   navOpen: false,
   /** Per-view filter state, kept here so a redraw does not lose it. */
   filters: {
+    logService: "",
+    logMinLevel: "",
+    logQ: "",
+    /** Correlation id typed in, or arrived at from a run/job link. */
+    logCorrelation: "",
+    /** Timestamps already paged past, so "older" walks back without an offset. */
+    logBefore: [],
     queueKind: "",
     queueState: "",
     queueDedupeKey: "",
@@ -416,6 +423,7 @@ const ICONS = {
   tokens: "M14 4a6 6 0 1 1-4.6 9.9L4 19v2h3v-2h2v-2h2l1.5-1.5A6 6 0 0 1 14 4Zm2.5 3.5h.01",
   permissions: "M6 11V8a6 6 0 0 1 12 0v3m-13 0h14v9H5v-9Zm7 3.5v2",
   audit: "M7 3h7l5 5v13H7V3Zm7 0v5h5M10 13h7m-7 4h7",
+  logs: "M4 5h16M4 9h10M4 13h16M4 17h7",
   system: "M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm8 3.5-1.8.6-.7 1.7 1 1.6-1.6 1.6-1.6-1-1.7.7L13 19h-2l-.6-1.8-1.7-.7-1.6 1L5.5 16l1-1.6-.7-1.7L4 12v-2l1.8-.6.7-1.7-1-1.6L7.1 4.5l1.6 1 1.7-.7L11 3h2l.6 1.8 1.7.7 1.6-1 1.6 1.6-1 1.6.7 1.7L20 10v2Z",
   chevron: "M15 6l-6 6 6 6",
   menu: "M4 7h16M4 12h16M4 17h16",
@@ -970,6 +978,17 @@ const NAV = [
       ["quarantine", "Quarantine"],
     ],
     blurb: "Everything that failed, newest first.",
+  },
+  {
+    id: "logs",
+    label: "Logs",
+    group: "Work",
+    icon: "logs",
+    scope: "runs:read",
+    // Errors is the curated view of what broke. This is the uncurated one, and
+    // it exists because the line that explains an incident is usually not an
+    // error: what a check concluded, which titles were skipped and why.
+    blurb: "Raw log lines from the core services, newest first.",
   },
   {
     id: "extensions",
@@ -6166,6 +6185,189 @@ function activityActions(entry) {
  * acknowledgement is recorded against the failure's timestamp (see
  * core/observability/errorFeed.ts).
  */
+/** pino's numeric levels, and what to call them. */
+const LOG_LEVELS = [
+  [10, "trace"],
+  [20, "debug"],
+  [30, "info"],
+  [40, "warn"],
+  [50, "error"],
+  [60, "fatal"],
+];
+
+const logLevelName = (level) => {
+  let name = "info";
+  for (const [value, label] of LOG_LEVELS) if (level >= value) name = label;
+  return name;
+};
+
+VIEWS.logs = () => {
+  const query = () => {
+    const parts = ["limit=300"];
+    const f = store.filters;
+    if (f.logService) parts.push(`service=${encodeURIComponent(f.logService)}`);
+    if (f.logMinLevel) parts.push(`minLevel=${encodeURIComponent(f.logMinLevel)}`);
+    if (f.logQ) parts.push(`q=${encodeURIComponent(f.logQ)}`);
+    if (f.logCorrelation) {
+      // One box for both ids: an operator pastes an id, not a field name, and
+      // the server ignores whichever of the two does not match.
+      parts.push(`runId=${encodeURIComponent(f.logCorrelation)}`);
+    }
+    const before = f.logBefore[f.logBefore.length - 1];
+    if (before) parts.push(`before=${encodeURIComponent(before)}`);
+    return parts.join("&");
+  };
+
+  const logs = new Resource("logs", () => api(`/logs?${query()}`));
+  const sources = new Resource("logSources", () => api("/logs/sources"));
+
+  // Outside the reactive region so a redraw cannot steal the caret mid-word.
+  const search = el("input", {
+    id: "logs-q",
+    type: "search",
+    maxlength: 200,
+    placeholder: "message contains…",
+    value: store.filters.logQ,
+    "aria-label": "Filter log lines by message",
+  });
+  const correlation = el("input", {
+    id: "logs-run",
+    type: "search",
+    maxlength: 64,
+    placeholder: "run id",
+    value: store.filters.logCorrelation,
+    "aria-label": "Filter log lines by run id",
+  });
+
+  const reload = () => {
+    setFilter({ logQ: search.value.trim(), logCorrelation: correlation.value.trim(), logBefore: [] });
+    void logs.load({ force: true });
+  };
+  search.addEventListener("change", reload);
+  correlation.addEventListener("change", reload);
+
+  const older = () => {
+    const next = logs.data?.nextBefore;
+    if (!next) return;
+    setFilter({ logBefore: [...store.filters.logBefore, next] });
+    void logs.load({ force: true });
+  };
+
+  const newer = () => {
+    if (store.filters.logBefore.length === 0) return;
+    setFilter({ logBefore: store.filters.logBefore.slice(0, -1) });
+    void logs.load({ force: true });
+  };
+
+  return el(
+    "div",
+    {},
+    card(
+      "Logs",
+      el("p", {
+        class: "dim small",
+        text:
+          "Every line the core services wrote, with the fields it carried, newest first. Errors shows what " +
+          "failed; this shows everything, because the line that explains an incident is usually not an error. " +
+          "Extension runs are not here: workers have no database by design, so a runner's output reaches the " +
+          "host's log stream and the failure tail on its envelope, not this page.",
+      }),
+      live([sources], (data) =>
+        row(
+          el("label", { class: "inline", for: "logs-service", text: "Service" }),
+          el(
+            "select",
+            {
+              id: "logs-service",
+              onchange: (event) => {
+                setFilter({ logService: event.target.value, logBefore: [] });
+                void logs.load({ force: true });
+              },
+            },
+            [
+              el("option", { value: "", text: "all", selected: store.filters.logService === "" }),
+              ...(data?.services ?? []).map((name) =>
+                el("option", { value: name, text: name, selected: name === store.filters.logService }),
+              ),
+            ],
+          ),
+          el("label", { class: "inline", for: "logs-level", text: "Level" }),
+          el(
+            "select",
+            {
+              id: "logs-level",
+              onchange: (event) => {
+                setFilter({ logMinLevel: event.target.value, logBefore: [] });
+                void logs.load({ force: true });
+              },
+            },
+            [
+              el("option", { value: "", text: "all", selected: store.filters.logMinLevel === "" }),
+              ...LOG_LEVELS.map(([value, label]) =>
+                el("option", {
+                  value: String(value),
+                  text: `${label} and above`,
+                  selected: String(value) === store.filters.logMinLevel,
+                }),
+              ),
+            ],
+          ),
+          search,
+          correlation,
+          el("button", { class: "ghost", text: "Refresh", onclick: () => void logs.load({ force: true }) }),
+        ),
+      ),
+      live([logs], (data) => {
+        const lines = data?.logs ?? [];
+        if (lines.length === 0) {
+          return el("p", { class: "dim", text: "No log lines match these filters." });
+        }
+        return el(
+          "div",
+          {},
+          el(
+            "div",
+            { class: "logstream" },
+            lines.map((line) => {
+              const level = logLevelName(line.level);
+              const when = new Date(line.createdAt).toISOString().replace("T", " ").slice(0, 23);
+              const where = line.component ? `${line.service}/${line.component}` : line.service;
+              // The fields are shown verbatim rather than summarised: the whole
+              // point of this page is that nothing is editorialised away.
+              const fields =
+                line.fields && Object.keys(line.fields).length > 0
+                  ? JSON.stringify(line.fields)
+                  : "";
+              return el("div", { class: `logline log-${level}` }, [
+                el("span", { class: "log-time", text: when }),
+                el("span", { class: `log-level log-${level}`, text: level.toUpperCase() }),
+                el("span", { class: "log-where", text: where }),
+                el("span", { class: "log-msg", text: line.msg }),
+                fields ? el("span", { class: "log-fields", text: fields }) : null,
+              ]);
+            }),
+          ),
+          row(
+            el("button", {
+              class: "ghost",
+              text: "Newer",
+              disabled: store.filters.logBefore.length === 0,
+              onclick: newer,
+            }),
+            el("button", {
+              class: "ghost",
+              text: "Older",
+              disabled: !data?.nextBefore,
+              onclick: older,
+            }),
+            el("span", { class: "dim small", text: `${lines.length} line(s)` }),
+          ),
+        );
+      }),
+    ),
+  );
+};
+
 VIEWS.errors = (route) => {
   if (route.tab === "quarantine") return quarantinePanel();
 

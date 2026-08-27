@@ -779,6 +779,40 @@ model ApiToken {
   @@map("api_tokens")
 }
 
+/// One structured log line, kept so the dashboard can show what happened
+/// without shell access to the host.
+///
+/// Logs were previously written to stdout and nowhere else, which made
+/// `docker compose logs` the only way to read them — and made anything a run
+/// reported unreadable to an operator, and to the admin API, the moment the
+/// container restarted.
+///
+/// Deliberately NOT an audit trail. `audit_events` records decisions and who
+/// made them and is kept indefinitely; this is diagnostic volume and is pruned.
+model LogEvent {
+  id        String   @id @default(uuid())
+  /// pino's numeric level: 10 trace, 20 debug, 30 info, 40 warn, 50 error, 60 fatal.
+  /// Stored as the number so "at least warn" is a range scan rather than a set.
+  level     Int
+  service   String
+  component String?
+  /// Correlation ids, when the line carried them. Indexed together because the
+  /// question is almost always "show me everything from this run".
+  runId     String?  @map("run_id")
+  jobId     String?  @map("job_id")
+  msg       String
+  /// Everything else pino was given, verbatim, so the page can show raw lines.
+  fields    Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([createdAt])
+  @@index([level, createdAt])
+  @@index([service, createdAt])
+  @@index([runId])
+  @@index([jobId])
+  @@map("log_events")
+}
+
 model AuditEvent {
   id        String   @id @default(uuid())
   actor     String

@@ -13,6 +13,7 @@ import { autoSyncExtensions } from "../core/webhooks/autoSync.js";
 import { parseRepoList } from "../core/api/routes/webhooks.js";
 import { BundleStore } from "../core/store/bundles.js";
 import { AuditLog } from "../core/store/settings.js";
+import { logSink } from "../core/observability/logSink.js";
 
 const config = loadConfig();
 const log = createLogger("core-scheduler", config.logLevel);
@@ -58,6 +59,10 @@ const metricsServer = await startMetricsServer({
   defaultPort: 8101,
 });
 
+/** Once an hour is often enough for a retention window measured in days. */
+const LOG_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+let lastLogPrune = 0;
+
 log.info("core-scheduler started");
 while (running) {
   // Checked at the top of the iteration so the exit goes through the teardown
@@ -79,6 +84,20 @@ while (running) {
     await collectInventoryMetrics(prisma);
   } catch (err) {
     log.warn({ err }, "publishing inventory metrics failed");
+  }
+
+  // Log retention. Here rather than on its own timer because the scheduler is
+  // the one core service guaranteed to be running exactly once, and a delete
+  // that runs a few minutes late costs nothing. Failing is not worth a warning
+  // every tick: the next pass covers the same rows.
+  if (Date.now() - lastLogPrune > LOG_PRUNE_INTERVAL_MS) {
+    lastLogPrune = Date.now();
+    try {
+      const pruned = await logSink.prune(config.logRetentionDays);
+      if (pruned > 0) log.info({ pruned, days: config.logRetentionDays }, "pruned old log events");
+    } catch (err) {
+      log.warn({ err }, "pruning log events failed");
+    }
   }
 
   await sleep(config.schedulerIntervalSeconds * 1000);

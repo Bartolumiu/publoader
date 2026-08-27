@@ -1,4 +1,5 @@
 import { PrismaClient } from "@prisma/client";
+import { logSink } from "./core/observability/logSink.js";
 
 let prisma: PrismaClient | undefined;
 
@@ -10,6 +11,11 @@ export function getPrisma(databaseUrl?: string): PrismaClient {
     prisma = new PrismaClient(
       databaseUrl ? { datasources: { db: { url: databaseUrl } } } : undefined,
     );
+    // Start persisting logs here rather than in each service, so a service
+    // cannot be added later and quietly not appear in the log page. Worker
+    // agents never reach this — they have no DATABASE_URL by design — so the
+    // sink stays an unread in-memory buffer there.
+    logSink.enable(prisma);
   }
   return prisma;
 }
