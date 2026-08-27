@@ -1366,6 +1366,63 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
       // The record of what was removed outlives the chapter.
       expect(await prisma.deletedChapter.count({ where: { mdChapterId: uuid(1) } })).toBe(1);
     });
+
+    /**
+     * The publisher's real link survives a later pass that no longer has it.
+     *
+     * Carding repoints `externalUrl`, so a chapter rebuilt from a MangaDex
+     * record afterwards carries the REPLACEMENT. If that could overwrite the
+     * origin row, the one place holding the publisher's actual chapter link
+     * would be destroyed by the very flows most likely to need it.
+     */
+    it("never overwrites a chapter's recorded origin", async () => {
+      const payload = (chapterUrl: string) => ({
+        mdChapterId: uuid(55),
+        mdMangaId: uuid(900),
+        mdGroupId: uuid(800),
+        chapterNumber: "1",
+        chapterLanguage: "en",
+        chapterUrl,
+        mangaName: "Test Series",
+        extensionName: "exampleext",
+        imageArtifacts: [],
+      });
+      const workers = () =>
+        new UploadTaskWorkers({
+          prisma,
+          md: stubMd([]),
+          notifier: notifier as never,
+          settings: new SettingsStore(prisma),
+          config,
+          log,
+        });
+
+      const first = await prisma.uploadTask.create({
+        data: {
+          kind: "UNAVAILABLE",
+          dedupeKey: `origin-a-${uuid(55)}`,
+          state: "LEASED",
+          chapter: payload("https://publisher.example/chapter/1"),
+        },
+      });
+      await workers().execute(first);
+
+      // A second pass that only knows the repointed link.
+      const second = await prisma.uploadTask.create({
+        data: {
+          kind: "UNAVAILABLE",
+          dedupeKey: `origin-b-${uuid(55)}`,
+          state: "LEASED",
+          chapter: payload("https://publisher.example/"),
+        },
+      });
+      await workers().execute(second);
+
+      const origin = await prisma.chapterOrigin.findUniqueOrThrow({
+        where: { mdChapterId: uuid(55) },
+      });
+      expect(origin.chapterUrl).toBe("https://publisher.example/chapter/1");
+    });
   });
 
   // ---- asking the publisher whether a series is still there ----
