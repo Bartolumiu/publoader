@@ -95,6 +95,10 @@ while (running) {
     try {
       const pruned = await logSink.prune(config.logRetentionDays);
       if (pruned > 0) log.info({ pruned, days: config.logRetentionDays }, "pruned old log events");
+      // After the age pass, so the cap only has to deal with what age left
+      // behind, and so a loud day is bounded even though nothing is old yet.
+      const capped = await logSink.capRows(config.logMaxRows);
+      if (capped > 0) log.info({ capped, maxRows: config.logMaxRows }, "capped log events");
     } catch (err) {
       log.warn({ err }, "pruning log events failed");
     }
