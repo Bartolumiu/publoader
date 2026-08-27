@@ -640,14 +640,46 @@ function decideCandidates(input: DecideInput): {
 // ---------------------------------------------------------------------------
 
 /**
+ * Does this link identify a chapter, or merely a publisher?
+ *
+ * Carding repoints externalUrl at the best link it can find: the chapter, then
+ * the series, then -- when neither is known -- the publisher's bare domain.
+ * That last one is not an identity. Every chapter that fell through to it
+ * carries the same url while being a different chapter, so keying duplicates on
+ * it buckets unrelated chapters together and hard-deletes all but the oldest.
+ *
+ * A scan of 773 series found exactly three "duplicates" and all three were
+ * this: distinct RuriDragon chapters -- en 5 and 6, es-la 4, 5 and 6 -- whose
+ * only shared feature was `https://mangaplus.shueisha.co.jp/`. Applying it
+ * would have deleted three live chapters.
+ *
+ * Anything with a real path is left alone, because that is where genuine
+ * chapter links live and where `multi_chapters` does its work.
+ */
+function identifiesAChapter(url: string): boolean {
+  try {
+    return new URL(url).pathname.replace(/\/+$/, "") !== "";
+  } catch {
+    // Unparseable: it cannot be shown to identify anything, so it does not.
+    return false;
+  }
+}
+
+/**
  * Chapters that duplicate one another. External/link chapters are keyed on
- * their exact externalUrl; image chapters fall back to volume + number.
- * Language is part of every key, so the same chapter in two languages is never
- * a duplicate of itself.
+ * their exact externalUrl; image chapters, and link chapters whose url names
+ * only the publisher, fall back to volume + number. Language is part of every
+ * key, so the same chapter in two languages is never a duplicate of itself.
+ *
+ * The url key is deliberately kept for real links rather than tightened with
+ * the chapter number. `multi_chapters` exists precisely to say which numbers
+ * legitimately share one publisher link, so that an undeclared extra copy is
+ * still caught; adding the number here would make every number its own bucket
+ * and quietly retire that whole mechanism.
  */
 function dupeKey(mdChapter: MdChapter): string {
   const attrs = mdChapter.attributes;
-  if (attrs.externalUrl) {
+  if (attrs.externalUrl && identifiesAChapter(attrs.externalUrl)) {
     return JSON.stringify([attrs.translatedLanguage, "url", attrs.externalUrl]);
   }
   return JSON.stringify([attrs.translatedLanguage, "image", attrs.volume, attrs.chapter]);
