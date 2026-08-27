@@ -35,12 +35,14 @@ const IMAGE_BATCH_SIZE = 10;
 /**
  * How hard to look for the card before deciding it did not land.
  *
- * MangaDex serves chapter reads from a cache that lags its own writes, so the
- * first read after a commit can still show the old chapter. A few seconds of
- * patience is much cheaper than dead-lettering a re-card that actually worked.
+ * Only reached when the commit echoed nothing useful; the echo is checked
+ * first and does not lag. This is the fallback, and it is generous on purpose:
+ * three attempts two seconds apart was NOT enough, and every premature verdict
+ * failed a task whose commit had worked, which then retried and uploaded
+ * another card. Twenty seconds of waiting is far cheaper than that.
  */
-const CARD_CONFIRM_ATTEMPTS = 3;
-const CARD_CONFIRM_DELAY_MS = 2_000;
+const CARD_CONFIRM_ATTEMPTS = 5;
+const CARD_CONFIRM_DELAY_MS = 5_000;
 
 /** Failure that should send the task back to the queue with its message intact. */
 export class TaskError extends Error {
@@ -736,6 +738,7 @@ export class UploadTaskWorkers {
         await this.confirmCardLanded(
           mdChapterId,
           { pages: attrs.pages ?? 0, version: attrs.version },
+          committed,
           log,
         );
 
@@ -790,8 +793,23 @@ export class UploadTaskWorkers {
   private async confirmCardLanded(
     mdChapterId: string,
     before: { pages: number; version: number },
+    committed: { attributes?: { version?: number; pages?: number } } | null,
     log: Logger,
   ): Promise<void> {
+    // The commit's own echo first, because it cannot lag: it is the write
+    // path's answer, where `GET /chapter/{id}` is served from a cache that can
+    // still show the pre-commit chapter seconds afterwards. Trusting only the
+    // read failed tasks whose commit had plainly worked -- a chapter reported
+    // as `pages 0 -> 0, version 2 -> 2` was sitting at pages 1, version 3 by
+    // the time anyone looked. Each of those retried and re-uploaded another
+    // card.
+    const echo = committed?.attributes;
+    if (echo) {
+      const echoedAPage = before.pages === 0 && (echo.pages ?? 0) > 0;
+      const echoedAWrite = before.pages > 0 && (echo.version ?? 0) > before.version;
+      if (echoedAPage || echoedAWrite) return;
+    }
+
     let pages: number | null = null;
     let version: number | null = null;
 
