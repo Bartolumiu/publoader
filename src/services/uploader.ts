@@ -96,12 +96,25 @@ async function drain(kind: UploadTaskKind): Promise<{ processed: number; failed:
   return { processed, failed };
 }
 
-async function publishDepths(): Promise<void> {
+/**
+ * Publish queue depths, and report what is still waiting per kind.
+ *
+ * The second half is what tells `flushQueueSummary` whether a queue is
+ * genuinely empty. Only PENDING and LEASED count: a DONE or DEAD_LETTER row is
+ * settled and will not be worked again, so counting it would mean no queue is
+ * ever "finished" and the summary would never be sent at all.
+ */
+async function publishDepths(): Promise<Map<string, number>> {
   const depths = await tasks.depths();
   metrics.uploadTasks.reset();
+  const remaining = new Map<string, number>();
   for (const row of depths) {
     metrics.uploadTasks.set({ kind: row.kind, state: row.state }, row.count);
+    if (row.state === "PENDING" || row.state === "LEASED") {
+      remaining.set(row.kind, (remaining.get(row.kind) ?? 0) + row.count);
+    }
   }
+  return remaining;
 }
 
 // Before the loop, so a port clash fails the deploy instead of leaving the
@@ -154,8 +167,10 @@ while (running) {
     }
 
     await workers.flushNotifications();
-    await workers.flushQueueSummary(drained);
-    await publishDepths();
+    // Depths first: the summary only announces a queue as finished once
+    // nothing is left in it, so it needs this pass's remainder to decide.
+    const remaining = await publishDepths();
+    await workers.flushQueueSummary(drained, remaining);
 
     if (claimed === 0 && running) await sleep(IDLE_SLEEP_MS);
   } catch (err) {

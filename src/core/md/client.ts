@@ -180,8 +180,15 @@ export interface MdChapterDetail extends MdChapter {
 
 export interface MdCommitResult {
   id: string;
-  /** Present when MangaDex echoed the committed chapter; carries the bumped version. */
-  attributes?: { version?: number };
+  /**
+   * Present when MangaDex echoed the committed chapter.
+   *
+   * This echo is the WRITE path's own answer, so it does not lag the way a
+   * subsequent read does: `GET /chapter/{id}` is served from a cache that can
+   * still show the pre-commit chapter seconds later. Confirming a card against
+   * a read alone failed tasks whose commit had plainly worked.
+   */
+  attributes?: { version?: number; pages?: number };
 }
 
 export interface MdUploadedImage {
@@ -1207,9 +1214,14 @@ export class MdClient implements MdExtendedApi {
       "upload session committed",
     );
     const version = typed.attributes?.version;
+    const pages = typed.attributes?.pages;
+    const echoed = {
+      ...(typeof version === "number" ? { version } : {}),
+      ...(typeof pages === "number" ? { pages } : {}),
+    };
     return {
       id: typed.id,
-      ...(typeof version === "number" ? { attributes: { version } } : {}),
+      ...(Object.keys(echoed).length > 0 ? { attributes: echoed } : {}),
     };
   }
 

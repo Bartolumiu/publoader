@@ -35,12 +35,14 @@ const IMAGE_BATCH_SIZE = 10;
 /**
  * How hard to look for the card before deciding it did not land.
  *
- * MangaDex serves chapter reads from a cache that lags its own writes, so the
- * first read after a commit can still show the old chapter. A few seconds of
- * patience is much cheaper than dead-lettering a re-card that actually worked.
+ * Only reached when the commit echoed nothing useful; the echo is checked
+ * first and does not lag. This is the fallback, and it is generous on purpose:
+ * three attempts two seconds apart was NOT enough, and every premature verdict
+ * failed a task whose commit had worked, which then retried and uploaded
+ * another card. Twenty seconds of waiting is far cheaper than that.
  */
-const CARD_CONFIRM_ATTEMPTS = 3;
-const CARD_CONFIRM_DELAY_MS = 2_000;
+const CARD_CONFIRM_ATTEMPTS = 5;
+const CARD_CONFIRM_DELAY_MS = 5_000;
 
 /** Failure that should send the task back to the queue with its message intact. */
 export class TaskError extends Error {
@@ -68,6 +70,15 @@ export class UploadTaskWorkers {
    * and it saves a query per task.
    */
   private sendSuccesses = false;
+  /**
+   * Work done per kind since that kind's queue was last empty.
+   *
+   * A drain is not a single pass: while a run is processing, tasks arrive in a
+   * trickle and the uploader wakes for one at a time. Reporting each pass
+   * produced a message a minute, every one of them claiming the queue was
+   * finished. These totals wait until it actually is.
+   */
+  private readonly queueTotals = new Map<string, { processed: number; failed: number }>();
 
   constructor(private readonly deps: TaskWorkerDeps) {}
 
@@ -175,17 +186,43 @@ export class UploadTaskWorkers {
    * with identical messages. The failures are reported by their own per-chapter
    * embeds, which is where an operator can act on them.
    */
-  async flushQueueSummary(counts: Map<string, { processed: number; failed: number }>): Promise<void> {
-    if (!this.deps.notifier.enabled) return;
-    const embeds: DiscordEmbedInput[] = [];
+  async flushQueueSummary(
+    counts: Map<string, { processed: number; failed: number }>,
+    /** PENDING + LEASED still waiting per kind, after this pass. */
+    remaining: Map<string, number>,
+  ): Promise<void> {
+    // Totals are accumulated across passes and only reported once the queue is
+    // actually empty. A drain is not one pass: work arrives in a trickle while
+    // a run is processing, so the uploader wakes, handles one task, and sleeps.
+    // Reporting per pass turned that into a message a minute, each announcing
+    // "finished all items in queue" over a queue that plainly was not finished.
     for (const [kind, count] of counts) {
-      if (count.processed === 0 && count.failed === 0) continue;
+      const total = this.queueTotals.get(kind) ?? { processed: 0, failed: 0 };
+      total.processed += count.processed;
+      total.failed += count.failed;
+      this.queueTotals.set(kind, total);
+    }
+
+    if (!this.deps.notifier.enabled) {
+      // Still clear, or the totals grow forever on a deployment with no webhook.
+      for (const kind of [...this.queueTotals.keys()]) {
+        if ((remaining.get(kind) ?? 0) === 0) this.queueTotals.delete(kind);
+      }
+      return;
+    }
+
+    const embeds: DiscordEmbedInput[] = [];
+    for (const [kind, total] of [...this.queueTotals]) {
+      // Not empty yet: keep counting and say nothing.
+      if ((remaining.get(kind) ?? 0) > 0) continue;
+      this.queueTotals.delete(kind);
+      if (total.processed === 0 && total.failed === 0) continue;
       // UNAVAILABLE is summary-only: a per-chapter embed for a bulk
       // "mark these unavailable" pass is hundreds of messages nobody reads.
       if (kind === "UNAVAILABLE") {
-        embeds.push(queueSummaryEmbed(kind, count.processed, count.failed));
+        embeds.push(queueSummaryEmbed(kind, total.processed, total.failed));
       }
-      if (count.processed > 0) embeds.push(queueFinishedEmbed(kind));
+      if (total.processed > 0) embeds.push(queueFinishedEmbed(kind));
     }
     if (embeds.length > 0) await this.deps.notifier.send(embeds);
   }
@@ -701,6 +738,7 @@ export class UploadTaskWorkers {
         await this.confirmCardLanded(
           mdChapterId,
           { pages: attrs.pages ?? 0, version: attrs.version },
+          committed,
           log,
         );
 
@@ -755,8 +793,23 @@ export class UploadTaskWorkers {
   private async confirmCardLanded(
     mdChapterId: string,
     before: { pages: number; version: number },
+    committed: { attributes?: { version?: number; pages?: number } } | null,
     log: Logger,
   ): Promise<void> {
+    // The commit's own echo first, because it cannot lag: it is the write
+    // path's answer, where `GET /chapter/{id}` is served from a cache that can
+    // still show the pre-commit chapter seconds afterwards. Trusting only the
+    // read failed tasks whose commit had plainly worked -- a chapter reported
+    // as `pages 0 -> 0, version 2 -> 2` was sitting at pages 1, version 3 by
+    // the time anyone looked. Each of those retried and re-uploaded another
+    // card.
+    const echo = committed?.attributes;
+    if (echo) {
+      const echoedAPage = before.pages === 0 && (echo.pages ?? 0) > 0;
+      const echoedAWrite = before.pages > 0 && (echo.version ?? 0) > before.version;
+      if (echoedAPage || echoedAWrite) return;
+    }
+
     let pages: number | null = null;
     let version: number | null = null;
 
