@@ -54,7 +54,7 @@ describe("chapter card", () => {
     // Pull the drawn lines back out and measure them the way layout did. The
     // old Helvetica table assumed 0.556em for every Cyrillic letter, so lines
     // measured as fitting and then ran off the page.
-    const lines = [...svg.matchAll(/>([^<]*[А-Яа-я][^<]*)</g)].map((m) => m[1]);
+    const lines = [...svg.matchAll(/>([^<]*[А-Яа-я][^<]*)</g)].map((m) => m[1] ?? "");
     expect(lines.length).toBeGreaterThan(1);
     for (const line of lines) {
       expect(measureText(line, 44)).toBeLessThanOrEqual(824);

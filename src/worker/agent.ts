@@ -307,6 +307,9 @@ function cancellationEnvelope(job: LeasedJob, leaseId: string, reason: string): 
     updatedChapters: [],
     allChapters: null,
     untrackedManga: [],
+    // A cancelled run knows nothing about any title; the null `allChapters`
+    // already says so for all of them.
+    failedManga: [],
     trackedMangadexIds: [],
     mangadexGroupId: null,
     overrideOptions: {},

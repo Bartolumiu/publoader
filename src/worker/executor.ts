@@ -52,6 +52,7 @@ interface RunnerOutput {
   updatedChapters?: ChapterRecord[];
   allChapters?: ChapterRecord[] | null;
   untrackedManga?: unknown[];
+  failedManga?: string[];
   trackedMangadexIds?: string[];
   mangadexGroupId?: string | null;
   overrideOptions?: Record<string, unknown>;
@@ -220,6 +221,7 @@ export class JobExecutor {
         updatedChapters,
         allChapters,
         untrackedManga: runner.untrackedManga ?? [],
+        failedManga: runner.failedManga ?? [],
         trackedMangadexIds: runner.trackedMangadexIds ?? [],
         mangadexGroupId: runner.mangadexGroupId ?? null,
         overrideOptions: runner.overrideOptions ?? {},
@@ -277,6 +279,10 @@ export class JobExecutor {
       updatedChapters: [],
       allChapters: null,
       untrackedManga: [],
+      // A run that failed outright reports no per-title failures: a null
+      // `allChapters` already says nothing is known about any title, and
+      // naming a few here would imply the rest were successfully checked.
+      failedManga: [],
       trackedMangadexIds: [],
       mangadexGroupId: null,
       overrideOptions: {},

@@ -65,6 +65,24 @@ export const CollectResult = z
      * "no removal information", never "everything was removed"). */
     allChapters: z.array(ChapterInput).nullable().default(null),
     untrackedManga: z.array(MangaInput).default([]),
+    /**
+     * External manga ids this run could not fetch, and therefore knows nothing
+     * about.
+     *
+     * Reporting a failure per title is what lets one dead series stop costing a
+     * whole run. Without it an extension has two equally bad options when a
+     * title 404s: abort `collect` -- which is what alpha_manga did, so a single
+     * gone series dead-lettered every run and no title uploaded anything -- or
+     * skip the title silently, which is worse. A title absent from
+     * `allChapters` is read as "the publisher has nothing here any more", so
+     * silently skipping a title the publisher never answered about unpublishes
+     * its entire back catalogue on MangaDex.
+     *
+     * Listing the id here says "no information", exactly as a null
+     * `allChapters` does for the whole catalogue, and the processor skips the
+     * removal pass for those titles alone.
+     */
+    failedManga: z.array(z.string().max(128)).max(50_000).default([]),
   })
   .strict();
 export type CollectResult = z.infer<typeof CollectResult>;
