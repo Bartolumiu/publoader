@@ -8,7 +8,7 @@ import { chapterFromJson, chapterToColumns, uploadedChapterColumns } from "./cha
 import type { MdChapterDetail, MdExtendedApi } from "./client.js";
 import type { DiscordEmbedInput, DiscordNotifier } from "./webhook.js";
 import { queueEmbed, queueFinishedEmbed, queueSummaryEmbed } from "./webhookEmbeds.js";
-import { isCarded, type Chapter } from "./types.js";
+import { botUserIdFromClientId, isCarded, type Chapter } from "./types.js";
 import type { UnavailableReason } from "./card.js";
 import type { SettingsStore } from "../store/settings.js";
 
@@ -59,6 +59,54 @@ export class UploadTaskWorkers {
   private sendSuccesses = false;
 
   constructor(private readonly deps: TaskWorkerDeps) {}
+
+  /** The MangaDex account publoader uploads as; see `uploadedByBot`. */
+  private get botUserId(): string | null {
+    return this.deps.config.mdBotUserId ?? botUserIdFromClientId(this.deps.config.mdClientId);
+  }
+
+  /**
+   * May this task write to this chapter?
+   *
+   * The ownership gate in `dedupe.ts` decides what gets QUEUED. It does not run
+   * here, so anything already in the queue -- or put back by a retry -- reaches
+   * the write with no check at all. That is not hypothetical: four chapters
+   * uploaded by another account dead-lettered on DELETE with 403, and retrying
+   * the dead letters re-queued them as UNAVAILABLE, which would have uploaded a
+   * card over somebody else's chapter and repointed their externalUrl.
+   *
+   * So the check runs again at the point of the write. Chapters are not
+   * transferred between accounts, so "not ours" is permanent: the task is
+   * finished rather than failed, because retrying it forever only produces
+   * noise and 403s.
+   */
+  private async ownership(
+    mdChapterId: string,
+  ): Promise<
+    | { ok: true; detail: MdChapterDetail }
+    | { ok: false; gone: true }
+    | { ok: false; gone: false; reason: string }
+  > {
+    const detail = await this.deps.md.chapterById(mdChapterId, [
+      "scanlation_group",
+      "manga",
+      "user",
+    ]);
+    if (detail === null) return { ok: false, gone: true };
+
+    const uploader = detail.relationships.find((rel) => rel.type === "user")?.id ?? null;
+    const bot = this.botUserId;
+    if (!bot) {
+      return { ok: false, gone: false, reason: "no MangaDex bot user id is configured" };
+    }
+    if (uploader === null) {
+      return { ok: false, gone: false, reason: "MangaDex did not say who uploaded this chapter" };
+    }
+    if (uploader.toLowerCase() !== bot.toLowerCase()) {
+      return { ok: false, gone: false, reason: `uploaded by ${uploader}, not by this account` };
+    }
+    return { ok: true, detail };
+  }
 
   /** Re-read the reporting settings. Call once at the start of each drain. */
   async refreshReporting(): Promise<void> {
@@ -414,6 +462,28 @@ export class UploadTaskWorkers {
     const mdChapterId = chapter.mdChapterId;
     if (!mdChapterId) throw new TaskError("delete task has no mdChapterId");
 
+    // Costs one read before an irreversible write. `runDelete` previously
+    // called deleteChapter without ever looking at the chapter, so a queued row
+    // was enough to attempt a deletion on any chapter id it happened to carry.
+    const owned = await this.ownership(mdChapterId);
+    if (!owned.ok) {
+      if (owned.gone) {
+        log.info({ mdChapterId }, "chapter already gone from MangaDex, nothing to delete");
+        metrics.uploadsTotal.inc({ outcome: "delete_already_gone" });
+        this.queue("Delete", chapter, mdChapterId, true, "Chapter no longer on MangaDex.");
+        return;
+      }
+      // Finished, not failed: ownership does not change, so a retry can only
+      // produce the same 403.
+      log.error(
+        { mdChapterId, reason: owned.reason },
+        "refusing to delete a chapter this account did not upload",
+      );
+      metrics.uploadsTotal.inc({ outcome: "delete_refused_not_ours" });
+      this.queue("Delete", chapter, mdChapterId, false, `Refused: ${owned.reason}`);
+      return;
+    }
+
     let deleted: boolean;
     try {
       deleted = await this.deps.md.deleteChapter(mdChapterId);
@@ -475,14 +545,30 @@ export class UploadTaskWorkers {
     const force = raw["force"] === true;
     const footerNote = readString(raw, "footerNote");
 
-    let detail: MdChapterDetail | null;
+    let owned: Awaited<ReturnType<UploadTaskWorkers["ownership"]>>;
     try {
-      detail = await md.chapterById(mdChapterId, ["scanlation_group", "manga"]);
+      owned = await this.ownership(mdChapterId);
     } catch (err) {
       metrics.uploadsTotal.inc({ outcome: "unavailable_failed" });
       this.queue("Unavailable", chapter, mdChapterId, false, errorMessage(err));
       throw err;
     }
+
+    // Carding is a write to somebody's chapter: it uploads a page over it and
+    // repoints its externalUrl. A retried task reaches here without having gone
+    // through the queueing gate, which is how four chapters belonging to
+    // another account came to be queued for exactly this.
+    if (!owned.ok && !owned.gone) {
+      log.error(
+        { mdChapterId, reason: owned.reason },
+        "refusing to card a chapter this account did not upload",
+      );
+      metrics.uploadsTotal.inc({ outcome: "unavailable_refused_not_ours" });
+      this.queue("Unavailable", chapter, mdChapterId, false, `Refused: ${owned.reason}`);
+      return;
+    }
+
+    const detail: MdChapterDetail | null = owned.ok ? owned.detail : null;
 
     if (detail === null) {
       // Gone from MangaDex already; archiving is the correct end state.
