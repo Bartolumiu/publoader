@@ -24,6 +24,8 @@ describe.skipIf(!dbReady())("scoped runs", () => {
   const log = createLogger("test-scoped-run", "error");
 
   const GROUP = "0a0a0a0a-0000-4000-8000-00000000000a";
+  /** The MangaDex account these fixtures pretend publoader uploads as. */
+  const BOT = "74d95af1-7492-4fca-bc44-10c9142703e8";
   const SERIES_A = "11111111-0000-4000-8000-000000000001";
   const SERIES_B = "22222222-0000-4000-8000-000000000002";
   const BUNDLE = "a".repeat(64);
@@ -58,6 +60,10 @@ describe.skipIf(!dbReady())("scoped runs", () => {
         // Which manga a chapter belongs to is read off the relationship, so it
         // has to be here for the removal pass to bucket it.
         { id: externalUrl?.includes("/b/") ? SERIES_B : SERIES_A, type: "manga" },
+        // And who uploaded it, for the same reason: the removal passes refuse
+        // to touch a chapter they cannot show this account uploaded, so a
+        // fixture without an uploader tests that refusal rather than removal.
+        { id: BOT, type: "user" },
       ],
     } as unknown as MdChapter;
   }
@@ -227,7 +233,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
       stillListed: A_LOST_ONE,
     });
 
-    const processor = new RunProcessor(prisma, fakeMd(), log);
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
     await processor.processRun({
       id: run.id,
       extension: "testext",
@@ -251,7 +257,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
       stillListed: A_LOST_ONE,
     });
 
-    const processor = new RunProcessor(prisma, fakeMd(), log);
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
     await processor.processRun({
       id: run.id,
       extension: "testext",
@@ -273,7 +279,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
   it("still unpublishes an absent series when the run did claim to cover everything", async () => {
     const { run } = await runWithEnvelope({ scopeMangaIds: [], stillListed: A_LOST_ONE });
 
-    const processor = new RunProcessor(prisma, fakeMd(), log);
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
     await processor.processRun({
       id: run.id,
       extension: "testext",
@@ -298,7 +304,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
   it("visits a scoped series that reported no updates at all", async () => {
     const { run } = await runWithEnvelope({ scopeMangaIds: [SERIES_A], stillListed: [] });
     // Nothing listed anywhere: the publisher has dropped series A entirely.
-    const processor = new RunProcessor(prisma, fakeMd(), log);
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
     await processor.processRun({
       id: run.id,
       extension: "testext",
@@ -340,7 +346,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
       updated: [],
     });
 
-    const processor = new RunProcessor(prisma, fakeMd(), log);
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
     await processor.processRun({
       id: run.id,
       extension: "testext",
@@ -372,7 +378,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
       updated: [],
     });
 
-    const processor = new RunProcessor(prisma, fakeMd(), log);
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
     await processor.processRun({
       id: run.id,
       extension: "testext",
@@ -390,7 +396,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
 
   it("marks the run processed either way", async () => {
     const { run } = await runWithEnvelope({ scopeMangaIds: [SERIES_A], stillListed: A_LOST_ONE });
-    const processor = new RunProcessor(prisma, fakeMd(), log);
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
     await processor.processRun({
       id: run.id,
       extension: "testext",

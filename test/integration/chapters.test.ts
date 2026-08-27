@@ -33,10 +33,16 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
 describe.skipIf(!dbReady())("chapter management endpoints", () => {
   const prisma = testPrisma();
   const ADMIN_TOKEN = "test-admin-token-0123456789";
+  /** The MangaDex account these fixtures pretend publoader uploads as. */
+  const BOT_USER_ID = "74d95af1-7492-4fca-bc44-10c9142703e8";
   const config = loadConfig({
     DATABASE_URL: process.env.TEST_DATABASE_URL!,
     ADMIN_TOKEN,
     LOG_LEVEL: "error",
+    // Every destructive path is gated on this; without it the uploader
+    // correctly refuses to touch anything and the card tests below would pass
+    // for the wrong reason.
+    MANGADEX_BOT_USER_ID: BOT_USER_ID,
   });
   const log = createLogger("test-chapters", "error");
   let app: FastifyInstance;
@@ -1162,7 +1168,13 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
         version: 3,
         createdAt: "2026-01-01T00:00:00.000Z",
       },
-      relationships: [{ id: uuid(800), type: "scanlation_group" }],
+      relationships: [
+        { id: uuid(800), type: "scanlation_group" },
+        // The uploader refuses to write to a chapter it cannot show this
+        // account uploaded, so without an uploader these tests would exercise
+        // that refusal rather than the card flow.
+        { id: BOT_USER_ID, type: "user" },
+      ],
     });
 
     function stubMd(calls: string[]): MdExtendedApi {
