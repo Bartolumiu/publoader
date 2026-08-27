@@ -26,7 +26,19 @@ import { startMetricsServer } from "../core/observability/metricsServer.js";
 /** Long enough for a full page set at the MangaDex ratelimit. */
 const LEASE_TTL_SECONDS = 600;
 const IDLE_SLEEP_MS = 5_000;
-const KIND_ORDER: UploadTaskKind[] = ["DELETE", "EDIT", "UPLOAD", "UNAVAILABLE"];
+/**
+ * Which queues this drains, and in what order.
+ *
+ * A kind missing from this list is never claimed at all: `claim` takes one
+ * kind, so a task of a kind nobody asks for waits forever in PENDING with
+ * nothing to say it is stuck. RESTORE was added as a task kind and a worker
+ * without being added here, and 39 restore tasks sat untouched because of it.
+ *
+ * RESTORE goes first because it is the corrective verb: it takes a card off a
+ * chapter that should not have one, and until it runs a reader is looking at
+ * "no longer available" over a chapter they can actually read.
+ */
+const KIND_ORDER: UploadTaskKind[] = ["RESTORE", "DELETE", "EDIT", "UPLOAD", "UNAVAILABLE"];
 
 const config = loadConfig();
 const log = createLogger("core-uploader", config.logLevel);
