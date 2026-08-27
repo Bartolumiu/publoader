@@ -32,6 +32,13 @@ export const ResultEnvelope = z
     updatedChapters: z.array(ChapterRecord).max(MAX_CHAPTERS_PER_ENVELOPE).default([]),
     allChapters: z.array(ChapterRecord).max(MAX_CHAPTERS_PER_ENVELOPE).nullable().default(null),
     untrackedManga: z.array(MangaRecord).max(5_000).default([]),
+    /**
+     * External manga ids the run could not fetch. Carried through to the
+     * processor, which skips the removal pass for them: see `failedManga` in
+     * contracts/extensionApi.ts for why silence about a title must not be read
+     * as "the publisher removed everything".
+     */
+    failedManga: z.array(z.string().max(128)).max(50_000).default([]),
     trackedMangadexIds: z.array(z.string().uuid()).max(50_000).default([]),
     mangadexGroupId: z.string().uuid().nullable().default(null),
     overrideOptions: OverrideOptions.default({}),

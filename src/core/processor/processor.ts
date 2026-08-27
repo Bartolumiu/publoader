@@ -65,6 +65,16 @@ export interface MergedResults {
   allChapters: Chapter[] | null;
   untrackedManga: MangaRecord[];
   /**
+   * External manga ids no segment could read this run.
+   *
+   * The removal passes treat absence from `allChapters` as "the publisher
+   * dropped it", so a title the publisher never answered about has to be held
+   * out of that judgement explicitly. Without this, isolating a per-title fetch
+   * failure would unpublish the title's whole back catalogue -- strictly worse
+   * than the dead-lettered run the isolation was meant to prevent.
+   */
+  failedManga: string[];
+  /**
    * As reported by the workers. Advisory only: the database is the source of
    * truth and processRun replaces these before use, because a worker runs a
    * pinned bundle whose view of configuration can be arbitrarily stale.
@@ -84,6 +94,15 @@ export interface RunProcessorOptions {
    * configured or is failing.
    */
   notifier?: { enabled: boolean; send(embeds: DiscordEmbedInput[]): Promise<void> };
+  /**
+   * The MangaDex user publoader uploads as. Every removal pass is gated on it.
+   *
+   * Omitted, nothing can be shown to belong to us and no chapter is removed:
+   * the passes go quiet instead of acting on unverified ownership. That is the
+   * intended direction -- a missed removal is retried on the next run; a
+   * chapter deleted from somebody else's account is gone.
+   */
+  botUserId?: string | null;
 }
 
 export class RunProcessor {
@@ -97,6 +116,7 @@ export class RunProcessor {
   private aggregates = new Map<string, unknown>();
   private readonly maxRunsPerTick: number;
   private readonly notifier: { enabled: boolean; send(embeds: DiscordEmbedInput[]): Promise<void> } | null;
+  private readonly botUserId: string | null;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -110,6 +130,13 @@ export class RunProcessor {
     this.config = new ExtensionConfigStore(prisma);
     this.maxRunsPerTick = options.maxRunsPerTick ?? 10;
     this.notifier = options.notifier ?? null;
+    this.botUserId = options.botUserId ?? null;
+    if (!this.botUserId) {
+      this.log.error(
+        "no MangaDex bot user id configured: every removal pass is disabled. " +
+          "Set MANGADEX_BOT_USER_ID, or use a personal client id that embeds it.",
+      );
+    }
   }
 
   /**
@@ -292,6 +319,19 @@ export class RunProcessor {
 
     const updatedByManga = groupByMdManga(merged.updatedChapters);
     const allByManga = merged.allChapters === null ? null : groupByMdManga(merged.allChapters);
+    const failedMdIds = await this.failedMdMangaIds(run.extension, merged.failedManga);
+    if (merged.failedManga.length > 0) {
+      // Named rather than counted: a title that fails every run is a series to
+      // untrack or an extension bug, and neither is visible from a bare count.
+      log.warn(
+        {
+          failed: merged.failedManga.length,
+          resolved: failedMdIds.size,
+          mangaIds: merged.failedManga.slice(0, 20),
+        },
+        "extension could not read some titles this run; skipping their removal pass",
+      );
+    }
     const trackedIds = new Set(merged.trackedMangadexIds);
     // Judged once over the whole run: see `extensionPublishesPages`. Read off
     // the updates, which are the only chapters a run actually fetches — a
@@ -365,7 +405,15 @@ export class RunProcessor {
       const decision = decideForManga({
         mangadexMangaId: mangaId,
         updatedChapters,
-        allMangaChapters: allByManga === null ? null : (allByManga.get(mangaId) ?? []),
+        // A title the run could not read gets null, the same "no removal
+        // information" this passes for a run that published no catalogue at
+        // all. Letting it fall through to `?? []` would say the publisher holds
+        // nothing for this series and unpublish every chapter of it, on the
+        // strength of a request that failed.
+        allMangaChapters:
+          allByManga === null || failedMdIds.has(mangaId)
+            ? null
+            : (allByManga.get(mangaId) ?? []),
         chaptersOnMd,
         // Uploads happen asynchronously off the UploadTask queue, so nothing has
         // been posted to MangaDex by the time this run is processed.
@@ -375,6 +423,7 @@ export class RunProcessor {
         groupId,
         cleanDb: run.kind === "CLEAN",
         extensionPublishesPages,
+        botUserId: this.botUserId,
       });
 
       for (const chapter of decision.toUpload) {
@@ -567,6 +616,28 @@ export class RunProcessor {
       distinct: ["mdMangaId"],
     });
     return [...new Set([...rows.map((row) => row.mdMangaId), ...reportedByWorkers])];
+  }
+
+  /**
+   * The MangaDex titles behind the external ids a run could not read.
+   *
+   * `failedManga` carries the publisher's own ids, because that is all an
+   * extension knows; the removal passes work in MangaDex ids. Resolving through
+   * `tracked_manga` rather than the worker's reported map keeps this consistent
+   * with every other mapping decision, which is DB-authoritative -- and the
+   * worker's copy can be stale precisely when a title is behaving oddly.
+   *
+   * An external id with no mapping resolves to nothing and is dropped: it has
+   * no MangaDex title, so there is no removal pass for it to protect.
+   */
+  private async failedMdMangaIds(extension: string, failedManga: string[]): Promise<Set<string>> {
+    if (failedManga.length === 0) return new Set();
+    const rows = await this.prisma.trackedManga.findMany({
+      where: { extension, mangaId: { in: failedManga } },
+      select: { mdMangaId: true },
+      distinct: ["mdMangaId"],
+    });
+    return new Set(rows.map((row) => row.mdMangaId));
   }
 
   /**
@@ -797,7 +868,11 @@ export class RunProcessor {
           : chapters;
 
 
-      const dupes = findDuplicateChapters(inLanguage, { groupId, multiChapters });
+      const dupes = findDuplicateChapters(inLanguage, {
+        groupId,
+        multiChapters,
+        botUserId: this.botUserId,
+      });
       if (dupes.length === 0) continue;
 
       log.info({ mangaId, dupes: dupes.map((c) => c.id) }, "found duplicate chapters to delete");
@@ -825,6 +900,7 @@ export function mergeEnvelopes(envelopes: ResultEnvelope[], extension: string): 
   const allChapters: Chapter[] = [];
   let allChaptersComplete = true;
   const untrackedManga = new Map<string, MangaRecord>();
+  const failedManga = new Set<string>();
   const trackedMangadexIds = new Set<string>();
   let overrideOptions: OverrideOptionsLike = {};
   let languages: string[] = [];
@@ -843,6 +919,10 @@ export function mergeEnvelopes(envelopes: ResultEnvelope[], extension: string): 
     }
     for (const manga of envelope.untrackedManga) untrackedManga.set(manga.mangaId, manga);
     for (const id of envelope.trackedMangadexIds) trackedMangadexIds.add(id);
+    // Unioned, never intersected: if any segment could not read a title, the
+    // run as a whole has no trustworthy answer for it. Segments do not overlap,
+    // so in practice at most one ever reports a given id.
+    for (const mangaId of envelope.failedManga) failedManga.add(mangaId);
 
     // Identical across segments of a run; first non-empty wins.
     if (Object.keys(envelope.overrideOptions).length > 0 && Object.keys(overrideOptions).length === 0) {
@@ -858,6 +938,7 @@ export function mergeEnvelopes(envelopes: ResultEnvelope[], extension: string): 
     updatedChapters,
     allChapters: allChaptersComplete ? allChapters : null,
     untrackedManga: [...untrackedManga.values()],
+    failedManga: [...failedManga],
     trackedMangadexIds: [...trackedMangadexIds],
     overrideOptions,
     languages,

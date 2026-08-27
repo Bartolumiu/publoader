@@ -1,4 +1,12 @@
 import sharp from "sharp";
+import {
+  assertRenderable,
+  ensureFontConfig,
+  familiesForText,
+  measureText,
+  measureTracked,
+  vendoredFace,
+} from "./fonts.js";
 
 /**
  * Per-chapter info card, uploaded to MangaDex as the visible page when a
@@ -73,14 +81,27 @@ const LANG_NAMES: Record<string, string> = {
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-/** Helvetica advance widths in 1/1000 em, indexed by code point 32..126. */
-const WIDTHS: readonly number[] = [
-  278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556,
-  556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722, 722, 667,
-  611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667,
-  667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500,
-  222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584,
-];
+/**
+ * Why the widths are measured rather than tabulated.
+ *
+ * This file used to carry a Helvetica advance table covering code points
+ * 32..126, and treated everything outside it as 0.556 em. Two of the fonts it
+ * actually draws with are not Helvetica, and the assumption was badly wrong for
+ * every script the catalogue publishes in: Cyrillic is wider, CJK is close to a
+ * full em. Titles were therefore under-measured, wrapped too late, and ran off
+ * the edge of the page. `fonts.ts` reads the real advance from whichever face
+ * will draw each character.
+ */
+
+/**
+ * Why a chapter is not readable, which decides the card's explanatory copy.
+ *
+ * A first-class field rather than free text because the wording has to differ
+ * per publisher without every extension having to know how to phrase it. Most
+ * extensions have no subscription tier at all, so `removed` stays the default
+ * and their cards read exactly as they did before this existed.
+ */
+export type UnavailableReason = "removed" | "subscriber-only" | "region-locked";
 
 export interface ChapterCardOptions {
   mangaName: string;
@@ -92,33 +113,31 @@ export interface ChapterCardOptions {
   availableFrom?: string | Date | null;
   availableTo?: string | Date | null;
   footerNote?: string | null;
+  /** Defaults to `removed`, the only case that existed before. */
+  reason?: UnavailableReason | null;
+  /**
+   * The subscription a `subscriber-only` chapter needs, e.g. "MANGA Plus MAX".
+   * Named by the extension, since only it knows what its publisher calls the
+   * tier; omitted, the copy stays generic rather than inventing a name.
+   */
+  subscriptionName?: string | null;
 }
 
-/** DejaVu Sans Mono's fixed advance, in 1/1000 em. */
-const MONO_ADVANCE = 602;
-
-/** Approximate rendered width of `text` in logical units. */
-function advance(text: string, fontSize: number, bold = false, mono = false): number {
-  if (mono) return ([...text].length * MONO_ADVANCE * fontSize) / 1000;
-  let units = 0;
-  for (const char of text) {
-    const code = char.codePointAt(0) ?? 32;
-    if (code >= 32 && code <= 126) {
-      units += WIDTHS[code - 32] ?? 556;
-    } else if (code >= 0x1100 && code <= 0x9fff) {
-      units += 1000; // CJK and friends are full-width
-    } else if (code >= 0xff00 && code <= 0xffef) {
-      units += 1000;
-    } else {
-      units += 556;
-    }
-  }
-  return (units / 1000) * fontSize * (bold ? 1.06 : 1);
+/**
+ * Rendered width of `text` in logical units, from the real font metrics.
+ *
+ * `bold` is accepted for call-site compatibility but no longer scales the
+ * result: the vendored faces are drawn at a heavier weight by synthesis or by
+ * their own variable axis, and guessing a multiplier is what the old estimator
+ * did. A small safety margin is applied instead by `fitLines`, which is where
+ * overflow actually matters.
+ */
+function advance(text: string, fontSize: number, _bold = false, mono = false): number {
+  return measureText(text, fontSize, vendoredFace(mono ? "mono" : "display"));
 }
 
-function trackedWidth(text: string, fontSize: number, tracking: number, bold = false): number {
-  if (!text) return 0;
-  return advance(text, fontSize, bold) + tracking * (text.length - 1);
+function trackedWidth(text: string, fontSize: number, tracking: number, _bold = false): number {
+  return measureTracked(text, fontSize, tracking, vendoredFace("display"));
 }
 
 function escapeXml(value: string): string {
@@ -185,6 +204,95 @@ function wrapChars(text: string, fontSize: number, maxW: number, maxLines: numbe
   return lines.length > 0 ? lines : [""];
 }
 
+/**
+ * The widest line in a set, for checking a block against its box.
+ */
+function widestLine(lines: readonly string[], size: number, bold: boolean, mono = false): number {
+  let widest = 0;
+  for (const line of lines) widest = Math.max(widest, advance(line, size, bold, mono));
+  return widest;
+}
+
+/**
+ * Wrap `text` so it fits `maxW` in at most `maxLines`, shrinking the type
+ * rather than cutting words off.
+ *
+ * The old behaviour was to wrap at a fixed size and ellipsise whatever did not
+ * fit, which is how a series title reached MangaDex reading
+ * "The Plain Salary Man Turned Out to..". A title is the one thing on the card
+ * a reader uses to know what they are looking at, so it is worth a few points
+ * of type size to show all of it.
+ *
+ * Shrinking stops at `minSize`. Only a string still too long there -- a single
+ * unbroken word wider than the box, say -- is ellipsised, because at that point
+ * something has to give.
+ */
+function fitLines(
+  text: string,
+  opts: {
+    maxW: number;
+    maxLines: number;
+    size: number;
+    minSize: number;
+    bold?: boolean;
+    /** Fraction of the box left free, so rounding can never touch the edge. */
+    margin?: number;
+  },
+): { lines: string[]; size: number } {
+  const bold = opts.bold ?? false;
+  const usable = opts.maxW * (1 - (opts.margin ?? 0.02));
+  const step = Math.max(1, Math.round(opts.size * 0.04));
+
+  for (let size = opts.size; size >= opts.minSize; size -= step) {
+    const lines = wrapWords(text, size, usable, opts.maxLines, bold);
+    const overflows = widestLine(lines, size, bold) > usable;
+    const truncated = lines.some((line) => line.endsWith("…"));
+    if (!overflows && !truncated) return { lines, size };
+  }
+
+  const lines = wrapWords(text, opts.minSize, usable, opts.maxLines, bold);
+  return { lines, size: opts.minSize };
+}
+
+/**
+ * The explanatory paragraph, chosen by reason.
+ *
+ * `removed` keeps the exact wording every extension's cards already carry, so
+ * nothing changes for publishers that only ever take chapters down.
+ *
+ * `subscriber-only` exists because a chapter can be listed by the publisher,
+ * carry no expiry, and still serve a reader nothing -- it moved behind a paid
+ * tier. Saying "removed" there would be untrue and would leave a reader
+ * thinking the chapter is gone when they could in fact read it.
+ */
+function defaultNote(opts: ChapterCardOptions, showWindow: boolean): string {
+  const reason = opts.reason ?? "removed";
+
+  if (reason === "subscriber-only") {
+    const tier = opts.subscriptionName?.trim();
+    const named = tier ? `a ${tier} subscription` : "a paid subscription";
+    return (
+      `This chapter is still published, but it is no longer free to read. ` +
+      `It now requires ${named} on the publisher's own site or app. ` +
+      `Open the source link above to read it there.`
+    );
+  }
+
+  if (reason === "region-locked") {
+    return (
+      "This chapter is published, but the publisher does not make it available " +
+      "in every region. It may be readable from the source link above depending " +
+      "on where it is opened from."
+    );
+  }
+
+  return showWindow
+    ? "This chapter was officially available on the publisher's site during the dates above. " +
+        "It has since been removed and is no longer available on the publisher."
+    : "This chapter was officially available on the publisher's site. " +
+        "It has since been removed and is no longer available on the publisher.";
+}
+
 /** Format a footer date, dropping the 1990 "unknown" sentinel. */
 function formatDate(value: string | Date | null | undefined): string | null {
   if (value === null || value === undefined || value === "") return null;
@@ -216,7 +324,11 @@ function baselineFromMiddle(middle: number, size: number): number {
 
 function text(x: number, baseline: number, content: string, opts: TextOptions): string {
   const weight = opts.weight ?? (opts.bold ? 700 : 400);
-  const family = opts.mono ? MONO : SANS;
+  // Named per string rather than from a fixed list: the fallback that will draw
+  // a Japanese or Cyrillic run is the one its width was measured with, and
+  // letting librsvg pick a different substitute is how measured-to-fit text
+  // ends up overflowing.
+  const family = familiesForText(content, opts.mono ? "mono" : "display");
   const attrs = [
     `x="${round(x)}"`,
     `y="${round(baseline)}"`,
@@ -253,9 +365,19 @@ export function buildChapterCardSvg(opts: ChapterCardOptions): string {
   // ---- ghost chapter number behind the top-right corner ----
   const digits = opts.chapterNumber ? /\d+(?:\.\d+)?/.exec(String(opts.chapterNumber))?.[0] : null;
   if (digits) {
+    // Sized and placed to stay inside the page and clear of the header. The
+    // previous version anchored past the right edge at a fixed 300, so a three-
+    // or four-digit number was sliced in half by the canvas boundary and read
+    // as a rendering fault rather than as a watermark. Bringing it inside then
+    // put it straight through the publisher pill, so it also starts below the
+    // header band: a watermark that crosses a bordered element stops looking
+    // like a watermark.
+    const ghostMax = (CONTENT_R - CONTENT_L) * 0.62;
+    let ghostSize = 240;
+    while (ghostSize > 96 && advance(digits, ghostSize, true) > ghostMax) ghostSize -= 8;
     parts.push(
-      text(LOGICAL + 34, baselineFromTop(8, 300), digits, {
-        size: 300,
+      text(CONTENT_R, baselineFromTop(PAD_T + 58, ghostSize), digits, {
+        size: ghostSize,
         fill: GHOST,
         weight: 700,
         anchor: "end",
@@ -329,21 +451,23 @@ export function buildChapterCardSvg(opts: ChapterCardOptions): string {
   // misinformation, so the window only appears when we know when it began.
   const showWindow = Boolean(dateFrom);
 
-  const noteText =
-    opts.footerNote ??
-    (showWindow
-      ? "This chapter was officially available on the publisher's site during the dates above. " +
-        "It has since been removed and is no longer available on the publisher."
-      : "This chapter was officially available on the publisher's site. " +
-        "It has since been removed and is no longer available on the publisher.");
+  const noteText = opts.footerNote ?? defaultNote(opts, showWindow);
   const noteLines = wrapWords(noteText, noteSize, 760, 4);
 
   const rowH = 28;
   const rowGap = 14;
   const noteAdvance = noteSize * 1.45;
+  // A chapter that moved behind a paywall is still published, so an open-ended
+  // "available 14 May 2019 -> now" row states the opposite of the note beneath
+  // it and is the more believable of the two. The window is only shown when it
+  // has an end date, which is the case where it reads as "it was free between
+  // these dates"; otherwise the row is dropped and the note carries the meaning.
+  const openEnded = !dateTo;
+  const suppressWindow = (opts.reason ?? "removed") !== "removed" && openEnded;
+
   const rows: ("language" | "available")[] = [];
   if (langDisplay) rows.push("language");
-  if (showWindow) rows.push("available");
+  if (showWindow && !suppressWindow) rows.push("available");
 
   let footerH = 30 + rows.length * (rowH + rowGap) + noteAdvance * noteLines.length;
   // Room for the publoader mark under the note.
@@ -355,8 +479,16 @@ export function buildChapterCardSvg(opts: ChapterCardOptions): string {
   const chTitleSize = 44;
   const urlSize = 21;
   const titleX = CONTENT_L + 6 + 30;
-  const titleLines = wrapWords(opts.mangaName || "Untitled", titleSize, CONTENT_R - titleX, 2, true);
-  const titleAdvance = titleSize * 1.02;
+  const titleFit = fitLines(opts.mangaName || "Untitled", {
+    maxW: CONTENT_R - titleX,
+    maxLines: 2,
+    size: titleSize,
+    minSize: 40,
+    bold: true,
+  });
+  const titleLines = titleFit.lines;
+  const fittedTitleSize = titleFit.size;
+  const titleAdvance = fittedTitleSize * 1.02;
 
   let chapterNumberText = String(opts.chapterNumber ?? "").trim();
   if (chapterNumberText && !chapterNumberText.toLowerCase().startsWith("chapter")) {
@@ -365,10 +497,18 @@ export function buildChapterCardSvg(opts: ChapterCardOptions): string {
     chapterNumberText = "Chapter";
   }
 
-  const chTitleLines = opts.chapterTitle
-    ? wrapWords(opts.chapterTitle, chTitleSize, CONTENT_W, 2, true)
-    : [];
-  const chTitleAdvance = chTitleSize * 1.08;
+  const chTitleFit = opts.chapterTitle
+    ? fitLines(opts.chapterTitle, {
+        maxW: CONTENT_W,
+        maxLines: 2,
+        size: chTitleSize,
+        minSize: 26,
+        bold: true,
+      })
+    : { lines: [] as string[], size: chTitleSize };
+  const chTitleLines = chTitleFit.lines;
+  const fittedChTitleSize = chTitleFit.size;
+  const chTitleAdvance = fittedChTitleSize * 1.08;
 
   const urlPadX = 22;
   const urlPadY = 14;
@@ -400,17 +540,20 @@ export function buildChapterCardSvg(opts: ChapterCardOptions): string {
   const titleTop = y;
   titleLines.forEach((line, i) => {
     parts.push(
-      text(titleX, baselineFromTop(titleTop + i * titleAdvance, titleSize), line, {
-        size: titleSize,
+      text(titleX, baselineFromTop(titleTop + i * titleAdvance, fittedTitleSize), line, {
+        size: fittedTitleSize,
         fill: INK,
         weight: 700,
       }),
     );
   });
   // Accent bar spans cap-top of the first line to the baseline of the last.
-  const capH = titleSize * 0.7;
-  const barTop = baselineFromTop(titleTop, titleSize) - capH;
-  const barBottom = baselineFromTop(titleTop + (titleLines.length - 1) * titleAdvance, titleSize);
+  const capH = fittedTitleSize * 0.7;
+  const barTop = baselineFromTop(titleTop, fittedTitleSize) - capH;
+  const barBottom = baselineFromTop(
+    titleTop + (titleLines.length - 1) * titleAdvance,
+    fittedTitleSize,
+  );
   parts.push(rect(CONTENT_L, barTop, 6, barBottom - barTop, ORANGE, 3));
   y = titleTop + titleBlock;
 
@@ -431,8 +574,8 @@ export function buildChapterCardSvg(opts: ChapterCardOptions): string {
   if (chTitleLines.length > 0) {
     chTitleLines.forEach((line, i) => {
       parts.push(
-        text(CONTENT_L, baselineFromTop(y + i * chTitleAdvance, chTitleSize), line, {
-          size: chTitleSize,
+        text(CONTENT_L, baselineFromTop(y + i * chTitleAdvance, fittedChTitleSize), line, {
+          size: fittedChTitleSize,
           fill: INK,
           weight: 700,
         }),
@@ -507,24 +650,35 @@ export function buildChapterCardSvg(opts: ChapterCardOptions): string {
   });
   footY += noteAdvance * noteLines.length + 8;
 
-  parts.push(
-    text(CONTENT_R, baselineFromTop(footY, 14), "publoader", {
-      size: 14,
-      fill: INK_FAINT,
-      weight: 600,
-      tracking: 0.16 * 14,
-      anchor: "end",
-    }),
-  );
-
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${LOGICAL * SCALE}" height="${LOGICAL * SCALE}" ` +
     `viewBox="0 0 ${LOGICAL} ${LOGICAL}">${parts.join("")}</svg>`
   );
 }
 
-/** Render the card as PNG bytes. */
+/**
+ * Render the card as PNG bytes.
+ *
+ * The renderability check runs before anything is drawn. A card replaces the
+ * chapter itself on a public catalogue, so publishing one whose text is a grid
+ * of tofu boxes is worse than publishing nothing: the reader cannot tell it
+ * from a fault at their end, and nothing downstream inspects the pixels. It has
+ * happened -- cards reached MangaDex with every character, Latin included,
+ * drawn as a box, because librsvg resolved no font at all. Throwing here turns
+ * that into a task error an operator sees.
+ */
 export async function generateChapterCard(opts: ChapterCardOptions): Promise<Buffer> {
+  ensureFontConfig();
+  assertRenderable([
+    opts.mangaName,
+    opts.chapterTitle,
+    opts.chapterNumber,
+    opts.extensionName,
+    opts.chapterUrl,
+    opts.footerNote,
+    opts.subscriptionName,
+  ]);
+
   const svg = buildChapterCardSvg(opts);
   return sharp(Buffer.from(svg, "utf8"))
     .png({ compressionLevel: 9, palette: false })

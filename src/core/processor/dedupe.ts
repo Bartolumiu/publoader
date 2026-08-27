@@ -1,4 +1,4 @@
-import { isCarded, type Chapter, type MdChapter, type MdManga } from "../md/types.js";
+import { isCarded, uploadedByBot, type Chapter, type MdChapter, type MdManga } from "../md/types.js";
 
 /**
  * Pure decision logic. Nothing here performs I/O or touches Prisma: every
@@ -57,6 +57,16 @@ export interface DecideInput {
   languages: string[];
   groupId: string;
   cleanDb: boolean;
+  /**
+   * The MangaDex user publoader uploads as. Chapters uploaded by anyone else
+   * are left alone by every destructive pass.
+   *
+   * Optional in the type but not in effect: absent means no chapter can be
+   * shown to be ours, so nothing is removed. That is the intended failure
+   * direction -- a missed removal is retried next run, a wrong deletion is
+   * somebody's work gone.
+   */
+  botUserId?: string | null;
   /**
    * Whether this extension fetches chapter images at all, judged over the whole
    * run rather than this manga.
@@ -351,6 +361,12 @@ function findExtraChapters(input: DecideInput): MdChapter[] {
 
   return input.chaptersOnMd.filter(
     (mdChapter) =>
+      // Somebody else's upload is never ours to remove. Filtering the listing
+      // by our scanlation group is not enough on its own: other people upload
+      // into the same group, and this pass has queued chapters this account
+      // never uploaded for deletion because of it. `uploadedByBot` fails closed
+      // when the uploader is unknown or the bot id is not configured.
+      uploadedByBot(mdChapter, input.botUserId ?? null) &&
       // A chapter already carrying our card has reached the end state this
       // pass exists to move chapters towards, and it can never satisfy the url
       // test below: marking it unavailable repointed its externalUrl away from
@@ -625,7 +641,16 @@ function createdAt(mdChapter: MdChapter): string | null {
  */
 export function findDuplicateChapters(
   chapters: MdChapter[],
-  options: { groupId: string; multiChapters?: Record<string, string[]> },
+  options: {
+    groupId: string;
+    multiChapters?: Record<string, string[]>;
+    /**
+     * The MangaDex user publoader uploads as; a duplicate uploaded by anyone
+     * else is not ours to delete. Absent means nothing can be shown to be
+     * ours, so nothing is deleted.
+     */
+    botUserId?: string | null;
+  },
 ): MdChapter[] {
   const multiChapters = options.multiChapters ?? {};
 
@@ -637,7 +662,15 @@ export function findDuplicateChapters(
   // the removal mode, so that path silently converted "mark unavailable" into
   // "delete" one chapter at a time, on every run.
   const chaptersToCheck = chapters.filter(
-    (c) => scanlationGroups(c).includes(options.groupId) && !isCarded(c),
+    (c) =>
+      // Duplicates are hard-deleted whatever the removal mode, so this is the
+      // most destructive path in the codebase and the least forgiving of a
+      // wrong answer. Group membership alone does not establish authorship:
+      // another uploader in the same group whose chapter happens to collide on
+      // `dupeKey` would have their work deleted as our duplicate.
+      uploadedByBot(c, options.botUserId ?? null) &&
+      scanlationGroups(c).includes(options.groupId) &&
+      !isCarded(c),
   );
   if (chaptersToCheck.length <= 1) return [];
 

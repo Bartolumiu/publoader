@@ -1,5 +1,5 @@
 import type { MdChapterDetail } from "./client.js";
-import type { ChapterCardOptions } from "./card.js";
+import type { ChapterCardOptions, UnavailableReason } from "./card.js";
 import type { Chapter } from "./types.js";
 
 /**
@@ -23,6 +23,13 @@ export function unavailableCardOptions(input: {
   unavailableAt?: string | null;
   /** Replaces the standard explanatory paragraph. */
   footerNote?: string | null;
+  /**
+   * Why the chapter is unreadable, which selects the card's wording. Defaults
+   * to `removed`, so every caller that predates this is unaffected.
+   */
+  reason?: UnavailableReason | null;
+  /** Subscription a `subscriber-only` chapter needs, e.g. "MANGA Plus MAX". */
+  subscriptionName?: string | null;
 }): ChapterCardOptions {
   const { chapter, detail } = input;
   const attrs = detail?.attributes ?? null;
@@ -36,6 +43,8 @@ export function unavailableCardOptions(input: {
     availableFrom: chapter.chapterTimestamp,
     availableTo: input.unavailableAt ?? chapter.chapterExpire,
     footerNote: input.footerNote ?? null,
+    reason: input.reason ?? "removed",
+    subscriptionName: input.subscriptionName ?? null,
   };
 }
 

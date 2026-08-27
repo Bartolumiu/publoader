@@ -532,7 +532,7 @@ function validateCollectResult(result) {
   if (result === null || typeof result !== "object" || Array.isArray(result)) {
     throw new ContractError("collect() must resolve to an object");
   }
-  const { updatedChapters, allChapters, untrackedManga } = result;
+  const { updatedChapters, allChapters, untrackedManga, failedManga } = result;
   if (updatedChapters !== undefined && !Array.isArray(updatedChapters)) {
     throw new ContractError("collect(): updatedChapters must be an array");
   }
@@ -542,8 +542,11 @@ function validateCollectResult(result) {
   if (untrackedManga !== undefined && !Array.isArray(untrackedManga)) {
     throw new ContractError("collect(): untrackedManga must be an array");
   }
+  if (failedManga !== undefined && !Array.isArray(failedManga)) {
+    throw new ContractError("collect(): failedManga must be an array");
+  }
   const unknown = Object.keys(result).filter(
-    (k) => !["updatedChapters", "allChapters", "untrackedManga"].includes(k),
+    (k) => !["updatedChapters", "allChapters", "untrackedManga", "failedManga"].includes(k),
   );
   if (unknown.length > 0) {
     log("warn", "collect() returned unknown keys; ignoring", { keys: unknown });
@@ -552,6 +555,12 @@ function validateCollectResult(result) {
     updatedChapters: updatedChapters ?? [],
     allChapters: allChapters ?? null,
     untrackedManga: untrackedManga ?? [],
+    // Ids only, de-duplicated and stringified: an extension reporting a failure
+    // is already having a bad run, so this must not itself throw on a number or
+    // a repeat.
+    failedManga: [
+      ...new Set((failedManga ?? []).map((id) => String(id)).filter((id) => id.length > 0)),
+    ],
   };
 }
 
@@ -779,6 +788,14 @@ async function runJob(job, bundleDir, outputDir) {
     // new titles from the operator. The core dedupes across a run's segments.
     allChapters: allRecords,
     untrackedManga,
+    // Segment-filtered like the chapter lists: on a partitioned run a segment
+    // may only speak for the titles it owns, and a failure it reports for
+    // someone else's title would suppress that title's removal pass on the
+    // strength of a run that never touched it.
+    failedManga:
+      segmentIds.size > 0
+        ? result.failedManga.filter((id) => segmentIds.has(id))
+        : result.failedManga,
     trackedMangadexIds: [...new Set(Object.keys(mangaIdMap))],
     mangadexGroupId,
     // Override options are database-authoritative (§12). The worker is not a
