@@ -483,6 +483,10 @@ export class UploadTaskWorkers {
       if (owned.gone) {
         log.info({ mdChapterId }, "chapter already gone from MangaDex, nothing to delete");
         metrics.uploadsTotal.inc({ outcome: "delete_already_gone" });
+        // Still archive it. The chapter is gone either way, and leaving the
+        // live rows behind is what makes the archives describe chapters that
+        // no longer exist.
+        await this.archiveDeleted(mdChapterId, chapter);
         this.queue("Delete", chapter, mdChapterId, true, "Chapter no longer on MangaDex.");
         return;
       }
@@ -512,19 +516,37 @@ export class UploadTaskWorkers {
       throw new TaskError(message);
     }
 
-    // Archive first, then drop the live row; deletion is irreversible, so the
-    // record of what was removed outlives it (legacy deleter.py appended to the
-    // `deleted` collection for exactly this reason).
+    await this.archiveDeleted(mdChapterId, chapter);
+    metrics.uploadsTotal.inc({ outcome: "delete_ok" });
+    log.info({ mdChapterId }, "chapter deleted from MangaDex and archived");
+    this.queue("Delete", chapter, mdChapterId, true);
+  }
+
+  /**
+   * Record a chapter as deleted and take it out of the live archives.
+   *
+   * Archive first, then drop the live rows: deletion is irreversible, so the
+   * record of what was removed outlives it (legacy deleter.py appended to the
+   * `deleted` collection for the same reason).
+   *
+   * BOTH live archives are cleared, which is the part that was missing. A
+   * chapter can be in `uploaded` or in `unavailable`, never both, and delete
+   * only ever cleared `uploaded` -- so deleting a CARDED chapter left its
+   * `unavailable_chapters` row behind for good. Nothing removes those later,
+   * so the archive kept describing chapters MangaDex no longer has: 13 of them
+   * on RuriDragon alone, which is how a query for "carded chapters" answered 36
+   * when only 23 existed.
+   */
+  private async archiveDeleted(mdChapterId: string, chapter: Chapter): Promise<void> {
     const columns = chapterToColumns({ ...chapter, mdChapterId });
-    await this.deps.prisma.deletedChapter.upsert({
+    const { prisma } = this.deps;
+    await prisma.deletedChapter.upsert({
       where: { mdChapterId },
       create: { mdChapterId, ...columns },
       update: { ...columns, deletedAt: new Date() },
     });
-    await this.deps.prisma.uploadedChapter.deleteMany({ where: { mdChapterId } });
-    metrics.uploadsTotal.inc({ outcome: "delete_ok" });
-    log.info({ mdChapterId }, "chapter deleted from MangaDex and archived");
-    this.queue("Delete", chapter, mdChapterId, true);
+    await prisma.uploadedChapter.deleteMany({ where: { mdChapterId } });
+    await prisma.unavailableChapter.deleteMany({ where: { mdChapterId } });
   }
 
   // --------------------------------------------------------- UNAVAILABLE
