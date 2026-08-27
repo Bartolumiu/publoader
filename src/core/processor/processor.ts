@@ -332,7 +332,26 @@ export class RunProcessor {
         "scoped run: not announcing a run summary for a probe of part of the catalogue",
       );
     } else {
-      await this.reportRunSummary(run.extension, merged.untrackedManga, merged.updatedChapters.length);
+      // Once per run, not once per attempt. Processing is not resumable: an
+      // interrupted run stays in INGESTING and the next tick starts it again
+      // from the top. A restart mid-run is ordinary -- a deploy causes one --
+      // and this line re-announced the same run four times in an evening.
+      //
+      // The conditional update IS the claim: whoever flips it from null sends,
+      // so two processors racing the same run still announce once.
+      const claimed = await this.prisma.run.updateMany({
+        where: { id: run.id, summaryNotifiedAt: null },
+        data: { summaryNotifiedAt: new Date() },
+      });
+      if (claimed.count === 1) {
+        await this.reportRunSummary(
+          run.extension,
+          merged.untrackedManga,
+          merged.updatedChapters.length,
+        );
+      } else {
+        log.info("run summary already announced; not repeating it for this attempt");
+      }
     }
 
     const updatedByManga = groupByMdManga(merged.updatedChapters);
