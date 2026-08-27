@@ -68,6 +68,15 @@ export class UploadTaskWorkers {
    * and it saves a query per task.
    */
   private sendSuccesses = false;
+  /**
+   * Work done per kind since that kind's queue was last empty.
+   *
+   * A drain is not a single pass: while a run is processing, tasks arrive in a
+   * trickle and the uploader wakes for one at a time. Reporting each pass
+   * produced a message a minute, every one of them claiming the queue was
+   * finished. These totals wait until it actually is.
+   */
+  private readonly queueTotals = new Map<string, { processed: number; failed: number }>();
 
   constructor(private readonly deps: TaskWorkerDeps) {}
 
@@ -175,17 +184,43 @@ export class UploadTaskWorkers {
    * with identical messages. The failures are reported by their own per-chapter
    * embeds, which is where an operator can act on them.
    */
-  async flushQueueSummary(counts: Map<string, { processed: number; failed: number }>): Promise<void> {
-    if (!this.deps.notifier.enabled) return;
-    const embeds: DiscordEmbedInput[] = [];
+  async flushQueueSummary(
+    counts: Map<string, { processed: number; failed: number }>,
+    /** PENDING + LEASED still waiting per kind, after this pass. */
+    remaining: Map<string, number>,
+  ): Promise<void> {
+    // Totals are accumulated across passes and only reported once the queue is
+    // actually empty. A drain is not one pass: work arrives in a trickle while
+    // a run is processing, so the uploader wakes, handles one task, and sleeps.
+    // Reporting per pass turned that into a message a minute, each announcing
+    // "finished all items in queue" over a queue that plainly was not finished.
     for (const [kind, count] of counts) {
-      if (count.processed === 0 && count.failed === 0) continue;
+      const total = this.queueTotals.get(kind) ?? { processed: 0, failed: 0 };
+      total.processed += count.processed;
+      total.failed += count.failed;
+      this.queueTotals.set(kind, total);
+    }
+
+    if (!this.deps.notifier.enabled) {
+      // Still clear, or the totals grow forever on a deployment with no webhook.
+      for (const kind of [...this.queueTotals.keys()]) {
+        if ((remaining.get(kind) ?? 0) === 0) this.queueTotals.delete(kind);
+      }
+      return;
+    }
+
+    const embeds: DiscordEmbedInput[] = [];
+    for (const [kind, total] of [...this.queueTotals]) {
+      // Not empty yet: keep counting and say nothing.
+      if ((remaining.get(kind) ?? 0) > 0) continue;
+      this.queueTotals.delete(kind);
+      if (total.processed === 0 && total.failed === 0) continue;
       // UNAVAILABLE is summary-only: a per-chapter embed for a bulk
       // "mark these unavailable" pass is hundreds of messages nobody reads.
       if (kind === "UNAVAILABLE") {
-        embeds.push(queueSummaryEmbed(kind, count.processed, count.failed));
+        embeds.push(queueSummaryEmbed(kind, total.processed, total.failed));
       }
-      if (count.processed > 0) embeds.push(queueFinishedEmbed(kind));
+      if (total.processed > 0) embeds.push(queueFinishedEmbed(kind));
     }
     if (embeds.length > 0) await this.deps.notifier.send(embeds);
   }
