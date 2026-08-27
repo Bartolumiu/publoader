@@ -21,6 +21,8 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
 describe.skipIf(!dbReady())("extension config tables", () => {
   const prisma = testPrisma();
   const store = new ExtensionConfigStore(prisma);
+  /** The MangaDex account these fixtures pretend publoader uploads as. */
+  const BOT_USER_ID = "74d95af1-7492-4fca-bc44-10c9142703e8";
 
   beforeEach(async () => {
     await resetDb(prisma);
@@ -233,6 +235,10 @@ describe.skipIf(!dbReady())("extension config tables", () => {
       relationships: [
         { id: "22222222-2222-4222-8222-222222222222", type: "scanlation_group" },
         { id: "11111111-1111-4111-8111-111111111111", type: "manga" },
+        // Removal decisions refuse to touch a chapter they cannot show this
+        // account uploaded, so a fixture without an uploader exercises that
+        // refusal rather than the override rules under test here.
+        { id: BOT_USER_ID, type: "user" },
       ],
     }) as unknown as MdChapter;
 
@@ -257,6 +263,7 @@ describe.skipIf(!dbReady())("extension config tables", () => {
       languages: ["en"],
       groupId: "22222222-2222-4222-8222-222222222222",
       cleanDb: false,
+      botUserId: BOT_USER_ID,
     });
     expect(sameResult.skippedDifferentId).toHaveLength(1);
     expect(sameResult.toUpload).toHaveLength(0);
@@ -278,6 +285,7 @@ describe.skipIf(!dbReady())("extension config tables", () => {
       languages: ["en"],
       groupId: "22222222-2222-4222-8222-222222222222",
       cleanDb: false,
+      botUserId: BOT_USER_ID,
     });
     expect(languageResult.toRemove).toHaveLength(0);
 
@@ -300,6 +308,7 @@ describe.skipIf(!dbReady())("extension config tables", () => {
       {
         groupId: "22222222-2222-4222-8222-222222222222",
         multiChapters: overrideOptions.multi_chapters,
+        botUserId: BOT_USER_ID,
       },
     );
     expect(dupes.map((c) => c.id)).toEqual(["eeee1111-1111-4111-8111-111111111111"]);
