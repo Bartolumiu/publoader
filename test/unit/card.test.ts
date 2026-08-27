@@ -98,9 +98,29 @@ describe("chapter card", () => {
 });
 
 describe("font coverage", () => {
-  it("covers the scripts the catalogue actually publishes in", () => {
-    for (const sample of ["Black Clover", "Последняя страница", "黒の召喚士"]) {
-      expect(missingGlyphs(sample)).toEqual([]);
+  it("covers what the vendored fonts ship, on any host", () => {
+    // Latin and its punctuation come from the faces vendored in assets/fonts,
+    // so this holds regardless of what the machine has installed.
+    expect(missingGlyphs("Black Clover — Vol. 1 (2024)")).toEqual([]);
+  });
+
+  it("either renders a script or refuses to, but never draws boxes", () => {
+    // Coverage for CJK, Cyrillic and Thai comes from system fonts, so it is a
+    // property of the host: the runtime image installs the Noto families, a CI
+    // runner generally has no CJK font at all. Both are fine. What must never
+    // happen is the third outcome -- reporting full coverage and then drawing
+    // tofu -- so assert the contract rather than the machine.
+    //
+    // The first version of this test asserted coverage directly and passed on a
+    // developer Mac (which ships Arial Unicode MS) while failing CI, which is
+    // exactly the environment-dependent assertion it was meant to catch in the
+    // renderer.
+    for (const sample of ["黒の召喚士", "Последняя страница", "ไทย"]) {
+      if (missingGlyphs(sample).length === 0) {
+        expect(() => assertRenderable([sample])).not.toThrow();
+      } else {
+        expect(() => assertRenderable([sample])).toThrow(/unrenderable/i);
+      }
     }
   });
 
