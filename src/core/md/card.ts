@@ -30,13 +30,11 @@ import {
 const LOGICAL = 1000;
 const SCALE = 2;
 
-// Noto Sans CJK sits after the Latin families and before the generic: a series
-// title is frequently Japanese, and DejaVu has no glyph for a single kana. The
-// core image installs all three (docker/core/Dockerfile); on a host missing
-// them the renderer silently draws tofu rather than failing, which is why the
-// image asserts they are present at build time.
-const SANS = "DejaVu Sans, Liberation Sans, Helvetica, Arial, Noto Sans CJK JP, sans-serif";
-const MONO = "DejaVu Sans Mono, Liberation Mono, Menlo, Consolas, monospace";
+// The font stack is no longer a constant here. It is built per string by
+// `familiesForText`, from the faces that were actually used to measure that
+// string, so drawing and measuring cannot disagree — a fixed list could name a
+// family librsvg then substitutes for something of a different width, which is
+// how text ended up outside boxes it had been measured to fit.
 
 const ORANGE = "#FF6740";
 const ORANGE_SOFT = "#FFF1EC";
