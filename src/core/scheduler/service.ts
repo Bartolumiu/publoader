@@ -215,11 +215,25 @@ export class SchedulerService {
           mangaIds: [...opts.scope.mangaIds],
         },
       ];
-    } else if (manifest.partition && opts.kind !== "CLEAN") {
-      // CLEAN runs are all-or-nothing over the full catalogue; never partition
-      // them; a missing segment must not read as "chapters were removed".
+    } else if (manifest.partition) {
+      // CLEAN runs are partitioned too, which they did not used to be. The old
+      // rule was "never partition a clean run, a missing segment must not read
+      // as chapters were removed". That requirement has not changed; it is now
+      // enforced where it belongs instead of by refusing to split the work:
+      //
+      //  - mergeEnvelopes turns the run's whole listing to null the moment ANY
+      //    segment reports `allChapters: null`, so one segment that could not
+      //    produce a catalogue disables removal for the entire run.
+      //  - processRun refuses a CLEAN run with any uncommitted segment.
+      //  - failedManga is unioned across segments, never intersected.
+      //  - only series some segment actually covered reach the removal pass.
+      //
+      // Splitting also SHRINKS the blast radius of a segment that lies: it
+      // endangers its own slice rather than the whole catalogue, which is
+      // strictly better than the single job it replaces.
+      //
       // The DB (TrackedManga) is the source of truth for the tracked catalogue;
- // bundle data files only seed it at publish time.
+      // bundle data files only seed it at publish time.
       const tracked = await this.prisma.trackedManga.findMany({
         where: { extension: manifest.name },
         select: { namespace: true, mangaId: true },

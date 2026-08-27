@@ -290,4 +290,67 @@ describe.skipIf(!dbReady())("multi-slot schedules", () => {
     expect(runs).toHaveLength(1);
     expect(runs[0]?.kind).toBe("UPDATE");
   });
+
+  /**
+   * Clean runs are partitioned across the fleet like every other kind.
+   *
+   * They used to be the exception, on the rule that "a missing segment must not
+   * read as chapters were removed". That requirement still holds; it is now
+   * enforced where it belongs rather than by refusing to split the work --
+   * `mergeEnvelopes` nulls the whole run's listing if ANY segment reports no
+   * catalogue, `processRun` refuses a CLEAN run with an uncommitted segment,
+   * and `failedManga` is unioned across segments. Splitting also shrinks what
+   * one bad segment can reach, from the catalogue to its own slice.
+   *
+   * The point of partitioning at all is that publishers rate-limit per source
+   * IP, so one worker doing every series is one address doing it.
+   */
+  const partitioned = { ...manifest, partition: { maxSegments: 4, minMangaPerSegment: 25 } };
+  const bundle = { sha256: "b".repeat(64) };
+
+  const seedTracked = async (count: number): Promise<void> => {
+    await prisma.trackedManga.createMany({
+      data: Array.from({ length: count }, (_, i) => ({
+        extension: "mangaplus",
+        mangaId: `s-${i}`,
+        mdMangaId: `11111111-1111-4111-8111-${String(i).padStart(12, "0")}`,
+      })),
+    });
+  };
+
+  it("partitions a CLEAN run across segments", async () => {
+    await seedTracked(120);
+    const scheduler = new SchedulerService(prisma, log, { baseSeconds: 1, maxSeconds: 2 });
+
+    const result = await scheduler.createRunForExtension(partitioned as never, bundle as never, {
+      idempotencyKey: "clean-partitioned",
+      kind: "CLEAN",
+      triggeredBy: "test",
+    });
+
+    expect(result.segments).toBeGreaterThan(1);
+    const jobs = await prisma.job.findMany({ where: { runId: result.runId } });
+    expect(jobs).toHaveLength(result.segments);
+    // Every tracked series lands in exactly one segment: overlapping subsets
+    // would fetch twice, and a gap would leave series nothing vouches for.
+    const covered = jobs.flatMap((job) => job.segmentMangaIds);
+    expect(new Set(covered).size).toBe(120);
+  });
+
+  it("still runs a SCOPED clean as a single segment", async () => {
+    await seedTracked(120);
+    const scheduler = new SchedulerService(prisma, log, { baseSeconds: 1, maxSeconds: 2 });
+
+    // Scope means "these titles and no others", which the processor has to be
+    // able to tell from a catalogue-wide answer. Partitioning it would erase
+    // that distinction.
+    const result = await scheduler.createRunForExtension(partitioned as never, bundle as never, {
+      idempotencyKey: "clean-scoped",
+      kind: "CLEAN",
+      triggeredBy: "test",
+      scope: { mangaIds: ["s-1"], mdMangaIds: ["11111111-1111-4111-8111-000000000001"] },
+    });
+
+    expect(result.segments).toBe(1);
+  });
 });
