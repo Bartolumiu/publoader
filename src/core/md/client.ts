@@ -221,7 +221,12 @@ export interface MdExtendedApi extends MdApi {
   ): Promise<MdGroupAvailability>;
   chaptersForGroup(groupId: string, onPage?: WalkProgress): Promise<MdChapter[]>;
   chapterStatistics(chapterIds: string[]): Promise<Map<string, MdChapterStats>>;
-  beginEditSession(chapterId: string, version: number | null): Promise<{ id: string }>;
+  beginEditSession(
+    chapterId: string,
+    version: number | null,
+  ): Promise<{ id: string; fileIds: string[] }>;
+  /** DELETE /upload/{id}/batch; takes the chapter's existing pages out of the session. */
+  deleteUploadSessionFiles(sessionId: string, fileIds: string[]): Promise<boolean>;
   uploadImages(
     sessionId: string,
     files: { name: string; data: Buffer }[],
@@ -1041,7 +1046,10 @@ export class MdClient implements MdExtendedApi {
    * Edit-mode upload session for an existing chapter (unavailable.py step 3).
    * Unlike /upload/begin this attaches pages to a chapter that already exists.
    */
-  async beginEditSession(chapterId: string, version: number | null): Promise<{ id: string }> {
+  async beginEditSession(
+    chapterId: string,
+    version: number | null,
+  ): Promise<{ id: string; fileIds: string[] }> {
     return this.withVersionRetry(`POST /upload/begin/${chapterId}`, version, async (attempt) => {
       const response = await this.request(
         "POST",
@@ -1050,8 +1058,54 @@ export class MdClient implements MdExtendedApi {
       );
       const id = MdClient.dataId(response.data);
       if (!id) throw new MdRequestError("edit session response carried no id");
-      return { id };
+      return { id, fileIds: MdClient.sessionFileIds(response.data) };
     });
+  }
+
+  /**
+   * The pages already on the chapter, as files of the edit session.
+   *
+   * UNDOCUMENTED. The published `UploadSession` schema carries only id, type
+   * and attributes, and there is no GET on the session path to ask for its
+   * contents -- but the begin-edit response does return an
+   * `upload_session_file` relationship per existing page, which is the only way
+   * to learn the ids that `deleteUploadSessionFiles` needs.
+   *
+   * Empty is a legitimate answer (a chapter with no pages), so this returns a
+   * list rather than throwing on absence.
+   */
+  private static sessionFileIds(payload: Record<string, unknown> | null): string[] {
+    const data = payload?.data;
+    if (data === null || typeof data !== "object") return [];
+    const relationships = (data as { relationships?: unknown }).relationships;
+    if (!Array.isArray(relationships)) return [];
+    return relationships
+      .filter(
+        (rel): rel is { id: string; type: string } =>
+          rel !== null &&
+          typeof rel === "object" &&
+          (rel as { type?: unknown }).type === "upload_session_file" &&
+          typeof (rel as { id?: unknown }).id === "string",
+      )
+      .map((rel) => rel.id);
+  }
+
+  /**
+   * Remove files from an open upload session.
+   *
+   * DELETE /upload/{id}/batch, which is how the pages already on a chapter are
+   * taken out of an edit session before it is committed. Answers `{"result":
+   * "ok"}` and genuinely empties the session -- confirmed by re-reading it
+   * afterwards.
+   */
+  async deleteUploadSessionFiles(sessionId: string, fileIds: string[]): Promise<boolean> {
+    if (fileIds.length === 0) return true;
+    const response = await this.request(
+      "DELETE",
+      `${this.config.mdApiUrl}/upload/${sessionId}/batch`,
+      { json: fileIds },
+    );
+    return response.status === 200;
   }
 
   /**

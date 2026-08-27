@@ -759,25 +759,24 @@ export class UploadTaskWorkers {
    * compared four languages it had never fetched, and there was no way to undo
    * a single one of them.
    *
-   * The undo is an edit session committed with NO pages. `externalUrl` is set
-   * from the stored row's chapter link, or from `externalUrl` on the task when
-   * an operator supplies one -- the row keeps the publisher's real chapter link
-   * (see `unavailableCardOptions`), which is what makes this recoverable at all.
+   * The undo, as MangaDex describe it: open an edit session, take the card's
+   * page OUT of it with DELETE /upload/{id}/batch, then commit keeping no
+   * pages. `externalUrl` is set from the stored row's chapter link, or from
+   * `externalUrl` on the task when an operator supplies one -- the row keeps
+   * the publisher's real chapter link (see `unavailableCardOptions`), which is
+   * what makes this recoverable at all.
    *
-   * WHICH DOES NOT CURRENTLY WORK, and the reason is on MangaDex's side. There
-   * is no way to express "keep no pages": `pageOrder` is specified minItems:1
-   * and non-nullable, omitting it is rejected as required, and sending `[]`
-   * returns 200 while changing nothing -- not the page count, not `updatedAt`,
-   * not even the version. Emptying the session first with
-   * DELETE /upload/{id}/batch genuinely empties it, and the commit still does
-   * nothing. Verified end to end against a live chapter.
+   * BLOCKED ON A MANGADEX BUG at the time of writing, confirmed with them. Each
+   * step reports success and the chapter does not change: the batch delete
+   * genuinely empties the session (re-reading it afterwards shows no files),
+   * and the commit then answers 200 while leaving the page count, `updatedAt`
+   * and even the version exactly as they were.
    *
-   * So this path is kept, and it now FAILS rather than reporting success: the
-   * page count is checked afterwards and anything but zero throws. 23 chapters
-   * were previously logged as restored while every one of them kept its card,
-   * which is worse than not having the feature at all. Until MangaDex offers a
-   * way back, the only real undo is deleting the chapter and recreating it as
-   * an external one, which costs its id, comments and stats.
+   * The sequence is kept as written because it is the correct one and will
+   * start working when their fix lands. What changed is that it no longer
+   * LIES: the page count is checked afterwards and anything but zero throws.
+   * 23 chapters were previously logged as restored while every one of them kept
+   * its card, which is worse than not having the feature at all.
    */
   private async runRestore(
     chapter: Chapter,
@@ -831,7 +830,27 @@ export class UploadTaskWorkers {
 
     const session = await md.beginEditSession(mdChapterId, attrs.version);
     try {
-      // No pages: this is what removes the card.
+      // The card is a file of this session, and it has to be taken OUT of the
+      // session before the commit; a commit alone leaves it exactly where it
+      // was. The ids come from the begin-edit response, which returns an
+      // `upload_session_file` relationship per existing page -- undocumented,
+      // but it is the only place they are available.
+      if (session.fileIds.length > 0) {
+        const removed = await md.deleteUploadSessionFiles(session.id, session.fileIds);
+        if (!removed) {
+          throw new TaskError(
+            `couldn't remove the card's page from the edit session for ${mdChapterId}`,
+          );
+        }
+        log.info(
+          { mdChapterId, sessionId: session.id, files: session.fileIds.length },
+          "removed the card's page from the edit session",
+        );
+      }
+
+      // Then commit with no pages kept. `[]` rather than omitting the field:
+      // omitting it is rejected outright as required, and null is rejected as
+      // not-an-array, so this is the only form the endpoint accepts.
       const committed = await md.commitUploadSession(
         session.id,
         {

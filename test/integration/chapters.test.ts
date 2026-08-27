@@ -1200,7 +1200,14 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
         },
         beginEditSession: async () => {
           calls.push("beginEditSession");
-          return { id: uuid(701) };
+          // The chapter's existing pages arrive as session files. Carding a
+          // live chapter starts from none; the restore path is what has to
+          // deal with a card already being there.
+          return { id: uuid(701), fileIds: carded ? [uuid(720)] : [] };
+        },
+        deleteUploadSessionFiles: async (_session: string, fileIds: string[]) => {
+          calls.push(`deleteUploadSessionFiles:${fileIds.length}`);
+          return true;
         },
         uploadImages: async (_session: string, files: { name: string; data: Buffer }[]) => {
           calls.push(`uploadImages:${files.length}`);

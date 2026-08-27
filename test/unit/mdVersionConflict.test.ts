@@ -135,7 +135,12 @@ describe("MangaDex version conflicts", () => {
       respond = (_url, attempt) =>
         attempt === 1 ? lockError(2, 3) : ok({ id: "session-1", type: "upload_session" });
 
-      await expect(client.beginEditSession("chapter-1", 2)).resolves.toEqual({ id: "session-1" });
+      // `fileIds` is empty because this response carries no relationships; a
+      // real edit session lists one `upload_session_file` per existing page.
+      await expect(client.beginEditSession("chapter-1", 2)).resolves.toEqual({
+        id: "session-1",
+        fileIds: [],
+      });
       expect(sent.map((call) => (call.body as { version: number }).version)).toEqual([2, 3]);
     });
 
