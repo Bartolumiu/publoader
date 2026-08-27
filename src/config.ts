@@ -57,6 +57,20 @@ const ConfigSchema = z.object({
    */
   logRetentionDays: z.coerce.number().int().min(1).max(365).default(14),
 
+  /**
+   * Hard ceiling on rows in `log_events`, enforced oldest-first.
+   *
+   * `logRetentionDays` bounds how OLD a line may get, which bounds nothing at
+   * all about size: a loud day writes as much in an hour as a quiet week does,
+   * and the age bound only starts reclaiming space once the oldest lines are
+   * two weeks old. A full disk stops Postgres dead, so the table needs a bound
+   * that binds today. Whichever limit bites first wins.
+   *
+   * Rows rather than bytes because rows are what we can count cheaply and
+   * delete precisely; at roughly a kilobyte a line this is a few gigabytes.
+   */
+  logMaxRows: z.coerce.number().int().min(10_000).default(2_000_000),
+
   // Lease/queue tuning
   leaseTtlSeconds: z.coerce.number().int().min(30).default(300),
   sweepIntervalSeconds: z.coerce.number().int().min(5).default(30),
@@ -225,6 +239,7 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): Con
     sessionCookieSecure: get("SESSION_COOKIE_SECURE"),
     logLevel: get("LOG_LEVEL"),
     logRetentionDays: get("LOG_RETENTION_DAYS"),
+    logMaxRows: get("LOG_MAX_ROWS"),
     leaseTtlSeconds: get("LEASE_TTL_SECONDS"),
     sweepIntervalSeconds: get("SWEEP_INTERVAL_SECONDS"),
     schedulerIntervalSeconds: get("SCHEDULER_INTERVAL_SECONDS"),

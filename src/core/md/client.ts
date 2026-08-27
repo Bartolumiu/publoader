@@ -21,6 +21,8 @@ const USER_AGENT = "publoader/2.0.0";
 const ACCESS_TOKEN_KEY = "mdauth_access";
 const REFRESH_TOKEN_KEY = "mdauth_refresh";
 const PAGE_LIMIT = 100;
+/** Chapter ids per statistics request; the endpoint takes a repeated query param. */
+const STATISTICS_BATCH = 100;
 /** MangaDex accepts at most 10 files per upload POST. */
 const IMAGE_BATCH_SIZE = 10;
 /** Refresh this far ahead of `exp` so a token can't expire mid-flight. */
@@ -195,6 +197,22 @@ export interface MdUploadedImage {
  * place in the narrower interface. Any test double used by taskWorkers must
  * implement this, not just MdApi.
  */
+/**
+ * What MangaDex knows about a chapter's reception.
+ *
+ * Only the comment thread is read, because that is the part deletion destroys
+ * irreversibly: a duplicate with a discussion on it is a page people have
+ * written on, and removing it takes their words with it.
+ *
+ * `comments` is null for a chapter nobody has ever posted on — MangaDex creates
+ * the thread lazily — so "no thread" and "a thread with nothing in it" both mean
+ * nothing would be lost.
+ */
+export interface MdChapterStats {
+  /** Replies on the chapter's comment thread; 0 when there is no thread. */
+  comments: number;
+}
+
 export interface MdExtendedApi extends MdApi {
   chapterById(chapterId: string, includes?: string[]): Promise<MdChapterDetail | null>;
   chapterAvailabilityForGroup(
@@ -202,7 +220,13 @@ export interface MdExtendedApi extends MdApi {
     onPage?: WalkProgress,
   ): Promise<MdGroupAvailability>;
   chaptersForGroup(groupId: string, onPage?: WalkProgress): Promise<MdChapter[]>;
-  beginEditSession(chapterId: string, version: number | null): Promise<{ id: string }>;
+  chapterStatistics(chapterIds: string[]): Promise<Map<string, MdChapterStats>>;
+  beginEditSession(
+    chapterId: string,
+    version: number | null,
+  ): Promise<{ id: string; fileIds: string[] }>;
+  /** DELETE /upload/{id}/batch; takes the chapter's existing pages out of the session. */
+  deleteUploadSessionFiles(sessionId: string, fileIds: string[]): Promise<boolean>;
   uploadImages(
     sessionId: string,
     files: { name: string; data: Buffer }[],
@@ -693,6 +717,9 @@ export class MdClient implements MdExtendedApi {
         // one another and hard-delete them.
         ...(typeof pages === "number" ? { pages } : {}),
         ...(isUnavailable === true ? { isUnavailable: true } : {}),
+        // Identifies the page content, which is how a replaced card is told
+        // apart from a commit that returned 200 and changed nothing.
+        ...(str("hash") !== null ? { hash: str("hash") as string } : {}),
       },
       relationships: (entity.relationships ?? []).map((rel) => ({ id: rel.id, type: rel.type })),
     };
@@ -847,6 +874,58 @@ export class MdClient implements MdExtendedApi {
   }
 
   /**
+   * GET /statistics/chapter; how much discussion each chapter carries.
+   *
+   * Used before deleting a duplicate. A chapter is data we can recreate, but the
+   * comments on it are other people's writing and deleting the chapter deletes
+   * them, so the count is what separates a duplicate that can be removed from
+   * one that needs a person to look at it.
+   *
+   * A chapter missing from the response is reported as 0 replies rather than
+   * omitted: MangaDex creates comment threads lazily, so "no entry" is the
+   * ordinary answer for a chapter nobody has posted on. The caller is asking
+   * "would deleting this destroy a discussion", and for those the answer is no.
+   *
+   * Throws if MangaDex will not answer. The caller must not read a failed lookup
+   * as "no comments" -- that would turn an outage into a delete.
+   */
+  async chapterStatistics(chapterIds: string[]): Promise<Map<string, MdChapterStats>> {
+    const out = new Map<string, MdChapterStats>();
+    const wanted = [...new Set(chapterIds)];
+    if (wanted.length === 0) return out;
+
+    for (const batch of MdClient.chunk(wanted, STATISTICS_BATCH)) {
+      const response = await this.request("GET", `${this.config.mdApiUrl}/statistics/chapter`, {
+        params: { "chapter[]": batch },
+      });
+      if (response.status !== 200 || !response.data) {
+        throw new MdRequestError("chapter statistics request failed", response.status);
+      }
+      const statistics = response.data.statistics;
+      if (statistics === null || typeof statistics !== "object") {
+        throw new MdRequestError("chapter statistics response carried no statistics");
+      }
+      for (const [chapterId, entry] of Object.entries(statistics as Record<string, unknown>)) {
+        out.set(chapterId, { comments: MdClient.replyCount(entry) });
+      }
+      // Present in the request, absent from the response: no thread exists yet.
+      for (const chapterId of batch) {
+        if (!out.has(chapterId)) out.set(chapterId, { comments: 0 });
+      }
+    }
+    return out;
+  }
+
+  /** `comments` is null until somebody posts, so an absent thread is zero. */
+  private static replyCount(entry: unknown): number {
+    if (entry === null || typeof entry !== "object") return 0;
+    const comments = (entry as { comments?: unknown }).comments;
+    if (comments === null || typeof comments !== "object") return 0;
+    const replies = (comments as { repliesCount?: unknown }).repliesCount;
+    return typeof replies === "number" && Number.isFinite(replies) && replies > 0 ? replies : 0;
+  }
+
+  /**
    * GET /manga?title=…; used by the title pipeline to check whether a series
    * already exists on MangaDex before creating a new entry for it. Creating a
    * duplicate title is the one mistake here that other people have to clean up,
@@ -967,7 +1046,10 @@ export class MdClient implements MdExtendedApi {
    * Edit-mode upload session for an existing chapter (unavailable.py step 3).
    * Unlike /upload/begin this attaches pages to a chapter that already exists.
    */
-  async beginEditSession(chapterId: string, version: number | null): Promise<{ id: string }> {
+  async beginEditSession(
+    chapterId: string,
+    version: number | null,
+  ): Promise<{ id: string; fileIds: string[] }> {
     return this.withVersionRetry(`POST /upload/begin/${chapterId}`, version, async (attempt) => {
       const response = await this.request(
         "POST",
@@ -976,8 +1058,54 @@ export class MdClient implements MdExtendedApi {
       );
       const id = MdClient.dataId(response.data);
       if (!id) throw new MdRequestError("edit session response carried no id");
-      return { id };
+      return { id, fileIds: MdClient.sessionFileIds(response.data) };
     });
+  }
+
+  /**
+   * The pages already on the chapter, as files of the edit session.
+   *
+   * UNDOCUMENTED. The published `UploadSession` schema carries only id, type
+   * and attributes, and there is no GET on the session path to ask for its
+   * contents -- but the begin-edit response does return an
+   * `upload_session_file` relationship per existing page, which is the only way
+   * to learn the ids that `deleteUploadSessionFiles` needs.
+   *
+   * Empty is a legitimate answer (a chapter with no pages), so this returns a
+   * list rather than throwing on absence.
+   */
+  private static sessionFileIds(payload: Record<string, unknown> | null): string[] {
+    const data = payload?.data;
+    if (data === null || typeof data !== "object") return [];
+    const relationships = (data as { relationships?: unknown }).relationships;
+    if (!Array.isArray(relationships)) return [];
+    return relationships
+      .filter(
+        (rel): rel is { id: string; type: string } =>
+          rel !== null &&
+          typeof rel === "object" &&
+          (rel as { type?: unknown }).type === "upload_session_file" &&
+          typeof (rel as { id?: unknown }).id === "string",
+      )
+      .map((rel) => rel.id);
+  }
+
+  /**
+   * Remove files from an open upload session.
+   *
+   * DELETE /upload/{id}/batch, which is how the pages already on a chapter are
+   * taken out of an edit session before it is committed. Answers `{"result":
+   * "ok"}` and genuinely empties the session -- confirmed by re-reading it
+   * afterwards.
+   */
+  async deleteUploadSessionFiles(sessionId: string, fileIds: string[]): Promise<boolean> {
+    if (fileIds.length === 0) return true;
+    const response = await this.request(
+      "DELETE",
+      `${this.config.mdApiUrl}/upload/${sessionId}/batch`,
+      { json: fileIds },
+    );
+    return response.status === 200;
   }
 
   /**
@@ -1068,6 +1196,19 @@ export class MdClient implements MdExtendedApi {
     }
     const typed = entity as MdEntity;
     if (typeof typed.id !== "string") return null;
+    // What the commit actually produced, not what it was asked for. A commit
+    // that changes nothing answers 2xx exactly like one that works, so the page
+    // count coming back is the only thing here that distinguishes them -- and
+    // it is what an empty pageOrder failing to drop the pages looks like.
+    this.log.info(
+      {
+        sessionId,
+        chapterId: typed.id,
+        requestedPages: pageOrder.length,
+        resultingPages: typed.attributes?.pages ?? null,
+      },
+      "upload session committed",
+    );
     const version = typed.attributes?.version;
     return {
       id: typed.id,

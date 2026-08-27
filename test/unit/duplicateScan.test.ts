@@ -66,6 +66,10 @@ interface Harness {
   queued: { dedupeKey: string; chapter: Record<string, unknown> }[];
   /** How the chapters were read, so the fetch shape can be asserted. */
   reads: { kind: "group" | "series"; id: string }[];
+  /** Chapter ids MangaDex was asked about, per statistics call. */
+  statsAsked: string[][];
+  /** Comment counts written to the cache. */
+  remembered: { mdChapterId: string; comments: number }[];
 }
 
 function harness(
@@ -74,10 +78,18 @@ function harness(
     /** Chapter ids that already have a queue row, and in which state. */
     existingTasks?: Record<string, "PENDING" | "LEASED">;
     multiChapters?: { chapterId: string; chapterNumber: string }[];
+    /** Replies per chapter id; anything unlisted has none. */
+    comments?: Record<string, number>;
+    /** Make the statistics lookup fail, to exercise the fail-closed path. */
+    statsFail?: boolean;
+    /** Comment counts already in the cache table. */
+    cachedComments?: Record<string, number>;
   } = {},
 ): Harness {
   const queued: { dedupeKey: string; chapter: Record<string, unknown> }[] = [];
   const reads: { kind: "group" | "series"; id: string }[] = [];
+  const statsAsked: string[][] = [];
+  const remembered: { mdChapterId: string; comments: number }[] = [];
   const existing = opts.existingTasks ?? {};
 
   const prisma = {
@@ -130,6 +142,26 @@ function harness(
       });
       return [{ id: `task-${dedupeKey}`, kind: "DELETE", dedupeKey, state: "PENDING", inserted: true }];
     },
+
+    /**
+     * The remembered comment counts. Only rows at or above the threshold are
+     * returned, mirroring the `comments: { gte: … }` filter the scan applies:
+     * a remembered zero must not be reusable, or a chapter commented on since
+     * the last scan would be deleted on the strength of a stale reading.
+     */
+    chapterCommentCount: {
+      findMany: async (args: { where: { mdChapterId: { in: string[] } } }) => {
+        const cached = opts.cachedComments ?? {};
+        return args.where.mdChapterId.in
+          .filter((id) => (cached[id] ?? 0) >= 1)
+          .map((id) => ({ mdChapterId: id, comments: cached[id] as number }));
+      },
+      upsert: async (args: { create: { mdChapterId: string; comments: number } }) => {
+        remembered.push(args.create);
+        return args.create;
+      },
+    },
+    $transaction: async (ops: Promise<unknown>[]) => Promise.all(ops),
   } as unknown as PrismaClient;
 
   const md = {
@@ -148,6 +180,14 @@ function harness(
         id,
         attributes: { title: { en: `Title ${id}` }, altTitles: [], originalLanguage: "ja" },
       })),
+    chapterStatistics: async (ids: string[]) => {
+      statsAsked.push([...ids]);
+      if (opts.statsFail) throw new Error("statistics unavailable");
+      const counts = opts.comments ?? {};
+      // Mirrors the client: every id asked about comes back, with zero for the
+      // chapters MangaDex has no thread for.
+      return new Map(ids.map((id) => [id, { comments: counts[id] ?? 0 }]));
+    },
   } as unknown as MdExtendedApi;
 
   const audit = { record: async () => undefined } as unknown as AuditLog;
@@ -158,7 +198,7 @@ function harness(
     log: createLogger("duplicate-scan-test", "error"),
     botUserId: BOT,
   });
-  return { scanner, queued, reads };
+  return { scanner, queued, reads, statsAsked, remembered };
 }
 
 const scan = (h: Harness, over: Partial<Parameters<DuplicateScanner["run"]>[0]> = {}) =>
@@ -256,6 +296,105 @@ describe("DuplicateScanner", () => {
     expect(report.blocked).toBe(1);
     expect(h.queued).toEqual([]);
     expect(report.series[0]?.duplicates[0]?.remove[0]?.outcome).toBe("leased");
+  });
+
+  /**
+   * Deleting a duplicate is the one action here that destroys something we
+   * cannot recreate. The chapter itself is reproducible; the comments under it
+   * are other people's writing, and they go with it.
+   *
+   * So the comment count is a gate on the delete, and these pin the three ways
+   * that gate has to behave: it stops a delete, it does not stop one when there
+   * is nothing to lose, and it stops one when MangaDex will not answer at all.
+   */
+  it("holds a duplicate that carries comments instead of deleting it", async () => {
+    const h = harness(
+      [
+        mdChapter("dup-old", "manga-a", { chapter: "1", externalUrl: "https://pub/c/1" }),
+        mdChapter("dup-new", "manga-a", { chapter: "1", externalUrl: "https://pub/c/1" }),
+      ],
+      { comments: { "dup-new": 4 } },
+    );
+
+    const report = await scan(h, { apply: true });
+
+    expect(h.queued).toEqual([]);
+    expect(report.queued).toBe(0);
+    expect(report.heldForReview).toBe(1);
+    const removal = report.series[0]?.duplicates[0]?.remove[0];
+    expect(removal?.outcome).toBe("held_for_review");
+    expect(removal?.comments).toBe(4);
+    // Worth remembering: this answer can never become "safe to delete".
+    expect(h.remembered).toEqual([{ mdChapterId: "dup-new", comments: 4 }]);
+  });
+
+  it("deletes a duplicate nobody has commented on", async () => {
+    const h = harness([
+      mdChapter("dup-old", "manga-a", { chapter: "1", externalUrl: "https://pub/c/1" }),
+      mdChapter("dup-new", "manga-a", { chapter: "1", externalUrl: "https://pub/c/1" }),
+    ]);
+
+    const report = await scan(h, { apply: true });
+
+    expect(h.queued.map((task) => task.dedupeKey)).toEqual(["dup-new"]);
+    expect(report.heldForReview).toBe(0);
+    // A zero is never stored: it is re-checked next time regardless, so writing
+    // it would put a row here for every chapter ever scanned and buy nothing.
+    expect(h.remembered).toEqual([]);
+  });
+
+  it("holds every duplicate when the comment lookup fails", async () => {
+    const h = harness(
+      [
+        mdChapter("dup-old", "manga-a", { chapter: "1", externalUrl: "https://pub/c/1" }),
+        mdChapter("dup-new", "manga-a", { chapter: "1", externalUrl: "https://pub/c/1" }),
+      ],
+      { statsFail: true },
+    );
+
+    const report = await scan(h, { apply: true });
+
+    // Fail closed. Reading a failed lookup as "no comments" would turn a
+    // MangaDex outage into a batch of irreversible deletions.
+    expect(h.queued).toEqual([]);
+    expect(report.heldForReview).toBe(1);
+    expect(report.series[0]?.duplicates[0]?.remove[0]?.outcome).toBe("held_for_review");
+  });
+
+  it("trusts a remembered comment count instead of asking again", async () => {
+    const h = harness(
+      [
+        mdChapter("dup-old", "manga-a", { chapter: "1", externalUrl: "https://pub/c/1" }),
+        mdChapter("dup-new", "manga-a", { chapter: "1", externalUrl: "https://pub/c/1" }),
+      ],
+      { cachedComments: { "dup-new": 2 } },
+    );
+
+    const report = await scan(h, { apply: true });
+
+    expect(report.heldForReview).toBe(1);
+    expect(h.queued).toEqual([]);
+    // Nothing left to ask about, so MangaDex is not called at all.
+    expect(h.statsAsked).toEqual([]);
+  });
+
+  it("re-asks about a chapter remembered as having no comments", async () => {
+    const h = harness(
+      [
+        mdChapter("dup-old", "manga-a", { chapter: "1", externalUrl: "https://pub/c/1" }),
+        mdChapter("dup-new", "manga-a", { chapter: "1", externalUrl: "https://pub/c/1" }),
+      ],
+      // Zero in the cache, three on MangaDex: somebody commented since.
+      { cachedComments: { "dup-new": 0 }, comments: { "dup-new": 3 } },
+    );
+
+    const report = await scan(h, { apply: true });
+
+    // The stale zero must not be reused, or this chapter would be deleted with
+    // three comments on it.
+    expect(h.statsAsked).toEqual([["dup-new"]]);
+    expect(report.heldForReview).toBe(1);
+    expect(h.queued).toEqual([]);
   });
 
   /**

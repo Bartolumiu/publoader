@@ -4699,6 +4699,18 @@ function duplicatesCard(archive, filter, filterHooks = []) {
               text: `${report.blocked} of them already had a delete queued or in flight.`,
             })
           : el("span", {}),
+        // Deliberately left alone, which is a different thing from blocked: the
+        // scan decided NOT to delete these, and nothing else will revisit them.
+        // Saying nothing would read as "all handled".
+        report.apply && report.heldForReview
+          ? el("div", {
+              class: "warn-text",
+              text:
+                `${report.heldForReview} left in place for review: they carry comments, or ` +
+                "MangaDex would not say whether they do. Deleting a chapter deletes its " +
+                "discussion, so these need a person.",
+            })
+          : el("span", {}),
         report.apply
           ? el("div", {
               text:

@@ -149,6 +149,41 @@ class LogSink {
    * is kept indefinitely, while this table would grow without limit for no
    * lasting benefit.
    */
+  /**
+   * Delete the oldest lines beyond `maxRows`, so the table has a size bound and
+   * not merely an age one.
+   *
+   * `prune` reclaims nothing until the oldest lines are `logRetentionDays` old,
+   * which is no protection at all against a loud day: the volume that fills a
+   * disk is written long before any of it is old enough to expire. This is the
+   * bound that binds now.
+   *
+   * Done as "find the cutoff, then delete by range" rather than a subquery with
+   * OFFSET, because the delete then rides the `created_at` index instead of
+   * walking millions of rows to find where to start. Ties on the boundary
+   * timestamp are left alone; being a few lines over the cap is not worth a
+   * second pass.
+   */
+  async capRows(maxRows: number): Promise<number> {
+    if (this.prisma === null) return 0;
+    try {
+      const rows = await this.prisma.$queryRaw<{ created_at: Date }[]>`
+        SELECT created_at FROM log_events
+        ORDER BY created_at DESC
+        OFFSET ${maxRows} LIMIT 1
+      `;
+      const cutoff = rows[0]?.created_at;
+      // Nothing at that depth means the table is under the cap.
+      if (!cutoff) return 0;
+      const { count } = await this.prisma.logEvent.deleteMany({
+        where: { createdAt: { lt: cutoff } },
+      });
+      return count;
+    } catch {
+      return 0;
+    }
+  }
+
   async prune(days: number): Promise<number> {
     if (this.prisma === null) return 0;
     const before = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
