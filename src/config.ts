@@ -65,6 +65,21 @@ const ConfigSchema = z.object({
   mdPassword: z.string().optional(),
   mdClientId: z.string().optional(),
   mdClientSecret: z.string().optional(),
+  /**
+   * The MangaDex user id publoader uploads as.
+   *
+   * Every destructive action is gated on it: a chapter this account did not
+   * upload is somebody else's work, and deleting or carding it is not something
+   * we can undo. Group membership is not a substitute -- other people upload
+   * into the same scanlation group.
+   *
+   * Usually left unset and derived from `mdClientId`, which for a personal
+   * client embeds the owner's user id
+   * ("personal-client-<uuid>-<suffix>"). Set it explicitly when that shape does
+   * not hold. When neither yields an id the removal passes refuse to run rather
+   * than act on unverified ownership.
+   */
+  mdBotUserId: z.string().optional(),
   mdRatelimitMs: z.coerce.number().int().default(2000),
   uploadRetry: z.coerce.number().int().min(1).default(3),
 
@@ -212,6 +227,7 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): Con
     mdPassword: get("MANGADEX_PASSWORD"),
     mdClientId: get("MANGADEX_CLIENT_ID"),
     mdClientSecret: get("MANGADEX_CLIENT_SECRET"),
+    mdBotUserId: get("MANGADEX_BOT_USER_ID"),
     mdRatelimitMs: get("MANGADEX_RATELIMIT_MS"),
     uploadRetry: get("UPLOAD_RETRY"),
     discordWebhookUrls: get("DISCORD_WEBHOOK_URLS"),

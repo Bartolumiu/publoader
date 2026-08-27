@@ -41,6 +41,16 @@ const TOKEN_SKEW_SECONDS = 60;
  * external chapters. Adding them to "include more" removes nearly everything.
  */
 const INCLUDE_UNAVAILABLE = { includeUnavailable: "1" } as const;
+/**
+ * Ask for the uploader on every chapter listing.
+ *
+ * Without it the `user` relationship is simply absent, and the ownership check
+ * that gates deletes and cards has nothing to read -- which is how chapters
+ * this account never uploaded came to be queued for deletion. `uploadedByBot`
+ * fails closed on a missing relationship, so omitting this here would stop the
+ * removal passes entirely rather than let them act blind.
+ */
+const INCLUDE_UPLOADER: Record<string, string[]> = { "includes[]": ["user"] };
 const MAX_OFFSET = 10000;
 /** Safety valve: a createdAt cursor that stops advancing must not loop forever. */
 const MAX_PAGES = 500;
@@ -746,6 +756,7 @@ export class MdClient implements MdExtendedApi {
       "groups[]": [groupId],
       "order[createdAt]": "desc",
       ...INCLUDE_UNAVAILABLE,
+      ...INCLUDE_UPLOADER,
     });
     return entities.map(MdClient.toChapter);
   }
@@ -770,6 +781,7 @@ export class MdClient implements MdExtendedApi {
         "groups[]": [groupId],
         "order[createdAt]": "asc",
         ...INCLUDE_UNAVAILABLE,
+        ...INCLUDE_UPLOADER,
       },
       onPage ? (collected, total) => onPage(collected, total, "all") : undefined,
     );

@@ -32,10 +32,14 @@ const chapter = (over: Partial<Chapter> = {}): Chapter => ({
   ...over,
 });
 
+/** The MangaDex account these fixtures pretend publoader uploads as. */
+const BOT = "74d95af1-7492-4fca-bc44-10c9142703e8";
+
 const mdChapter = (
   id: string,
   attributes: Partial<MdChapter["attributes"]> = {},
   groups: string[] = ["grp"],
+  uploader: string | null = BOT,
 ): MdChapter => ({
   id,
   // Cast so the factory keeps compiling if the client grows the attribute set.
@@ -51,6 +55,10 @@ const mdChapter = (
   relationships: [
     { id: "md-manga", type: "manga" },
     ...groups.map((group) => ({ id: group, type: "scanlation_group" })),
+    // Present by default: every destructive pass now refuses to act on a
+    // chapter it cannot show this account uploaded, so a fixture without an
+    // uploader is testing the refusal rather than the behaviour under test.
+    ...(uploader === null ? [] : [{ id: uploader, type: "user" }]),
   ],
 });
 
@@ -70,6 +78,7 @@ const decide = (over: Partial<DecideInput>) =>
     languages: ["en"],
     groupId: "grp",
     cleanDb: false,
+    botUserId: BOT,
     ...over,
   });
 
@@ -315,7 +324,7 @@ describe("findDuplicateChapters", () => {
       mdChapter("dup-new", { chapter: "1", externalUrl: "https://pub.example/c/1" }),
       "2025-01-01T00:00:00+00:00",
     );
-    expect(findDuplicateChapters([newer, older], { groupId: "grp" }).map((c) => c.id)).toEqual([
+    expect(findDuplicateChapters([newer, older], { groupId: "grp", botUserId: BOT }).map((c) => c.id)).toEqual([
       "dup-new",
     ]);
   });
@@ -332,13 +341,13 @@ describe("findDuplicateChapters", () => {
       { chapter: "1", externalUrl: "https://pub.example/c/1" },
       ["not-us"],
     );
-    expect(findDuplicateChapters([ours, otherLanguage, otherGroup], { groupId: "grp" })).toEqual([]);
+    expect(findDuplicateChapters([ours, otherLanguage, otherGroup], { groupId: "grp", botUserId: BOT })).toEqual([]);
   });
 
   it("dedupes image chapters on volume and number", () => {
     const first = mdChapter("img-a", { chapter: "4", volume: "1" });
     const second = mdChapter("img-b", { chapter: "4", volume: "1" });
-    expect(findDuplicateChapters([first, second], { groupId: "grp" }).map((c) => c.id)).toEqual([
+    expect(findDuplicateChapters([first, second], { groupId: "grp", botUserId: BOT }).map((c) => c.id)).toEqual([
       "img-b",
     ]);
   });
@@ -368,7 +377,7 @@ describe("findDuplicateChapters", () => {
       }),
       "2025-01-01T00:00:00+00:00",
     );
-    expect(findDuplicateChapters([cardOne, cardTwo], { groupId: "grp" })).toEqual([]);
+    expect(findDuplicateChapters([cardOne, cardTwo], { groupId: "grp", botUserId: BOT })).toEqual([]);
   });
 
   it("still deletes a live duplicate of a chapter that also has a card", () => {
@@ -385,7 +394,7 @@ describe("findDuplicateChapters", () => {
       "2025-01-01T00:00:00+00:00",
     );
     expect(
-      findDuplicateChapters([card, live, liveDupe], { groupId: "grp" }).map((c) => c.id),
+      findDuplicateChapters([card, live, liveDupe], { groupId: "grp", botUserId: BOT }).map((c) => c.id),
     ).toEqual(["live-new"]);
   });
 });

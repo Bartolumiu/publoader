@@ -14,7 +14,7 @@ import type { MdExtendedApi } from "../../md/client.js";
 import { generateChapterCard } from "../../md/card.js";
 import { unavailableCardOptions } from "../../md/unavailableCard.js";
 import type { MdChapterDetail } from "../../md/client.js";
-import { isCarded } from "../../md/types.js";
+import { botUserIdFromClientId, isCarded } from "../../md/types.js";
 import {
   ARCHIVES,
   CHAPTER_ARCHIVES,
@@ -203,6 +203,10 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
         log: ctx.log,
         audit: ctx.audit,
         settings: ctx.settings,
+        // Duplicates are hard-deleted, so the scan is gated on being able to
+        // prove we uploaded the chapter. Explicit config wins; otherwise the
+        // owner's user id is read out of a personal client id.
+        botUserId: ctx.config.mdBotUserId ?? botUserIdFromClientId(ctx.config.mdClientId),
       });
 
     const actor = (req: FastifyRequest): string => {

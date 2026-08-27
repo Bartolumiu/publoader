@@ -83,6 +83,11 @@ export interface DuplicateRunnerDeps {
   log: Logger;
   audit: AuditLog;
   settings: SettingsStore;
+  /**
+   * The MangaDex user publoader uploads as; passed to the scanner, which
+   * deletes nothing it cannot show we uploaded.
+   */
+  botUserId?: string | null;
 }
 
 export class DuplicateRunner {
@@ -191,6 +196,7 @@ export class DuplicateRunner {
       log: this.deps.log,
       audit: this.deps.audit,
       onProgress: (progress) => beat(progress, changedState(progress)),
+      botUserId: this.deps.botUserId ?? null,
     });
 
     const scanOptions: DuplicateScanOptions = { ...options, actor };

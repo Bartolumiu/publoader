@@ -30,6 +30,8 @@ import type { MdChapter } from "../../src/core/md/types.js";
  */
 
 const GROUP = "grp";
+/** The MangaDex account these fixtures pretend publoader uploads as. */
+const BOT = "74d95af1-7492-4fca-bc44-10c9142703e8";
 
 const mdChapter = (
   id: string,
@@ -51,6 +53,10 @@ const mdChapter = (
   relationships: [
     { id: mangaId, type: "manga" },
     ...groups.map((group) => ({ id: group, type: "scanlation_group" })),
+    // The scan hard-deletes, so it refuses to touch a chapter it cannot show
+    // this account uploaded. Without an uploader every fixture would be testing
+    // that refusal rather than the duplicate logic.
+    { id: BOT, type: "user" },
   ],
 });
 
@@ -150,6 +156,7 @@ function harness(
     md,
     audit,
     log: createLogger("duplicate-scan-test", "error"),
+    botUserId: BOT,
   });
   return { scanner, queued, reads };
 }

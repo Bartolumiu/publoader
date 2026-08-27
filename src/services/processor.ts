@@ -4,6 +4,7 @@ import { createLogger } from "../logging.js";
 import { getPrisma } from "../db.js";
 import { metrics } from "../metrics.js";
 import { MdClient } from "../core/md/client.js";
+import { botUserIdFromClientId } from "../core/md/types.js";
 import { RunProcessor } from "../core/processor/processor.js";
 import { DiscordNotifier } from "../core/md/webhook.js";
 import { SettingsStore } from "../core/store/settings.js";
@@ -28,7 +29,10 @@ const md = new MdClient(config, prisma, log);
 // The processor is where the update plan is decided, so it is where the
 // per-manga report is sent from.
 const notifier = DiscordNotifier.fromConfig(config, log);
-const processor = new RunProcessor(prisma, md, log, { notifier });
+// Explicit config wins; otherwise read the owner's user id out of a personal
+// client id. Every removal pass is gated on this, and is disabled without it.
+const botUserId = config.mdBotUserId ?? botUserIdFromClientId(config.mdClientId);
+const processor = new RunProcessor(prisma, md, log, { notifier, botUserId });
 const settings = new SettingsStore(prisma);
 const tasks = new UploadTaskStore(prisma);
 

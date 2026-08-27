@@ -160,6 +160,15 @@ export interface DuplicateScanDeps {
   audit: AuditLog;
   /** Called as the scan advances, with the whole step list. Never awaited. */
   onProgress?: (progress: DuplicateScanProgress) => void;
+  /**
+   * The MangaDex user publoader uploads as.
+   *
+   * Duplicates are hard-deleted, so this scan is the most destructive path
+   * here. A chapter uploaded by anyone else is not a duplicate of ours to
+   * resolve, whatever it collides with. Absent, nothing can be shown to be
+   * ours and the scan finds nothing.
+   */
+  botUserId?: string | null;
 }
 
 /**
@@ -188,9 +197,18 @@ export class DuplicateScanner {
   private readonly tasks: UploadTaskStore;
   private readonly config: ExtensionConfigStore;
 
+  private readonly botUserId: string | null;
+
   constructor(private readonly deps: DuplicateScanDeps) {
     this.tasks = new UploadTaskStore(deps.prisma);
     this.config = new ExtensionConfigStore(deps.prisma);
+    this.botUserId = deps.botUserId ?? null;
+    if (!this.botUserId) {
+      deps.log.error(
+        "no MangaDex bot user id configured: the duplicate scan will find nothing, " +
+          "because no chapter can be shown to be ours to delete.",
+      );
+    }
   }
 
   /** The steps as they stand, for a caller that needs them after a failure. */
@@ -335,7 +353,11 @@ export class DuplicateScanner {
       scanned += 1;
       this.plan.advance(scan, scanned);
 
-      const dupes = findDuplicateChapters(chapters, { groupId, multiChapters });
+      const dupes = findDuplicateChapters(chapters, {
+        groupId,
+        multiChapters,
+        botUserId: this.botUserId,
+      });
       if (dupes.length === 0) continue;
 
       const series: DuplicateSeries = {

@@ -4,6 +4,9 @@ import { decideForManga, type DecideInput } from "../../src/core/processor/dedup
 import type { ResultEnvelope } from "../../src/contracts/envelope.js";
 import type { MdChapter } from "../../src/core/md/types.js";
 
+/** The MangaDex account these fixtures pretend publoader uploads as. */
+const BOT = "74d95af1-7492-4fca-bc44-10c9142703e8";
+
 const envelope = (over: Partial<ResultEnvelope> = {}): ResultEnvelope =>
   ({
     envelopeVersion: 1,
@@ -67,6 +70,9 @@ describe("removal safety for an unreadable title", () => {
       relationships: [
         { type: "manga", id: "md-manga" },
         { type: "scanlation_group", id: "group" },
+        // Removal now requires proving we uploaded the chapter; without this
+        // every case below would pass for the wrong reason.
+        { type: "user", id: BOT },
       ],
     }) as unknown as MdChapter;
 
@@ -83,6 +89,7 @@ describe("removal safety for an unreadable title", () => {
     languages: ["en"],
     groupId: "group",
     cleanDb: true,
+    botUserId: BOT,
   });
 
   it("removes nothing when the title could not be read", () => {
@@ -97,5 +104,65 @@ describe("removal safety for an unreadable title", () => {
     // The counterpart: an empty list from a title that WAS read is real
     // evidence, and must keep working.
     expect(decideForManga(input([])).toRemove).toHaveLength(2);
+  });
+});
+
+describe("ownership gating", () => {
+  const chapterBy = (id: string, uploader: string | null): MdChapter =>
+    ({
+      id,
+      attributes: {
+        chapter: "1",
+        volume: null,
+        title: "t",
+        translatedLanguage: "en",
+        externalUrl: "https://example.com/gone",
+        pages: 0,
+        version: 1,
+      },
+      relationships: [
+        { type: "manga", id: "md-manga" },
+        { type: "scanlation_group", id: "group" },
+        ...(uploader === null ? [] : [{ type: "user", id: uploader }]),
+      ],
+    }) as unknown as MdChapter;
+
+  const decide = (chaptersOnMd: MdChapter[], botUserId: string | null): DecideInput => ({
+    mangadexMangaId: "md-manga",
+    updatedChapters: [],
+    // Empty catalogue: the publisher lists nothing, so everything below is
+    // eligible for removal and only ownership decides.
+    allMangaChapters: [],
+    chaptersOnMd,
+    postedMdUpdates: [],
+    overrideOptions: {},
+    languages: ["en"],
+    groupId: "group",
+    cleanDb: true,
+    botUserId,
+  });
+
+  it("leaves a chapter uploaded by somebody else alone", () => {
+    // The bug this guards: publoader queued chapters it had not uploaded for
+    // deletion. Sharing a scanlation group is not authorship, and deleting
+    // another person's chapter is not something a later run can undo.
+    const theirs = chapterBy("theirs", "11111111-2222-3333-4444-555555555555");
+    expect(decideForManga(decide([theirs], BOT)).toRemove).toEqual([]);
+  });
+
+  it("still removes our own chapter alongside theirs", () => {
+    const ours = chapterBy("ours", BOT);
+    const theirs = chapterBy("theirs", "11111111-2222-3333-4444-555555555555");
+    expect(decideForManga(decide([ours, theirs], BOT)).toRemove.map((c) => c.id)).toEqual(["ours"]);
+  });
+
+  it("removes nothing when the uploader was not read", () => {
+    // chaptersForManga asks for includes[]=user; if that ever stops arriving,
+    // the safe answer is to do nothing rather than assume the chapter is ours.
+    expect(decideForManga(decide([chapterBy("unknown", null)], BOT)).toRemove).toEqual([]);
+  });
+
+  it("removes nothing when no bot user id is configured", () => {
+    expect(decideForManga(decide([chapterBy("ours", BOT)], null)).toRemove).toEqual([]);
   });
 });

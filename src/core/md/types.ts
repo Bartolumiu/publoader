@@ -100,6 +100,52 @@ export function isCardedAttributes(attributes: Record<string, unknown>): boolean
   return typeof external === "string" && external !== "" && typeof pages === "number" && pages > 0;
 }
 
+/**
+ * The MangaDex user who uploaded a chapter, or null when the read did not ask
+ * for the relationship.
+ *
+ * Null is not "nobody": it means the question was not asked, and callers must
+ * treat it as unknown ownership rather than as ours. `chaptersForManga` and
+ * `chaptersForGroup` request `includes[]=user` so the answer is present.
+ */
+export function uploaderId(chapter: MdChapter): string | null {
+  return chapter.relationships.find((rel) => rel.type === "user")?.id ?? null;
+}
+
+/**
+ * A personal client id embeds the owner's user id:
+ * `personal-client-<uuid>-<suffix>`. Extracting it means ownership checks work
+ * from the credentials already configured, rather than needing a second value
+ * that can drift out of sync with the account actually uploading.
+ */
+export function botUserIdFromClientId(clientId: string | undefined | null): string | null {
+  if (!clientId) return null;
+  const match = /personal-client-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(
+    clientId,
+  );
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
+/**
+ * May this chapter be deleted, carded or edited?
+ *
+ * Fails closed in both unknown cases -- no configured bot id, or a chapter
+ * whose uploader was not read -- because the cost of the two mistakes is not
+ * symmetric. Refusing to act on our own chapter leaves a stale entry that the
+ * next run retries; acting on someone else's destroys their work, and no run
+ * can undo it.
+ *
+ * Group membership is deliberately not accepted as a substitute: other people
+ * upload into the same scanlation group, so `groups[]=<ours>` narrows the set
+ * without establishing who made any particular chapter.
+ */
+export function uploadedByBot(chapter: MdChapter, botUserId: string | null): boolean {
+  if (!botUserId) return false;
+  const uploader = uploaderId(chapter);
+  if (uploader === null) return false;
+  return uploader.toLowerCase() === botUserId.toLowerCase();
+}
+
 /** `isCardedAttributes` for an already-parsed chapter. */
 export function isCarded(chapter: MdChapter): boolean {
   return isCardedAttributes(chapter.attributes);

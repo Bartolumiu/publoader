@@ -94,6 +94,15 @@ export interface RunProcessorOptions {
    * configured or is failing.
    */
   notifier?: { enabled: boolean; send(embeds: DiscordEmbedInput[]): Promise<void> };
+  /**
+   * The MangaDex user publoader uploads as. Every removal pass is gated on it.
+   *
+   * Omitted, nothing can be shown to belong to us and no chapter is removed:
+   * the passes go quiet instead of acting on unverified ownership. That is the
+   * intended direction -- a missed removal is retried on the next run; a
+   * chapter deleted from somebody else's account is gone.
+   */
+  botUserId?: string | null;
 }
 
 export class RunProcessor {
@@ -107,6 +116,7 @@ export class RunProcessor {
   private aggregates = new Map<string, unknown>();
   private readonly maxRunsPerTick: number;
   private readonly notifier: { enabled: boolean; send(embeds: DiscordEmbedInput[]): Promise<void> } | null;
+  private readonly botUserId: string | null;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -120,6 +130,13 @@ export class RunProcessor {
     this.config = new ExtensionConfigStore(prisma);
     this.maxRunsPerTick = options.maxRunsPerTick ?? 10;
     this.notifier = options.notifier ?? null;
+    this.botUserId = options.botUserId ?? null;
+    if (!this.botUserId) {
+      this.log.error(
+        "no MangaDex bot user id configured: every removal pass is disabled. " +
+          "Set MANGADEX_BOT_USER_ID, or use a personal client id that embeds it.",
+      );
+    }
   }
 
   /**
@@ -406,6 +423,7 @@ export class RunProcessor {
         groupId,
         cleanDb: run.kind === "CLEAN",
         extensionPublishesPages,
+        botUserId: this.botUserId,
       });
 
       for (const chapter of decision.toUpload) {
@@ -850,7 +868,11 @@ export class RunProcessor {
           : chapters;
 
 
-      const dupes = findDuplicateChapters(inLanguage, { groupId, multiChapters });
+      const dupes = findDuplicateChapters(inLanguage, {
+        groupId,
+        multiChapters,
+        botUserId: this.botUserId,
+      });
       if (dupes.length === 0) continue;
 
       log.info({ mangaId, dupes: dupes.map((c) => c.id) }, "found duplicate chapters to delete");
