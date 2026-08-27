@@ -213,6 +213,23 @@ COPY --chown=root:root docs ./docs
 # Fail here rather than serving an empty docs list in production.
 RUN test -n "$(ls -A ./docs 2>/dev/null)" || (echo "no docs/ in the runtime image" >&2; exit 1)
 
+# The fonts the unavailable-chapter card is drawn with (core/md/fonts.ts).
+#
+# They are vendored precisely so a card looks the same whatever the host has
+# installed, and that guarantee is only worth anything if they reach the runtime
+# image. Without this the renderer finds no vendored directory, silently falls
+# back to whatever fontconfig offers, and draws the card in a different typeface
+# than the one its layout was measured against.
+#
+# fonts.ts locates this by walking up from its own module, so /app/assets/fonts
+# is what it finds from /app/dist/src/core/md (PUBLOADER_FONT_DIR overrides it).
+COPY --chown=root:root assets ./assets
+# Fail here rather than drawing every card in a substitute face. Unlike docs,
+# this one is not cosmetic: the card replaces the chapter itself on a public
+# catalogue.
+RUN test -n "$(ls -A ./assets/fonts 2>/dev/null)" \
+    || (echo "no assets/fonts in the runtime image" >&2; exit 1)
+
 # Everything is owned by root and only readable by the service account: the
 # process can execute its own code but cannot rewrite it, which is what makes
 # `read_only: true` in compose meaningful rather than decorative.
