@@ -75,6 +75,19 @@ export interface MdChapter {
      * this flag only when it is `true`.
      */
     isUnavailable?: boolean;
+    /**
+     * MangaDex's identifier for the CONTENT of this chapter's pages.
+     *
+     * Carried for one reason: it is the only thing that distinguishes one card
+     * from another. Replacing a card leaves the page count at one either way,
+     * so `pages` cannot say whether a re-card actually replaced the image or
+     * whether the commit quietly did nothing -- and a commit that quietly does
+     * nothing is a thing MangaDex demonstrably returns 200 for.
+     *
+     * Optional: absent on chapters with no pages, which is every live external
+     * chapter.
+     */
+    hash?: string;
   };
   relationships: { id: string; type: string }[];
 }

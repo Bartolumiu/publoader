@@ -1157,7 +1157,13 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
      * the entry, its externalUrl was repointed at the publisher's site root,
      * and its only page is the card posted last time.
      */
-    const detail = (): MdChapterDetail => ({
+    /**
+     * `pages` is a parameter because the uploader now checks that the card
+     * actually landed rather than trusting the commit, so the stub has to be
+     * able to describe both sides of that: the chapter before it is carded, and
+     * the chapter after.
+     */
+    const detail = (pages = 0, hash = "card-hash"): MdChapterDetail => ({
       id: uuid(1),
       attributes: {
         volume: null,
@@ -1167,6 +1173,7 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
         externalUrl: null,
         version: 3,
         createdAt: "2026-01-01T00:00:00.000Z",
+        ...(pages > 0 ? { pages, hash } : {}),
       },
       relationships: [
         { id: uuid(800), type: "scanlation_group" },
@@ -1181,10 +1188,15 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
       const unexpected = (name: string) => () => {
         throw new Error(`the uploader should not call ${name} in this test`);
       };
+      // The chapter genuinely changes when the commit lands, and the uploader
+      // now re-reads it to confirm that. A stub that always answered the same
+      // way would describe a commit that silently did nothing -- which is a
+      // real MangaDex behaviour, but not the one this test is about.
+      let carded = false;
       return {
         chapterById: async () => {
           calls.push("chapterById");
-          return detail();
+          return detail(carded ? 1 : 0);
         },
         beginEditSession: async () => {
           calls.push("beginEditSession");
@@ -1200,6 +1212,7 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
         },
         commitUploadSession: async () => {
           calls.push("commitUploadSession");
+          carded = true;
           return { id: uuid(1), attributes: { version: 4 } };
         },
         editChapter: async () => {

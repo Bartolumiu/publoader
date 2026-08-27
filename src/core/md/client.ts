@@ -712,6 +712,9 @@ export class MdClient implements MdExtendedApi {
         // one another and hard-delete them.
         ...(typeof pages === "number" ? { pages } : {}),
         ...(isUnavailable === true ? { isUnavailable: true } : {}),
+        // Identifies the page content, which is how a replaced card is told
+        // apart from a commit that returned 200 and changed nothing.
+        ...(str("hash") !== null ? { hash: str("hash") as string } : {}),
       },
       relationships: (entity.relationships ?? []).map((rel) => ({ id: rel.id, type: rel.type })),
     };

@@ -1,3 +1,4 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import type { Prisma, PrismaClient, UploadTask } from "@prisma/client";
 import type { Config } from "../../config.js";
 import type { Logger } from "../../logging.js";
@@ -30,6 +31,16 @@ import type { SettingsStore } from "../store/settings.js";
  */
 
 const IMAGE_BATCH_SIZE = 10;
+
+/**
+ * How hard to look for the card before deciding it did not land.
+ *
+ * MangaDex serves chapter reads from a cache that lags its own writes, so the
+ * first read after a commit can still show the old chapter. A few seconds of
+ * patience is much cheaper than dead-lettering a re-card that actually worked.
+ */
+const CARD_CONFIRM_ATTEMPTS = 3;
+const CARD_CONFIRM_DELAY_MS = 2_000;
 
 /** Failure that should send the task back to the queue with its message intact. */
 export class TaskError extends Error {
@@ -659,6 +670,18 @@ export class UploadTaskWorkers {
         if (!edited) {
           throw new TaskError(`couldn't repoint externalUrl for chapter ${mdChapterId}`);
         }
+
+        // Two successful calls do not add up to a card on the chapter. A commit
+        // that changes nothing returns 200 exactly like one that works, so the
+        // chapter is asked what happened rather than inferred from the calls.
+        // Without this a re-card sweep over thousands of chapters would report
+        // every one of them regenerated and change none.
+        await this.confirmCardLanded(
+          mdChapterId,
+          { pages: attrs.pages ?? 0, hash: attrs.hash ?? null },
+          log,
+        );
+
         log.info(
           { mdChapterId, replacementUrl: replacementUrl ?? "cleared", force },
           force ? "unavailable card regenerated" : "chapter marked unavailable",
@@ -680,6 +703,54 @@ export class UploadTaskWorkers {
   }
 
   /**
+   * Check that the card is actually on the chapter, and throw if it is not.
+   *
+   * `before` is how the chapter looked going in, because what counts as success
+   * depends on it:
+   *
+   *  - a chapter with no pages must come back with at least one. That is a card
+   *    where there was none.
+   *  - a chapter that already had a card must come back with a DIFFERENT page
+   *    hash. The count stays at one either way, so it says nothing about
+   *    whether the image was replaced, and re-carding thousands of chapters
+   *    whose commits all quietly did nothing would look identical to success.
+   *
+   * Re-read a few times before giving up. MangaDex serves chapter reads from a
+   * cache that lags its own writes, so the first read after a commit can still
+   * show the old state; failing on that would turn working re-cards into
+   * dead-lettered tasks.
+   */
+  private async confirmCardLanded(
+    mdChapterId: string,
+    before: { pages: number; hash: string | null },
+    log: Logger,
+  ): Promise<void> {
+    let pages: number | null = null;
+    let hash: string | null = null;
+
+    for (let attempt = 1; attempt <= CARD_CONFIRM_ATTEMPTS; attempt += 1) {
+      if (attempt > 1) {
+        // Worth saying: a retry here means the read came back stale, and if
+        // these become common the delay is the thing to look at.
+        log.debug({ mdChapterId, attempt }, "card not visible yet, re-reading");
+        await sleep(CARD_CONFIRM_DELAY_MS);
+      }
+      const after = await this.deps.md.chapterById(mdChapterId);
+      pages = after?.attributes.pages ?? null;
+      hash = after?.attributes.hash ?? null;
+
+      const gainedAPage = before.pages === 0 && (pages ?? 0) > 0;
+      const replacedTheImage = before.pages > 0 && hash !== null && hash !== before.hash;
+      if (gainedAPage || replacedTheImage) return;
+    }
+
+    throw new TaskError(
+      `the card did not land on chapter ${mdChapterId}: pages ${before.pages} -> ` +
+        `${pages === null ? "unknown" : pages}, hash ${before.hash ?? "none"} -> ${hash ?? "none"}`,
+    );
+  }
+
+  /**
    * Take the card back off a chapter.
    *
    * Carding was a one-way door: `findExtraChapters` skips anything already
@@ -688,11 +759,25 @@ export class UploadTaskWorkers {
    * compared four languages it had never fetched, and there was no way to undo
    * a single one of them.
    *
-   * The undo is an edit session committed with NO pages, which removes the card
-   * image and leaves an ordinary external chapter. `externalUrl` is set from
-   * the stored row's chapter link, or from `externalUrl` on the task when an
-   * operator supplies one -- the row keeps the publisher's real chapter link
+   * The undo is an edit session committed with NO pages. `externalUrl` is set
+   * from the stored row's chapter link, or from `externalUrl` on the task when
+   * an operator supplies one -- the row keeps the publisher's real chapter link
    * (see `unavailableCardOptions`), which is what makes this recoverable at all.
+   *
+   * WHICH DOES NOT CURRENTLY WORK, and the reason is on MangaDex's side. There
+   * is no way to express "keep no pages": `pageOrder` is specified minItems:1
+   * and non-nullable, omitting it is rejected as required, and sending `[]`
+   * returns 200 while changing nothing -- not the page count, not `updatedAt`,
+   * not even the version. Emptying the session first with
+   * DELETE /upload/{id}/batch genuinely empties it, and the commit still does
+   * nothing. Verified end to end against a live chapter.
+   *
+   * So this path is kept, and it now FAILS rather than reporting success: the
+   * page count is checked afterwards and anything but zero throws. 23 chapters
+   * were previously logged as restored while every one of them kept its card,
+   * which is worse than not having the feature at all. Until MangaDex offers a
+   * way back, the only real undo is deleting the chapter and recreating it as
+   * an external one, which costs its id, comments and stats.
    */
   private async runRestore(
     chapter: Chapter,
