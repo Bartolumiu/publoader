@@ -652,6 +652,108 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
       };
     });
 
+    /**
+     * Run SQL against the platform's own database.
+     *
+     * Deployment here is compose-only: there is no psql on the host and no
+     * published port, by design — a reachable 5432 has been the entry point in
+     * enough incidents. That left no way to answer a question the API happens
+     * not to expose, which is how several of this session's investigations
+     * stalled.
+     *
+     * The trade is real and worth stating. This is unrestricted read/write over
+     * HTTP, so it is fenced accordingly:
+     *
+     *  - ROOT ONLY. Not a `pa_…` token however scoped, and not a dashboard
+     *    session however privileged. Scopes are for delegating a capability;
+     *    this one is not delegable, so it is gated on the credential itself
+     *    rather than on a scope somebody could be granted.
+     *  - READ ONLY unless asked otherwise. The statement runs inside a
+     *    transaction marked read-only, so an UPDATE fails at the database
+     *    rather than on a check here that could be wrong.
+     *  - Writing needs `write` AND `confirm`, the same shape as every other
+     *    destructive verb, so a typo cannot become a mutation.
+     *  - Every statement is audited before it runs, including the ones that
+     *    fail, because "what was run against the database" is exactly the
+     *    question an incident asks.
+     *  - A statement timeout, so a careless join cannot hold a connection the
+     *    scheduler needs.
+     */
+    scope.post("/api/v1/admin/sql", async (req, reply) => {
+      if (req.principal?.kind !== "root") {
+        return reply.code(403).send({
+          error:
+            "direct SQL is restricted to the root ADMIN_TOKEN; it is not available to API tokens " +
+            "or dashboard sessions",
+        });
+      }
+
+      const body = parseOrThrow(
+        z
+          .object({
+            sql: z.string().min(1).max(20_000),
+            /** Allow the statement to modify data. Requires `confirm` too. */
+            write: z.boolean().default(false),
+            confirm: z.boolean().default(false),
+            /** Rows returned to the caller; the query itself is not rewritten. */
+            limit: z.coerce.number().int().min(1).max(5_000).default(200),
+            timeoutMs: z.coerce.number().int().min(100).max(60_000).default(15_000),
+          })
+          .strict(),
+        req.body ?? {},
+      );
+
+      if (body.write && !body.confirm) {
+        return reply
+          .code(400)
+          .send({ error: "a write needs confirm: true alongside write: true" });
+      }
+
+      // Audited BEFORE running: a statement that fails, or hangs, is the one
+      // most worth having a record of.
+      await ctx.audit.record(actor(req), body.write ? "sql.write" : "sql.read", undefined, {
+        sql: body.sql.slice(0, 4_000),
+        write: body.write,
+      });
+
+      const started = Date.now();
+      try {
+        const rows = await ctx.prisma.$transaction(async (tx) => {
+          await tx.$executeRawUnsafe(`SET LOCAL statement_timeout = ${body.timeoutMs}`);
+          if (!body.write) {
+            // Enforced by Postgres, not by inspecting the statement: parsing SQL
+            // to decide whether it writes is a guess, and a wrong guess here is
+            // an unintended mutation.
+            await tx.$executeRawUnsafe("SET LOCAL transaction_read_only = on");
+          }
+          return (await tx.$queryRawUnsafe(body.sql)) as unknown[];
+        });
+
+        const list = Array.isArray(rows) ? rows : [];
+        return {
+          ok: true,
+          write: body.write,
+          rowCount: list.length,
+          truncated: list.length > body.limit,
+          durationMs: Date.now() - started,
+          // BigInt is what Postgres returns for count(*) and for bigint columns,
+          // and JSON cannot carry it; stringifying keeps the value exact rather
+          // than rounding it into a double.
+          rows: JSON.parse(
+            JSON.stringify(list.slice(0, body.limit), (_key, value) =>
+              typeof value === "bigint" ? value.toString() : value,
+            ),
+          ) as unknown[],
+        };
+      } catch (err) {
+        return reply.code(400).send({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          durationMs: Date.now() - started,
+        });
+      }
+    });
+
     /** Distinct services and components present, for the log page's filters. */
     scope.get("/api/v1/admin/logs/sources", { preHandler: requireScope("runs:read") }, async () => {
       const [services, components] = await Promise.all([
