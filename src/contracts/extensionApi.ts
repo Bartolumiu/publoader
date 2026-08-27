@@ -104,6 +104,20 @@ export interface ExtensionContext {
   /** The extension's manifest (validated copy; read-only). */
   readonly manifest: Readonly<Record<string, unknown>>;
   /**
+   * The extension's configuration as the DATABASE holds it — what the dashboard
+   * edits, not what the bundle shipped with.
+   *
+   * The lease has always carried this and the context never exposed it, so the
+   * only configuration an extension could read was the copy inside its own
+   * bundle. That made every setting a release: flipping one flag meant
+   * publishing a new bundle, and the operator-editable config reached the
+   * runner and went no further.
+   *
+   * The two are NOT merged here. Which wins is the extension's own decision and
+   * belongs in the extension, stated plainly, rather than happening to it.
+   */
+  readonly overrideOptions: Readonly<Record<string, unknown>>;
+  /**
    * External manga id -> MangaDex title id, from the platform's
    * DB-authoritative tracked map (includes titles auto-created since the
    * bundle was published).

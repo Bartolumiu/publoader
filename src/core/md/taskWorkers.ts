@@ -132,6 +132,8 @@ export class UploadTaskWorkers {
         return this.runDelete(chapter, log);
       case "UNAVAILABLE":
         return this.runUnavailable(chapter, raw, log);
+      case "RESTORE":
+        return this.runRestore(chapter, raw, log);
       default:
         throw new TaskError(`unknown upload task kind ${String(task.kind)}`);
     }
@@ -675,6 +677,126 @@ export class UploadTaskWorkers {
     await this.archiveUnavailable(mdChapterId, chapter, detail);
     metrics.uploadsTotal.inc({ outcome: "unavailable_ok" });
     this.queue("Unavailable", chapter, mdChapterId, true);
+  }
+
+  /**
+   * Take the card back off a chapter.
+   *
+   * Carding was a one-way door: `findExtraChapters` skips anything already
+   * carded, so nothing ever revisited one, and a chapter carded by mistake
+   * stayed carded. 213 live RuriDragon chapters were carded by a run that
+   * compared four languages it had never fetched, and there was no way to undo
+   * a single one of them.
+   *
+   * The undo is an edit session committed with NO pages, which removes the card
+   * image and leaves an ordinary external chapter. `externalUrl` is set from
+   * the stored row's chapter link, or from `externalUrl` on the task when an
+   * operator supplies one -- the row keeps the publisher's real chapter link
+   * (see `unavailableCardOptions`), which is what makes this recoverable at all.
+   */
+  private async runRestore(
+    chapter: Chapter,
+    raw: Record<string, unknown>,
+    log: Logger,
+  ): Promise<void> {
+    const { md } = this.deps;
+    const mdChapterId = chapter.mdChapterId;
+    if (!mdChapterId) throw new TaskError("restore task has no mdChapterId");
+
+    const owned = await this.ownership(mdChapterId);
+    if (!owned.ok) {
+      if (owned.gone) {
+        log.info({ mdChapterId }, "chapter is gone from MangaDex, nothing to restore");
+        this.queue("Restore", chapter, mdChapterId, true, "Chapter no longer on MangaDex.");
+        return;
+      }
+      log.error(
+        { mdChapterId, reason: owned.reason },
+        "refusing to restore a chapter this account did not upload",
+      );
+      this.queue("Restore", chapter, mdChapterId, false, `Refused: ${owned.reason}`);
+      return;
+    }
+
+    const detail = owned.detail;
+    const attrs = detail.attributes;
+    if (!isCarded(detail)) {
+      // Already an ordinary external chapter. Archiving is the right end state:
+      // a re-queued restore should not open a session to change nothing.
+      log.info({ mdChapterId }, "chapter carries no card, nothing to restore");
+      await this.archiveRestored(mdChapterId, chapter);
+      this.queue("Restore", chapter, mdChapterId, true, "No card to remove.");
+      return;
+    }
+
+    const groups = detail.relationships
+      .filter((rel) => rel.type === "scanlation_group")
+      .map((rel) => rel.id);
+
+    // An operator may correct the link while restoring; otherwise the row's
+    // chapter url wins, and only then the value MangaDex currently holds --
+    // which on a carded chapter is the replacement, not the chapter.
+    const replacement = readString(raw, "externalUrl") ?? chapter.chapterUrl ?? attrs.externalUrl;
+
+    const openSession = await md.currentUploadSession();
+    if (openSession) {
+      log.warn({ sessionId: openSession.id }, "removing stale upload session before restore");
+      await md.deleteUploadSession(openSession.id);
+    }
+
+    const session = await md.beginEditSession(mdChapterId, attrs.version);
+    try {
+      // No pages: this is what removes the card.
+      const committed = await md.commitUploadSession(
+        session.id,
+        {
+          volume: attrs.volume,
+          chapter: attrs.chapter,
+          title: attrs.title,
+          translatedLanguage: attrs.translatedLanguage,
+          externalUrl: replacement,
+        },
+        [],
+      );
+
+      let version = committed?.attributes?.version ?? null;
+      if (version === null) {
+        const refetched = await md.chapterById(mdChapterId);
+        version = refetched?.attributes.version ?? attrs.version;
+      }
+
+      const edited = await md.editChapter(mdChapterId, {
+        volume: attrs.volume,
+        chapter: attrs.chapter,
+        title: attrs.title,
+        translatedLanguage: attrs.translatedLanguage,
+        groups,
+        externalUrl: replacement,
+        version,
+      });
+      if (!edited) throw new TaskError(`couldn't restore externalUrl for chapter ${mdChapterId}`);
+    } catch (err) {
+      await this.safeDeleteSession(session.id, log);
+      this.queue("Restore", chapter, mdChapterId, false, errorMessage(err));
+      throw err;
+    }
+
+    await this.archiveRestored(mdChapterId, chapter);
+    log.info({ mdChapterId, externalUrl: replacement }, "card removed; chapter restored");
+    this.queue("Restore", chapter, mdChapterId, true);
+  }
+
+  /**
+   * Move a chapter out of the unavailable archive and back to uploaded.
+   *
+   * The row is what tells every later pass the chapter is carded, so leaving it
+   * behind would have the next run treat a restored chapter as still
+   * unavailable.
+   */
+  private async archiveRestored(mdChapterId: string, chapter: Chapter): Promise<void> {
+    const { prisma } = this.deps;
+    await prisma.unavailableChapter.deleteMany({ where: { mdChapterId } });
+    await this.recordUploadedChapter(chapter, mdChapterId);
   }
 
   /** Upload the card as page "0", retrying the way `_upload_card` does. */

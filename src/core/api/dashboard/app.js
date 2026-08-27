@@ -5166,6 +5166,9 @@ function chapterBulkBar(selected, scope, rows, data, activeFilter, archive, relo
     }),
     bulk("Edit…", "edit", false),
     bulk("Mark unavailable…", "unavailable", false),
+    // Only where there are cards to take off. Offering it on `uploaded` would
+    // list an action that refuses every chapter it is given.
+    archive === "unavailable" ? bulk("Remove card…", "restore", false) : null,
     bulk("Delete…", "delete", true),
     el("span", { class: "grow" }),
     el(
@@ -5817,6 +5820,27 @@ function chapterBulkDialog({ action, archive, target, targeting, done }) {
               maxlength: "600",
             }),
           )
+        : action === "restore"
+        ? el(
+            "div",
+            {},
+            el("p", {
+              text:
+                "The card image comes off and each chapter goes back to being an ordinary external " +
+                "link. Use this when a chapter was carded by mistake and is still readable at the " +
+                "publisher.",
+            }),
+            ...field(
+              "externalUrl",
+              "Publisher link",
+              "Blank keeps the chapter's stored link, which is the one it had before it was carded. " +
+                "Fill this in only when that link is itself wrong.",
+              { maxlength: "2048", placeholder: "https://…" },
+            ),
+            ...field("reason", "Reason (recorded against every chapter in the audit trail)", "", {
+              maxlength: "500",
+            }),
+          )
         : el(
             "div",
             {},
@@ -5848,6 +5872,13 @@ function chapterBulkDialog({ action, archive, target, targeting, done }) {
     if (action === "unavailable") {
       const note = inputs.footerNote.value.trim();
       return { force: force.checked, ...(note ? { footerNote: note } : {}) };
+    }
+    if (action === "restore") {
+      // Blank means "keep the chapter's stored link", which is the usual case;
+      // the field exists for when that link is itself what was wrong.
+      const url = inputs.externalUrl.value.trim();
+      const why = inputs.reason.value.trim();
+      return { ...(url ? { externalUrl: url } : {}), ...(why ? { reason: why } : {}) };
     }
     const reason = inputs.reason.value.trim();
     return reason ? { reason } : {};
@@ -5906,7 +5937,9 @@ function chapterBulkDialog({ action, archive, target, targeting, done }) {
       ? "Edit these chapters on MangaDex"
       : action === "unavailable"
         ? "Mark these chapters unavailable"
-        : "Delete these chapters from MangaDex",
+        : action === "restore"
+          ? "Take the card off these chapters"
+          : "Delete these chapters from MangaDex",
     body,
   );
 }

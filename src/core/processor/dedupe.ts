@@ -354,6 +354,26 @@ function findExtraChapters(input: DecideInput): MdChapter[] {
 
   const customLanguage = input.overrideOptions.custom_language ?? {};
   const allowedLanguages = new Set([...input.languages, ...Object.values(customLanguage)]);
+
+  /**
+   * The languages this run actually looked at for this series.
+   *
+   * One MangaDex title is fed by several of the publisher's titles — one per
+   * language — and a run does not always fetch all of them. A scoped recheck of
+   * RuriDragon fetched only the English title and reported eight English
+   * chapters; the pass below then compared every French, Spanish, Thai and
+   * Indonesian chapter on MangaDex against that English-only listing, found
+   * them all "missing", and carded 213 live chapters.
+   *
+   * Absence is only evidence about a language the run can actually speak for.
+   * A chapter in a language this listing never covered is not missing from it;
+   * it was never in scope, and the run has nothing to say about it.
+   *
+   * An empty catalogue is the deliberate exception: "the publisher has nothing
+   * for this series" carries no language, and must stay able to remove.
+   */
+  const coveredLanguages = new Set(input.allMangaChapters.map((c) => c.chapterLanguage));
+  const listingCoversEveryLanguage = input.allMangaChapters.length === 0;
   // Null urls are kept in the set deliberately: the comprehension
   // included them, so an MD chapter with no externalUrl is "still present"
   // whenever any extension chapter also lacks one.
@@ -374,8 +394,15 @@ function findExtraChapters(input: DecideInput): MdChapter[] {
       // subsequent run. Left in, it is re-queued forever — re-carded under
       // `unavailable`, hard-deleted under `delete`.
       !isCarded(mdChapter) &&
+      // A language the extension may not publish at all should not be on
+      // MangaDex under our group whatever this run happened to fetch, so that
+      // branch needs no coverage check.
       (!allowedLanguages.has(mdChapter.attributes.translatedLanguage) ||
-        !externalUrls.has(mdChapter.attributes.externalUrl)),
+        // "Missing from the listing" is only evidence for a language the run
+        // actually fetched. See `coveredLanguages`.
+        ((listingCoversEveryLanguage ||
+          coveredLanguages.has(mdChapter.attributes.translatedLanguage)) &&
+          !externalUrls.has(mdChapter.attributes.externalUrl))),
   );
 }
 

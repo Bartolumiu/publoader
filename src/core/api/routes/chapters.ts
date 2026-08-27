@@ -289,7 +289,7 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
       req: FastifyRequest,
       reply: FastifyReply,
       opts: {
-        kind: "EDIT" | "DELETE" | "UNAVAILABLE";
+        kind: "EDIT" | "DELETE" | "UNAVAILABLE" | "RESTORE";
         row: ChapterRow;
         sidecars: Record<string, unknown>;
         audit: string;
@@ -1267,7 +1267,7 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
       req: FastifyRequest,
       reply: FastifyReply,
       opts: {
-        kind: "EDIT" | "DELETE" | "UNAVAILABLE";
+        kind: "EDIT" | "DELETE" | "UNAVAILABLE" | "RESTORE";
         body: { ids?: string[]; filter?: z.infer<typeof BulkFilter>; dryRun: boolean; confirm: boolean };
         /** Per-chapter task sidecars. Constant across the set by construction. */
         sidecars: Record<string, unknown>;
@@ -1278,7 +1278,10 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
       },
     ): Promise<FastifyReply> {
       const { kind, body } = opts;
-      const archive = body.filter?.archive ?? "uploaded";
+      // RESTORE selects from the carded chapters by definition, so a filter
+      // that does not say otherwise means "the unavailable ones". Defaulting it
+      // to `uploaded` like the other verbs would silently match nothing.
+      const archive = body.filter?.archive ?? (opts.kind === "RESTORE" ? "unavailable" : "uploaded");
 
       let ids: string[];
       let capped = false;
@@ -1299,7 +1302,11 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
         // Only the UNAVAILABLE path needs this: `locate` may have resolved the
         // chapter from `uploaded`, which does not answer whether a card is
         // already posted.
-        opts.kind === "UNAVAILABLE" ? ctx.chapters.manyByIds("unavailable", ids) : Promise.resolve([]),
+        // RESTORE needs it for the opposite test: UNAVAILABLE refuses a chapter
+        // that is already carded, RESTORE refuses one that is not.
+        opts.kind === "UNAVAILABLE" || opts.kind === "RESTORE"
+          ? ctx.chapters.manyByIds("unavailable", ids)
+          : Promise.resolve([]),
         ctx.uploadTasks.forDedupeKeys(ids),
       ]);
       const alreadyUnavailable = new Set(unavailableRows.map((row) => row.mdChapterId));
@@ -1316,6 +1323,15 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           return {
             outcome: "needs_force",
             reason: "already marked unavailable; pass force: true to post a fresh card over the old one",
+          };
+        }
+        // Restoring a chapter that was never carded would open an edit session
+        // to change nothing. Refused here rather than discovered by the worker,
+        // so a filter that selected too much is visible in the dry run.
+        if (kind === "RESTORE" && !alreadyUnavailable.has(id)) {
+          return {
+            outcome: "not_found",
+            reason: "this chapter is not marked unavailable, so it has no card to remove",
           };
         }
         const task = taskByChapter.get(id);
@@ -1571,6 +1587,47 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           },
           auditAction: "chapter.unavailable",
           auditDetail: { force: body.force, footerNote: body.footerNote ?? null, bulkKind: "unavailable" },
+        });
+      },
+    );
+
+    /**
+     * Take the card back off, leaving an ordinary external chapter.
+     *
+     * The counterpart to `bulk/unavailable`, and until now it did not exist:
+     * carding was one-way, because `findExtraChapters` skips anything already
+     * carded so nothing ever revisited one. A chapter carded by mistake stayed
+     * carded, which is how 213 live RuriDragon chapters ended up under "no
+     * longer available on the publisher" with a working link beneath it.
+     *
+     * The card image is removed and `externalUrl` is kept, since it is the
+     * chapter's only remaining way to reach the publisher. `externalUrl` in the
+     * body overrides it, for the case where the stored link is the one that was
+     * wrong.
+     */
+    scope.post(
+      "/api/v1/admin/chapters/bulk/restore",
+      { preHandler: [requireScope("chapters:write"), requireAdminRole] },
+      async (req, reply) => {
+        const body = parseOrThrow(
+          bulkBody({
+            externalUrl: z.string().url().max(2048).optional(),
+            reason: z.string().max(500).optional(),
+          }),
+          req.body ?? {},
+        );
+        return runBulk(req, reply, {
+          kind: "RESTORE",
+          body,
+          sidecars: {
+            ...(body.externalUrl ? { externalUrl: body.externalUrl } : {}),
+          },
+          auditAction: "chapter.restore",
+          auditDetail: {
+            reason: body.reason ?? null,
+            externalUrl: body.externalUrl ?? null,
+            bulkKind: "restore",
+          },
         });
       },
     );

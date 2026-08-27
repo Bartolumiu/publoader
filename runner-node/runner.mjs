@@ -413,7 +413,7 @@ function resolveDataFilePath(bundleDir, dataFiles, name) {
   return target;
 }
 
-function buildContext(bundleDir, manifest, mangaIdMap) {
+function buildContext(bundleDir, manifest, mangaIdMap, overrideOptions) {
   const allowedHosts = Array.isArray(manifest.allowed_hosts) ? manifest.allowed_hosts : [];
   const dataFiles =
     manifest.data_files && typeof manifest.data_files === "object" ? manifest.data_files : {};
@@ -424,6 +424,20 @@ function buildContext(bundleDir, manifest, mangaIdMap) {
     mangaIdMap: invertMangaIdMap(mangaIdMap),
     fetch: (input, init) => guarded(input, init),
     dataFile: (name) => readFile(resolveDataFilePath(bundleDir, dataFiles, name), "utf8"),
+    /**
+     * The extension's configuration as the DATABASE holds it.
+     *
+     * The lease has always carried this and the context never exposed it, so an
+     * extension's only source of configuration was the copy baked into its own
+     * bundle — which meant changing one setting required publishing a new
+     * bundle, and the operator-editable config the dashboard writes reached the
+     * runner and stopped there.
+     *
+     * Frozen, and never merged into `dataFile` output on the extension's
+     * behalf: which of the two wins is the extension's decision to state
+     * explicitly, not something to have happen to it silently.
+     */
+    overrideOptions: Object.freeze({ ...(overrideOptions ?? {}) }),
     log: (message, fields) => log("info", String(message), { source: "extension", ...(fields ?? {}) }),
   };
   return { ctx, fetchState: state };
@@ -678,7 +692,7 @@ async function runJob(job, bundleDir, outputDir) {
   const segmentIds = new Set((job.segmentMangaIds ?? []).map(String));
   const cleanRun = String(job.kind ?? "").toUpperCase() === "CLEAN";
 
-  const { ctx, fetchState } = buildContext(bundleDir, manifest, mangaIdMap);
+  const { ctx, fetchState } = buildContext(bundleDir, manifest, mangaIdMap, job.overrideOptions);
 
   // Import and factory construction are properties of the bundle: retrying the
   // same pinned sha256 would fail identically, so they raise ContractError

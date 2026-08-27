@@ -107,6 +107,97 @@ describe("removal safety for an unreadable title", () => {
   });
 });
 
+describe("a run may only remove what it looked at", () => {
+  const mdChapter = (id: string, language: string, externalUrl: string): MdChapter =>
+    ({
+      id,
+      attributes: {
+        chapter: "50",
+        volume: null,
+        title: "t",
+        translatedLanguage: language,
+        externalUrl,
+        pages: 0,
+        version: 1,
+      },
+      relationships: [
+        { type: "manga", id: "md-manga" },
+        { type: "scanlation_group", id: "group" },
+        { type: "user", id: BOT },
+      ],
+    }) as unknown as MdChapter;
+
+  const listed = (language: string, url: string) =>
+    ({
+      chapterLanguage: language,
+      chapterUrl: url,
+      chapterId: url.split("/").pop() ?? null,
+      chapterNumber: "50",
+      mdMangaId: "md-manga",
+      imageArtifacts: [],
+    }) as unknown as NonNullable<DecideInput["allMangaChapters"]>[number];
+
+  it("leaves a language the listing never covered alone", () => {
+    // One MangaDex title is fed by one publisher title per language, and a
+    // scoped recheck may fetch only some of them. A recheck of RuriDragon
+    // fetched only the English title, and every French, Spanish, Thai and
+    // Indonesian chapter was then compared against that English-only listing,
+    // found "missing", and carded — 213 live chapters.
+    const result = decideForManga({
+      mangadexMangaId: "md-manga",
+      updatedChapters: [],
+      allMangaChapters: [listed("en", "https://pub.example/viewer/100")],
+      chaptersOnMd: [
+        mdChapter("en-50", "en", "https://pub.example/viewer/100"),
+        mdChapter("fr-50", "fr", "https://pub.example/viewer/700"),
+      ],
+      postedMdUpdates: [],
+      overrideOptions: {},
+      languages: ["en", "fr"],
+      groupId: "group",
+      cleanDb: true,
+      botUserId: BOT,
+    });
+    expect(result.toRemove).toEqual([]);
+  });
+
+  it("still removes a chapter missing from a language it did cover", () => {
+    // The counterpart: within a language the run fetched, absence is real
+    // evidence and must keep working.
+    const result = decideForManga({
+      mangadexMangaId: "md-manga",
+      updatedChapters: [],
+      allMangaChapters: [listed("en", "https://pub.example/viewer/100")],
+      chaptersOnMd: [mdChapter("en-51", "en", "https://pub.example/viewer/999")],
+      postedMdUpdates: [],
+      overrideOptions: {},
+      languages: ["en", "fr"],
+      groupId: "group",
+      cleanDb: true,
+      botUserId: BOT,
+    });
+    expect(result.toRemove.map((c) => c.id)).toEqual(["en-51"]);
+  });
+
+  it("still removes everything when the publisher genuinely lists nothing", () => {
+    // An empty catalogue names no language, so it must stay able to remove —
+    // otherwise a series the publisher really has dropped becomes untouchable.
+    const result = decideForManga({
+      mangadexMangaId: "md-manga",
+      updatedChapters: [],
+      allMangaChapters: [],
+      chaptersOnMd: [mdChapter("fr-50", "fr", "https://pub.example/viewer/700")],
+      postedMdUpdates: [],
+      overrideOptions: {},
+      languages: ["en", "fr"],
+      groupId: "group",
+      cleanDb: true,
+      botUserId: BOT,
+    });
+    expect(result.toRemove.map((c) => c.id)).toEqual(["fr-50"]);
+  });
+});
+
 describe("ownership gating", () => {
   const chapterBy = (id: string, uploader: string | null): MdChapter =>
     ({

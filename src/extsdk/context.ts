@@ -31,6 +31,12 @@ export interface ExtensionContextOptions {
    * `UnsupportedMangaIdMapError`.
    */
   mangaIdMapNamespaced?: boolean | undefined;
+  /**
+   * The extension's configuration as the database holds it, which is what the
+   * dashboard edits. Passed through to `ctx.overrideOptions` untouched; the
+   * extension decides how it relates to the copy in its own bundle.
+   */
+  overrideOptions?: Record<string, unknown> | undefined;
   /** Overrides the manifest's allowed_hosts (tests only; normally omitted). */
   allowedHosts?: readonly string[] | undefined;
   /** Tuning/injection for the guarded fetch. */
@@ -160,6 +166,10 @@ export function createExtensionContext(opts: ExtensionContextOptions): CreatedEx
 
   const ctx: ExtensionContext = {
     manifest: Object.freeze({ ...manifest }),
+    // The database's copy of the extension's configuration, which is what the
+    // dashboard edits. Kept separate from `dataFile` rather than merged into
+    // it: which of the two wins is the extension's decision to state.
+    overrideOptions: Object.freeze({ ...(opts.overrideOptions ?? {}) }),
     mangaIdMap: invertMangaIdMap(opts.mangaIdMap ?? {}, {
       namespaced: opts.mangaIdMapNamespaced ?? false,
     }),
