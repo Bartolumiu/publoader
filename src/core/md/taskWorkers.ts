@@ -775,6 +775,26 @@ export class UploadTaskWorkers {
         version,
       });
       if (!edited) throw new TaskError(`couldn't restore externalUrl for chapter ${mdChapterId}`);
+
+      // MangaDex accepting the commit is not the same as MangaDex having
+      // dropped the pages, and the difference is invisible from here: a commit
+      // that changes nothing comes back 2xx exactly like one that works. Ask
+      // the chapter what happened instead of trusting the call.
+      //
+      // Worth the extra request because of what the two failures cost. A
+      // restore that silently leaves the card on is a live chapter still
+      // showing "no longer available" to readers, recorded as DONE, retried by
+      // nobody -- which is precisely how 23 chapters were reported restored
+      // while every one of them kept its card. A restore that fails loudly is
+      // a queue entry someone can see.
+      const after = await md.chapterById(mdChapterId);
+      const pagesAfter = after?.attributes.pages ?? null;
+      if (pagesAfter === null || pagesAfter > 0) {
+        throw new TaskError(
+          `commit left ${pagesAfter === null ? "unknown" : String(pagesAfter)} page(s) on ` +
+            `chapter ${mdChapterId}; the card was not removed`,
+        );
+      }
     } catch (err) {
       await this.safeDeleteSession(session.id, log);
       this.queue("Restore", chapter, mdChapterId, false, errorMessage(err));
