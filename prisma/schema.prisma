@@ -874,3 +874,32 @@ model ClearedError {
   @@index([clearedAt])
   @@map("cleared_errors")
 }
+
+/// How much discussion a MangaDex chapter carries, remembered so the duplicate
+/// scan does not re-ask about every chapter on every run.
+///
+/// The cache is deliberately ASYMMETRIC, because the two answers are not
+/// equally durable:
+///
+///   - `comments > 0` is effectively permanent. It means "a person has written
+///     here, so never delete this automatically", and no later reading can make
+///     deleting it safe. Once recorded it is trusted and MangaDex is not asked
+///     about that chapter again.
+///   - `comments = 0` is provisional. Somebody can comment at any time, so it
+///     is re-checked on the next scan; caching it as final is how a chapter
+///     that has since been discussed would get silently deleted.
+///
+/// So this table saves work on exactly the chapters worth protecting, and never
+/// at the cost of the check it exists to support.
+model ChapterCommentCount {
+  /// The MangaDex chapter id; one row per chapter.
+  mdChapterId String   @id @map("md_chapter_id")
+  /// Replies on the chapter's comment thread when it was last read.
+  comments    Int
+  checkedAt   DateTime @default(now()) @updatedAt @map("checked_at")
+
+  /// The scan asks "which of these are already known to have comments", which
+  /// is a filter on this column.
+  @@index([comments])
+  @@map("chapter_comment_counts")
+}

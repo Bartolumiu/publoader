@@ -21,6 +21,8 @@ const USER_AGENT = "publoader/2.0.0";
 const ACCESS_TOKEN_KEY = "mdauth_access";
 const REFRESH_TOKEN_KEY = "mdauth_refresh";
 const PAGE_LIMIT = 100;
+/** Chapter ids per statistics request; the endpoint takes a repeated query param. */
+const STATISTICS_BATCH = 100;
 /** MangaDex accepts at most 10 files per upload POST. */
 const IMAGE_BATCH_SIZE = 10;
 /** Refresh this far ahead of `exp` so a token can't expire mid-flight. */
@@ -195,6 +197,22 @@ export interface MdUploadedImage {
  * place in the narrower interface. Any test double used by taskWorkers must
  * implement this, not just MdApi.
  */
+/**
+ * What MangaDex knows about a chapter's reception.
+ *
+ * Only the comment thread is read, because that is the part deletion destroys
+ * irreversibly: a duplicate with a discussion on it is a page people have
+ * written on, and removing it takes their words with it.
+ *
+ * `comments` is null for a chapter nobody has ever posted on — MangaDex creates
+ * the thread lazily — so "no thread" and "a thread with nothing in it" both mean
+ * nothing would be lost.
+ */
+export interface MdChapterStats {
+  /** Replies on the chapter's comment thread; 0 when there is no thread. */
+  comments: number;
+}
+
 export interface MdExtendedApi extends MdApi {
   chapterById(chapterId: string, includes?: string[]): Promise<MdChapterDetail | null>;
   chapterAvailabilityForGroup(
@@ -202,6 +220,7 @@ export interface MdExtendedApi extends MdApi {
     onPage?: WalkProgress,
   ): Promise<MdGroupAvailability>;
   chaptersForGroup(groupId: string, onPage?: WalkProgress): Promise<MdChapter[]>;
+  chapterStatistics(chapterIds: string[]): Promise<Map<string, MdChapterStats>>;
   beginEditSession(chapterId: string, version: number | null): Promise<{ id: string }>;
   uploadImages(
     sessionId: string,
@@ -844,6 +863,58 @@ export class MdClient implements MdExtendedApi {
       out.push(...entities.map(MdClient.toManga));
     }
     return out;
+  }
+
+  /**
+   * GET /statistics/chapter; how much discussion each chapter carries.
+   *
+   * Used before deleting a duplicate. A chapter is data we can recreate, but the
+   * comments on it are other people's writing and deleting the chapter deletes
+   * them, so the count is what separates a duplicate that can be removed from
+   * one that needs a person to look at it.
+   *
+   * A chapter missing from the response is reported as 0 replies rather than
+   * omitted: MangaDex creates comment threads lazily, so "no entry" is the
+   * ordinary answer for a chapter nobody has posted on. The caller is asking
+   * "would deleting this destroy a discussion", and for those the answer is no.
+   *
+   * Throws if MangaDex will not answer. The caller must not read a failed lookup
+   * as "no comments" -- that would turn an outage into a delete.
+   */
+  async chapterStatistics(chapterIds: string[]): Promise<Map<string, MdChapterStats>> {
+    const out = new Map<string, MdChapterStats>();
+    const wanted = [...new Set(chapterIds)];
+    if (wanted.length === 0) return out;
+
+    for (const batch of MdClient.chunk(wanted, STATISTICS_BATCH)) {
+      const response = await this.request("GET", `${this.config.mdApiUrl}/statistics/chapter`, {
+        params: { "chapter[]": batch },
+      });
+      if (response.status !== 200 || !response.data) {
+        throw new MdRequestError("chapter statistics request failed", response.status);
+      }
+      const statistics = response.data.statistics;
+      if (statistics === null || typeof statistics !== "object") {
+        throw new MdRequestError("chapter statistics response carried no statistics");
+      }
+      for (const [chapterId, entry] of Object.entries(statistics as Record<string, unknown>)) {
+        out.set(chapterId, { comments: MdClient.replyCount(entry) });
+      }
+      // Present in the request, absent from the response: no thread exists yet.
+      for (const chapterId of batch) {
+        if (!out.has(chapterId)) out.set(chapterId, { comments: 0 });
+      }
+    }
+    return out;
+  }
+
+  /** `comments` is null until somebody posts, so an absent thread is zero. */
+  private static replyCount(entry: unknown): number {
+    if (entry === null || typeof entry !== "object") return 0;
+    const comments = (entry as { comments?: unknown }).comments;
+    if (comments === null || typeof comments !== "object") return 0;
+    const replies = (comments as { repliesCount?: unknown }).repliesCount;
+    return typeof replies === "number" && Number.isFinite(replies) && replies > 0 ? replies : 0;
   }
 
   /**

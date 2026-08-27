@@ -70,7 +70,16 @@ export type DuplicateOutcome =
   | "requeued"
   | "already_queued"
   | "leased"
-  | "failed";
+  | "failed"
+  /**
+   * Has comments, so it was NOT queued for deletion.
+   *
+   * A duplicate chapter can be recreated; the discussion underneath it cannot,
+   * and deleting the chapter deletes it. So a duplicate carrying comments stops
+   * being a thing to clean up automatically and becomes a thing for a person to
+   * decide about.
+   */
+  | "held_for_review";
 
 export interface DuplicateChapterRow {
   mdChapterId: string;
@@ -88,6 +97,14 @@ export interface DuplicateRemoval extends DuplicateChapterRow {
   taskId?: string;
   /** Why it was not queued, when it was not. */
   reason?: string;
+  /**
+   * Replies on this chapter's comment thread, when they were looked up.
+   *
+   * Undefined on a report-only scan, which does not ask: the lookup exists to
+   * decide whether deleting is safe, and a scan that deletes nothing has no
+   * such decision to make.
+   */
+  comments?: number;
 }
 
 /** One bucket of chapters that are the same chapter. */
@@ -124,6 +141,8 @@ export interface DuplicateGroupSummary {
   seriesWithDuplicates: number;
   duplicatesFound: number;
   queued: number;
+  /** Duplicates left alone because they carry comments. */
+  heldForReview: number;
 }
 
 export interface DuplicateScanReport {
@@ -145,6 +164,15 @@ export interface DuplicateScanReport {
    * already coming; the per-chapter `outcome` says which case it was.
    */
   blocked: number;
+  /**
+   * Duplicates left in place because they carry comments, or because MangaDex
+   * would not say whether they do.
+   *
+   * Counted apart from `blocked` because it means something different: a
+   * blocked duplicate is already on its way out, while these are deliberately
+   * still there and waiting for a person.
+   */
+  heldForReview: number;
   /** Series with duplicates that `series` does not list, for size. */
   truncatedSeries: number;
 }
@@ -181,6 +209,16 @@ export interface DuplicateScanDeps {
  * is lost by trimming the display.
  */
 const SERIES_LIMIT = 200;
+
+/**
+ * Replies that make a duplicate a person's decision rather than a cleanup.
+ *
+ * One, deliberately. A single comment is still somebody's writing, and deleting
+ * the chapter deletes it with no way to put it back; a duplicate left in place
+ * costs a second row in a list. The two mistakes are not the same size, so the
+ * threshold sits at the point where anything was written at all.
+ */
+const COMMENTS_NEEDING_REVIEW = 1;
 
 /** Title ids per `mangaByIds` request. */
 const TITLE_BATCH = 100;
@@ -235,6 +273,7 @@ export class DuplicateScanner {
       duplicatesFound: 0,
       queued: 0,
       blocked: 0,
+      heldForReview: 0,
       truncatedSeries: 0,
     };
 
@@ -328,6 +367,7 @@ export class DuplicateScanner {
       seriesWithDuplicates: 0,
       duplicatesFound: 0,
       queued: 0,
+      heldForReview: 0,
     };
 
     const read = `read:${groupId}`;
@@ -383,6 +423,14 @@ export class DuplicateScanner {
     for (const entry of found) entry.series.mangaName = names.get(entry.series.mdMangaId) ?? null;
 
     if (options.apply) {
+      // Asked once for the whole group rather than per chapter: the endpoint
+      // takes a hundred ids at a time, and at the MangaDex ratelimit the
+      // difference on a large group is a couple of requests against hundreds.
+      const doomed = found.flatMap((entry) =>
+        entry.series.duplicates.flatMap((set) => set.remove.map((r) => r.mdChapterId)),
+      );
+      const comments = await this.commentCounts(doomed);
+
       const step = `delete:${groupId}`;
       this.plan.start(step, summary.duplicatesFound);
       let done = 0;
@@ -391,6 +439,25 @@ export class DuplicateScanner {
           for (const removal of set.remove) {
             const chapter = entry.chapters.find((c) => c.id === removal.mdChapterId);
             if (!chapter) continue;
+
+            // A duplicate is recreatable; the discussion under it is not. So
+            // anything carrying comments -- or anything MangaDex would not
+            // answer for -- is left alone and reported instead of deleted.
+            const count = comments.get(removal.mdChapterId);
+            if (count === undefined || count >= COMMENTS_NEEDING_REVIEW) {
+              removal.outcome = "held_for_review";
+              removal.reason =
+                count === undefined
+                  ? "MangaDex would not say whether this chapter has comments, so it was left alone"
+                  : `has ${count} comment(s); deleting it would delete them`;
+              if (count !== undefined) removal.comments = count;
+              report.heldForReview += 1;
+              summary.heldForReview += 1;
+              this.plan.advance(step, (done += 1));
+              continue;
+            }
+            removal.comments = count;
+
             const result = await this.queueDelete(chapter, {
               extension,
               groupId,
@@ -410,7 +477,8 @@ export class DuplicateScanner {
           }
         }
       }
-      this.plan.finish(step, summary.queued, `${summary.queued} queued`);
+      const held = summary.heldForReview > 0 ? `, ${summary.heldForReview} held for review` : "";
+      this.plan.finish(step, summary.queued, `${summary.queued} queued${held}`);
     }
 
     affected.push(...found.map((entry) => entry.series));
@@ -503,6 +571,87 @@ export class DuplicateScanner {
       }
     }
     return names;
+  }
+
+  /**
+   * How many comments each of these chapters carries.
+   *
+   * Fails CLOSED. If MangaDex will not answer, the map comes back without those
+   * chapters, and a chapter with no entry is held for review rather than
+   * deleted. Reading a failed lookup as "no comments" would turn a MangaDex
+   * outage into a batch of irreversible deletions, which is the one outcome
+   * this check exists to prevent.
+   */
+  private async commentCounts(chapterIds: string[]): Promise<Map<string, number>> {
+    if (chapterIds.length === 0) return new Map();
+    const counts = new Map<string, number>();
+
+    // Chapters already known to carry comments are not asked about again. That
+    // answer cannot change into a safe one: it means somebody has written here,
+    // and no later reading makes deleting it acceptable. A remembered zero is
+    // NOT reused -- anyone can comment at any time, and treating a stale zero
+    // as final is how a chapter that has since been discussed gets deleted.
+    let known: { mdChapterId: string; comments: number }[] = [];
+    try {
+      known = await this.deps.prisma.chapterCommentCount.findMany({
+        where: { mdChapterId: { in: chapterIds }, comments: { gte: COMMENTS_NEEDING_REVIEW } },
+        select: { mdChapterId: true, comments: true },
+      });
+    } catch (error) {
+      // The cache is an optimisation; losing it costs requests, not accuracy.
+      this.deps.log.warn({ error }, "could not read remembered comment counts");
+    }
+    for (const row of known) counts.set(row.mdChapterId, row.comments);
+
+    const toFetch = chapterIds.filter((id) => !counts.has(id));
+    if (toFetch.length === 0) return counts;
+
+    let fetched: Map<string, { comments: number }>;
+    try {
+      fetched = await this.deps.md.chapterStatistics(toFetch);
+    } catch (error) {
+      this.deps.log.warn(
+        { error, chapters: toFetch.length },
+        "could not read chapter comment counts; holding those duplicates for review",
+      );
+      // Deliberately partial: the chapters that could not be read are absent,
+      // and an absent chapter is held rather than deleted.
+      return counts;
+    }
+
+    const toRemember: { mdChapterId: string; comments: number }[] = [];
+    for (const [id, entry] of fetched) {
+      counts.set(id, entry.comments);
+      // Only the positives are stored. A zero would be re-checked next time
+      // regardless, so writing one buys nothing and would put a row in this
+      // table for every chapter that has ever been scanned.
+      if (entry.comments >= COMMENTS_NEEDING_REVIEW) {
+        toRemember.push({ mdChapterId: id, comments: entry.comments });
+      }
+    }
+    await this.rememberCommentCounts(toRemember);
+    return counts;
+  }
+
+  /** Persist the chapters found to have comments. Never throws. */
+  private async rememberCommentCounts(
+    rows: { mdChapterId: string; comments: number }[],
+  ): Promise<void> {
+    if (rows.length === 0) return;
+    try {
+      await this.deps.prisma.$transaction(
+        rows.map((row) =>
+          this.deps.prisma.chapterCommentCount.upsert({
+            where: { mdChapterId: row.mdChapterId },
+            create: row,
+            update: { comments: row.comments },
+          }),
+        ),
+      );
+    } catch (error) {
+      // Failing to remember costs a lookup next time and nothing else.
+      this.deps.log.warn({ error, rows: rows.length }, "could not store comment counts");
+    }
   }
 
   /**
