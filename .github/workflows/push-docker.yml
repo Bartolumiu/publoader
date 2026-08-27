@@ -8,6 +8,11 @@ name: Publish images
 # built by hand on an arm64 laptop and pushed single-arch, so every x86_64 server
 # rejected them with `exec format error`: a message that names Prisma and has
 # nothing to do with it. A runner builds both architectures every time.
+#
+# The three images build as a matrix rather than as three steps of one job. They
+# do not depend on each other, and arm64 is emulated under QEMU and therefore
+# slow, so running them in sequence made the wall clock the sum of three
+# emulated builds when it only needs to be the longest one.
 
 on:
   push:
@@ -27,18 +32,14 @@ permissions:
   contents: read
 
 jobs:
-  publish:
+  # Resolved once and shared, so three parallel builds cannot disagree about
+  # which version they are publishing.
+  meta:
     runs-on: ubuntu-latest
+    outputs:
+      owner: ${{ steps.meta.outputs.owner }}
+      version: ${{ steps.meta.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ vars.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
       # A tag push or a manual run publishes that version as well as `latest`;
       # a plain push to master only moves `latest`, so merging never silently
       # overwrites a released version number.
@@ -71,55 +72,89 @@ jobs:
           esac
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # The core image's context is the REPO ROOT, not platform/: it copies docs/
-      # into the runtime so the dashboard can serve the operator handbook, and
-      # docs/ is a sibling of platform/. The worker needs nothing outside
-      # platform/, so its context stays narrow.
-      - name: core
+  build:
+    needs: meta
+    runs-on: ubuntu-latest
+    strategy:
+      # One image failing should not cancel the other two: a partial publish is
+      # easier to reason about when the successes are actually published, and
+      # the arch assertion below refuses to pass on a half-finished set anyway.
+      fail-fast: false
+      matrix:
+        include:
+          # The core image's context is the REPO ROOT, not platform/: it copies
+          # docs/ and assets/ into the runtime so the dashboard can serve the
+          # handbook and the card renderer has its fonts, and both are siblings
+          # of platform/.
+          - name: core
+            image: publoader-core
+            file: docker/core/Dockerfile
+            target: ""
+            cache: core
+          - name: core-migrate
+            image: publoader-core-migrate
+            file: docker/core/Dockerfile
+            target: migrate
+            # Reads the core scope as well as its own: `migrate` is a stage of
+            # the same Dockerfile, so most of its layers are core's. In parallel
+            # that hits the previous run's core cache rather than this run's,
+            # which costs a little on the first build after a base change and
+            # nothing afterwards.
+            cache: core-migrate
+          # The worker needs nothing outside platform/, so its context could be
+          # narrower; it is kept at the root so all three share one build
+          # context and therefore one cache of it.
+          - name: worker
+            image: publoader-worker
+            file: docker/worker/Dockerfile
+            target: ""
+            cache: worker
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: ${{ matrix.name }}
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/core/Dockerfile
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
           push: true
+          # Attestations are not consumed by anything that deploys these, and
+          # generating them adds a build and a push per architecture.
+          provenance: false
+          sbom: false
           tags: |
-            ${{ steps.meta.outputs.owner }}/publoader-core:latest
-            ${{ steps.meta.outputs.version && format('{0}/publoader-core:{1}', steps.meta.outputs.owner, steps.meta.outputs.version) || '' }}
-          cache-from: type=gha,scope=core
-          cache-to: type=gha,mode=max,scope=core
+            ${{ needs.meta.outputs.owner }}/${{ matrix.image }}:latest
+            ${{ needs.meta.outputs.version && format('{0}/{1}:{2}', needs.meta.outputs.owner, matrix.image, needs.meta.outputs.version) || '' }}
+          cache-from: |
+            type=gha,scope=${{ matrix.cache }}
+            type=gha,scope=core
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache }}
 
-      - name: core-migrate
-        uses: docker/build-push-action@v6
+  # Cheap, and it catches the exact failure this workflow exists to prevent.
+  # Its own job so it runs after all three have pushed rather than after each.
+  verify:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/login-action@v3
         with:
-          context: .
-          file: docker/core/Dockerfile
-          target: migrate
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ steps.meta.outputs.owner }}/publoader-core-migrate:latest
-            ${{ steps.meta.outputs.version && format('{0}/publoader-core-migrate:{1}', steps.meta.outputs.owner, steps.meta.outputs.version) || '' }}
-          cache-from: type=gha,scope=core
-          cache-to: type=gha,mode=max,scope=core-migrate
-
-      - name: worker
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/worker/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ steps.meta.outputs.owner }}/publoader-worker:latest
-            ${{ steps.meta.outputs.version && format('{0}/publoader-worker:{1}', steps.meta.outputs.owner, steps.meta.outputs.version) || '' }}
-          cache-from: type=gha,scope=worker
-          cache-to: type=gha,mode=max,scope=worker
-
-      # Cheap, and it catches the exact failure this workflow exists to prevent.
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
       - name: Assert both architectures published
+        env:
+          OWNER: ${{ needs.meta.outputs.owner }}
         run: |
           for image in publoader-core publoader-core-migrate publoader-worker; do
-            ref="${{ steps.meta.outputs.owner }}/$image:latest"
+            ref="$OWNER/$image:latest"
             archs=$(docker manifest inspect "$ref" \
               | grep -o '"architecture"[^,]*' | grep -oE 'amd64|arm64' | sort -u | tr '\n' ' ')
             echo "$ref -> ${archs:-none}"

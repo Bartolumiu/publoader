@@ -586,6 +586,89 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
      * core/observability/errorFeed.ts, shared with the bot, the CLI and the
      * dashboard.
      */
+    /**
+     * Raw log lines, newest first.
+     *
+     * The errors feed above is a curated view: it shows what failed. This is
+     * the uncurated one — every line a core service emitted, with the fields it
+     * carried — because the questions that matter during an incident are often
+     * about lines that are not errors at all. What a check concluded, which
+     * titles a run skipped and why, what a decision was made on: all of that was
+     * previously readable only with shell access to the host, and only until the
+     * container restarted.
+     *
+     * Paged by `before` rather than an offset: the table is being appended to
+     * while it is read, so an offset would skip and repeat lines.
+     */
+    scope.get("/api/v1/admin/logs", { preHandler: requireScope("runs:read") }, async (req) => {
+      const query = parseOrThrow(
+        z.object({
+          limit: z.coerce.number().int().min(1).max(1000).default(200),
+          /** pino levels: 10 trace, 20 debug, 30 info, 40 warn, 50 error. */
+          minLevel: z.coerce.number().int().min(10).max(60).optional(),
+          service: z.string().max(64).optional(),
+          component: z.string().max(64).optional(),
+          runId: z.string().max(64).optional(),
+          jobId: z.string().max(64).optional(),
+          /** Case-insensitive substring over the message. */
+          q: z.string().min(1).max(200).optional(),
+          since: z.coerce.date().optional(),
+          /** Cursor: return lines strictly older than this timestamp. */
+          before: z.coerce.date().optional(),
+        }),
+        req.query ?? {},
+      );
+
+      const createdAt: { gte?: Date; lt?: Date } = {};
+      if (query.since) createdAt.gte = query.since;
+      if (query.before) createdAt.lt = query.before;
+
+      const rows = await ctx.prisma.logEvent.findMany({
+        where: {
+          ...(query.minLevel === undefined ? {} : { level: { gte: query.minLevel } }),
+          ...(query.service ? { service: query.service } : {}),
+          ...(query.component ? { component: query.component } : {}),
+          ...(query.runId ? { runId: query.runId } : {}),
+          ...(query.jobId ? { jobId: query.jobId } : {}),
+          ...(query.q ? { msg: { contains: query.q, mode: "insensitive" as const } } : {}),
+          ...(Object.keys(createdAt).length > 0 ? { createdAt } : {}),
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: query.limit,
+      });
+
+      const oldest = rows[rows.length - 1];
+      return {
+        logs: rows,
+        // Feed straight back as `before` to page further into the past.
+        nextBefore: rows.length === query.limit && oldest ? oldest.createdAt.toISOString() : null,
+        /**
+         * Extension runs are NOT here. Worker agents have no database by
+         * design, so a runner's output reaches the host's log stream and the
+         * failure tail on its envelope, but not this table. Said plainly so an
+         * empty result is not read as "nothing happened".
+         */
+        covers: ["core-api", "core-scheduler", "core-processor", "core-uploader"],
+      };
+    });
+
+    /** Distinct services and components present, for the log page's filters. */
+    scope.get("/api/v1/admin/logs/sources", { preHandler: requireScope("runs:read") }, async () => {
+      const [services, components] = await Promise.all([
+        ctx.prisma.logEvent.findMany({ distinct: ["service"], select: { service: true }, take: 50 }),
+        ctx.prisma.logEvent.findMany({
+          distinct: ["component"],
+          select: { component: true },
+          where: { component: { not: null } },
+          take: 200,
+        }),
+      ]);
+      return {
+        services: services.map((row) => row.service).sort(),
+        components: components.map((row) => row.component).filter(Boolean).sort(),
+      };
+    });
+
     scope.get("/api/v1/admin/errors", { preHandler: requireScope("runs:read") }, async (req) => {
       const query = parseOrThrow(
         z.object({

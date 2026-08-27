@@ -93,7 +93,11 @@ describe("unavailableCardOptions", () => {
     expect(opts.chapterNumber).toBe("12.5");
     expect(opts.chapterTitle).toBe("Live title");
     expect(opts.chapterLanguage).toBe("ja");
-    expect(opts.chapterUrl).toBe("https://publisher.example/live");
+    // The url is the deliberate exception. Carding repoints externalUrl, so on
+    // an already-carded chapter MangaDex's value is that replacement rather
+    // than the chapter; taking it would print the replacement under SOURCE and
+    // lose the original chapter link, again on every re-card. The row keeps it.
+    expect(opts.chapterUrl).toBe("https://publisher.example/ch/12");
     // The extension never appears on the MangaDex resource, so it always comes
     // from our row.
     expect(opts.extensionName).toBe("exampleext");

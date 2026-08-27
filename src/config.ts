@@ -47,6 +47,15 @@ const ConfigSchema = z.object({
     .default("false")
     .transform((v) => v === "true"),
   logLevel: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
+  /**
+   * Days of log lines kept in the database for the dashboard's log page.
+   *
+   * Diagnostic volume, not an audit trail: `audit_events` records decisions and
+   * is kept indefinitely, while this table would grow without limit for no
+   * lasting benefit. stdout is unaffected, so the host's own log retention
+   * still applies to the authoritative copy.
+   */
+  logRetentionDays: z.coerce.number().int().min(1).max(365).default(14),
 
   // Lease/queue tuning
   leaseTtlSeconds: z.coerce.number().int().min(30).default(300),
@@ -215,6 +224,7 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): Con
     sessionTtlMinutes: get("SESSION_TTL_MINUTES"),
     sessionCookieSecure: get("SESSION_COOKIE_SECURE"),
     logLevel: get("LOG_LEVEL"),
+    logRetentionDays: get("LOG_RETENTION_DAYS"),
     leaseTtlSeconds: get("LEASE_TTL_SECONDS"),
     sweepIntervalSeconds: get("SWEEP_INTERVAL_SECONDS"),
     schedulerIntervalSeconds: get("SCHEDULER_INTERVAL_SECONDS"),

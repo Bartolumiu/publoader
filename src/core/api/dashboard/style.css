@@ -2380,3 +2380,86 @@ dialog::backdrop {
   background: var(--bad-bg);
   border-right-color: var(--bad-2);
 }
+
+/* ---- raw log stream -------------------------------------------------------
+ * One line per record, monospaced and not wrapped, because the value of this
+ * page is that lines stay comparable down the column. Overflow scrolls
+ * horizontally rather than reflowing: a wrapped log line hides how many lines
+ * there actually are.
+ */
+.logstream {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+  max-height: 68vh;
+  overflow: auto;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: var(--bg-2, #0d1117);
+}
+
+.logline {
+  display: flex;
+  gap: 10px;
+  white-space: pre;
+  padding: 1px 0;
+}
+
+.logline + .logline {
+  border-top: 1px solid transparent;
+}
+
+.log-time {
+  color: var(--dimmer);
+  flex: 0 0 auto;
+}
+
+.log-level {
+  flex: 0 0 auto;
+  width: 5ch;
+  font-weight: 600;
+}
+
+.log-where {
+  color: var(--dimmer);
+  flex: 0 0 auto;
+}
+
+.log-msg {
+  flex: 0 0 auto;
+}
+
+/* Dimmed rather than hidden: the structured fields are usually the answer, but
+ * they should not out-shout the message. */
+.log-fields {
+  color: var(--dimmer);
+  flex: 0 0 auto;
+}
+
+.log-level.log-trace,
+.log-level.log-debug {
+  color: var(--dimmer);
+}
+
+.log-level.log-info {
+  color: var(--ok-2);
+}
+
+.log-level.log-warn {
+  color: var(--warn);
+}
+
+.log-level.log-error,
+.log-level.log-fatal {
+  color: var(--bad);
+}
+
+.logline.log-error .log-msg,
+.logline.log-fatal .log-msg {
+  color: var(--bad);
+}
+
+.logline.log-warn .log-msg {
+  color: var(--warn);
+}
