@@ -46,6 +46,10 @@ x-app-security: &app-security
     options:
       max-size: "20m"
       max-file: "5"
+  labels:
+    # Marks the container auto-updatable. On the anchor so it covers exactly our
+    # own images; postgres and cloudflared don't inherit it and are never touched.
+    com.centurylinklabs.watchtower.scope: publoader
 
 # Every core service reads the same base config. Kept in one anchor so a new
 # tuning knob is added to all four at once rather than to whichever one the
@@ -513,6 +517,46 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # --- watchtower -----------------------------------------------------------
+  # Pulls new images for the scoped services and recreates them, so a push
+  # lands without a deploy. Two things to know:
+  #
+  #  - It does NOTHING against a pinned tag. Point PUBLOADER_CORE_IMAGE and
+  #    PUBLOADER_MIGRATE_IMAGE at `:latest` for it to have any effect.
+  #  - `depends_on` orders `compose up`, not watchtower. `migrate` is included
+  #    (hence INCLUDE/REVIVE_STOPPED) so schema changes do get applied, but
+  #    ordering against the app services is best effort: a release changing both
+  #    schema and code can throw failed queries for a few seconds.
+  #
+  # It holds the Docker socket, which is root on the host. Front it with a
+  # socket proxy if that matters more than the convenience.
+  watchtower:
+    image: containrrr/watchtower:latest
+    restart: unless-stopped
+    environment:
+      WATCHTOWER_SCOPE: publoader
+      WATCHTOWER_POLL_INTERVAL: ${WATCHTOWER_POLL_INTERVAL:-300}
+      # This host has filled its disk on old image layers before.
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_INCLUDE_STOPPED: "true"
+      WATCHTOWER_REVIVE_STOPPED: "true"
+      WATCHTOWER_NO_STARTUP_MESSAGE: "true"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - edge
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Unlabelled on purpose: it does not update itself.
 
 networks:
   # Database plane. `internal: true` removes the default gateway from this
