@@ -720,6 +720,103 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
       },
     );
 
+    /**
+     * Chapters we decided should NOT be carded, and what became of that.
+     *
+     * A RESTORE task means somebody (or a removal audit) judged the card wrong.
+     * Whether the card is actually off is not the task's state -- a restore can
+     * report DONE and change nothing, which is how 23 chapters were recorded as
+     * restored while every one kept its card. The honest signal is which
+     * archive the chapter sits in now: `unavailable` means still carded,
+     * `uploaded` means the card really came off.
+     */
+    scope.get(
+      "/api/v1/admin/chapters/restores",
+      { preHandler: requireScope("chapters:read") },
+      async (req) => {
+        const query = parseOrThrow(
+          z.object({
+            outcome: z.enum(["all", "still-carded", "restored"]).default("all"),
+            limit: z.coerce.number().int().min(1).max(MAX_PAGE).default(DEFAULT_PAGE),
+          }),
+          req.query ?? {},
+        );
+
+        const tasks = await ctx.prisma.uploadTask.findMany({
+          where: { kind: "RESTORE" },
+          orderBy: { updatedAt: "desc" },
+          take: query.limit,
+          select: { id: true, state: true, attempt: true, lastError: true, updatedAt: true, chapter: true },
+        });
+
+        const rowOf = (value: unknown): Record<string, unknown> =>
+          value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
+        const idOf = (task: (typeof tasks)[number]): string | null => {
+          const id = rowOf(task.chapter)["mdChapterId"];
+          return typeof id === "string" ? id : null;
+        };
+
+        const ids = tasks.map(idOf).filter((id): id is string => id !== null);
+        const [carded, live, deleted] = await Promise.all([
+          ctx.prisma.unavailableChapter.findMany({
+            where: { mdChapterId: { in: ids } },
+            select: { mdChapterId: true },
+          }),
+          ctx.prisma.uploadedChapter.findMany({
+            where: { mdChapterId: { in: ids } },
+            select: { mdChapterId: true },
+          }),
+          ctx.prisma.deletedChapter.findMany({
+            where: { mdChapterId: { in: ids } },
+            select: { mdChapterId: true },
+          }),
+        ]);
+        const cardedIds = new Set(carded.map((r) => r.mdChapterId));
+        const liveIds = new Set(live.map((r) => r.mdChapterId));
+        const deletedIds = new Set(deleted.map((r) => r.mdChapterId));
+
+        const rows = tasks
+          .map((task) => {
+            const mdChapterId = idOf(task);
+            const chapter = rowOf(task.chapter);
+            const outcome = !mdChapterId
+              ? "unknown"
+              : cardedIds.has(mdChapterId)
+                ? "still-carded"
+                : deletedIds.has(mdChapterId)
+                  ? "gone"
+                  : liveIds.has(mdChapterId)
+                    ? "restored"
+                    : "unknown";
+            return {
+              mdChapterId,
+              outcome,
+              taskState: task.state,
+              attempt: task.attempt,
+              lastError: task.lastError,
+              at: task.updatedAt,
+              extension: chapter["extensionName"] ?? null,
+              mangaName: chapter["mangaName"] ?? null,
+              mdMangaId: chapter["mdMangaId"] ?? null,
+              chapterNumber: chapter["chapterNumber"] ?? null,
+              chapterLanguage: chapter["chapterLanguage"] ?? null,
+              chapterUrl: chapter["chapterUrl"] ?? null,
+            };
+          })
+          .filter((row) => query.outcome === "all" || row.outcome === query.outcome);
+
+        return {
+          restores: rows,
+          counts: {
+            stillCarded: rows.filter((r) => r.outcome === "still-carded").length,
+            restored: rows.filter((r) => r.outcome === "restored").length,
+            gone: rows.filter((r) => r.outcome === "gone").length,
+          },
+          limit: query.limit,
+        };
+      },
+    );
+
     scope.get("/api/v1/admin/chapters", { preHandler: requireScope("chapters:read") }, async (req) => {
       const query = parseOrThrow(
         z.object({

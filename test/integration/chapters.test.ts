@@ -1309,6 +1309,63 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
       });
       expect(archived.chapterNumber).toBe("1");
     });
+
+    /**
+     * Deleting a CARDED chapter has to clear the unavailable archive too.
+     *
+     * A chapter lives in `uploaded` or in `unavailable`, never both, and delete
+     * only ever cleared `uploaded`. So deleting a carded chapter left its
+     * `unavailable_chapters` row behind permanently, and nothing removes those
+     * later: the archive kept describing chapters MangaDex no longer holds. On
+     * RuriDragon that was 13 rows, which is how a query for "still carded"
+     * answered 36 when the real number was 23.
+     */
+    it("clears the unavailable archive when a carded chapter is deleted", async () => {
+      // Card it first, which is what puts the row in `unavailable`.
+      await run(false);
+      expect(await prisma.unavailableChapter.count({ where: { mdChapterId: uuid(1) } })).toBe(1);
+
+      const calls: string[] = [];
+      const workers = new UploadTaskWorkers({
+        prisma,
+        md: {
+          ...stubMd(calls),
+          deleteChapter: async () => {
+            calls.push("deleteChapter");
+            return true;
+          },
+        } as never,
+        notifier: notifier as never,
+        settings: new SettingsStore(prisma),
+        config,
+        log,
+      });
+
+      const task = await prisma.uploadTask.create({
+        data: {
+          kind: "DELETE",
+          dedupeKey: `del-${uuid(1)}`,
+          state: "LEASED",
+          chapter: {
+            mdChapterId: uuid(1),
+            mdMangaId: uuid(900),
+            mdGroupId: uuid(800),
+            chapterNumber: "1",
+            chapterLanguage: "en",
+            mangaName: "Test Series",
+            extensionName: "exampleext",
+            imageArtifacts: [],
+          },
+        },
+      });
+      await workers.execute(task);
+
+      expect(calls).toContain("deleteChapter");
+      expect(await prisma.unavailableChapter.count({ where: { mdChapterId: uuid(1) } })).toBe(0);
+      expect(await prisma.uploadedChapter.count({ where: { mdChapterId: uuid(1) } })).toBe(0);
+      // The record of what was removed outlives the chapter.
+      expect(await prisma.deletedChapter.count({ where: { mdChapterId: uuid(1) } })).toBe(1);
+    });
   });
 
   // ---- asking the publisher whether a series is still there ----

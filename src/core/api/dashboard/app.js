@@ -1025,6 +1025,7 @@ const NAV = [
     tabs: [
       ["uploaded", "On MangaDex"],
       ["unavailable", "Unavailable"],
+      ["restores", "Restores"],
       ["deleted", "Deleted"],
       ["edited", "Edited"],
     ],
@@ -4039,8 +4040,65 @@ const CHAPTER_ARCHIVE_LABELS = {
   edited: "Last edited",
 };
 
+/**
+ * Chapters whose card we decided was wrong, and whether it actually came off.
+ *
+ * The task state is not the answer. A restore can report DONE and change
+ * nothing -- 23 chapters were recorded that way while every one kept its card.
+ * Which archive the chapter is in NOW is the answer, so that is what `outcome`
+ * reports and what this page is sorted around.
+ */
+function chapterRestores() {
+  const restores = new Resource("chapter-restores", () => api("/chapters/restores?limit=200"));
+  return el(
+    "div",
+    {},
+    card(
+      "Restores",
+      el("p", {
+        class: "dim small",
+        text:
+          "Chapters an audit or an operator judged wrongly carded, and what became of the attempt. " +
+          "“Still carded” means the card is on the chapter right now, whatever the task says.",
+      }),
+      live([restores], (data) => {
+        const rows = data?.restores ?? [];
+        const counts = data?.counts ?? {};
+        return el("div", {}, [
+          el("p", {
+            class: "small",
+            text:
+              `${counts.stillCarded ?? 0} still carded · ${counts.restored ?? 0} restored · ` +
+              `${counts.gone ?? 0} no longer on MangaDex`,
+          }),
+          table(
+            ["Chapter", "Series", "Lang", "Ch", "Outcome", "Task", "Last error"],
+            rows.map((r) => [
+              el("code", { text: (r.mdChapterId ?? "—").slice(0, 8) }),
+              r.mangaName ?? "—",
+              r.chapterLanguage ?? "—",
+              r.chapterNumber ?? "—",
+              el("span", {
+                class: r.outcome === "still-carded" ? "warn-text" : "dim",
+                text: r.outcome,
+              }),
+              r.taskState ?? "—",
+              el("span", { class: "dim small", text: (r.lastError ?? "").slice(0, 90) }),
+            ]),
+            { empty: "No un-card attempts recorded." },
+          ),
+        ]);
+      }),
+    ),
+  );
+}
+
 VIEWS.chapters = (route) => {
   if (route.param) return chapterDetail(route.param);
+  // Not an archive: these are chapters spread across archives, grouped by a
+  // decision made about them. It shares the section because that is where an
+  // operator looks, not because it shares the listing machinery.
+  if (route.tab === "restores") return chapterRestores();
   const archive = route.tab ?? "uploaded";
   const f = () => store.filters;
   const cursors = () => f().chapterCursors[archive] ?? [];

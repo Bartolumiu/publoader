@@ -59,6 +59,17 @@ export default async function setup(): Promise<() => Promise<void>> {
           await client.query(`CREATE DATABASE "${dbName}"`);
           created = !reuse;
         }
+        // Pin the test database to UTC, whatever timezone the server or the
+        // developer's machine runs in.
+        //
+        // Every timestamp column here is `timestamp without time zone` and
+        // Prisma writes JS Dates as UTC, so any SQL comparing one against
+        // `now()` is comparing UTC to the server's local clock. On a machine
+        // set to UTC+03 that makes a heartbeat written a second ago look three
+        // hours old: workers read as dead, leases as expired, backoffs as
+        // elapsed. Seven integration tests failed that way and none of them had
+        // anything wrong with them.
+        await client.query(`ALTER DATABASE "${dbName}" SET timezone = 'UTC'`);
       } finally {
         await client.end();
       }
