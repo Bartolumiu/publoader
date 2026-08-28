@@ -43,6 +43,17 @@ export interface GuardedFetchOptions {
   fetchImpl?: typeof fetch;
   /** Minimum gap between two requests to the same host. */
   minIntervalMs?: number;
+  /**
+   * Extra random delay, as a fraction of `minIntervalMs`, added to every gap.
+   *
+   * A fixed interval is a fingerprint. Requests landing exactly 500ms apart for
+   * an hour look like nothing else, whatever the volume, and several workers
+   * starting one run together march in step from the first request.
+   *
+   * Only ever ADDS: the floor stays `minIntervalMs`, so the politeness this
+   * throttle exists to guarantee is unchanged. 0 restores the metronome.
+   */
+  jitterRatio?: number;
   /** Per-attempt wall-clock timeout. */
   timeoutMs?: number;
   /** Retries AFTER the first attempt, for 5xx and transport errors. */
@@ -54,6 +65,8 @@ export interface GuardedFetchOptions {
   /** Injected for tests. */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
+  /** Injected for tests; defaults to Math.random. */
+  random?: () => number;
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -65,6 +78,8 @@ export interface GuardedFetch {
 
 const DEFAULTS = {
   minIntervalMs: 500,
+  /** 500ms becomes 500-750ms, and a run's first request lands somewhere inside that. */
+  jitterRatio: 0.5,
   timeoutMs: 30_000,
   maxRetries: 3,
   maxRedirects: 5,
@@ -127,6 +142,8 @@ export function createGuardedFetch(opts: GuardedFetchOptions): GuardedFetch {
   const maxRetries = opts.maxRetries ?? DEFAULTS.maxRetries;
   const maxRedirects = opts.maxRedirects ?? DEFAULTS.maxRedirects;
   const maxRetryAfterMs = opts.maxRetryAfterMs ?? DEFAULTS.maxRetryAfterMs;
+  const jitterRatio = opts.jitterRatio ?? DEFAULTS.jitterRatio;
+  const random = opts.random ?? Math.random;
   const now = opts.now ?? (() => Date.now());
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const log = opts.log ?? (() => {});
@@ -140,10 +157,27 @@ export function createGuardedFetch(opts: GuardedFetchOptions): GuardedFetch {
    * reserved before awaiting so concurrent callers queue behind each other
    * instead of all reading the same stale timestamp.
    */
+  /**
+   * `minIntervalMs` plus a random fraction of it. Never less, so the politeness
+   * floor is untouched; the point is only that the gaps stop being identical.
+   */
+  function spacing(): number {
+    if (jitterRatio <= 0) return minIntervalMs;
+    return minIntervalMs + Math.floor(random() * minIntervalMs * jitterRatio);
+  }
+
   async function awaitTurn(host: string): Promise<void> {
     const at = now();
+    // First request to this host starts somewhere inside one interval rather
+    // than immediately. Several workers handed segments of the same run begin
+    // within milliseconds of each other, and without this they stay in step
+    // for the whole run -- a synchronised pattern across addresses, which is
+    // exactly what looks coordinated from the far end.
+    if (!nextAllowedAt.has(host)) {
+      nextAllowedAt.set(host, at + Math.floor(random() * minIntervalMs * jitterRatio));
+    }
     const readyAt = Math.max(at, nextAllowedAt.get(host) ?? 0);
-    nextAllowedAt.set(host, readyAt + minIntervalMs);
+    nextAllowedAt.set(host, readyAt + spacing());
     const wait = readyAt - at;
     if (wait > 0) await sleep(wait);
   }

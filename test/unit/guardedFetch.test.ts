@@ -293,6 +293,9 @@ describe("guardedFetch politeness", () => {
       fetchImpl,
       minIntervalMs: 500,
       now: () => clock,
+      // Jitter off: this asserts the FLOOR, which is the part that must hold
+      // whatever the randomness does.
+      random: () => 0,
       sleep: async (ms) => {
         slept.push(ms);
         clock += ms;
@@ -312,6 +315,7 @@ describe("guardedFetch politeness", () => {
       fetchImpl,
       minIntervalMs: 500,
       now: () => 0,
+      random: () => 0,
       sleep: async (ms) => {
         slept.push(ms);
       },
@@ -319,6 +323,87 @@ describe("guardedFetch politeness", () => {
     await fetchGuarded("https://example.com/1");
     await fetchGuarded("https://other.test/1");
     expect(slept).toEqual([]);
+  });
+
+  /**
+   * A fixed gap is a fingerprint on its own.
+   *
+   * Requests landing exactly 500ms apart for an hour look like nothing a person
+   * produces, whatever the volume, and workers handed segments of the same run
+   * start within milliseconds of each other — so without jitter they march in
+   * step across several addresses at once, which is the pattern most worth not
+   * showing a publisher.
+   *
+   * The floor is the invariant: jitter may only ever ADD.
+   */
+  it("adds a random extra to each gap, never less than the floor", async () => {
+    const slept: number[] = [];
+    let clock = 0;
+    const { fetchImpl } = recorder(() => new Response("ok"));
+    const fetchGuarded = createGuardedFetch({
+      allowedHosts: ["example.com"],
+      fetchImpl,
+      minIntervalMs: 500,
+      jitterRatio: 0.5,
+      // Maximum jitter, so the upper bound is exercised rather than averaged.
+      random: () => 0.999,
+      now: () => clock,
+      sleep: async (ms) => {
+        slept.push(ms);
+        clock += ms;
+      },
+    });
+    await fetchGuarded("https://example.com/1");
+    await fetchGuarded("https://example.com/2");
+    await fetchGuarded("https://example.com/3");
+
+    // First request staggered, then gaps inside [500, 750].
+    for (const wait of slept) {
+      expect(wait).toBeGreaterThanOrEqual(0);
+      expect(wait).toBeLessThanOrEqual(750);
+    }
+    const gaps = slept.slice(1);
+    for (const gap of gaps) expect(gap).toBeGreaterThanOrEqual(500);
+  });
+
+  it("staggers the first request so parallel workers do not start in lockstep", async () => {
+    const slept: number[] = [];
+    const { fetchImpl } = recorder(() => new Response("ok"));
+    const fetchGuarded = createGuardedFetch({
+      allowedHosts: ["example.com"],
+      fetchImpl,
+      minIntervalMs: 500,
+      jitterRatio: 0.5,
+      random: () => 0.5,
+      now: () => 0,
+      sleep: async (ms) => {
+        slept.push(ms);
+      },
+    });
+    await fetchGuarded("https://example.com/1");
+    // Without the stagger this is 0 for every worker at once.
+    expect(slept[0]).toBe(125);
+  });
+
+  it("restores an exact interval when jitter is turned off", async () => {
+    const slept: number[] = [];
+    let clock = 0;
+    const { fetchImpl } = recorder(() => new Response("ok"));
+    const fetchGuarded = createGuardedFetch({
+      allowedHosts: ["example.com"],
+      fetchImpl,
+      minIntervalMs: 500,
+      jitterRatio: 0,
+      random: () => 0.999,
+      now: () => clock,
+      sleep: async (ms) => {
+        slept.push(ms);
+        clock += ms;
+      },
+    });
+    await fetchGuarded("https://example.com/1");
+    await fetchGuarded("https://example.com/2");
+    expect(slept).toEqual([500]);
   });
 
   it("counts every request it issues, hops included", async () => {
