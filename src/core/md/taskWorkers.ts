@@ -815,6 +815,24 @@ export class UploadTaskWorkers {
       if (echoedAPage || echoedAWrite) return;
     }
 
+    // Re-cards stop here. The echo above is free; the read below is not, and
+    // for a re-card it cannot take the fast path at all: the page count stays
+    // at one, and MangaDex's commit echo reports a STALE version (it said 7
+    // for a chapter that had reached 13). So every re-card fell through to the
+    // read loop and sat out MangaDex's cache -- 15 to 20 seconds of sleeping,
+    // which was two thirds of the time a re-card took and the reason a 2,425
+    // chapter sweep was measured in days.
+    //
+    // What that bought was small. A re-card replaces an image on a chapter
+    // already carded, so a silent failure leaves the OLD card in place rather
+    // than a live chapter looking dead. The dangerous direction -- a card that
+    // never landed on a live chapter -- is the first-card case, which keeps its
+    // confirmation because the echoed page count settles it without waiting.
+    if (before.pages > 0) {
+      log.info({ mdChapterId }, "re-card committed; not waiting on the read to confirm it");
+      return;
+    }
+
     let pages: number | null = null;
     let version: number | null = null;
 
