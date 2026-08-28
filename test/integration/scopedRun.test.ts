@@ -394,6 +394,67 @@ describe.skipIf(!dbReady())("scoped runs", () => {
     expect(uploads.map((task) => (task.chapter as { chapterId: string }).chapterId)).toEqual(["a3"]);
   });
 
+  /**
+   * A carded chapter the publisher is listing again.
+   *
+   * Nothing else can notice these: `findExtraChapters` skips anything already
+   * carded, because carding repoints `externalUrl` and a carded chapter would
+   * otherwise look unlisted forever. The price of that exclusion is that
+   * carding is one-way, so a chapter taken down and later re-opened keeps its
+   * card and goes on telling readers it is unavailable. A real sweep found 36
+   * in that state.
+   */
+  it("reports carded chapters the publisher lists again", async () => {
+    const warns: { msg: string; fields: Record<string, unknown> }[] = [];
+    const capturing = (): never => {
+      const node = {
+        child: () => capturing(),
+        info: () => undefined,
+        debug: () => undefined,
+        error: () => undefined,
+        warn: (fields: Record<string, unknown>, msg?: string) => {
+          warns.push({ msg: msg ?? "", fields });
+        },
+      };
+      return node as never;
+    };
+
+    // Carded, but its publisher link is one the listing below still carries.
+    await prisma.unavailableChapter.create({
+      data: {
+        mdChapterId: "aaaa1111-0000-4000-8000-000000000001",
+        unavailableAt: new Date("2026-08-26T12:00:00Z"),
+        extension: "testext",
+        chapterUrl: "https://publisher.example/a/1",
+        chapterNumber: "1",
+        chapterLanguage: "en",
+        mangaName: "Series A",
+        mdMangaId: SERIES_A,
+      },
+    });
+
+    const { run } = await runWithEnvelope({
+      scopeMangaIds: [],
+      stillListed: [
+        { mdMangaId: SERIES_A, mangaId: "series-a", chapterId: "a1", url: "https://publisher.example/a/1" },
+      ],
+      updated: [],
+    });
+
+    const processor = new RunProcessor(prisma, fakeMd(), capturing(), { botUserId: BOT });
+    await processor.processRun({
+      id: run.id,
+      extension: "testext",
+      bundleSha256: BUNDLE,
+      kind: "CLEAN",
+      scopeMangaIds: [],
+    });
+
+    const revived = warns.find((w) => w.msg.includes("listed by the publisher again"));
+    expect(revived).toBeTruthy();
+    expect(revived?.fields["revived"]).toBe(1);
+  });
+
   it("marks the run processed either way", async () => {
     const { run } = await runWithEnvelope({ scopeMangaIds: [SERIES_A], stillListed: A_LOST_ONE });
     const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
