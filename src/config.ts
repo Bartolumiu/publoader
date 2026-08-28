@@ -103,7 +103,22 @@ const ConfigSchema = z.object({
    * than act on unverified ownership.
    */
   mdBotUserId: z.string().optional(),
-  mdRatelimitMs: z.coerce.number().int().default(2000),
+  /**
+   * FLOOR on the gap between MangaDex requests, not the pace.
+   *
+   * The pace comes from `x-ratelimit-remaining` on every response, which
+   * describes the budget as MangaDex sees it. This is only the fastest the
+   * client will go while that budget is healthy.
+   *
+   * It used to be the whole mechanism, and had to be set for the worst case:
+   * the limit is per IP while the gate is per process, so core-api,
+   * core-processor and core-uploader each kept a private metronome and none
+   * could see the other two spending the same allowance. 2000ms is a tenth of
+   * what MangaDex permits, and it cost every card about twelve seconds of pure
+   * waiting. With the headers doing the real work, three processes at this
+   * floor observe the same depletion and back off together.
+   */
+  mdRatelimitMs: z.coerce.number().int().default(250),
   uploadRetry: z.coerce.number().int().min(1).default(3),
 
   // Discord notifications (core only)
