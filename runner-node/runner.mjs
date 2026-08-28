@@ -210,6 +210,17 @@ function log(level, message, fields) {
 
 const FETCH_DEFAULTS = {
   minIntervalMs: 500,
+  /**
+   * Extra random delay, as a fraction of minIntervalMs, added to every gap.
+   *
+   * A fixed interval is a fingerprint independent of volume: requests landing
+   * exactly 500ms apart for an hour look like nothing else. Worse, workers
+   * handed segments of the same run start within milliseconds of each other,
+   * so without this they march in step across several addresses at once.
+   *
+   * Only ever ADDS delay, so the politeness floor is untouched.
+   */
+  jitterRatio: 0.5,
   timeoutMs: 30_000,
   maxRetries: 3,
   maxRedirects: 5,
@@ -263,9 +274,11 @@ async function drain(res) {
   }
 }
 
-function createGuardedFetch(allowedHosts) {
+function createGuardedFetch(allowedHosts, throttle = {}) {
   const nextAllowedAt = new Map();
   const state = { requestCount: 0 };
+  const minIntervalMs = throttle.minIntervalMs ?? FETCH_DEFAULTS.minIntervalMs;
+  const jitterRatio = throttle.jitterRatio ?? FETCH_DEFAULTS.jitterRatio;
 
   const requireAllowed = (url) => {
     if (url.protocol !== "http:" && url.protocol !== "https:") {
@@ -276,10 +289,22 @@ function createGuardedFetch(allowedHosts) {
     }
   };
 
+  /** minIntervalMs plus a random fraction of it; never less. */
+  const spacing = () =>
+    jitterRatio > 0
+      ? minIntervalMs + Math.floor(Math.random() * minIntervalMs * jitterRatio)
+      : minIntervalMs;
+
   const awaitTurn = async (host) => {
     const at = Date.now();
+    // The first request to a host waits a random slice of one interval rather
+    // than firing immediately, so workers given segments of the same run do
+    // not start in lockstep and then stay that way for the whole run.
+    if (!nextAllowedAt.has(host)) {
+      nextAllowedAt.set(host, at + Math.floor(Math.random() * minIntervalMs * jitterRatio));
+    }
     const readyAt = Math.max(at, nextAllowedAt.get(host) ?? 0);
-    nextAllowedAt.set(host, readyAt + FETCH_DEFAULTS.minIntervalMs);
+    nextAllowedAt.set(host, readyAt + spacing());
     if (readyAt > at) await sleep(readyAt - at);
   };
 
@@ -413,11 +438,41 @@ function resolveDataFilePath(bundleDir, dataFiles, name) {
   return target;
 }
 
+/**
+ * Throttle settings from the extension's DATABASE configuration, so pacing can
+ * be changed from the dashboard without publishing a bundle.
+ *
+ *   fetch_jitter           false turns the randomness off entirely
+ *   fetch_jitter_ratio     size of the random extra, as a fraction of the gap
+ *   fetch_min_interval_ms  the gap itself
+ *
+ * Every value is clamped, and a nonsense one falls back to the default rather
+ * than being obeyed. The floor on the interval matters most: this is the only
+ * thing pacing our requests at a publisher, and a stray 0 in a config field
+ * should not be able to turn it into a flood.
+ */
+function readThrottle(overrideOptions) {
+  const options = overrideOptions && typeof overrideOptions === "object" ? overrideOptions : {};
+  const num = (value, fallback, min, max) => {
+    const parsed = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(max, Math.max(min, parsed));
+  };
+
+  const enabled = options.fetch_jitter !== false;
+  return {
+    minIntervalMs: num(options.fetch_min_interval_ms, FETCH_DEFAULTS.minIntervalMs, 100, 60_000),
+    jitterRatio: enabled
+      ? num(options.fetch_jitter_ratio, FETCH_DEFAULTS.jitterRatio, 0, 5)
+      : 0,
+  };
+}
+
 function buildContext(bundleDir, manifest, mangaIdMap, overrideOptions) {
   const allowedHosts = Array.isArray(manifest.allowed_hosts) ? manifest.allowed_hosts : [];
   const dataFiles =
     manifest.data_files && typeof manifest.data_files === "object" ? manifest.data_files : {};
-  const { guarded, state } = createGuardedFetch(allowedHosts);
+  const { guarded, state } = createGuardedFetch(allowedHosts, readThrottle(overrideOptions));
 
   const ctx = {
     manifest: Object.freeze({ ...manifest }),
