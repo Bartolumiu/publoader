@@ -71,10 +71,29 @@ function retryDelaySeconds(attempt: number): number {
  * the two (see UploadTaskWorkers.flushQueueSummary). `claimed` is what decides
  * whether the loop sleeps, since a pass that only failed still did I/O.
  */
+/**
+ * How many tasks of one kind a single pass may take before yielding.
+ *
+ * Without a bound, `drain` empties its kind completely before returning, and
+ * the kinds are visited in a fixed order. A bulk backfill therefore owns the
+ * uploader for as long as it takes: 2,425 re-cards at roughly twenty seconds
+ * each is thirteen hours during which UPLOAD is never looked at again, so a
+ * chapter published in the meantime simply waits. That is the queue "not doing
+ * anything" while plainly being busy.
+ *
+ * UNAVAILABLE gets the small slice because it is the bulk verb -- cards are
+ * backfill, and nobody is waiting on one the way a reader waits on a chapter.
+ * The others keep a large budget: they are ordinary work, and yielding after
+ * every hundred costs a claim query.
+ */
+const DEFAULT_DRAIN_BUDGET = 100;
+const DRAIN_BUDGET: Partial<Record<UploadTaskKind, number>> = { UNAVAILABLE: 10 };
+
 async function drain(kind: UploadTaskKind): Promise<{ processed: number; failed: number }> {
   let processed = 0;
   let failed = 0;
-  while (running) {
+  const budget = DRAIN_BUDGET[kind] ?? DEFAULT_DRAIN_BUDGET;
+  while (running && processed + failed < budget) {
     const task = await tasks.claim(kind, LEASE_TTL_SECONDS);
     if (!task) break;
     const leaseId = task.leaseId ?? "";

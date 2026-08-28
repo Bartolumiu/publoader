@@ -58,6 +58,14 @@ const MAX_OFFSET = 10000;
 const MAX_PAGES = 500;
 const CREATED_AT_EPOCH = "2000-01-01T00:00:00";
 const REQUEST_TIMEOUT_MS = 30_000;
+/**
+ * Ceiling on header-derived spacing.
+ *
+ * A window with one request left and a long reset ahead computes a very wide
+ * gap, which would stall a drain on arithmetic rather than on any real limit.
+ * Past this, waiting for the reset and starting fresh is the better trade.
+ */
+const MAX_PACED_SPACING_MS = 5_000;
 /** Fallback pause when a 429 arrives with no Retry-After (model.py used 60s). */
 const RATELIMIT_FALLBACK_MS = 60_000;
 const BACKOFF_BASE_MS = 2_000;
@@ -121,6 +129,44 @@ export function optimisticLockVersion(err: unknown): number | null {
     if (Number.isInteger(version) && version > 0) return version;
   }
   return null;
+}
+
+/**
+ * What the last response's rate-limit headers imply about our pace.
+ *
+ * Exported and pure because it is the arithmetic that decides how hard this
+ * platform hits MangaDex, and that is worth testing directly rather than
+ * through a client that really sleeps.
+ *
+ * `null` means the headers said nothing usable, so the caller keeps whatever
+ * pace it had. Otherwise `spacingMs` is the gap to leave between requests, and
+ * a non-zero `waitMs` means the window is spent and nothing should go out until
+ * it rolls.
+ */
+export function pacedSpacing(
+  headers: Headers,
+  now: number,
+): { spacingMs: number; waitMs: number } | null {
+  // Presence first: `Number(null)` is 0, which is perfectly finite, so testing
+  // only the parse reads a MISSING header as "nothing left" -- and a route that
+  // sends no budget headers would be paced as though it were exhausted.
+  const remainingRaw = headers.get("x-ratelimit-remaining");
+  const resetRaw = headers.get("x-ratelimit-retry-after");
+  if (remainingRaw === null || resetRaw === null) return null;
+
+  const remaining = Number(remainingRaw);
+  const resetAt = Number(resetRaw);
+  if (!Number.isFinite(remaining) || !Number.isFinite(resetAt)) return null;
+
+  // A window that has already rolled says nothing about the next one, so fall
+  // back to the floor rather than pacing off a stale reading.
+  const msLeft = resetAt * 1000 - now;
+  if (msLeft <= 0) return { spacingMs: 0, waitMs: 0 };
+  if (remaining <= 0) return { spacingMs: 0, waitMs: msLeft + 1000 };
+
+  // Spread what is left across the time left. Self-correcting: the gap widens
+  // as the budget runs down and returns to the floor once the window rolls.
+  return { spacingMs: Math.min(msLeft / remaining, MAX_PACED_SPACING_MS), waitMs: 0 };
 }
 
 /** Generic MangaDex entity as it comes off the wire. */
@@ -279,6 +325,13 @@ export class MdClient implements MdExtendedApi {
   /** Serialises *slot acquisition* only; requests may still overlap in flight. */
   private gate: Promise<void> = Promise.resolve();
   private nextRequestAt = 0;
+  /**
+   * Spacing derived from the last response's rate-limit headers.
+   *
+   * Zero until MangaDex has told us something, so a fresh client runs at the
+   * configured floor rather than guessing at a budget it has not seen.
+   */
+  private pacedSpacingMs = 0;
 
   constructor(
     private readonly config: Config,
@@ -304,8 +357,36 @@ export class MdClient implements MdExtendedApi {
     await previous;
     const wait = this.nextRequestAt - Date.now();
     if (wait > 0) await sleep(wait);
-    this.nextRequestAt = Date.now() + this.config.mdRatelimitMs;
+    // The configured interval is a FLOOR, not the pace. What MangaDex says is
+    // left of the budget decides the rest; see paceFromHeaders.
+    this.nextRequestAt = Date.now() + Math.max(this.config.mdRatelimitMs, this.pacedSpacingMs);
     release();
+  }
+
+  /**
+   * Pace from what MangaDex says is left, instead of from a fixed guess.
+   *
+   * Every response carries `x-ratelimit-remaining` and, as a unix timestamp,
+   * `x-ratelimit-retry-after` for when the window resets. Spreading what is
+   * left over the time remaining is self-correcting: spacing widens as the
+   * budget runs down and returns to the floor once the window rolls.
+   *
+   * This is also the only honest way to pace THIS system. The limit is per IP
+   * and the gate is per process, so core-api, core-processor and core-uploader
+   * each held their own metronome and none of them could see the other two
+   * spending the same budget. A fixed interval had to be set for the worst
+   * case, which is why it sat at 2s -- a tenth of what MangaDex allows -- and
+   * every card paid twelve seconds of waiting for it. These headers describe
+   * the SHARED budget, so all three observe the same depletion and back off
+   * together without knowing about each other.
+   */
+  private paceFromHeaders(headers: Headers): void {
+    const paced = pacedSpacing(headers, Date.now());
+    if (!paced) return;
+    this.pacedSpacingMs = paced.spacingMs;
+    // Spent. Waiting for the reset here costs one pause; spending it is a 429
+    // for whichever caller gets there first.
+    if (paced.waitMs > 0) this.delayGate(paced.waitMs);
   }
 
   /** Push the gate out so every pending caller respects a server-side pause. */
@@ -415,6 +496,9 @@ export class MdClient implements MdExtendedApi {
         }
       }
       const status = response.status;
+      // Every response, not just the 429s. Learning only from rejections means
+      // only ever finding the limit by crossing it.
+      this.paceFromHeaders(response.headers);
 
       if (successfulCodes.includes(status) || (status >= 200 && status < 300)) {
         return { status, data };
