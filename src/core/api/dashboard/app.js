@@ -6681,6 +6681,9 @@ VIEWS.extensions = (route) => {
   const removal = new Resource("removal-mode", () =>
     can("settings:read") ? api("/removal-mode", { quiet: true }) : Promise.resolve(null),
   );
+  const throttle = new Resource("fetch-throttle", () =>
+    can("settings:read") ? api("/fetch-throttle", { quiet: true }) : Promise.resolve(null),
+  );
 
   return el(
     "div",
@@ -6689,6 +6692,23 @@ VIEWS.extensions = (route) => {
       ? card(
           "Chapter removal mode",
           live([removal], (data) => (data ? removalModeControls(data, removal) : el("span", {})), {
+            reserve: 40,
+            skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
+          }),
+        )
+      : null,
+    can("settings:read")
+      ? card(
+          "Publisher fetch pacing",
+          el("p", {
+            class: "dim small",
+            text:
+              "How fast a worker may talk to one publisher, and how regular it looks. A fixed " +
+              "interval is recognisable on its own, and workers given segments of the same run " +
+              "would otherwise start in step. Extensions can override this individually on their " +
+              "own Config tab.",
+          }),
+          live([throttle], (data) => (data ? fetchThrottleControls(data, throttle) : el("span", {})), {
             reserve: 40,
             skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
           }),
@@ -6760,6 +6780,79 @@ function removalModeControls(removal, resource) {
         }),
     }),
   );
+}
+
+/**
+ * The global pacing controls.
+ *
+ * Bounds mirror the server's, which enforces them again: this stops a typo at
+ * the keyboard, not a bad request. The interval floor is the one that matters —
+ * this throttle is the only thing pacing requests at a publisher.
+ */
+function fetchThrottleControls(data, resource) {
+  const values = data.global ?? data.defaults ?? {};
+  const interval = el("input", {
+    id: "throttle-interval",
+    type: "number",
+    min: "100",
+    max: "60000",
+    step: "50",
+    value: String(values.minIntervalMs ?? 500),
+    "aria-label": "Minimum gap between requests, milliseconds",
+  });
+  const jitter = el("input", {
+    id: "throttle-jitter",
+    type: "checkbox",
+    "aria-label": "Randomise the gap",
+  });
+  jitter.checked = values.jitter !== false;
+  const ratio = el("input", {
+    id: "throttle-ratio",
+    type: "number",
+    min: "0",
+    max: "5",
+    step: "0.1",
+    value: String(values.jitterRatio ?? 0.5),
+    "aria-label": "Random extra, as a fraction of the gap",
+  });
+
+  const overrides = Object.keys(data.overrides ?? {});
+  return el("div", {}, [
+    row(
+      el("label", { class: "inline", for: "throttle-interval", text: "Minimum gap (ms)" }),
+      interval,
+      el("label", { class: "inline", for: "throttle-jitter", text: "Randomise" }),
+      jitter,
+      el("label", { class: "inline", for: "throttle-ratio", text: "Extra (x gap)" }),
+      ratio,
+      gatedButton("settings:write", {
+        text: "Save",
+        onclick: (event) =>
+          act(
+            "fetch-throttle.set",
+            () =>
+              api("/fetch-throttle", {
+                method: "POST",
+                body: {
+                  minIntervalMs: Number(interval.value),
+                  jitter: jitter.checked,
+                  jitterRatio: Number(ratio.value),
+                },
+              }),
+            { button: event.currentTarget, refresh: [resource] },
+          ),
+      }),
+    ),
+    // Named rather than counted: "3 overrides" tells an operator nothing about
+    // whether the global they are editing actually reaches the extension they
+    // have in mind.
+    overrides.length
+      ? el("p", {
+          class: "dim small",
+          text: `Overridden for: ${overrides.join(", ")}. Those extensions ignore the fields they set here.`,
+        })
+      : el("p", { class: "dim small", text: "No extension overrides; every extension follows this." }),
+  ]);
 }
 
 async function triggerRun(extension, kind, button) {
