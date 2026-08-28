@@ -34,7 +34,7 @@ import { countOutstandingErrors } from "../../observability/errorFeed.js";
  * reads was never passed to core-api at all.
  */
 const WORKER_IMAGE = process.env["PUBLOADER_WORKER_IMAGE"] ?? "ardax/publoader-worker:latest";
-import { VALID_REMOVAL_MODES } from "../../store/settings.js";
+import { DEFAULT_FETCH_THROTTLE, VALID_REMOVAL_MODES } from "../../store/settings.js";
 import { BundleRejectedError } from "../../store/bundles.js";
 import { MapSyncService } from "../../mapsync/service.js";
 import AdmZip from "adm-zip";
@@ -596,6 +596,62 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       await ctx.audit.record(actor(req), "removal_mode.set", body.mode);
       return { ok: true, mode: body.mode };
     });
+
+    // ---- publisher fetch pacing ----
+
+    /**
+     * How fast workers may talk to a publisher, and how regular it looks.
+     *
+     * Operator infrastructure, not extension config: the operator owns how hard
+     * their addresses hit a publisher, and the answer differs per publisher
+     * without the extension having a say. `overrides` is per extension and
+     * merges over the global field by field, so raising one interval does not
+     * mean restating the jitter that was already fine.
+     */
+    scope.get("/api/v1/admin/fetch-throttle", { preHandler: requireScope("settings:read") }, async () => ({
+      global: await ctx.settings.getFetchThrottle(),
+      overrides: await ctx.settings.getFetchThrottleOverrides(),
+      defaults: DEFAULT_FETCH_THROTTLE,
+    }));
+
+    const throttleBody = z
+      .object({
+        minIntervalMs: z.coerce.number().int().min(100).max(60_000).optional(),
+        jitter: z.boolean().optional(),
+        jitterRatio: z.coerce.number().min(0).max(5).optional(),
+      })
+      .strict();
+
+    scope.post("/api/v1/admin/fetch-throttle", { preHandler: requireScope("settings:write") }, async (req) => {
+      const body = throttleBody.parse(req.body);
+      await ctx.settings.setFetchThrottle(body);
+      const applied = await ctx.settings.getFetchThrottle();
+      await ctx.audit.record(actor(req), "fetch_throttle.set", "global", applied);
+      return { ok: true, global: applied };
+    });
+
+    /**
+     * One extension's override. An empty body clears it, so the extension goes
+     * back to following the global rather than being pinned to whatever the
+     * global happened to be when it was set.
+     */
+    scope.post(
+      "/api/v1/admin/fetch-throttle/:name",
+      { preHandler: requireScope("settings:write") },
+      async (req, reply) => {
+        const { name } = req.params as { name: string };
+        if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
+        const body = throttleBody.parse(req.body ?? {});
+        const clearing = Object.keys(body).length === 0;
+        await ctx.settings.setFetchThrottleOverride(name, clearing ? null : body);
+        const applied = await ctx.settings.getFetchThrottle(name);
+        await ctx.audit.record(actor(req), "fetch_throttle.set", name, {
+          cleared: clearing,
+          ...applied,
+        });
+        return { ok: true, extension: name, cleared: clearing, effective: applied };
+      },
+    );
 
     // ---- webhook verbosity ----
     // Only the successful per-chapter embeds are switchable. Failures are
