@@ -155,6 +155,15 @@ model Run {
   /// that as "the publisher dropped it" would unpublish the catalogue.
   scopeMangaIds      String[]  @default([]) @map("scope_manga_ids")
   triggeredBy        String?   @map("triggered_by")
+  /// When the "Found N chapters" summary was announced, so it is announced once.
+  ///
+  /// Processing is not resumable: a run that is interrupted stays in INGESTING
+  /// and the next tick starts it again from the top, re-sending anything it had
+  /// already sent. A container restart mid-run is ordinary -- watchtower does it
+  /// on every deploy -- and one clean run announced itself four times in an
+  /// evening because of it. Claimed atomically, so two processors racing the
+  /// same run still send once.
+  summaryNotifiedAt  DateTime? @map("summary_notified_at")
   scheduledFor       DateTime? @map("scheduled_for")
   startedAt          DateTime? @map("started_at")
   completedAt        DateTime? @map("completed_at")

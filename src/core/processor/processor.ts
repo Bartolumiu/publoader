@@ -224,6 +224,72 @@ export class RunProcessor {
     }
   }
 
+  /**
+   * Carded chapters the publisher is listing again.
+   *
+   * Nothing else notices these. `findExtraChapters` skips anything already
+   * carded -- it has to, because carding repoints `externalUrl` away from the
+   * publisher's chapter, so a carded chapter looks unlisted on every later run
+   * and would be re-queued forever. The cost of that exclusion is that carding
+   * is one-way: once a chapter is carded, no pass ever asks about it again.
+   *
+   * So a chapter the publisher takes down and later re-opens keeps its card
+   * indefinitely, showing readers "no longer available" over something they can
+   * read. MangaPlus re-opens chapters for events routinely; a single sweep
+   * found 36 in that state, against 74 carded by an actual misjudgement.
+   *
+   * This only REPORTS. Removing the card is a different problem and currently
+   * an unsolved one -- MangaDex accepts the commit that would do it and changes
+   * nothing -- so queueing restores here would just fill the dead-letter queue.
+   * Naming them is what lets somebody act when that is fixed.
+   */
+  private async reportRevivedChapters(
+    extension: string,
+    listing: Chapter[] | null,
+    log: Logger,
+  ): Promise<void> {
+    // No catalogue, no evidence: an UPDATE run's listing is null, and absence
+    // from a partial one means nothing.
+    if (listing === null) return;
+
+    const listed = new Set<string>();
+    for (const chapter of listing) {
+      if (chapter.chapterUrl) listed.add(chapter.chapterUrl);
+    }
+    if (listed.size === 0) return;
+
+    const carded = await this.prisma.unavailableChapter.findMany({
+      where: { extension, chapterUrl: { not: null } },
+      select: {
+        mdChapterId: true,
+        chapterUrl: true,
+        chapterNumber: true,
+        chapterLanguage: true,
+        mangaName: true,
+      },
+    });
+
+    const revived = carded.filter((row) => row.chapterUrl && listed.has(row.chapterUrl));
+    if (revived.length === 0) return;
+
+    log.warn(
+      {
+        extension,
+        revived: revived.length,
+        carded: carded.length,
+        // Capped: the count is the alarm, and the whole list belongs in a
+        // query rather than in one log line.
+        sample: revived.slice(0, 20).map((row) => ({
+          mdChapterId: row.mdChapterId,
+          manga: row.mangaName,
+          language: row.chapterLanguage,
+          chapter: row.chapterNumber,
+        })),
+      },
+      "carded chapters are listed by the publisher again; their cards are now wrong",
+    );
+  }
+
   /** Process every run currently waiting in INGESTING. Returns the count. */
   async tick(): Promise<number> {
     const attempted = new Set<string>();
@@ -332,7 +398,26 @@ export class RunProcessor {
         "scoped run: not announcing a run summary for a probe of part of the catalogue",
       );
     } else {
-      await this.reportRunSummary(run.extension, merged.untrackedManga, merged.updatedChapters.length);
+      // Once per run, not once per attempt. Processing is not resumable: an
+      // interrupted run stays in INGESTING and the next tick starts it again
+      // from the top. A restart mid-run is ordinary -- a deploy causes one --
+      // and this line re-announced the same run four times in an evening.
+      //
+      // The conditional update IS the claim: whoever flips it from null sends,
+      // so two processors racing the same run still announce once.
+      const claimed = await this.prisma.run.updateMany({
+        where: { id: run.id, summaryNotifiedAt: null },
+        data: { summaryNotifiedAt: new Date() },
+      });
+      if (claimed.count === 1) {
+        await this.reportRunSummary(
+          run.extension,
+          merged.untrackedManga,
+          merged.updatedChapters.length,
+        );
+      } else {
+        log.info("run summary already announced; not repeating it for this attempt");
+      }
     }
 
     const updatedByManga = groupByMdManga(merged.updatedChapters);
@@ -561,6 +646,8 @@ export class RunProcessor {
       groupId,
       log,
     );
+
+    await this.reportRevivedChapters(run.extension, merged.allChapters, log);
 
     log.info({ ...totals, dupes }, "run processed");
     await this.markProcessed(run.id, log);
