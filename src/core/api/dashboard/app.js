@@ -6855,6 +6855,85 @@ function fetchThrottleControls(data, resource) {
   ]);
 }
 
+/**
+ * One extension's pacing override.
+ *
+ * The inputs start from what this extension EFFECTIVELY uses, so the numbers on
+ * screen are the ones its workers obey rather than a blank form beside an
+ * invisible global. Whether that came from an override or the global is said in
+ * words, because the two look identical in a filled-in field and only one of
+ * them follows the global when it changes.
+ */
+function extensionThrottleControls(name, data, resource) {
+  const override = (data.overrides ?? {})[name] ?? {};
+  const overridden = Object.keys(override).length > 0;
+  const effective = { ...(data.defaults ?? {}), ...(data.global ?? {}), ...override };
+
+  const interval = el("input", {
+    type: "number",
+    min: "100",
+    max: "60000",
+    step: "50",
+    value: String(effective.minIntervalMs ?? 500),
+    "aria-label": `Minimum gap for ${name}, milliseconds`,
+  });
+  const jitter = el("input", { type: "checkbox", "aria-label": `Randomise the gap for ${name}` });
+  jitter.checked = effective.jitter !== false;
+  const ratio = el("input", {
+    type: "number",
+    min: "0",
+    max: "5",
+    step: "0.1",
+    value: String(effective.jitterRatio ?? 0.5),
+    "aria-label": `Random extra for ${name}`,
+  });
+
+  const post = (body, event) =>
+    act(
+      "fetch-throttle.set",
+      () =>
+        api(`/fetch-throttle/${encodeURIComponent(name)}`, { method: "POST", body }),
+      { button: event.currentTarget, refresh: [resource] },
+    );
+
+  return el("div", {}, [
+    row(
+      el("span", { class: "inline", text: "Minimum gap (ms)" }),
+      interval,
+      el("span", { class: "inline", text: "Randomise" }),
+      jitter,
+      el("span", { class: "inline", text: "Extra (x gap)" }),
+      ratio,
+      gatedButton("settings:write", {
+        text: "Override",
+        onclick: (event) =>
+          post(
+            {
+              minIntervalMs: Number(interval.value),
+              jitter: jitter.checked,
+              jitterRatio: Number(ratio.value),
+            },
+            event,
+          ),
+      }),
+      // An empty body clears, which is NOT the same as saving the current
+      // global into the override: a cleared extension tracks the global later.
+      overridden
+        ? gatedButton("settings:write", {
+            text: "Follow global",
+            onclick: (event) => post({}, event),
+          })
+        : el("span", {}),
+    ),
+    el("p", {
+      class: overridden ? "warn-text small" : "dim small",
+      text: overridden
+        ? `Overridden for ${name}: ${Object.keys(override).join(", ")}. Changes to the global will not reach it.`
+        : `Following the global. Saving an override pins ${name} to these values.`,
+    }),
+  ]);
+}
+
 async function triggerRun(extension, kind, button) {
   if (
     kind === "CLEAN" &&
@@ -7661,12 +7740,34 @@ function relationList(spec, initialRows) {
  */
 function configPanel(name) {
   const config = new Resource(`config:${name}`, () => api(`/extensions/${encodeURIComponent(name)}/config`));
+  const throttle = new Resource(`throttle:${name}`, () =>
+    can("settings:read") ? api("/fetch-throttle", { quiet: true }) : Promise.resolve(null),
+  );
   const writable = can("extensions:write");
 
   return el(
     "div",
     {},
     extensionTabs(name, "config"),
+    can("settings:read")
+      ? card(
+          "Fetch pacing",
+          el("p", {
+            class: "dim small",
+            text:
+              "How fast a worker may talk to this publisher. Set here it overrides the global on " +
+              "System, field by field; cleared, this extension follows the global as it changes.",
+          }),
+          live(
+            [throttle],
+            (data) => (data ? extensionThrottleControls(name, data, throttle) : el("span", {})),
+            {
+              reserve: 40,
+              skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
+            },
+          ),
+        )
+      : null,
     card(
       "Override options",
       live(
