@@ -46,10 +46,25 @@ x-app-security: &app-security
     options:
       max-size: "20m"
       max-file: "5"
+
+# Watchtower labels for the services that run AFTER the schema is current.
+#
+# `depends_on: migrate` orders `compose up`. It does not order watchtower, which
+# recreates containers directly -- so a release carrying a migration brought the
+# app up against a database it was ahead of. That is not hypothetical: it cost
+# one failed run-processing tick at 02:44:54, three seconds before the migration
+# landed. The label is watchtower's own ordering primitive and is the closest
+# thing it offers to the dependency compose already declares.
+#
+# Best effort, not a guarantee, so the app must still tolerate the window: a
+# failed tick leaves the run in INGESTING and the next one retries. The QUEUE is
+# unaffected either way -- upload_tasks live in postgres, an in-flight task has
+# stop_grace_period to finish, and anything cut short is reclaimed by the lease
+# sweep. Restarts cost time, never work.
+x-watchtower-app: &watchtower-app
   labels:
-    # Marks the container auto-updatable. On the anchor so it covers exactly our
-    # own images; postgres and cloudflared don't inherit it and are never touched.
     com.centurylinklabs.watchtower.scope: publoader
+    com.centurylinklabs.watchtower.depends-on: publoader-core-migrate-1
 
 # Every core service reads the same base config. Kept in one anchor so a new
 # tuning knob is added to all four at once rather than to whichever one the
@@ -165,6 +180,8 @@ services:
   # resets, or drops anything.
   migrate:
     <<: [*app-security, *core-build]
+    labels:
+      com.centurylinklabs.watchtower.scope: publoader
     # A separate Dockerfile target that keeps the prisma CLI, so it overrides the
     # image inherited from *core-build. Its build config lives in
     # docker-compose.build.yml for the reason given there.
@@ -195,7 +212,7 @@ services:
   core-api:
     # `public-dns` for the same reason core-uploader has it: this service now
     # reaches MangaDex directly.
-    <<: [*app-security, *core-build, *public-dns]
+    <<: [*app-security, *core-build, *public-dns, *watchtower-app]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -211,7 +228,7 @@ services:
       # about what has NOT changed: uploading chapters remains core-uploader's
       # alone; it owns the upload queue and the upload session, and no other
       # process claims from it.
-      <<: [*core-env, *md-env]
+      <<: [*core-env, *md-env, *watchtower-app]
       PORT: "8100"
       HOST: 0.0.0.0
       # Metrics are NOT on 8100. The tunnel forwards every path on the public
@@ -291,7 +308,7 @@ services:
   # Exactly ONE replica. Scaling it does not increase throughput (workers are
   # the throughput) and duplicate schedulers would race on slot creation.
   core-scheduler:
-    <<: [*app-security, *core-build]
+    <<: [*app-security, *core-build, *watchtower-app]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -332,12 +349,12 @@ services:
   # logic) -> upload tasks (§7). It reads MangaDex but never writes to it, so
   # a bug here cannot post anything; the worst case is a task not created.
   core-processor:
-    <<: [*app-security, *core-build, *public-dns]
+    <<: [*app-security, *core-build, *public-dns, *watchtower-app]
     depends_on:
       migrate:
         condition: service_completed_successfully
     environment:
-      <<: [*core-env, *md-env]
+      <<: [*core-env, *md-env, *watchtower-app]
       METRICS_PORT: "8102"
       HOST: 0.0.0.0
     # Internal only (see the note on core-scheduler). Scrape
@@ -373,12 +390,12 @@ services:
   # Exactly ONE replica: the MangaDex upload session is per-account state, and
   # two uploaders would clobber each other's session.
   core-uploader:
-    <<: [*app-security, *core-build, *public-dns]
+    <<: [*app-security, *core-build, *public-dns, *watchtower-app]
     depends_on:
       migrate:
         condition: service_completed_successfully
     environment:
-      <<: [*core-env, *md-env]
+      <<: [*core-env, *md-env, *watchtower-app]
       METRICS_PORT: "8103"
       HOST: 0.0.0.0
     # Internal only (see the note on core-scheduler). Scrape
@@ -431,7 +448,7 @@ services:
     # Optional: started only with `--profile bot` (the switcher's
     # `./scripts/publoader <env> up -d --profile bot`). Without it the core runs Discord-free.
     profiles: ["bot"]
-    <<: [*app-security, *core-build, *public-dns]
+    <<: [*app-security, *core-build, *public-dns, *watchtower-app]
     depends_on:
       core-api:
         condition: service_started

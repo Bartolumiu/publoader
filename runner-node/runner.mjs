@@ -439,40 +439,62 @@ function resolveDataFilePath(bundleDir, dataFiles, name) {
 }
 
 /**
- * Throttle settings from the extension's DATABASE configuration, so pacing can
- * be changed from the dashboard without publishing a bundle.
+ * How to pace requests at this job's publisher.
  *
- *   fetch_jitter           false turns the randomness off entirely
- *   fetch_jitter_ratio     size of the random extra, as a fraction of the gap
- *   fetch_min_interval_ms  the gap itself
+ * `lease.fetchThrottle` is the answer core resolved from the global setting and
+ * any per-extension override. The runner does not recombine those parts: a
+ * worker computing its own policy could disagree with the dashboard showing it,
+ * and pacing is the operator's decision rather than the extension's.
  *
- * Every value is clamped, and a nonsense one falls back to the default rather
- * than being obeyed. The floor on the interval matters most: this is the only
- * thing pacing our requests at a publisher, and a stray 0 in a config field
- * should not be able to turn it into a flood.
+ * The `fetch_*` keys in the extension's own settings are read only when the
+ * lease carries nothing, which happens against a core older than this field.
+ * They are not a second place to configure this.
+ *
+ * Everything is clamped, and a nonsense value falls back to the default rather
+ * than being obeyed. The floor on the interval matters most: this throttle is
+ * the only thing pacing our requests at a publisher, and a stray 0 must not be
+ * able to turn it into a flood.
  */
-function readThrottle(overrideOptions) {
-  const options = overrideOptions && typeof overrideOptions === "object" ? overrideOptions : {};
+function readThrottle(fetchThrottle, overrideOptions) {
   const num = (value, fallback, min, max) => {
     const parsed = typeof value === "number" ? value : Number(value);
     if (!Number.isFinite(parsed)) return fallback;
     return Math.min(max, Math.max(min, parsed));
   };
 
-  const enabled = options.fetch_jitter !== false;
+  if (fetchThrottle && typeof fetchThrottle === "object") {
+    return {
+      minIntervalMs: num(
+        fetchThrottle.minIntervalMs,
+        FETCH_DEFAULTS.minIntervalMs,
+        100,
+        60_000,
+      ),
+      jitterRatio:
+        fetchThrottle.jitter === false
+          ? 0
+          : num(fetchThrottle.jitterRatio, FETCH_DEFAULTS.jitterRatio, 0, 5),
+    };
+  }
+
+  const options = overrideOptions && typeof overrideOptions === "object" ? overrideOptions : {};
   return {
     minIntervalMs: num(options.fetch_min_interval_ms, FETCH_DEFAULTS.minIntervalMs, 100, 60_000),
-    jitterRatio: enabled
-      ? num(options.fetch_jitter_ratio, FETCH_DEFAULTS.jitterRatio, 0, 5)
-      : 0,
+    jitterRatio:
+      options.fetch_jitter === false
+        ? 0
+        : num(options.fetch_jitter_ratio, FETCH_DEFAULTS.jitterRatio, 0, 5),
   };
 }
 
-function buildContext(bundleDir, manifest, mangaIdMap, overrideOptions) {
+function buildContext(bundleDir, manifest, mangaIdMap, overrideOptions, fetchThrottle) {
   const allowedHosts = Array.isArray(manifest.allowed_hosts) ? manifest.allowed_hosts : [];
   const dataFiles =
     manifest.data_files && typeof manifest.data_files === "object" ? manifest.data_files : {};
-  const { guarded, state } = createGuardedFetch(allowedHosts, readThrottle(overrideOptions));
+  const { guarded, state } = createGuardedFetch(
+    allowedHosts,
+    readThrottle(fetchThrottle, overrideOptions),
+  );
 
   const ctx = {
     manifest: Object.freeze({ ...manifest }),
@@ -747,7 +769,13 @@ async function runJob(job, bundleDir, outputDir) {
   const segmentIds = new Set((job.segmentMangaIds ?? []).map(String));
   const cleanRun = String(job.kind ?? "").toUpperCase() === "CLEAN";
 
-  const { ctx, fetchState } = buildContext(bundleDir, manifest, mangaIdMap, job.overrideOptions);
+  const { ctx, fetchState } = buildContext(
+    bundleDir,
+    manifest,
+    mangaIdMap,
+    job.overrideOptions,
+    job.fetchThrottle,
+  );
 
   // Import and factory construction are properties of the bundle: retrying the
   // same pinned sha256 would fail identically, so they raise ContractError

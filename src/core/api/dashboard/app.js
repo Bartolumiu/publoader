@@ -6681,6 +6681,9 @@ VIEWS.extensions = (route) => {
   const removal = new Resource("removal-mode", () =>
     can("settings:read") ? api("/removal-mode", { quiet: true }) : Promise.resolve(null),
   );
+  const throttle = new Resource("fetch-throttle", () =>
+    can("settings:read") ? api("/fetch-throttle", { quiet: true }) : Promise.resolve(null),
+  );
 
   return el(
     "div",
@@ -6689,6 +6692,23 @@ VIEWS.extensions = (route) => {
       ? card(
           "Chapter removal mode",
           live([removal], (data) => (data ? removalModeControls(data, removal) : el("span", {})), {
+            reserve: 40,
+            skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
+          }),
+        )
+      : null,
+    can("settings:read")
+      ? card(
+          "Publisher fetch pacing",
+          el("p", {
+            class: "dim small",
+            text:
+              "How fast a worker may talk to one publisher, and how regular it looks. A fixed " +
+              "interval is recognisable on its own, and workers given segments of the same run " +
+              "would otherwise start in step. Extensions can override this individually on their " +
+              "own Config tab.",
+          }),
+          live([throttle], (data) => (data ? fetchThrottleControls(data, throttle) : el("span", {})), {
             reserve: 40,
             skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
           }),
@@ -6760,6 +6780,158 @@ function removalModeControls(removal, resource) {
         }),
     }),
   );
+}
+
+/**
+ * The global pacing controls.
+ *
+ * Bounds mirror the server's, which enforces them again: this stops a typo at
+ * the keyboard, not a bad request. The interval floor is the one that matters —
+ * this throttle is the only thing pacing requests at a publisher.
+ */
+function fetchThrottleControls(data, resource) {
+  const values = data.global ?? data.defaults ?? {};
+  const interval = el("input", {
+    id: "throttle-interval",
+    type: "number",
+    min: "100",
+    max: "60000",
+    step: "50",
+    value: String(values.minIntervalMs ?? 500),
+    "aria-label": "Minimum gap between requests, milliseconds",
+  });
+  const jitter = el("input", {
+    id: "throttle-jitter",
+    type: "checkbox",
+    "aria-label": "Randomise the gap",
+  });
+  jitter.checked = values.jitter !== false;
+  const ratio = el("input", {
+    id: "throttle-ratio",
+    type: "number",
+    min: "0",
+    max: "5",
+    step: "0.1",
+    value: String(values.jitterRatio ?? 0.5),
+    "aria-label": "Random extra, as a fraction of the gap",
+  });
+
+  const overrides = Object.keys(data.overrides ?? {});
+  return el("div", {}, [
+    row(
+      el("label", { class: "inline", for: "throttle-interval", text: "Minimum gap (ms)" }),
+      interval,
+      el("label", { class: "inline", for: "throttle-jitter", text: "Randomise" }),
+      jitter,
+      el("label", { class: "inline", for: "throttle-ratio", text: "Extra (x gap)" }),
+      ratio,
+      gatedButton("settings:write", {
+        text: "Save",
+        onclick: (event) =>
+          act(
+            "fetch-throttle.set",
+            () =>
+              api("/fetch-throttle", {
+                method: "POST",
+                body: {
+                  minIntervalMs: Number(interval.value),
+                  jitter: jitter.checked,
+                  jitterRatio: Number(ratio.value),
+                },
+              }),
+            { button: event.currentTarget, refresh: [resource] },
+          ),
+      }),
+    ),
+    // Named rather than counted: "3 overrides" tells an operator nothing about
+    // whether the global they are editing actually reaches the extension they
+    // have in mind.
+    overrides.length
+      ? el("p", {
+          class: "dim small",
+          text: `Overridden for: ${overrides.join(", ")}. Those extensions ignore the fields they set here.`,
+        })
+      : el("p", { class: "dim small", text: "No extension overrides; every extension follows this." }),
+  ]);
+}
+
+/**
+ * One extension's pacing override.
+ *
+ * The inputs start from what this extension EFFECTIVELY uses, so the numbers on
+ * screen are the ones its workers obey rather than a blank form beside an
+ * invisible global. Whether that came from an override or the global is said in
+ * words, because the two look identical in a filled-in field and only one of
+ * them follows the global when it changes.
+ */
+function extensionThrottleControls(name, data, resource) {
+  const override = (data.overrides ?? {})[name] ?? {};
+  const overridden = Object.keys(override).length > 0;
+  const effective = { ...(data.defaults ?? {}), ...(data.global ?? {}), ...override };
+
+  const interval = el("input", {
+    type: "number",
+    min: "100",
+    max: "60000",
+    step: "50",
+    value: String(effective.minIntervalMs ?? 500),
+    "aria-label": `Minimum gap for ${name}, milliseconds`,
+  });
+  const jitter = el("input", { type: "checkbox", "aria-label": `Randomise the gap for ${name}` });
+  jitter.checked = effective.jitter !== false;
+  const ratio = el("input", {
+    type: "number",
+    min: "0",
+    max: "5",
+    step: "0.1",
+    value: String(effective.jitterRatio ?? 0.5),
+    "aria-label": `Random extra for ${name}`,
+  });
+
+  const post = (body, event) =>
+    act(
+      "fetch-throttle.set",
+      () =>
+        api(`/fetch-throttle/${encodeURIComponent(name)}`, { method: "POST", body }),
+      { button: event.currentTarget, refresh: [resource] },
+    );
+
+  return el("div", {}, [
+    row(
+      el("span", { class: "inline", text: "Minimum gap (ms)" }),
+      interval,
+      el("span", { class: "inline", text: "Randomise" }),
+      jitter,
+      el("span", { class: "inline", text: "Extra (x gap)" }),
+      ratio,
+      gatedButton("settings:write", {
+        text: "Override",
+        onclick: (event) =>
+          post(
+            {
+              minIntervalMs: Number(interval.value),
+              jitter: jitter.checked,
+              jitterRatio: Number(ratio.value),
+            },
+            event,
+          ),
+      }),
+      // An empty body clears, which is NOT the same as saving the current
+      // global into the override: a cleared extension tracks the global later.
+      overridden
+        ? gatedButton("settings:write", {
+            text: "Follow global",
+            onclick: (event) => post({}, event),
+          })
+        : el("span", {}),
+    ),
+    el("p", {
+      class: overridden ? "warn-text small" : "dim small",
+      text: overridden
+        ? `Overridden for ${name}: ${Object.keys(override).join(", ")}. Changes to the global will not reach it.`
+        : `Following the global. Saving an override pins ${name} to these values.`,
+    }),
+  ]);
 }
 
 async function triggerRun(extension, kind, button) {
@@ -7568,12 +7740,34 @@ function relationList(spec, initialRows) {
  */
 function configPanel(name) {
   const config = new Resource(`config:${name}`, () => api(`/extensions/${encodeURIComponent(name)}/config`));
+  const throttle = new Resource(`throttle:${name}`, () =>
+    can("settings:read") ? api("/fetch-throttle", { quiet: true }) : Promise.resolve(null),
+  );
   const writable = can("extensions:write");
 
   return el(
     "div",
     {},
     extensionTabs(name, "config"),
+    can("settings:read")
+      ? card(
+          "Fetch pacing",
+          el("p", {
+            class: "dim small",
+            text:
+              "How fast a worker may talk to this publisher. Set here it overrides the global on " +
+              "System, field by field; cleared, this extension follows the global as it changes.",
+          }),
+          live(
+            [throttle],
+            (data) => (data ? extensionThrottleControls(name, data, throttle) : el("span", {})),
+            {
+              reserve: 40,
+              skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
+            },
+          ),
+        )
+      : null,
     card(
       "Override options",
       live(

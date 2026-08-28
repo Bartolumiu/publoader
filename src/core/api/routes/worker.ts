@@ -120,12 +120,17 @@ export function registerWorkerRoutes(app: FastifyInstance, ctx: AppContext): voi
           // Runtime config comes from the DATABASE, not bundle JSON files:
           // the tracked-manga map (including titles auto-created since the
           // bundle was published) and operator-editable override options.
-          const [trackedRows, overrideOptions] = await Promise.all([
+          const [trackedRows, overrideOptions, fetchThrottle] = await Promise.all([
             ctx.prisma.trackedManga.findMany({
               where: { extension: claimed.job.extension },
               select: { namespace: true, mangaId: true, mdMangaId: true },
             }),
             ctx.extensionConfig.loadForLease(claimed.job.extension),
+            // Resolved here rather than in the worker: how hard our addresses
+            // hit a publisher is the operator's decision, and a worker that
+            // computed it from parts could disagree with the dashboard showing
+            // it. The runner receives an answer, not a policy.
+            ctx.settings.getFetchThrottle(claimed.job.extension),
           ]);
           // Delivered in the legacy manga_id_map shape; flat
           // {mdMangaId: [externalIds]} while the extension has one id space, and
@@ -166,6 +171,7 @@ export function registerWorkerRoutes(app: FastifyInstance, ctx: AppContext): voi
               mangaIdMap,
               mangaIdMapNamespaced: namespaced,
               overrideOptions,
+              fetchThrottle,
             },
             leaseId: claimed.leaseId,
             leaseExpiresAt: claimed.leaseExpiresAt.toISOString(),

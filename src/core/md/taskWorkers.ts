@@ -643,9 +643,14 @@ export class UploadTaskWorkers {
     const detail: MdChapterDetail | null = owned.ok ? owned.detail : null;
 
     if (detail === null) {
-      // Gone from MangaDex already; archiving is the correct end state.
-      log.info({ mdChapterId }, "chapter already gone from MangaDex, archiving");
-      await this.archiveUnavailable(mdChapterId, chapter, null);
+      // Gone from MangaDex, so it is DELETED, not carded. Archiving it as
+      // unavailable said the opposite -- that a chapter which no longer exists
+      // is carrying one of our cards -- and wrote the row that says so. 848
+      // rows currently sit in both archives because of this and the matching
+      // gap in runDelete, and every one of them makes a later pass spend a
+      // MangaDex lookup rediscovering a 404.
+      log.info({ mdChapterId }, "chapter already gone from MangaDex, archiving as deleted");
+      await this.archiveDeleted(mdChapterId, chapter);
       metrics.uploadsTotal.inc({ outcome: "unavailable_already_gone" });
       this.queue("Unavailable", chapter, mdChapterId, true, "Chapter no longer on MangaDex.");
       return;

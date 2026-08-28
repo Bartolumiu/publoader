@@ -46,6 +46,73 @@ const REMOVAL_MODE_KEY = "chapter_removal_mode";
 const SIGNUPS_KEY = "dash_signups_enabled";
 const WEBHOOK_SUCCESSES_KEY = "webhook_upload_successes";
 const GITHUB_AUTO_SYNC_KEY = "github_auto_sync";
+const FETCH_THROTTLE_KEY = "fetch_throttle";
+const FETCH_THROTTLE_OVERRIDES_KEY = "fetch_throttle_overrides";
+
+/** How a worker paces itself against one publisher. */
+export interface FetchThrottle {
+  /** Minimum gap between two requests to the same host. */
+  minIntervalMs: number;
+  /** Off restores an exact interval, which is itself a recognisable pattern. */
+  jitter: boolean;
+  /** Random extra as a fraction of the gap: 0.5 turns 500ms into 500-750ms. */
+  jitterRatio: number;
+}
+
+export const DEFAULT_FETCH_THROTTLE: FetchThrottle = {
+  minIntervalMs: 500,
+  jitter: true,
+  jitterRatio: 0.5,
+};
+
+/**
+ * Bounds, not preferences.
+ *
+ * This throttle is the only thing pacing our requests at a publisher, so a
+ * stray 0 in a settings field must not be able to turn it into a flood. The
+ * ceiling is just as deliberate: an interval of an hour would stall every run
+ * without ever looking like a failure.
+ */
+function clampThrottle(value: FetchThrottle): FetchThrottle {
+  const num = (raw: number, fallback: number, min: number, max: number): number =>
+    Number.isFinite(raw) ? Math.min(max, Math.max(min, raw)) : fallback;
+  return {
+    minIntervalMs: num(value.minIntervalMs, DEFAULT_FETCH_THROTTLE.minIntervalMs, 100, 60_000),
+    jitter: value.jitter !== false,
+    jitterRatio: num(value.jitterRatio, DEFAULT_FETCH_THROTTLE.jitterRatio, 0, 5),
+  };
+}
+
+/** Reads whatever was stored without trusting any of it. */
+function parseThrottle(raw: unknown): Partial<FetchThrottle> {
+  let value = raw;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return {};
+    }
+  }
+  if (value === null || typeof value !== "object") return {};
+  const record = value as Record<string, unknown>;
+  const out: Partial<FetchThrottle> = {};
+  if (typeof record["minIntervalMs"] === "number") out.minIntervalMs = record["minIntervalMs"];
+  if (typeof record["jitter"] === "boolean") out.jitter = record["jitter"];
+  if (typeof record["jitterRatio"] === "number") out.jitterRatio = record["jitterRatio"];
+  return out;
+}
+
+function parseRecord(raw: string | null): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed !== null && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
 export const VALID_REMOVAL_MODES = ["unavailable", "delete"] as const;
 export type RemovalMode = (typeof VALID_REMOVAL_MODES)[number];
 export const DEFAULT_REMOVAL_MODE: RemovalMode = "unavailable";
@@ -102,6 +169,54 @@ export class SettingsStore {
 
   async setRemovalMode(mode: RemovalMode): Promise<void> {
     await this.setSetting(REMOVAL_MODE_KEY, mode);
+  }
+
+  // -- publisher fetch pacing --
+
+  /**
+   * How fast a worker may talk to one publisher, and how regular it looks.
+   *
+   * Operator infrastructure rather than extension config, so it lives here and
+   * not in an extension's own settings document: the operator owns how hard
+   * their addresses hit a publisher, and the answer differs per publisher
+   * without the extension having any say in it.
+   *
+   * Resolved global-then-override, field by field, so an extension can raise
+   * its interval without restating the jitter it was already happy with.
+   */
+  async getFetchThrottle(extension?: string): Promise<FetchThrottle> {
+    const [globalRaw, overridesRaw] = await Promise.all([
+      this.getSetting(FETCH_THROTTLE_KEY),
+      extension ? this.getSetting(FETCH_THROTTLE_OVERRIDES_KEY) : Promise.resolve(null),
+    ]);
+    const base = { ...DEFAULT_FETCH_THROTTLE, ...parseThrottle(globalRaw) };
+    if (!extension) return clampThrottle(base);
+    const overrides = parseRecord(overridesRaw);
+    return clampThrottle({ ...base, ...parseThrottle(overrides[extension]) });
+  }
+
+  async setFetchThrottle(values: Partial<FetchThrottle>): Promise<void> {
+    const next = clampThrottle({ ...(await this.getFetchThrottle()), ...values });
+    await this.setSetting(FETCH_THROTTLE_KEY, JSON.stringify(next));
+  }
+
+  /** Every per-extension override, for the editor to render. */
+  async getFetchThrottleOverrides(): Promise<Record<string, Partial<FetchThrottle>>> {
+    const parsed = parseRecord(await this.getSetting(FETCH_THROTTLE_OVERRIDES_KEY));
+    const out: Record<string, Partial<FetchThrottle>> = {};
+    for (const [name, value] of Object.entries(parsed)) out[name] = parseThrottle(value);
+    return out;
+  }
+
+  /** `null` removes the override, so the extension follows the global again. */
+  async setFetchThrottleOverride(
+    extension: string,
+    values: Partial<FetchThrottle> | null,
+  ): Promise<void> {
+    const overrides = await this.getFetchThrottleOverrides();
+    if (values === null) delete overrides[extension];
+    else overrides[extension] = values;
+    await this.setSetting(FETCH_THROTTLE_OVERRIDES_KEY, JSON.stringify(overrides));
   }
 
   // -- dashboard self-signup gate --
