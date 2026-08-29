@@ -34,7 +34,11 @@ import { countOutstandingErrors } from "../../observability/errorFeed.js";
  * reads was never passed to core-api at all.
  */
 const WORKER_IMAGE = process.env["PUBLOADER_WORKER_IMAGE"] ?? "ardax/publoader-worker:latest";
-import { DEFAULT_FETCH_THROTTLE, VALID_REMOVAL_MODES } from "../../store/settings.js";
+import {
+  DEFAULT_FETCH_THROTTLE,
+  DEFAULT_UPLOAD_SCHEDULE,
+  VALID_REMOVAL_MODES,
+} from "../../store/settings.js";
 import { BundleRejectedError } from "../../store/bundles.js";
 import { MapSyncService } from "../../mapsync/service.js";
 import AdmZip from "adm-zip";
@@ -646,6 +650,66 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         await ctx.settings.setFetchThrottleOverride(name, clearing ? null : body);
         const applied = await ctx.settings.getFetchThrottle(name);
         await ctx.audit.record(actor(req), "fetch_throttle.set", name, {
+          cleared: clearing,
+          ...applied,
+        });
+        return { ok: true, extension: name, cleared: clearing, effective: applied };
+      },
+    );
+
+    // ---- upload release spreading ----
+
+    /**
+     * How many chapters a run may put on MangaDex per day.
+     *
+     * Operator infrastructure for the same reason the fetch throttle is: the
+     * extension decides what is publishable, the operator decides how fast that
+     * reaches readers. Spreading only changes a task's `not_before`, so nothing
+     * is dropped and a routine run — well under the caps — is unaffected.
+     */
+    scope.get(
+      "/api/v1/admin/upload-schedule",
+      { preHandler: requireScope("settings:read") },
+      async () => ({
+        global: await ctx.settings.getUploadSchedule(),
+        overrides: await ctx.settings.getUploadScheduleOverrides(),
+        defaults: DEFAULT_UPLOAD_SCHEDULE,
+      }),
+    );
+
+    // 0 is allowed and means "no limit"; the store clamps the rest.
+    const uploadScheduleBody = z
+      .object({
+        perDay: z.coerce.number().int().min(0).max(100_000).optional(),
+        perMangaPerDay: z.coerce.number().int().min(0).max(100_000).optional(),
+        intervalHours: z.coerce.number().int().min(1).max(24 * 30).optional(),
+      })
+      .strict();
+
+    scope.post(
+      "/api/v1/admin/upload-schedule",
+      { preHandler: requireScope("settings:write") },
+      async (req) => {
+        const body = uploadScheduleBody.parse(req.body);
+        await ctx.settings.setUploadSchedule(body);
+        const applied = await ctx.settings.getUploadSchedule();
+        await ctx.audit.record(actor(req), "upload_schedule.set", "global", applied);
+        return { ok: true, global: applied };
+      },
+    );
+
+    /** One extension's override; an empty body clears it, as above. */
+    scope.post(
+      "/api/v1/admin/upload-schedule/:name",
+      { preHandler: requireScope("settings:write") },
+      async (req, reply) => {
+        const { name } = req.params as { name: string };
+        if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
+        const body = uploadScheduleBody.parse(req.body ?? {});
+        const clearing = Object.keys(body).length === 0;
+        await ctx.settings.setUploadScheduleOverride(name, clearing ? null : body);
+        const applied = await ctx.settings.getUploadSchedule(name);
+        await ctx.audit.record(actor(req), "upload_schedule.set", name, {
           cleared: clearing,
           ...applied,
         });

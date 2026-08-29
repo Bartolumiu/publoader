@@ -18,6 +18,7 @@ import { ExtensionConfigStore } from "../store/extensionConfig.js";
 import { ResultStore } from "../store/results.js";
 import { AuditLog, SettingsStore, type RemovalMode } from "../store/settings.js";
 import { UploadTaskStore, uploadDedupeKey } from "../store/uploadTasks.js";
+import { planUploadSchedule, summariseSchedule } from "./uploadSchedule.js";
 import {
   aggregateChapterIds,
   backfillVolumes,
@@ -493,6 +494,8 @@ export class RunProcessor {
     // catalogue, or just at the handful of series with new chapters?" — a
     // question the per-manga lines below cannot answer once they are quiet.
     const totals = { visited: 0, upload: 0, edit: 0, skip: 0, remove: 0, unfetchable: 0 };
+    /** Every chapter this run decided to upload, queued after the loop. */
+    const pendingUploads: Chapter[] = [];
 
     for (const [mangaId, updatedChapters] of visiting) {
       const chaptersOnMd = await this.md.chaptersForManga(mangaId, groupId);
@@ -529,9 +532,10 @@ export class RunProcessor {
         botUserId: this.botUserId,
       });
 
-      for (const chapter of decision.toUpload) {
-        await this.tasks.enqueue("UPLOAD", uploadDedupeKey(chapter), chapter);
-      }
+      // Held rather than queued here: the release schedule caps how many
+      // chapters a day takes across every series, which cannot be decided one
+      // series at a time. Queued together once the loop has seen them all.
+      pendingUploads.push(...decision.toUpload);
       for (const edit of decision.toEdit) {
         await this.tasks.enqueue("EDIT", edit.mdChapterId, {
           ...edit.chapter,
@@ -602,6 +606,39 @@ export class RunProcessor {
         },
         "manga processed",
       );
+    }
+
+    // Queue the run's uploads, spread across days when there are enough of them
+    // to matter. A routine run is well under the caps and every chapter comes
+    // out due now, exactly as before; a backlog is dated forward instead of
+    // landing on MangaDex all at once. Either way every chapter is queued here
+    // and none is recomputed later: a future-dated row is an ordinary PENDING
+    // task waiting for its date.
+    if (pendingUploads.length > 0) {
+      const schedule = await this.settings.getUploadSchedule(run.extension);
+      const scheduled = planUploadSchedule(pendingUploads, schedule);
+      const shape = summariseSchedule(scheduled);
+
+      for (const { chapter, notBefore } of scheduled) {
+        await this.tasks.enqueue("UPLOAD", uploadDedupeKey(chapter), chapter, { notBefore });
+      }
+
+      if (shape.deferred > 0) {
+        log.info(
+          {
+            queued: scheduled.length,
+            immediate: shape.immediate,
+            deferred: shape.deferred,
+            days: shape.days,
+            lastRelease: shape.lastDate,
+            perDay: schedule.perDay,
+            perMangaPerDay: schedule.perMangaPerDay,
+          },
+          "spreading this run's uploads over several days",
+        );
+      } else {
+        log.debug({ queued: scheduled.length }, "queued this run's uploads, all due now");
+      }
     }
 
     // "Untracked" is derived from the union of every segment's tracked ids, so
