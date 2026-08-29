@@ -6684,6 +6684,9 @@ VIEWS.extensions = (route) => {
   const throttle = new Resource("fetch-throttle", () =>
     can("settings:read") ? api("/fetch-throttle", { quiet: true }) : Promise.resolve(null),
   );
+  const uploadSchedule = new Resource("upload-schedule", () =>
+    can("settings:read") ? api("/upload-schedule", { quiet: true }) : Promise.resolve(null),
+  );
 
   return el(
     "div",
@@ -6712,6 +6715,27 @@ VIEWS.extensions = (route) => {
             reserve: 40,
             skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
           }),
+        )
+      : null,
+    can("settings:read")
+      ? card(
+          "Release pacing",
+          el("p", {
+            class: "dim small",
+            text:
+              "How many chapters may go up per day. A run still queues everything it decided in " +
+              "one pass; whatever is over a day's budget is dated forward instead of going up at " +
+              "once, so this changes when a chapter is released, never whether it is. 0 is no " +
+              "limit, not a stop. Extensions can override this individually on their own Config tab.",
+          }),
+          live(
+            [uploadSchedule],
+            (data) => (data ? uploadScheduleControls(data, uploadSchedule) : el("span", {})),
+            {
+              reserve: 40,
+              skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
+            },
+          ),
         )
       : null,
     can("bundles:write") ? publishCard(extensions) : null,
@@ -6912,6 +6936,167 @@ function extensionThrottleControls(name, data, resource) {
               minIntervalMs: Number(interval.value),
               jitter: jitter.checked,
               jitterRatio: Number(ratio.value),
+            },
+            event,
+          ),
+      }),
+      // An empty body clears, which is NOT the same as saving the current
+      // global into the override: a cleared extension tracks the global later.
+      overridden
+        ? gatedButton("settings:write", {
+            text: "Follow global",
+            onclick: (event) => post({}, event),
+          })
+        : el("span", {}),
+    ),
+    el("p", {
+      class: overridden ? "warn-text small" : "dim small",
+      text: overridden
+        ? `Overridden for ${name}: ${Object.keys(override).join(", ")}. Changes to the global will not reach it.`
+        : `Following the global. Saving an override pins ${name} to these values.`,
+    }),
+  ]);
+}
+
+/**
+ * The global release-spreading controls.
+ *
+ * Bounds mirror the server's, which enforces them again: this stops a typo at
+ * the keyboard, not a bad request. The 0 floor on the two caps is the one that
+ * needs saying out loud, and the card above says it: 0 is no limit, so the
+ * whole run goes up the moment it is decided. Read the other way round — as a
+ * cap of nothing — it would look like the field that stops uploads, which is
+ * not a thing this setting can do.
+ */
+function uploadScheduleControls(data, resource) {
+  const values = data.global ?? data.defaults ?? {};
+  const perDay = el("input", {
+    id: "schedule-per-day",
+    type: "number",
+    min: "0",
+    max: "100000",
+    step: "1",
+    value: String(values.perDay ?? 50),
+    "aria-label": "Chapters released per day, 0 for no limit",
+  });
+  const perManga = el("input", {
+    id: "schedule-per-manga",
+    type: "number",
+    min: "0",
+    max: "100000",
+    step: "1",
+    value: String(values.perMangaPerDay ?? 3),
+    "aria-label": "Chapters released per day for one series, 0 for no limit",
+  });
+  const interval = el("input", {
+    id: "schedule-interval",
+    type: "number",
+    min: "1",
+    max: "720",
+    step: "1",
+    value: String(values.intervalHours ?? 24),
+    "aria-label": "Hours between release days",
+  });
+
+  const overrides = Object.keys(data.overrides ?? {});
+  return el("div", {}, [
+    row(
+      el("label", { class: "inline", for: "schedule-per-day", text: "Per day" }),
+      perDay,
+      el("label", { class: "inline", for: "schedule-per-manga", text: "Per series per day" }),
+      perManga,
+      el("label", { class: "inline", for: "schedule-interval", text: "Gap between days (h)" }),
+      interval,
+      gatedButton("settings:write", {
+        text: "Save",
+        onclick: (event) =>
+          act(
+            "upload-schedule.set",
+            () =>
+              api("/upload-schedule", {
+                method: "POST",
+                body: {
+                  perDay: Number(perDay.value),
+                  perMangaPerDay: Number(perManga.value),
+                  intervalHours: Number(interval.value),
+                },
+              }),
+            { button: event.currentTarget, refresh: [resource] },
+          ),
+      }),
+    ),
+    // Named rather than counted, for the reason the pacing card above names
+    // them: a number does not tell an operator whether the global they are
+    // editing reaches the extension whose backlog they are worried about.
+    overrides.length
+      ? el("p", {
+          class: "dim small",
+          text: `Overridden for: ${overrides.join(", ")}. Those extensions ignore the fields they set here.`,
+        })
+      : el("p", { class: "dim small", text: "No extension overrides; every extension follows this." }),
+  ]);
+}
+
+/**
+ * One extension's release-spreading override.
+ *
+ * Seeded from the EFFECTIVE values and labelled in words for the same reasons
+ * as the fetch pacing override above: a filled-in field looks identical
+ * whether it came from the global or from an override, and only one of the two
+ * follows the global when it changes.
+ */
+function extensionUploadScheduleControls(name, data, resource) {
+  const override = (data.overrides ?? {})[name] ?? {};
+  const overridden = Object.keys(override).length > 0;
+  const effective = { ...(data.defaults ?? {}), ...(data.global ?? {}), ...override };
+
+  const perDay = el("input", {
+    type: "number",
+    min: "0",
+    max: "100000",
+    step: "1",
+    value: String(effective.perDay ?? 50),
+    "aria-label": `Chapters released per day for ${name}, 0 for no limit`,
+  });
+  const perManga = el("input", {
+    type: "number",
+    min: "0",
+    max: "100000",
+    step: "1",
+    value: String(effective.perMangaPerDay ?? 3),
+    "aria-label": `Chapters released per day for one ${name} series, 0 for no limit`,
+  });
+  const interval = el("input", {
+    type: "number",
+    min: "1",
+    max: "720",
+    step: "1",
+    value: String(effective.intervalHours ?? 24),
+    "aria-label": `Hours between release days for ${name}`,
+  });
+
+  const post = (body, event) =>
+    act("upload-schedule.set", () => api(`/upload-schedule/${encodeURIComponent(name)}`, { method: "POST", body }), {
+      button: event.currentTarget,
+      refresh: [resource],
+    });
+
+  return el("div", {}, [
+    row(
+      el("span", { class: "inline", text: "Per day" }),
+      perDay,
+      el("span", { class: "inline", text: "Per series per day" }),
+      perManga,
+      el("span", { class: "inline", text: "Gap between days (h)" }),
+      interval,
+      gatedButton("settings:write", {
+        text: "Override",
+        onclick: (event) =>
+          post(
+            {
+              perDay: Number(perDay.value),
+              perMangaPerDay: Number(perManga.value),
+              intervalHours: Number(interval.value),
             },
             event,
           ),
@@ -7743,6 +7928,9 @@ function configPanel(name) {
   const throttle = new Resource(`throttle:${name}`, () =>
     can("settings:read") ? api("/fetch-throttle", { quiet: true }) : Promise.resolve(null),
   );
+  const schedule = new Resource(`upload-schedule:${name}`, () =>
+    can("settings:read") ? api("/upload-schedule", { quiet: true }) : Promise.resolve(null),
+  );
   const writable = can("extensions:write");
 
   return el(
@@ -7761,6 +7949,27 @@ function configPanel(name) {
           live(
             [throttle],
             (data) => (data ? extensionThrottleControls(name, data, throttle) : el("span", {})),
+            {
+              reserve: 40,
+              skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
+            },
+          ),
+        )
+      : null,
+    can("settings:read")
+      ? card(
+          "Release pacing",
+          el("p", {
+            class: "dim small",
+            text:
+              "How many of this extension's chapters may go up per day. A run still queues " +
+              "everything it decided; whatever is over the day's budget is dated forward rather " +
+              "than released at once, and 0 is no limit. Set here it overrides the global on " +
+              "System, field by field; cleared, this extension follows the global as it changes.",
+          }),
+          live(
+            [schedule],
+            (data) => (data ? extensionUploadScheduleControls(name, data, schedule) : el("span", {})),
             {
               reserve: 40,
               skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
