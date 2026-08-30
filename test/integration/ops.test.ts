@@ -1191,6 +1191,111 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     expect(dashed.statusCode).toBe(200);
   });
 
+  // ---- paging the untracked queue ----
+
+  const listPage = async (query = "") => {
+    const res = await app.inject({ method: "GET", url: `/api/v1/admin/untracked${query}`, headers: root });
+    expect(res.statusCode).toBe(200);
+    return res.json() as {
+      untracked: { id: string }[];
+      total: number;
+      limit: number;
+      nextCursor: string | null;
+    };
+  };
+
+  it("reports the real total, not just the page it returned", async () => {
+    for (let i = 0; i < 5; i++) await untracked({ mangaId: `ext-${i}` });
+
+    const page = await listPage("?limit=2");
+    expect(page.untracked).toHaveLength(2);
+    // The whole complaint: a fixed window looks exactly like the whole list
+    // unless the count says otherwise.
+    expect(page.total).toBe(5);
+    expect(page.limit).toBe(2);
+    expect(page.nextCursor).not.toBeNull();
+  });
+
+  it("walks every row exactly once, even when a whole catalogue shares a timestamp", async () => {
+    // The real shape of this table: one run reports a catalogue in a single
+    // write, so hundreds of rows share a millisecond. A keyset on createdAt
+    // alone silently skips or repeats rows at every page boundary, which is
+    // the failure that would be least visible and worst to debug.
+    const sameInstant = new Date("2026-08-30T09:00:00.000Z");
+    const created: string[] = [];
+    for (let i = 0; i < 7; i++) {
+      const row = await untracked({ mangaId: `tie-${i}`, createdAt: sameInstant });
+      created.push(row.id);
+    }
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let guard = 0; guard < 10; guard++) {
+      const page: { untracked: { id: string }[]; nextCursor: string | null } = await listPage(
+        `?limit=2${cursor ? `&cursor=${cursor}` : ""}`,
+      );
+      seen.push(...page.untracked.map((r) => r.id));
+      cursor = page.nextCursor;
+      if (!cursor) break;
+    }
+
+    expect(seen).toHaveLength(created.length);
+    expect(new Set(seen).size).toBe(created.length);
+    expect([...seen].sort()).toEqual([...created].sort());
+  });
+
+  it("keeps the filter while paging, and counts only what matches it", async () => {
+    for (let i = 0; i < 3; i++) await untracked({ mangaId: `keep-${i}`, mangaName: "Findable Series" });
+    for (let i = 0; i < 4; i++) await untracked({ mangaId: `drop-${i}`, mangaName: "Something Else" });
+
+    const first = await listPage("?limit=2&q=findable");
+    expect(first.total).toBe(3);
+    const second = await listPage(`?limit=2&q=findable&cursor=${first.nextCursor}`);
+    expect(second.untracked).toHaveLength(1);
+    // Last page: nothing more, and the caller can stop without asking again.
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it("filters to one extension exactly, which free text cannot express", async () => {
+    await untracked({ extension: "opstest", mangaId: "a-1", mangaName: "Something omoi-ish" });
+    await bundle({ extension: "omoi", manifest: { name: "omoi" } });
+    await untracked({ extension: "omoi", mangaId: "b-1", mangaName: "Real Omoi Series" });
+    await untracked({ extension: "omoi", mangaId: "b-2", mangaName: "Another One" });
+
+    const scoped = await listPage("?extension=omoi");
+    expect(scoped.total).toBe(2);
+    expect(scoped.untracked.map((r) => (r as { extension: string }).extension)).toEqual(["omoi", "omoi"]);
+
+    // Free text over the name would also have caught the opstest row, which is
+    // the reason this is a filter of its own and not a search term.
+    const byText = await listPage("?q=omoi");
+    expect(byText.total).toBe(3);
+  });
+
+  it("composes the extension filter with state and search", async () => {
+    await bundle({ extension: "omoi", manifest: { name: "omoi" } });
+    await untracked({ extension: "omoi", mangaId: "c-1", mangaName: "Findable", state: "NEW" });
+    await untracked({ extension: "omoi", mangaId: "c-2", mangaName: "Findable", state: "SKIPPED" });
+    await untracked({ extension: "opstest", mangaId: "c-3", mangaName: "Findable", state: "NEW" });
+
+    const page = await listPage("?extension=omoi&state=NEW&q=findable");
+    expect(page.total).toBe(1);
+    expect(page.untracked).toHaveLength(1);
+  });
+
+  it("refuses a cursor it does not know rather than answering an empty page", async () => {
+    await untracked();
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/untracked?cursor=00000000-0000-4000-8000-000000000000",
+      headers: root,
+    });
+    // An empty page would read as "there is nothing after this", which is a
+    // different and wrong answer.
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toContain("unknown cursor");
+  });
+
   // ---- automatic mapping by MangaDex's official English link ----
 
   const LINKED_ID = "6a6a6a6a-0000-4000-8000-000000000001";

@@ -1061,13 +1061,21 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     });
 
     // ---- untracked series pipeline ----
-    scope.get("/api/v1/admin/untracked", { preHandler: requireScope("untracked:read") }, async (req) => {
+    scope.get("/api/v1/admin/untracked", { preHandler: requireScope("untracked:read") }, async (req, reply) => {
       const query = z
         .object({
           state: z.enum(["NEW", "CREATING", "CREATED", "TRACKED", "FAILED", "SKIPPED"]).optional(),
           /** Free text over the series name, the source's id, and the extension. */
           q: z.string().trim().max(200).optional(),
+          /**
+           * Exact extension. Separate from `q`, which only matches the name as
+           * a substring: "omoi" as free text also hits every series with omoi
+           * in its title, and cannot express "this source and no other".
+           */
+          extension: z.string().trim().max(64).optional(),
           limit: z.coerce.number().int().min(1).max(500).default(100),
+          /** Keyset position: the id of the last row of the previous page. */
+          cursor: z.string().uuid().optional(),
         })
         .parse(req.query ?? {});
       // A state filter and a page cap are not enough to find one series: a
@@ -1083,15 +1091,51 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
             ],
           }
         : {};
-      const rows = await ctx.prisma.untrackedManga.findMany({
-        where: {
-          ...(query.state ? { state: query.state } : {}),
-          ...search,
-        },
-        orderBy: { createdAt: "desc" },
-        take: query.limit,
-      });
-      return { untracked: rows };
+      const where: Prisma.UntrackedMangaWhereInput = {
+        ...(query.state ? { state: query.state } : {}),
+        ...(query.extension ? { extension: query.extension } : {}),
+        ...search,
+      };
+
+      // Keyset paging needs the cursor row's own sort key, so it is read first.
+      // An unknown cursor is a client error rather than an empty page, which
+      // would read as "there is nothing after this".
+      let keyset: Prisma.UntrackedMangaWhereInput | null = null;
+      if (query.cursor) {
+        const at = await ctx.prisma.untrackedManga.findUnique({
+          where: { id: query.cursor },
+          select: { id: true, createdAt: true },
+        });
+        if (!at) return reply.code(400).send({ error: `unknown cursor: ${query.cursor}` });
+        keyset = {
+          OR: [{ createdAt: { lt: at.createdAt } }, { createdAt: at.createdAt, id: { lt: at.id } }],
+        };
+      }
+
+      const [rows, total] = await Promise.all([
+        ctx.prisma.untrackedManga.findMany({
+          where: keyset ? { AND: [where, keyset] } : where,
+          // Tie-broken by id: createdAt alone is not unique here — a run
+          // reports a whole catalogue at once, so hundreds of rows can share a
+          // millisecond, and a keyset on a non-unique key silently skips or
+          // repeats rows at every page boundary.
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          take: query.limit,
+        }),
+        // The total is what makes paging honest: without it a caller cannot
+        // tell "that is all of them" from "here is the first page of two
+        // thousand", which is exactly what the old fixed cap looked like.
+        ctx.prisma.untrackedManga.count({ where }),
+      ]);
+
+      return {
+        untracked: rows,
+        total,
+        limit: query.limit,
+        // Null on the last page, so a caller can stop without a second request
+        // that comes back empty.
+        nextCursor: rows.length === query.limit ? (rows[rows.length - 1]?.id ?? null) : null,
+      };
     });
 
     /**
