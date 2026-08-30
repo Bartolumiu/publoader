@@ -364,7 +364,14 @@ export class TitleService {
       },
     });
 
-    if (!dryRun && report.mapped.length > 0) await this.announceMapped(report.mapped);
+    // Deliberately not announced to Discord.
+    //
+    // This drains a backlog thousands of rows deep, a batch per scheduler
+    // tick, so "one embed per pass that mapped something" is a message every
+    // few minutes for hours -- and it buries the announcements that do need
+    // reading, which is the announcement channel's whole job. The mappings are
+    // not lost: each is `auto:official-link` in the tracked map, on the
+    // series' own page, and in the audit log.
     return report;
   }
 
@@ -442,28 +449,6 @@ export class TitleService {
       data: { state: "TRACKED", mdMangaId, lastError: null },
     });
     return true;
-  }
-
-  /** Say what was mapped without anyone asking, so it can be checked. */
-  private async announceMapped(mapped: { row: UntrackedManga; mdMangaId: string }[]): Promise<void> {
-    for (let i = 0; i < mapped.length; i += 20) {
-      const batch = mapped.slice(i, i + 20);
-      const lines = batch.map(
-        ({ row, mdMangaId }) =>
-          `**[${row.mangaName}](https://mangadex.org/title/${mdMangaId})** ` +
-          `(${row.mangaLanguage}): [source](${row.mangaUrl}) · \`${row.extension}\``,
-      );
-      await this.notifier.send({
-        title:
-          `Mapped ${mapped.length} series automatically ` +
-          `by official English link${mapped.length === 1 ? "" : "s"}`,
-        description:
-          `${lines.join("\n")}\n\n_No titles were created. ` +
-          `These matched MangaDex's own official English link, and are marked ` +
-          `\`${OFFICIAL_LINK_SOURCE}\` in the tracked map._`,
-        colour: "3B82F6",
-      });
-    }
   }
 
   /**
