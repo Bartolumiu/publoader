@@ -400,8 +400,47 @@ The authority for publisher-id → MangaDex-title-id.
 | `namespace` | Which of the extension's catalogues `manga_id` belongs to; `""` for the common single-catalogue case. |
 | `md_manga_id` | The MangaDex title. |
 | `source` | Provenance: `"auto"`, `"bundle-import"` (seeded from a bundle's `manga_id_map.json` at first publish), or `operator:<actor>`. |
+| `recheck_after` | When this series rejoins runs. NULL means never paused; a row is **suppressed** while this is in the future and **due** once it is not. |
+| `cooldown_days` | Days to roll `recheck_after` forward by after a clean run covers a due series. NULL is a one-shot pause that expires for good. |
+| `paused_at` / `paused_by` / `pause_reason` | Current state, not history — the answer to "why is this paused" without reading `audit_events`. |
 
-Index: `(extension)` serves the lease-time map build.
+Index: `(extension)` serves the lease-time map build; a partial
+`(extension, recheck_after) WHERE recheck_after IS NOT NULL` serves the pause
+filter without indexing the overwhelming majority of rows that are never paused.
+
+**The recheck cooldown, and why it filters two places.** Some series can never
+produce another upload: on a publisher whose free set is a permanently-free
+prefix, a series with one free chapter has an answer no run can change, and a
+clean run pays a request per language to re-derive it anyway. Pausing those is
+what keeps clean runs cheap enough to run often on the series that do move.
+
+The pause is applied at **every site that decides what a run covers** — the
+lease map (`routes/worker.ts`), the authoritative tracked set
+(`processor.authoritativeTrackedIds`) and the partitioner
+(`scheduler/service.ts`) — and the second of those is load-bearing rather than
+merely thrifty. `removeMangaWithoutExternalChapters` queues a removal for every
+tracked id absent from `allChapters`, and a paused series is absent from
+`allChapters` by construction because it was withheld from the lease map. A
+pause applied only to the lease map does not skip a series; it takes its
+chapters off MangaDex. Sites that merely *resolve* an id (`chapterReconcile`
+mapping a title back to an external id, ingest validating that an envelope only
+names titles the extension owns) deliberately do not filter: a paused series
+still has a mapping, and a worker holding a lease taken before the pause would
+otherwise have an honest envelope rejected.
+
+The judgement is per **title**, not per row: uniqueness is on the external side,
+so one `md_manga_id` can carry several rows (one per language edition) and is
+paused only when all of them are. `activeTrackedTitles` in
+`store/trackedManga.ts` is the single definition; see
+`test/unit/recheckCooldown.test.ts`.
+
+A cooldown rather than a boolean because "this will never change" is a claim
+about a publisher's future. `cooldown_days` makes it self-renewing: the series
+comes back, one unscoped clean run whose `allChapters` was trustworthy looks at
+it properly, and `rearmRecheckCooldowns` puts it back to sleep. Update runs
+never re-arm — an update run may legitimately skip the series via its change
+signal, so re-arming on one would restart the cooldown on the strength of a look
+that never happened.
 
 `namespace` exists because some publishers expose more than one catalogue behind
 one API, and the catalogues number their series independently; viz keys its map

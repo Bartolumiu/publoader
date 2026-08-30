@@ -5,8 +5,10 @@ import type { AppContext } from "../context.js";
 import { adminAuthHook, requireScope } from "../auth.js";
 import { hasScope } from "../scopes.js";
 import {
+  DEFAULT_COOLDOWN_DAYS,
   DEFAULT_NAMESPACE,
   MAX_BATCH_ROWS,
+  MAX_COOLDOWN_DAYS,
   MAX_NAMESPACE_LENGTH,
   NAMESPACE_RE,
   normaliseNamespace,
@@ -892,6 +894,92 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       });
       await ctx.audit.record(actor(req), "tracked_manga.remove", trackedSubject(name, namespace, mangaId));
       return { ok: true, removed: res.count > 0 };
+    });
+
+    /**
+     * Series currently suppressed from runs, soonest to return first.
+     *
+     * Separate from the `tracked` listing rather than a filter on it, because
+     * this is the review surface: "what have I turned off, and when does it
+     * come back" is the question a pause creates, and it should not require
+     * paging the whole catalogue to answer.
+     */
+    scope.get("/api/v1/admin/extensions/:name/tracked/paused", { preHandler: requireScope("tracked:read") }, async (req, reply) => {
+      const { name } = req.params as { name: string };
+      if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
+      const paused = await ctx.trackedManga.listPaused(name);
+      return { paused, defaultCooldownDays: DEFAULT_COOLDOWN_DAYS };
+    });
+
+    /**
+     * Suppress series from runs until their cooldown expires.
+     *
+     * Bulk, because the operation that matters is bulk: on a publisher whose
+     * free set is a frozen prefix, "every series with one free chapter" is
+     * hundreds of rows, and pausing them one call at a time is a loop the
+     * operator should not have to write.
+     *
+     * `tracked:write` rather than `tracked:append`: a pause changes what runs
+     * do to titles that already exist, which is the same class of authority as
+     * repointing a mapping, not the same as adding a new series.
+     */
+    scope.post("/api/v1/admin/extensions/:name/tracked/pause", { preHandler: requireScope("tracked:write") }, async (req, reply) => {
+      const { name } = req.params as { name: string };
+      if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
+      const body = z
+        .object({
+          mangaIds: z.array(z.string().min(1).max(512)).min(1).max(MAX_BATCH_ROWS),
+          namespace: z.string().max(MAX_NAMESPACE_LENGTH).optional(),
+          days: z.number().int().min(1).max(MAX_COOLDOWN_DAYS).default(DEFAULT_COOLDOWN_DAYS),
+          /** False makes it a one-shot hold that expires for good. */
+          renew: z.boolean().default(true),
+          reason: z.string().max(500).optional(),
+        })
+        .strict()
+        .parse(req.body ?? {});
+
+      const namespace = normaliseNamespace(body.namespace);
+      const result = await ctx.trackedManga.pause(name, {
+        targets: body.mangaIds.map((mangaId) => ({ mangaId, namespace })),
+        days: body.days,
+        renew: body.renew,
+        ...(body.reason === undefined ? {} : { reason: body.reason }),
+        actor: actor(req),
+      });
+      await ctx.audit.record(actor(req), "tracked_manga.pause", `${name}:${body.mangaIds.length} series`, {
+        mangaIds: body.mangaIds.slice(0, 50),
+        count: body.mangaIds.length,
+        namespace,
+        days: body.days,
+        renew: body.renew,
+        reason: body.reason ?? null,
+      });
+      return { ok: true, ...result };
+    });
+
+    /** Put paused series back in play immediately. */
+    scope.post("/api/v1/admin/extensions/:name/tracked/unpause", { preHandler: requireScope("tracked:write") }, async (req, reply) => {
+      const { name } = req.params as { name: string };
+      if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
+      const body = z
+        .object({
+          mangaIds: z.array(z.string().min(1).max(512)).min(1).max(MAX_BATCH_ROWS),
+          namespace: z.string().max(MAX_NAMESPACE_LENGTH).optional(),
+        })
+        .strict()
+        .parse(req.body ?? {});
+
+      const namespace = normaliseNamespace(body.namespace);
+      const result = await ctx.trackedManga.unpause(
+        name,
+        body.mangaIds.map((mangaId) => ({ mangaId, namespace })),
+      );
+      await ctx.audit.record(actor(req), "tracked_manga.unpause", `${name}:${body.mangaIds.length} series`, {
+        mangaIds: body.mangaIds.slice(0, 50),
+        count: body.mangaIds.length,
+        namespace,
+      });
+      return { ok: true, ...result };
     });
 
     /**

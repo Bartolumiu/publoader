@@ -5,7 +5,7 @@ import type { AppContext } from "../context.js";
 import { workerAuthHook } from "../auth.js";
 import { MAX_ENVELOPE_BYTES } from "../../../contracts/envelope.js";
 import { MAX_ARTIFACT_BYTES } from "../../store/artifacts.js";
-import { buildMangaIdMap } from "../../store/trackedManga.js";
+import { activeTrackedWhere, buildMangaIdMap } from "../../store/trackedManga.js";
 import { hashToken } from "../../store/workers.js";
 import { metrics } from "../../../metrics.js";
 
@@ -122,7 +122,12 @@ export function registerWorkerRoutes(app: FastifyInstance, ctx: AppContext): voi
           // bundle was published) and operator-editable override options.
           const [trackedRows, overrideOptions, fetchThrottle] = await Promise.all([
             ctx.prisma.trackedManga.findMany({
-              where: { extension: claimed.job.extension },
+              // Paused series are left out of the map entirely, which is what
+              // makes the pause cost nothing: an extension cannot fetch, report
+              // or spend a request on a series it was never told about. The
+              // matching filter in authoritativeTrackedIds is what stops their
+              // absence from `allChapters` reading as a withdrawal.
+              where: activeTrackedWhere(claimed.job.extension),
               select: { namespace: true, mangaId: true, mdMangaId: true },
             }),
             ctx.extensionConfig.loadForLease(claimed.job.extension),

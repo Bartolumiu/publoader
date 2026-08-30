@@ -16,6 +16,7 @@ import { Command } from "commander";
 import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { BundleBuildError, buildExtensionBundle } from "../core/webhooks/bundleBuilder.js";
+import { DEFAULT_COOLDOWN_DAYS, MAX_COOLDOWN_DAYS } from "../core/store/trackedManga.js";
 
 const DEFAULT_API_URL = "https://publoader.ardax.dev";
 
@@ -422,6 +423,23 @@ for (const action of ["enable", "disable"] as const) {
     });
 }
 
+/**
+ * Series ids from the command line, or from stdin when the only argument is
+ * `-` (or there are none and stdin is a pipe).
+ *
+ * Accepts whitespace-, comma- and newline-separated ids with `#` comments, so
+ * the output of the query that FOUND the frozen series can be piped straight
+ * in without reformatting.
+ */
+function idsFromArgsOrStdin(args: string[]): string[] {
+  const fromStdin = args.length === 0 || (args.length === 1 && args[0] === "-");
+  if (!fromStdin) return args;
+  return readFileSync(0, "utf8")
+    .split(/\r?\n/)
+    .flatMap((line) => line.split("#")[0]!.trim().split(/[\s,;]+/))
+    .filter(Boolean);
+}
+
 // ---- tracked manga (the database replacement for manga_id_map.json) ----
 const tracked = program
   .command("tracked")
@@ -480,6 +498,94 @@ tracked
     );
     const subject = `${extension}:${qualify(opts.namespace, mangaId)}`;
     ok(res.removed ? `removed ${subject}` : `no mapping for ${subject}`);
+  });
+
+/**
+ * Series ids come from arguments or stdin, so the useful invocation composes:
+ *
+ *   publoader-admin tracked pause comikey $(cat frozen-ids.txt)
+ *   cat frozen-ids.txt | publoader-admin tracked pause comikey -
+ *
+ * The frozen-prefix case this exists for is hundreds of ids at once, and a
+ * command that only took one would make the real operation a shell loop.
+ */
+tracked
+  .command("pause <extension> [mangaIds...]")
+  .description("suppress series from runs until their cooldown expires")
+  .option("--namespace <namespace>", "the extension catalogue these ids belong to")
+  .option("--days <days>", `how long to suppress for (default: ${DEFAULT_COOLDOWN_DAYS})`)
+  .option("--once", "a one-shot hold: it expires for good instead of re-arming")
+  .option("--reason <reason>", "why, for whoever reads this in six months")
+  .action(async (
+    extension: string,
+    mangaIds: string[],
+    opts: { namespace?: string; days?: string; once?: boolean; reason?: string },
+  ) => {
+    const ids = idsFromArgsOrStdin(mangaIds);
+    if (ids.length === 0) fail("no series ids given");
+    const days = opts.days === undefined ? undefined : Number(opts.days);
+    if (days !== undefined && (!Number.isInteger(days) || days < 1 || days > MAX_COOLDOWN_DAYS)) {
+      fail(`--days must be a whole number between 1 and ${MAX_COOLDOWN_DAYS}`);
+    }
+    const res = await api<{ changed: number; notFound: { mangaId: string }[]; recheckAfter: string }>(
+      `/api/v1/admin/extensions/${extension}/tracked/pause`,
+      {
+        method: "POST",
+        json: {
+          mangaIds: ids,
+          ...(opts.namespace ? { namespace: opts.namespace } : {}),
+          ...(days === undefined ? {} : { days }),
+          ...(opts.once ? { renew: false } : {}),
+          ...(opts.reason ? { reason: opts.reason } : {}),
+        },
+      },
+    );
+    ok(
+      `paused ${res.changed} series until ${new Date(res.recheckAfter).toISOString().slice(0, 10)}` +
+        (opts.once ? " (one-shot)" : ", re-arming after each clean run"),
+    );
+    if (res.notFound.length > 0) {
+      console.log(`not tracked: ${res.notFound.map((r) => r.mangaId).join(", ")}`);
+    }
+  });
+
+tracked
+  .command("unpause <extension> [mangaIds...]")
+  .description("put paused series back in play immediately")
+  .option("--namespace <namespace>", "the extension catalogue these ids belong to")
+  .action(async (extension: string, mangaIds: string[], opts: { namespace?: string }) => {
+    const ids = idsFromArgsOrStdin(mangaIds);
+    if (ids.length === 0) fail("no series ids given");
+    const res = await api<{ changed: number; notFound: { mangaId: string }[] }>(
+      `/api/v1/admin/extensions/${extension}/tracked/unpause`,
+      {
+        method: "POST",
+        json: { mangaIds: ids, ...(opts.namespace ? { namespace: opts.namespace } : {}) },
+      },
+    );
+    ok(`unpaused ${res.changed} series`);
+    if (res.notFound.length > 0) {
+      console.log(`not tracked: ${res.notFound.map((r) => r.mangaId).join(", ")}`);
+    }
+  });
+
+tracked
+  .command("paused <extension>")
+  .description("series currently suppressed from runs, soonest to return first")
+  .action(async (extension: string) => {
+    const res = await api<{ paused: Record<string, unknown>[] }>(
+      `/api/v1/admin/extensions/${extension}/tracked/paused`,
+    );
+    const namespaced = res.paused.some((t) => t["namespace"]);
+    table(res.paused, [
+      ...(namespaced ? [{ header: "NAMESPACE", get: (t: Record<string, unknown>) => t["namespace"] || "-" }] : []),
+      { header: "MANGA ID", get: (t) => t["mangaId"] },
+      { header: "RETURNS", get: (t) => ago(t["recheckAfter"]) },
+      { header: "EVERY", get: (t) => (t["cooldownDays"] ? `${String(t["cooldownDays"])}d` : "once") },
+      { header: "BY", get: (t) => t["pausedBy"] ?? "-" },
+      { header: "REASON", get: (t) => t["pauseReason"] ?? "-" },
+    ], `nothing paused for ${extension}`);
+    if (res.paused.length > 0) console.log(`\n${res.paused.length} paused`);
   });
 
 tracked
