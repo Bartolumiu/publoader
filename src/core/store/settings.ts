@@ -82,26 +82,36 @@ export interface UploadSchedule {
   /** Gap between successive release days. */
   intervalHours: number;
   /**
-   * Minimum gap between two consecutive uploads inside one release day.
+   * Minimum gap between two consecutive uploads, in seconds.
    *
-   * Without this a day's whole allowance carries the same `not_before`, so the
-   * uploader claims all of it back to back the instant the day opens: the cap
-   * spreads work across days but does nothing to the burst inside one. A big
-   * backlog is exactly where that shows, because a big backlog fills every day
-   * to the cap.
+   * Seconds rather than minutes because a minute is the *slowest* rate anybody
+   * has wanted: "two a minute" is an ordinary request and a whole-minute field
+   * cannot express it at all.
    *
-   * `0` means auto: the day's allowance is spread evenly across the whole
-   * interval (`intervalHours / perDay` apart), so a full day trickles rather
-   * than lands. Set a number to force at least that gap instead.
+   * This is the queue's pace, not a property of one run, so it applies in both
+   * places work becomes claimable:
+   *
+   *  - when a spread run plans a day, it spaces that day's allowance rather
+   *    than giving every chapter in it the same instant;
+   *  - when anything is enqueued — a routine update, a hand-added task — the
+   *    new row is dated behind the queue's tail instead of on top of it.
+   *
+   * Without the second half the setting only ever reached work that a backlog
+   * planned, and the ordinary case (a run queues twelve chapters, all due now)
+   * still went out back to back.
+   *
+   * `0` means auto: a spread day divides its allowance across the interval, and
+   * enqueueing does not pace at all. A number forces at least that gap
+   * everywhere.
    */
-  spacingMinutes: number;
+  spacingSeconds: number;
 }
 
 export const DEFAULT_UPLOAD_SCHEDULE: UploadSchedule = {
   perDay: 50,
   perMangaPerDay: 3,
   intervalHours: 24,
-  spacingMinutes: 0,
+  spacingSeconds: 0,
 };
 
 /**
@@ -128,9 +138,9 @@ function clampUploadSchedule(value: UploadSchedule): UploadSchedule {
     perDay: num(value.perDay, DEFAULT_UPLOAD_SCHEDULE.perDay, 0, 100_000),
     perMangaPerDay: num(value.perMangaPerDay, DEFAULT_UPLOAD_SCHEDULE.perMangaPerDay, 0, 100_000),
     intervalHours: num(value.intervalHours, DEFAULT_UPLOAD_SCHEDULE.intervalHours, 1, 24 * 30),
-    // Capped at a day: a gap longer than the interval would push a day's tail
-    // past the day it belongs to.
-    spacingMinutes: num(value.spacingMinutes, DEFAULT_UPLOAD_SCHEDULE.spacingMinutes, 0, 24 * 60),
+    // Capped at a day: a gap longer than that is a pause, not a pace, and the
+    // per-day cap is the tool for holding work back.
+    spacingSeconds: num(value.spacingSeconds, DEFAULT_UPLOAD_SCHEDULE.spacingSeconds, 0, 24 * 3600),
   };
 }
 
@@ -147,7 +157,7 @@ function parseUploadSchedule(raw: unknown): Partial<UploadSchedule> {
   if (typeof value !== "object" || value === null) return {};
   const record = value as Record<string, unknown>;
   const out: Partial<UploadSchedule> = {};
-  for (const key of ["perDay", "perMangaPerDay", "intervalHours", "spacingMinutes"] as const) {
+  for (const key of ["perDay", "perMangaPerDay", "intervalHours", "spacingSeconds"] as const) {
     const field = record[key];
     if (typeof field === "number") out[key] = field;
   }

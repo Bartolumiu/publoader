@@ -780,6 +780,53 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
       };
     });
 
+    // ---- restagger ----
+
+    /**
+     * Re-space the whole pending queue to a fixed rate.
+     *
+     * Separate from `/reorder` because it is a different shape of operation: no
+     * id list, because it acts on the queue rather than on a selection, and no
+     * mode, because the only parameter is the gap. `/reorder` cannot do it —
+     * every mode there lands the listed rows on one instant, so a bunched queue
+     * stays bunched.
+     *
+     * The case this exists for: a queue that was pulled forward, or planned
+     * before the schedule paced anything, is hundreds of rows all due at once,
+     * and the uploader drains it back to back. `spacingMinutes` fixes that when
+     * work is planned; nothing fixed it for work already queued.
+     *
+     * `runs:write` and the audit record match `/reorder`: this rewrites when
+     * every pending row runs, which is the same authority.
+     */
+    scope.post("/api/v1/admin/queues/restagger", { preHandler: requireScope("runs:write") }, async (req) => {
+      const body = parseOrThrow(
+        z
+          .object({
+            /** Seconds between consecutive uploads. 60 is one a minute. */
+            gapSeconds: z.coerce.number().int().min(1).max(24 * 3600),
+            kind: z.enum(UPLOAD_TASK_KINDS).default("UPLOAD"),
+          })
+          .strict(),
+        req.body ?? {},
+      );
+
+      const moved = await ctx.uploadTasks.restagger(body.gapSeconds, body.kind);
+      await ctx.audit.record(actor(req), "queue.restagger", body.kind, {
+        gapSeconds: body.gapSeconds,
+        moved,
+      });
+      return {
+        ok: true,
+        kind: body.kind,
+        gapSeconds: body.gapSeconds,
+        moved,
+        // What the operator actually asked for, echoed as the thing they can
+        // check: the last row is `moved - 1` gaps out.
+        spansSeconds: moved > 0 ? (moved - 1) * body.gapSeconds : 0,
+      };
+    });
+
     // ---- manual add ----
 
     /**

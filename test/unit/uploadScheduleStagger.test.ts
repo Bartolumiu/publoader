@@ -31,7 +31,7 @@ const gaps = (out: readonly { notBefore: Date }[]): number[] => {
 describe("staggering inside a release day", () => {
   it("auto-spreads a day's allowance across the whole interval", () => {
     // 4 a day over 24h is one every 6 hours, not four at midnight.
-    const s = schedule({ perDay: 4, perMangaPerDay: 4, intervalHours: 24, spacingMinutes: 0 });
+    const s = schedule({ perDay: 4, perMangaPerDay: 4, intervalHours: 24, spacingSeconds: 0 });
     expect(spacingMsOf(s, 24 * 60 * MIN_MS)).toBe(6 * 60 * MIN_MS);
 
     // 6 chapters against a cap of 4: a big queue, so day 0 trickles.
@@ -46,7 +46,7 @@ describe("staggering inside a release day", () => {
   it("leaves a run that fits in the day entirely immediate", () => {
     // The invariant staggering must not break: pacing is for a backlog, and
     // dripping a routine run across a day would delay it for no benefit.
-    const s = schedule({ perDay: 50, perMangaPerDay: 50, intervalHours: 24, spacingMinutes: 0 });
+    const s = schedule({ perDay: 50, perMangaPerDay: 50, intervalHours: 24, spacingSeconds: 0 });
     const chapters = Array.from({ length: 20 }, (_, i) => chapter("m1", `c${i}`, i + 1));
 
     const out = planUploadSchedule(chapters, s, NOW);
@@ -55,7 +55,7 @@ describe("staggering inside a release day", () => {
   });
 
   it("honours an explicit gap over the auto one", () => {
-    const s = schedule({ perDay: 10, perMangaPerDay: 10, intervalHours: 24, spacingMinutes: 30 });
+    const s = schedule({ perDay: 10, perMangaPerDay: 10, intervalHours: 24, spacingSeconds: 1800 });
     const chapters = Array.from({ length: 3 }, (_, i) => chapter("m1", `c${i}`, i + 1));
 
     const out = planUploadSchedule(chapters, s, NOW);
@@ -66,7 +66,7 @@ describe("staggering inside a release day", () => {
   it("never lets a day's tail overtake the next day", () => {
     // A gap far larger than the allowance needs would otherwise push the last
     // chapter of day 0 past the start of day 1.
-    const s = schedule({ perDay: 3, perMangaPerDay: 3, intervalHours: 1, spacingMinutes: 60 });
+    const s = schedule({ perDay: 3, perMangaPerDay: 3, intervalHours: 1, spacingSeconds: 3600 });
     const chapters = Array.from({ length: 6 }, (_, i) => chapter("m1", `c${i}`, i + 1));
 
     const out = planUploadSchedule(chapters, s, NOW);
@@ -83,7 +83,7 @@ describe("staggering inside a release day", () => {
   it("queues behind work another run already put in the bucket", () => {
     // Prior load shifts the starting slot, so a top-up does not land on top of
     // the timestamps already there.
-    const s = schedule({ perDay: 10, perMangaPerDay: 10, intervalHours: 24, spacingMinutes: 10 });
+    const s = schedule({ perDay: 10, perMangaPerDay: 10, intervalHours: 24, spacingSeconds: 600 });
     const here = bucketIndex(NOW, 24 * 60 * MIN_MS);
     const existing: ScheduledLoad = {
       total: new Map([[here, 3]]),
@@ -97,7 +97,7 @@ describe("staggering inside a release day", () => {
   });
 
   it("does not stagger when spreading is off", () => {
-    const s = schedule({ perDay: 0, perMangaPerDay: 0, spacingMinutes: 0 });
+    const s = schedule({ perDay: 0, perMangaPerDay: 0, spacingSeconds: 0 });
     expect(spacingMsOf(s, 24 * 60 * MIN_MS)).toBe(0);
 
     const chapters = Array.from({ length: 3 }, (_, i) => chapter("m1", `c${i}`, i + 1));

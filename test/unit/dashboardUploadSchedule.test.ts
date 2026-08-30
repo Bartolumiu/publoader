@@ -207,7 +207,7 @@ describe("release pacing is editable from the dashboard", () => {
     expect(write?.path).toContain("/upload-schedule");
     // 0 is sent as 0, not dropped as falsy: it is a value the endpoint accepts
     // and means something different from leaving the field alone.
-    expect(write?.body).toEqual({ perDay: 80, perMangaPerDay: 0, intervalHours: 6, spacingMinutes: 0 });
+    expect(write?.body).toEqual({ perDay: 80, perMangaPerDay: 0, intervalHours: 6, spacingSeconds: 0 });
   });
 
   it("seeds an extension's form with what that extension actually uses", async () => {

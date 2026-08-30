@@ -641,12 +641,17 @@ export class RunProcessor {
       const schedule = spread ? await this.settings.getUploadSchedule(budgetOf) : null;
 
       if (schedule === null) {
+        // Not spread, but still paced. "Immediate" means this run's chapters
+        // are not held back for days by the per-day cap; it does not mean the
+        // uploader should fire them off back to back, which is the one thing
+        // `spacingSeconds` exists to stop. Each row queues behind the tail.
+        const { spacingSeconds } = await this.settings.getUploadSchedule(run.extension);
         for (const chapter of pendingUploads) {
-          await this.tasks.enqueue("UPLOAD", uploadDedupeKey(chapter), chapter);
+          await this.tasks.enqueue("UPLOAD", uploadDedupeKey(chapter), chapter, { spacingSeconds });
         }
         log.debug(
-          { queued: pendingUploads.length, kind: run.kind },
-          "queued this run's uploads, all due now",
+          { queued: pendingUploads.length, kind: run.kind, spacingSeconds },
+          "queued this run's uploads, paced but not spread",
         );
       } else {
         const scheduled = planUploadSchedule(
@@ -675,7 +680,7 @@ export class RunProcessor {
               scope,
               perDay: schedule.perDay,
               perMangaPerDay: schedule.perMangaPerDay,
-              spacingMinutes: schedule.spacingMinutes,
+              spacingSeconds: schedule.spacingSeconds,
             },
             "spreading this run's uploads over several days",
           );

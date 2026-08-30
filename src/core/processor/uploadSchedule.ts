@@ -127,14 +127,14 @@ function bucketStart(index: number, intervalMs: number, now: Date): number {
 /**
  * How far apart two consecutive uploads in one bucket are placed.
  *
- * Auto (`spacingMinutes: 0`) paces only a queue big enough to need it: a run
+ * Auto (`spacingSeconds: 0`) paces only a queue big enough to need it: a run
  * that does not fill a day is the routine case, and dripping a dozen chapters
  * across 24 hours would delay them for no benefit. Once the work does fill a
  * day, the day's allowance is divided across the whole interval so it trickles
  * rather than landing at once — without that, the cap spreads work across days
  * and still bursts inside each one, which is exactly what a backlog does.
  *
- * An explicit `spacingMinutes` is an operator's decision and always applies.
+ * An explicit `spacingSeconds` is an operator's decision and always applies.
  * With no `perDay` there is nothing to divide by and nothing to burst.
  */
 export function spacingMsOf(
@@ -143,7 +143,7 @@ export function spacingMsOf(
   /** Whether the work actually fills a day. False keeps a routine run immediate. */
   crowded = true,
 ): number {
-  if (schedule.spacingMinutes > 0) return schedule.spacingMinutes * 60 * 1000;
+  if (schedule.spacingSeconds > 0) return schedule.spacingSeconds * 1000;
   if (!crowded) return 0;
   if (schedule.perDay > 0) return Math.floor(intervalMs / schedule.perDay);
   return 0;

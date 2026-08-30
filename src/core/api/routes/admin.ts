@@ -712,8 +712,8 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         perDay: z.coerce.number().int().min(0).max(100_000).optional(),
         perMangaPerDay: z.coerce.number().int().min(0).max(100_000).optional(),
         intervalHours: z.coerce.number().int().min(1).max(24 * 30).optional(),
-        // 0 is auto: spread the day's allowance evenly across the interval.
-        spacingMinutes: z.coerce.number().int().min(0).max(24 * 60).optional(),
+        // 0 is auto: spread a day evenly, and do not pace enqueueing.
+        spacingSeconds: z.coerce.number().int().min(0).max(24 * 3600).optional(),
       })
       .strict();
 

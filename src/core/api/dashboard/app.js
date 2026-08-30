@@ -2665,7 +2665,7 @@ VIEWS.overview = (route) => {
       type: "number",
       id: "pause-minutes",
       min: "1",
-      max: "1440",
+      max: "86400",
       value: "60",
       "aria-label": "Pause duration in minutes",
     });
@@ -3854,6 +3854,15 @@ function queueFilterCard(onChange) {
           })
         : null,
       gatedButton("runs:write", {
+        text: "Space out…",
+        title: "Give every pending row its own time so the queue stops uploading back to back",
+        // Follows the Kind filter, so an operator looking at the EDIT queue
+        // paces that one; UPLOAD when no kind is picked, because that is the
+        // queue that reaches MangaDex and the only one pacing protects.
+        onclick: () =>
+          queueRestaggerDialog(store.filters.queueKind || "UPLOAD", summary, onChange),
+      }),
+      gatedButton("runs:write", {
         class: "danger",
         text: "Purge…",
         title: "Delete every row matching the current filter",
@@ -4232,6 +4241,136 @@ function queueDeferDialog(ids, tasks, done) {
             );
             if (result) {
               reportQueueOutcome(result);
+              closeModal();
+              done();
+            }
+          },
+        }),
+      ),
+    ),
+  );
+}
+
+/**
+ * Re-space the whole pending queue to a fixed rate.
+ *
+ * Not a selection action, which is why it is here rather than beside Run
+ * next/last: it acts on every pending row of the kind, because pacing half a
+ * queue leaves the other half bunched and the two interleave into the same
+ * burst. The dialog names the queue size and the resulting finish time so the
+ * consequence is on screen before the button is pressed.
+ */
+function queueRestaggerDialog(kind, tasks, done) {
+  const rate = el("input", { id: "restagger-rate", type: "number", min: "1", max: "600", value: "1" });
+  const keepPacing = el("input", {
+    id: "restagger-persist",
+    type: "checkbox",
+    checked: true,
+    disabled: !can("settings:write"),
+  });
+  const outcome = el("p", { class: "dim small" });
+  // Asked for rather than passed in: the estimate is the reason the dialog is
+  // worth opening, and a stale count would make it a guess.
+  let pending = null;
+
+  // Recomputed as the operator types: "1 a minute" means nothing without "and
+  // therefore the last one goes up in ten hours".
+  const describe = () => {
+    const perMinute = Number(rate.value);
+    if (!Number.isFinite(perMinute) || perMinute < 1) {
+      outcome.textContent = "Enter how many to upload each minute.";
+      return null;
+    }
+    const gapSeconds = Math.max(1, Math.round(60 / perMinute));
+    if (pending === null) {
+      outcome.textContent = `One every ${gapSeconds}s. Counting the queue…`;
+      return gapSeconds;
+    }
+    const spanMinutes = Math.round(((pending - 1) * gapSeconds) / 60);
+    outcome.textContent =
+      pending === 0
+        ? "Nothing is queued, so there is nothing to space out."
+        : `${pending} queued, one every ${gapSeconds}s. The last one becomes claimable in ` +
+          `${spanMinutes >= 120 ? `${Math.round(spanMinutes / 60)} hours` : `${spanMinutes} minutes`}.`;
+    return gapSeconds;
+  };
+  rate.oninput = describe;
+  describe();
+
+  // Quiet and best-effort: a failed count costs the estimate, not the action.
+  void api(`/queues?kind=${encodeURIComponent(kind)}&state=PENDING&limit=1`, { quiet: true })
+    .then((res) => {
+      pending = res?.total ?? null;
+      describe();
+    })
+    .catch(() => {});
+
+  openModal(
+    `Space out the ${kind.toLowerCase()} queue`,
+    el(
+      "div",
+      {},
+      el("p", {
+        class: "dim small",
+        text:
+          "Every pending row is given its own time, evenly spaced from now, in the order the queue is " +
+          "already in. Nothing is dropped or deferred indefinitely — this only changes when each row " +
+          "becomes claimable, so a queue that would upload back to back trickles instead.",
+      }),
+      row(
+        el("label", { class: "inline", for: "restagger-rate", text: "Uploads per minute" }),
+        rate,
+      ),
+      outcome,
+      // Ticked by default because the surprising outcome is the other one:
+      // spacing today's queue and then watching the next run pile back on top
+      // of it looks like the button did not work.
+      row(
+        el(
+          "label",
+          { class: "inline", for: "restagger-persist" },
+          keepPacing,
+          " Keep this pace for newly queued chapters too",
+        ),
+      ),
+      el(
+        "div",
+        { class: "row end" },
+        el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+        gatedButton("runs:write", {
+          class: "primary",
+          text: "Space them out",
+          onclick: async (event) => {
+            const gapSeconds = describe();
+            if (gapSeconds === null) {
+              toast("enter how many to upload each minute", false);
+              return;
+            }
+            const result = await act(
+              "queue.restagger",
+              async () => {
+                const res = await api("/queues/restagger", {
+                  method: "POST",
+                  body: { kind, gapSeconds },
+                });
+                // After the re-space, not before: if the rewrite fails there is
+                // no reason to have changed the standing setting.
+                if (keepPacing.checked && can("settings:write")) {
+                  await api("/upload-schedule", {
+                    method: "POST",
+                    body: { spacingSeconds: gapSeconds },
+                  });
+                }
+                return res;
+              },
+              { button: event.currentTarget, refresh: [tasks] },
+            );
+            if (result) {
+              toast(
+                `spaced ${result.moved} row(s), one every ${result.gapSeconds}s` +
+                  (keepPacing.checked ? "; new chapters will queue at the same pace" : ""),
+                true,
+              );
               closeModal();
               done();
             }
@@ -7623,10 +7762,10 @@ function uploadScheduleControls(data, resource) {
     id: "schedule-spacing",
     type: "number",
     min: "0",
-    max: "1440",
+    max: "86400",
     step: "1",
-    value: String(values.spacingMinutes ?? 0),
-    "aria-label": "Minutes between consecutive uploads within a day, 0 to spread evenly",
+    value: String(values.spacingSeconds ?? 0),
+    "aria-label": "Seconds between consecutive uploads, 0 to pace only a full day",
   });
 
   // The pool `perDay` counts against. Worth a control rather than a constant:
@@ -7672,7 +7811,7 @@ function uploadScheduleControls(data, resource) {
       perManga,
       el("label", { class: "inline", for: "schedule-interval", text: "Gap between days (h)" }),
       interval,
-      el("label", { class: "inline", for: "schedule-spacing", text: "Gap between uploads (min)" }),
+      el("label", { class: "inline", for: "schedule-spacing", text: "Gap between uploads (s)" }),
       spacing,
       gatedButton("settings:write", {
         text: "Save",
@@ -7686,7 +7825,7 @@ function uploadScheduleControls(data, resource) {
                   perDay: Number(perDay.value),
                   perMangaPerDay: Number(perManga.value),
                   intervalHours: Number(interval.value),
-                  spacingMinutes: Number(spacing.value),
+                  spacingSeconds: Number(spacing.value),
                 },
               }),
             { button: event.currentTarget, refresh: [resource] },
@@ -7701,8 +7840,9 @@ function uploadScheduleControls(data, resource) {
     el("p", {
       class: "dim small",
       text:
-        "Gap between uploads: 0 spreads a day's allowance evenly across the gap between days, " +
-        "so a full day trickles instead of uploading back to back.",
+        "Gap between uploads applies everywhere work becomes claimable: a spread day is spaced " +
+        "across it, and anything newly queued is dated behind the queue's tail rather than on top " +
+        "of it. 0 paces only a day that is full.",
     }),
     // Named rather than counted, for the reason the pacing card above names
     // them: a number does not tell an operator whether the global they are
@@ -7756,10 +7896,10 @@ function extensionUploadScheduleControls(name, data, resource) {
   const spacing = el("input", {
     type: "number",
     min: "0",
-    max: "1440",
+    max: "86400",
     step: "1",
-    value: String(effective.spacingMinutes ?? 0),
-    "aria-label": `Minutes between consecutive ${name} uploads, 0 to spread evenly`,
+    value: String(effective.spacingSeconds ?? 0),
+    "aria-label": `Seconds between consecutive ${name} uploads, 0 to pace only a full day`,
   });
 
   const post = (body, event) =>
@@ -7776,7 +7916,7 @@ function extensionUploadScheduleControls(name, data, resource) {
       perManga,
       el("span", { class: "inline", text: "Gap between days (h)" }),
       interval,
-      el("span", { class: "inline", text: "Gap between uploads (min)" }),
+      el("span", { class: "inline", text: "Gap between uploads (s)" }),
       spacing,
       gatedButton("settings:write", {
         text: "Override",
@@ -7786,7 +7926,7 @@ function extensionUploadScheduleControls(name, data, resource) {
               perDay: Number(perDay.value),
               perMangaPerDay: Number(perManga.value),
               intervalHours: Number(interval.value),
-              spacingMinutes: Number(spacing.value),
+              spacingSeconds: Number(spacing.value),
             },
             event,
           ),

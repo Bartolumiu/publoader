@@ -257,13 +257,29 @@ export class UploadTaskStore {
     kind: UploadTaskKind,
     dedupeKey: string,
     chapter: unknown,
-    opts: { notBefore?: Date } = {},
+    opts: { notBefore?: Date; spacingSeconds?: number } = {},
   ): Promise<boolean> {
+    const spacing = opts.spacingSeconds ?? 0;
+    // The queue's tail plus a gap, so a new row lands behind what is already
+    // waiting rather than on top of it. `max()` over no rows is NULL and
+    // `greatest` ignores NULLs, which is exactly the empty-queue case: nothing
+    // to queue behind, so the row is due now.
+    //
+    // An explicit `notBefore` still wins: a spread run has already decided
+    // where its chapters go, and pacing them a second time here would move work
+    // the planner deliberately placed.
+    const paced =
+      spacing > 0
+        ? Prisma.sql`greatest(now(), (SELECT max(not_before) FROM upload_tasks
+                                      WHERE kind = ${kind}::"UploadTaskKind" AND state = 'PENDING')
+                                     + make_interval(secs => ${spacing}))`
+        : Prisma.sql`now()`;
+
     const res = await this.prisma.$executeRaw(Prisma.sql`
       INSERT INTO upload_tasks (id, kind, dedupe_key, chapter, state, not_before, created_at, updated_at)
       VALUES (${randomUUID()}, ${kind}::"UploadTaskKind", ${dedupeKey},
               ${JSON.stringify(chapter)}::jsonb, 'PENDING',
-              coalesce(${opts.notBefore ?? null}::timestamptz, now()), now(), now())
+              coalesce(${opts.notBefore ?? null}::timestamptz, ${paced}), now(), now())
       ON CONFLICT (kind, dedupe_key) DO NOTHING
     `);
     return res === 1;
@@ -724,6 +740,37 @@ export class UploadTaskStore {
    * anchor is a scalar subquery inside that statement rather than a prior SELECT,
    * which keeps the whole thing atomic.
    */
+  /**
+   * Re-space the whole pending queue so it drains at a fixed rate.
+   *
+   * `reorder` cannot express this. Every one of its modes assigns the listed
+   * rows one instant — `defer` moves them all by the same amount, `front` and
+   * `back` stack them at one end — so a queue that is already bunched stays
+   * bunched, just somewhere else. Pacing needs a distinct `not_before` per row,
+   * which is a rank over the queue rather than arithmetic on an id list.
+   *
+   * The rank is `not_before, created_at, id`: the claim order, so re-spacing
+   * preserves the order the queue is already in rather than inventing one. The
+   * first row keeps `now()`, so this paces the queue without delaying its head.
+   *
+   * PENDING only, which is what keeps this off a row the uploader is mid-way
+   * through: a LEASED task has a worker holding it and its date means nothing.
+   */
+  async restagger(gapSeconds: number, kind: UploadTaskKind = "UPLOAD"): Promise<number> {
+    const rows = await this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+      UPDATE upload_tasks t
+      SET not_before = now() + make_interval(secs => r.rn * ${gapSeconds}), updated_at = now()
+      FROM (
+        SELECT id, row_number() OVER (ORDER BY not_before, created_at, id) - 1 AS rn
+        FROM upload_tasks
+        WHERE kind = ${kind}::"UploadTaskKind" AND state = 'PENDING'
+      ) r
+      WHERE t.id = r.id AND t.state = 'PENDING'
+      RETURNING t.id
+    `);
+    return rows.length;
+  }
+
   async reorder(
     ids: readonly string[],
     mode: ReorderMode,
