@@ -1275,7 +1275,32 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     expect(await mapped(row.mangaId)).toBeNull();
   });
 
-  it("writes nothing on a dry run, and does not consume the re-check", async () => {
+  it("moves past an unmatched row on a dry run too, so pressing again finds more", async () => {
+    // The bug this replaces: a preview recorded nothing, so it re-read the
+    // same rows every time. At a hit rate near one in twenty that means the
+    // operator sees zero, presses again, and sees the same zero — with
+    // thousands of unchecked rows sitting behind them.
+    await untracked({ mangaId: "ext-a", mangaUrl: "https://example.com/series/a" });
+    await untracked({ mangaId: "ext-b", mangaUrl: "https://example.com/series/b" });
+    const seen: string[] = [];
+    md.searchManga = async (title: string) => {
+      seen.push(title);
+      return [];
+    };
+
+    const first = await ctx.titleService!.autoMapByOfficialLink({ dryRun: true, limit: 1 });
+    const second = await ctx.titleService!.autoMapByOfficialLink({ dryRun: true, limit: 1 });
+
+    expect(first.considered).toBe(1);
+    expect(second.considered).toBe(1);
+    // Two presses, two different rows.
+    expect(seen).toHaveLength(2);
+    // And it says how much is left, so a zero does not read as broken.
+    expect(first.remaining).toBe(1);
+    expect(second.remaining).toBe(0);
+  });
+
+  it("keeps an unacted match on a dry run, so the other button can still map it", async () => {
     const row = await untracked({ mangaUrl: "https://example.com/series/1" });
     md.searchManga = async () => [linked(LINKED_ID, "Mangled Nmae", "https://example.com/series/1")];
 

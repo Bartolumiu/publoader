@@ -9684,27 +9684,42 @@ function autoMapCard(queue) {
   const writable = can("untracked:write") && can("tracked:append");
   const results = el("div", {});
 
-  const extension = el("input", {
-    id: "automap-extension",
-    type: "text",
-    maxlength: "64",
-    placeholder: "all extensions",
-    disabled: !writable,
-  });
-  const limit = el("input", {
-    id: "automap-limit",
-    type: "number",
-    min: "1",
-    max: "200",
-    value: "25",
-    disabled: !writable,
-  });
+  /**
+   * A picker, not a text box: the names are a known, short list, and a typo in
+   * a free-text field here reads exactly like "this extension has nothing to
+   * map" — the same empty result a correct name gives most of the time.
+   */
+  const extension = el(
+    "select",
+    { id: "automap-extension", "aria-label": "Extension to scan", disabled: !writable },
+    el("option", { value: "", text: "All extensions" }),
+  );
+  void api("/extensions")
+    .then((data) => {
+      const names = (data.extensions ?? [])
+        .map((e) => e.name ?? e)
+        .filter(Boolean)
+        .sort();
+      for (const name of names) extension.append(el("option", { value: name, text: name }));
+    })
+    .catch(() => {
+      // Losing the list is not worth failing the card over; "All extensions"
+      // still works, and the scan is the point.
+    });
+
+  const limit = el(
+    "select",
+    { id: "automap-limit", "aria-label": "How many rows to check", disabled: !writable },
+    [25, 50, 100, 200].map((n) =>
+      el("option", { value: String(n), text: String(n), selected: n === 50 }),
+    ),
+  );
 
   const requestBody = (dryRun) => {
-    const name = extension.value.trim();
+    const name = extension.value;
     return {
       dryRun,
-      limit: Math.min(200, Math.max(1, Number(limit.value) || 25)),
+      limit: Number(limit.value) || 50,
       ...(name ? { extension: name } : {}),
     };
   };
@@ -9742,14 +9757,33 @@ function autoMapCard(queue) {
           )
         : null,
       el("p", {
-        class: "dim small",
+        class: mapped.length ? "" : "dim small",
         text:
-          `${report.dryRun ? "Would map" : "Mapped"} ${mapped.length} of ${report.considered ?? 0} checked. ` +
+          `${report.dryRun ? "Would map" : "Mapped"} ${mapped.length} of the ` +
+          `${report.considered ?? 0} row(s) checked. ` +
           `${report.ambiguous ?? 0} ambiguous (two titles share one link; left for you), ` +
           `${report.unmatched ?? 0} with no matching official link.`,
       }),
+      // Most passes map nothing — the hit rate is roughly one in twenty on the
+      // sources here — so a bare "0" reads as broken unless it also says how
+      // much queue is left. Checked rows are not read again, so pressing the
+      // button again moves further down the queue.
+      el("p", {
+        class: "dim small",
+        text: report.remaining
+          ? `${report.remaining} row(s) still to check. These ${report.considered ?? 0} will not be ` +
+            `read again, so running it again moves on to the next ones.`
+          : "Every row in this filter has been checked. New series are checked as they arrive.",
+      }),
       report.dryRun && mapped.length
-        ? el("p", { class: "dim small", text: "Nothing was written. Map them writes these mappings." })
+        ? el("p", { text: "Nothing was written yet. Map them writes these mappings." })
+        : null,
+      !report.dryRun && mapped.length
+        ? el("p", {
+            text:
+              `Mapped, and marked auto:official-link in the tracked map. ` +
+              `These series have left the queue.`,
+          })
         : null,
     );
   };

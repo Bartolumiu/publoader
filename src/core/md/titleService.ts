@@ -42,6 +42,15 @@ export interface AutoMapReport {
   /** More than one candidate carried the link; left for a human. */
   ambiguous: number;
   unmatched: number;
+  /**
+   * NEW rows still due a check after this pass.
+   *
+   * The hit rate is low and the queue is thousands deep, so a pass that maps
+   * nothing is the normal case, not a failure. Without this the button looks
+   * broken: it says zero, and says nothing about the two thousand rows it has
+   * not reached yet.
+   */
+  remaining: number;
 }
 
 /** One MangaDex title offered as a mapping target for an untracked series. */
@@ -305,35 +314,66 @@ export class TitleService {
       take: limit,
     });
 
-    const report: AutoMapReport = { considered: rows.length, mapped: [], ambiguous: 0, unmatched: 0 };
+    const report: AutoMapReport = {
+      considered: rows.length,
+      mapped: [],
+      ambiguous: 0,
+      unmatched: 0,
+      remaining: 0,
+    };
 
     for (const row of rows) {
       const match = await this.officialLinkMatch(row);
-      if (!dryRun) {
-        await this.prisma.untrackedManga.updateMany({
-          where: { id: row.id },
-          data: { officialLinkCheckedAt: new Date() },
-        });
-      }
-      if (match === "ambiguous") {
-        report.ambiguous++;
+
+      if (match === null || match === "ambiguous") {
+        // Marked on a preview too, and this is the whole difference between a
+        // usable button and one that looks broken. A dry run that recorded
+        // nothing re-read the same rows every time it was pressed, so with a
+        // hit rate around one in twenty the operator saw zero, pressed again,
+        // and saw the same zero for the same rows — while two thousand
+        // unchecked rows sat behind them. Looking is what happened; say so.
+        await this.markLinkChecked(row.id);
+        if (match === "ambiguous") report.ambiguous++;
+        else report.unmatched++;
         continue;
       }
-      if (match === null) {
-        report.unmatched++;
-        continue;
-      }
+
       if (dryRun) {
+        // Deliberately NOT marked. A match nobody has acted on yet has to
+        // still be here when they press the button that acts on it.
         report.mapped.push({ row, mdMangaId: match });
         continue;
       }
+
       const written = await this.writeMapping(row, match, OFFICIAL_LINK_SOURCE);
-      if (written) report.mapped.push({ row, mdMangaId: match });
-      else report.unmatched++;
+      if (written) {
+        report.mapped.push({ row, mdMangaId: match });
+      } else {
+        // Already mapped elsewhere: not ours to repoint, and not worth
+        // re-searching every pass either.
+        await this.markLinkChecked(row.id);
+        report.unmatched++;
+      }
     }
+
+    report.remaining = await this.prisma.untrackedManga.count({
+      where: {
+        state: "NEW",
+        ...(opts.extension ? { extension: opts.extension } : {}),
+        OR: [{ officialLinkCheckedAt: null }, { officialLinkCheckedAt: { lt: staleBefore } }],
+      },
+    });
 
     if (!dryRun && report.mapped.length > 0) await this.announceMapped(report.mapped);
     return report;
+  }
+
+  /** Record that this row has been looked at, so a later pass moves past it. */
+  private async markLinkChecked(id: string): Promise<void> {
+    await this.prisma.untrackedManga.updateMany({
+      where: { id },
+      data: { officialLinkCheckedAt: new Date() },
+    });
   }
 
   /**
