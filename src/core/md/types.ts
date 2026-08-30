@@ -161,6 +161,14 @@ export interface MdManga {
      * so fixtures and mocks need not spell it out; MdClient always populates it.
      */
     originalLanguage?: string | null;
+    /**
+     * MangaDex's external links, keyed by site (`engtl` is the official English
+     * release, `raw` the original). Carried on the search result and not just
+     * the detail read because the auto-map pass matches on `engtl`, and
+     * re-reading every candidate in full to see one field would turn one search
+     * into a search plus a fetch per candidate.
+     */
+    links?: Record<string, string> | null;
   };
 }
 

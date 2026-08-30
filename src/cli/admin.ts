@@ -1440,6 +1440,46 @@ untracked
   });
 
 untracked
+  .command("automap")
+  .description("map every queued series MangaDex already lists under its own publisher url")
+  .option("--extension <name>", "only this extension")
+  .option("--limit <n>", "how many rows to check", "25")
+  .option("--commit", "actually write the mappings (default is a dry run)")
+  .action(async (opts: { extension?: string; limit: string; commit?: boolean }) => {
+    const res = await api<{
+      dryRun: boolean;
+      considered: number;
+      ambiguous: number;
+      unmatched: number;
+      mapped: { extension: string; mangaName: string; mdMangaId: string; titleUrl: string }[];
+    }>("/api/v1/admin/untracked/automap", {
+      method: "POST",
+      json: {
+        dryRun: !opts.commit,
+        limit: Number(opts.limit),
+        ...(opts.extension ? { extension: opts.extension } : {}),
+      },
+    });
+    table(
+      res.mapped,
+      [
+        { header: "EXTENSION", get: (m) => m["extension"] },
+        { header: "MANGA", get: (m) => String(m["mangaName"] ?? "").slice(0, 40) },
+        { header: "MANGADEX", get: (m) => m["titleUrl"] },
+      ],
+      "nothing matched an official English link",
+    );
+    kv({
+      mode: res.dryRun ? "dry run (nothing written)" : "committed",
+      considered: res.considered,
+      mapped: res.mapped.length,
+      // Two candidates carrying one link is a catalogue problem for a human.
+      ambiguous: res.ambiguous,
+      unmatched: res.unmatched,
+    });
+  });
+
+untracked
   .command("skip <id>")
   .description("never create a title for this series")
   .action(async (id: string) => {

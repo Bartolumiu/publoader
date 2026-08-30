@@ -64,6 +64,28 @@ const SEARCH_RESULTS = [
   },
 ];
 
+const MAPPED_ROW = {
+  id: ROW_ID,
+  extension: "opstest",
+  mangaName: "Mangled Nmae",
+  mangaUrl: "https://example.com/series/1",
+  mdMangaId: MATCH_ID,
+  titleUrl: `https://mangadex.org/title/${MATCH_ID}`,
+};
+
+/** The dry-run report, rebuilt per test so a swap cannot leak into the next. */
+const previewReport = () => ({
+  ok: true,
+  dryRun: true,
+  considered: 25,
+  ambiguous: 1,
+  unmatched: 22,
+  mapped: [MAPPED_ROW],
+});
+
+/** Swapped by the commit test so one mount can answer a dry run, then a write. */
+let AUTOMAP_REPORT: unknown = previewReport();
+
 function apiRoutes(): { match: RegExp; body: unknown }[] {
   return [
     { match: /\/session$/, body: { actor: "ardax", role: "OWNER", userId: "u1", email: "a@b.c" } },
@@ -80,6 +102,7 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
     },
     { match: /\/stats$/, body: { paused: false, workers: {}, jobs: {}, uploadTasks: [], quarantined: 0 } },
     { match: /\/mangadex\/search/, body: { results: SEARCH_RESULTS } },
+    { match: /\/untracked\/automap$/, body: () => AUTOMAP_REPORT },
     { match: /\/untracked\/[^/]+\/map$/, body: { ok: true, mdMangaId: MATCH_ID } },
     { match: /\/untracked\/[^/?]+$/, body: { untracked: ROW, mangadex: null } },
     { match: /\/untracked\?/, body: { untracked: [ROW] } },
@@ -94,7 +117,8 @@ function installFetch(): void {
     const path = String(url);
     requested.push(path);
     const route = routes.find((r) => r.match.test(path));
-    const body = route ? route.body : {};
+    const raw = route ? route.body : {};
+    const body = typeof raw === "function" ? (raw as () => unknown)() : raw;
     return {
       ok: Boolean(route),
       status: route ? 200 : 404,
@@ -156,6 +180,7 @@ const calls = (fragment: string) =>
 describe("mapping an untracked series onto an existing MangaDex title", () => {
   beforeEach(async () => {
     requested = [];
+    AUTOMAP_REPORT = previewReport();
     const html = readFileSync(INDEX_HTML, "utf8");
     const body = html.split("<body>")[1]?.split("</body>")[0];
     if (!body) throw new Error("index.html has no <body>: the dashboard shell cannot be mounted");
@@ -236,6 +261,72 @@ describe("mapping an untracked series onto an existing MangaDex title", () => {
     await settle(10);
 
     expect(calls("/map")).toHaveLength(0);
+  });
+
+  it("previews the auto-map without writing, and says what it would do", async () => {
+    await goto("#/untracked");
+    expect(text()).toContain("Auto-map by official MangaDex link");
+
+    click("Find matches");
+    await settle(15);
+
+    const [, init] = calls("/untracked/automap")[0];
+    expect(init.method).toBe("POST");
+    // Preview must be a dry run; this endpoint writes the series map.
+    expect(JSON.parse(init.body ?? "{}")).toMatchObject({ dryRun: true, limit: 25 });
+
+    expect(text()).toContain("Would map 1 of 25 checked");
+    // Ambiguity is the one outcome that needs a person, so it is never folded
+    // away into "unmatched".
+    expect(text()).toContain("1 ambiguous");
+    expect(text()).toContain("Nothing was written");
+  });
+
+  it("scopes the run to one extension when asked", async () => {
+    await goto("#/untracked");
+    const ext = doc.getElementById("automap-extension");
+    const limit = doc.getElementById("automap-limit");
+    expect(ext, "the extension box is not rendered").toBeTruthy();
+    ext.value = "mangaup_global";
+    limit.value = "50";
+
+    click("Find matches");
+    await settle(15);
+
+    const [, init] = calls("/untracked/automap")[0];
+    expect(JSON.parse(init.body ?? "{}")).toMatchObject({
+      dryRun: true,
+      limit: 50,
+      extension: "mangaup_global",
+    });
+  });
+
+  it("commits only after the confirmation, and then not as a dry run", async () => {
+    AUTOMAP_REPORT = { ...previewReport(), dryRun: false, ambiguous: 0, unmatched: 24 };
+    await goto("#/untracked");
+
+    click("Map them");
+    await settle();
+    // The confirm dialog stands between the click and any write.
+    expect(calls("/untracked/automap")).toHaveLength(0);
+
+    click("Add the mappings");
+    await settle(15);
+
+    const writes = calls("/untracked/automap");
+    expect(writes).toHaveLength(1);
+    expect(JSON.parse(writes[0][1].body ?? "{}")).toMatchObject({ dryRun: false });
+    expect(text()).toContain("Mapped 1 of 25 checked");
+  });
+
+  it("writes nothing if the auto-map confirmation is dismissed", async () => {
+    await goto("#/untracked");
+    click("Map them");
+    await settle();
+    click("Cancel");
+    await settle(10);
+
+    expect(calls("/untracked/automap")).toHaveLength(0);
   });
 
   it("searches the queue itself, so one series can be found among thousands", async () => {

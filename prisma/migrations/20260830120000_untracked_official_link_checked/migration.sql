@@ -1,0 +1,14 @@
+-- When this row was last checked against MangaDex's official-English links.
+--
+-- The auto-map pass searches MangaDex for every NEW row, which is one API call
+-- each. Without a marker the scheduler would re-search the same non-matching
+-- rows on every tick, forever: at the current queue depth that is ~2,400
+-- searches a pass to find the handful that changed. Nullable, so nothing needs
+-- backfilling and a NULL simply means "never checked", which is what every
+-- existing row is.
+--
+-- A timestamp rather than a boolean because the answer goes stale in the
+-- useful direction: a series with no official link on MangaDex today may have
+-- one next month, so the pass re-checks rows it has already seen once they are
+-- old enough.
+ALTER TABLE "untracked_manga" ADD COLUMN "official_link_checked_at" TIMESTAMP(3);
