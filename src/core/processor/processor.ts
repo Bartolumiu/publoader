@@ -19,7 +19,7 @@ import { ResultStore } from "../store/results.js";
 import { activeTrackedTitles } from "../store/trackedManga.js";
 import { AuditLog, SettingsStore, type RemovalMode } from "../store/settings.js";
 import { UploadTaskStore, uploadDedupeKey } from "../store/uploadTasks.js";
-import { planUploadSchedule, summariseSchedule } from "./uploadSchedule.js";
+import { intervalMsOf, planUploadSchedule, summariseSchedule } from "./uploadSchedule.js";
 import {
   aggregateChapterIds,
   backfillVolumes,
@@ -618,29 +618,63 @@ export class RunProcessor {
     // and none is recomputed later: a future-dated row is an ordinary PENDING
     // task waiting for its date.
     if (pendingUploads.length > 0) {
-      const schedule = await this.settings.getUploadSchedule(run.extension);
-      const scheduled = planUploadSchedule(pendingUploads, schedule);
-      const shape = summariseSchedule(scheduled);
+      // Only a CLEAN run spreads. A routine UPDATE is the day's handful of new
+      // chapters and the whole reason to run it is to publish them promptly;
+      // dating those forward buys nothing (they are already under any sane cap)
+      // and costs the thing the schedule was never meant to touch. Backlogs —
+      // an operator tracking a batch of series, the first run after an outage —
+      // arrive via CLEAN, which is what the cap exists for.
+      //
+      // FORCE is deliberately immediate too: it is an operator saying "do this
+      // now", and a cap that defers it would be answering a different question.
+      const spread = run.kind === "CLEAN";
 
-      for (const { chapter, notBefore } of scheduled) {
-        await this.tasks.enqueue("UPLOAD", uploadDedupeKey(chapter), chapter, { notBefore });
-      }
+      // Global, not per-extension. The cap protects MangaDex's feed and the
+      // shared upload queue, and neither of those has one budget per
+      // extension — five extensions each spending 50 is 250 chapters landing
+      // in a day against a cap that reads 50.
+      const schedule = spread ? await this.settings.getUploadSchedule() : null;
 
-      if (shape.deferred > 0) {
-        log.info(
-          {
-            queued: scheduled.length,
-            immediate: shape.immediate,
-            deferred: shape.deferred,
-            days: shape.days,
-            lastRelease: shape.lastDate,
-            perDay: schedule.perDay,
-            perMangaPerDay: schedule.perMangaPerDay,
-          },
-          "spreading this run's uploads over several days",
+      if (schedule === null) {
+        for (const chapter of pendingUploads) {
+          await this.tasks.enqueue("UPLOAD", uploadDedupeKey(chapter), chapter);
+        }
+        log.debug(
+          { queued: pendingUploads.length, kind: run.kind },
+          "queued this run's uploads, all due now",
         );
       } else {
-        log.debug({ queued: scheduled.length }, "queued this run's uploads, all due now");
+        const scheduled = planUploadSchedule(
+          pendingUploads,
+          schedule,
+          new Date(),
+          // What every other extension and every earlier run already put in
+          // each bucket, so this run fills what is left rather than starting
+          // the calendar over.
+          await this.tasks.scheduledLoad(intervalMsOf(schedule)),
+        );
+        const shape = summariseSchedule(scheduled);
+
+        for (const { chapter, notBefore } of scheduled) {
+          await this.tasks.enqueue("UPLOAD", uploadDedupeKey(chapter), chapter, { notBefore });
+        }
+
+        if (shape.deferred > 0) {
+          log.info(
+            {
+              queued: scheduled.length,
+              immediate: shape.immediate,
+              deferred: shape.deferred,
+              days: shape.days,
+              lastRelease: shape.lastDate,
+              perDay: schedule.perDay,
+              perMangaPerDay: schedule.perMangaPerDay,
+            },
+            "spreading this run's uploads over several days",
+          );
+        } else {
+          log.debug({ queued: scheduled.length }, "queued this run's uploads, all due now");
+        }
       }
     }
 
