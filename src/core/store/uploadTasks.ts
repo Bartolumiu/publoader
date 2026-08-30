@@ -257,13 +257,29 @@ export class UploadTaskStore {
     kind: UploadTaskKind,
     dedupeKey: string,
     chapter: unknown,
-    opts: { notBefore?: Date } = {},
+    opts: { notBefore?: Date; spacingSeconds?: number } = {},
   ): Promise<boolean> {
+    const spacing = opts.spacingSeconds ?? 0;
+    // The queue's tail plus a gap, so a new row lands behind what is already
+    // waiting rather than on top of it. `max()` over no rows is NULL and
+    // `greatest` ignores NULLs, which is exactly the empty-queue case: nothing
+    // to queue behind, so the row is due now.
+    //
+    // An explicit `notBefore` still wins: a spread run has already decided
+    // where its chapters go, and pacing them a second time here would move work
+    // the planner deliberately placed.
+    const paced =
+      spacing > 0
+        ? Prisma.sql`greatest(now(), (SELECT max(not_before) FROM upload_tasks
+                                      WHERE kind = ${kind}::"UploadTaskKind" AND state = 'PENDING')
+                                     + make_interval(secs => ${spacing}))`
+        : Prisma.sql`now()`;
+
     const res = await this.prisma.$executeRaw(Prisma.sql`
       INSERT INTO upload_tasks (id, kind, dedupe_key, chapter, state, not_before, created_at, updated_at)
       VALUES (${randomUUID()}, ${kind}::"UploadTaskKind", ${dedupeKey},
               ${JSON.stringify(chapter)}::jsonb, 'PENDING',
-              coalesce(${opts.notBefore ?? null}::timestamptz, now()), now(), now())
+              coalesce(${opts.notBefore ?? null}::timestamptz, ${paced}), now(), now())
       ON CONFLICT (kind, dedupe_key) DO NOTHING
     `);
     return res === 1;
