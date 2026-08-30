@@ -1197,7 +1197,7 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     const res = await app.inject({ method: "GET", url: `/api/v1/admin/untracked${query}`, headers: root });
     expect(res.statusCode).toBe(200);
     return res.json() as {
-      untracked: { id: string }[];
+      untracked: { id: string; extension: string }[];
       total: number;
       limit: number;
       nextCursor: string | null;
@@ -1264,7 +1264,7 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
 
     const scoped = await listPage("?extension=omoi");
     expect(scoped.total).toBe(2);
-    expect(scoped.untracked.map((r) => (r as { extension: string }).extension)).toEqual(["omoi", "omoi"]);
+    expect(scoped.untracked.map((r) => r.extension)).toEqual(["omoi", "omoi"]);
 
     // Free text over the name would also have caught the opstest row, which is
     // the reason this is a filter of its own and not a search term.
