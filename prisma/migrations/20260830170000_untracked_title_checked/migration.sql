@@ -1,0 +1,13 @@
+-- When this row was last checked against MangaDex's title index by name.
+--
+-- The sibling of official_link_checked_at, and it exists for the same reason:
+-- the title pass costs one MangaDex search per row, so without a marker every
+-- run re-searches the whole queue to find the few rows whose answer changed.
+-- Separate from the link column rather than shared, because the two passes ask
+-- different questions and go stale at different times -- a row can be "no
+-- MangaDex title carries this url" and "MangaDex holds this exact name" at
+-- once, and one pass marking the other's column would silently skip work.
+--
+-- Nullable: NULL means never checked, which is what every existing row is, so
+-- nothing needs backfilling.
+ALTER TABLE "untracked_manga" ADD COLUMN "title_checked_at" TIMESTAMP(3);

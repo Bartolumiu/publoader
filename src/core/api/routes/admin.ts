@@ -1276,13 +1276,25 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
             dryRun: z.boolean().default(true),
             limit: z.number().int().min(1).max(200).default(25),
             extension: z.string().max(64).optional(),
+            /**
+             * Which evidence to map on. `link` is the default because it is
+             * what this endpoint has always done and the stronger of the two:
+             * MangaDex recording this exact page as a title's official English
+             * release. `title` reaches the rest of the queue, where the entry
+             * carries no link but holds the publisher's name verbatim.
+             */
+            strategy: z.enum(["link", "title"]).default("link"),
           })
           .strict()
           .parse(req.body ?? {});
 
-        const report = await ctx.titleService.autoMapByOfficialLink(body);
+        const report =
+          body.strategy === "title"
+            ? await ctx.titleService.autoMapByTitle(body)
+            : await ctx.titleService.autoMapByOfficialLink(body);
         if (!body.dryRun && report.mapped.length > 0) {
           await ctx.audit.record(actor(req), "untracked.automap", body.extension ?? "all", {
+            strategy: body.strategy,
             mapped: report.mapped.length,
             ambiguous: report.ambiguous,
             considered: report.considered,
@@ -1291,6 +1303,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         return {
           ok: true,
           dryRun: body.dryRun,
+          strategy: body.strategy,
           considered: report.considered,
           ambiguous: report.ambiguous,
           unmatched: report.unmatched,

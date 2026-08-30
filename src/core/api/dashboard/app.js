@@ -9947,11 +9947,29 @@ function autoMapCard(queue) {
     ),
   );
 
+  /**
+   * Which evidence to map on, chosen rather than assumed.
+   *
+   * The two are not interchangeable and the operator is the one who should say
+   * which they are running: the link is MangaDex naming this exact page, the
+   * name is MangaDex holding the same words. The link matches about one row in
+   * twenty but is close to certain; the name matches most of the queue on
+   * weaker evidence, so it defaults to the link and the wording changes with
+   * the choice.
+   */
+  const strategy = el(
+    "select",
+    { id: "automap-strategy", "aria-label": "What to match on", disabled: !writable },
+    el("option", { value: "link", text: "Official MangaDex link" }),
+    el("option", { value: "title", text: "Exact title" }),
+  );
+
   const requestBody = (dryRun) => {
     const name = extension.value;
     return {
       dryRun,
       limit: Number(limit.value) || 50,
+      strategy: strategy.value,
       ...(name ? { extension: name } : {}),
     };
   };
@@ -9964,6 +9982,15 @@ function autoMapCard(queue) {
    */
   const draw = (report) => {
     const mapped = report.mapped ?? [];
+    const byTitle = report.strategy === "title";
+    // The two passes fail differently, and saying which is what tells an
+    // operator whether a zero means "nobody links here" or "MangaDex spells it
+    // another way" — different next moves entirely.
+    const ambiguousReason = byTitle
+      ? "two titles answer to one name; left for you"
+      : "two titles share one link; left for you";
+    const unmatchedReason = byTitle ? "with no title of that exact name" : "with no matching official link";
+    const provenance = byTitle ? "auto:title-match" : "auto:official-link";
     setChildren(
       results,
       mapped.length
@@ -9993,13 +10020,13 @@ function autoMapCard(queue) {
         text:
           `${report.dryRun ? "Would map" : "Mapped"} ${mapped.length} of the ` +
           `${report.considered ?? 0} row(s) checked. ` +
-          `${report.ambiguous ?? 0} ambiguous (two titles share one link; left for you), ` +
-          `${report.unmatched ?? 0} with no matching official link.`,
+          `${report.ambiguous ?? 0} ambiguous (${ambiguousReason}), ` +
+          `${report.unmatched ?? 0} ${unmatchedReason}.`,
       }),
-      // Most passes map nothing — the hit rate is roughly one in twenty on the
-      // sources here — so a bare "0" reads as broken unless it also says how
-      // much queue is left. Checked rows are not read again, so pressing the
-      // button again moves further down the queue.
+      // A link pass maps nothing most times — the hit rate is roughly one in
+      // twenty on these sources — so a bare "0" reads as broken unless it also
+      // says how much queue is left. Checked rows are not read again, so
+      // pressing the button again moves further down the queue.
       el("p", {
         class: "dim small",
         text: report.remaining
@@ -10013,7 +10040,7 @@ function autoMapCard(queue) {
       !report.dryRun && mapped.length
         ? el("p", {
             text:
-              `Mapped, and marked auto:official-link in the tracked map. ` +
+              `Mapped, and marked ${provenance} in the tracked map. ` +
               `These series have left the queue.`,
           })
         : null,
@@ -10040,13 +10067,16 @@ function autoMapCard(queue) {
     text: "Map them",
     disabled: !writable,
     onclick: async (event) => {
+      const byTitle = strategy.value === "title";
       const confirmed = await confirmDialog({
         title: "Map these series automatically",
         lead: "This adds mappings to the tracked series map. Uploads for those series start going to the matched titles.",
         points: [
-          "Only series whose url is MangaDex's own official English link are mapped.",
+          byTitle
+            ? "Only series MangaDex holds under exactly this name, on exactly one title, are mapped."
+            : "Only series whose url is MangaDex's own official English link are mapped.",
           "No MangaDex titles are created.",
-          "Each mapping is recorded as auto:official-link, so they can be found later.",
+          `Each mapping is recorded as ${byTitle ? "auto:title-match" : "auto:official-link"}, so they can be found later.`,
           "Preview with Find matches first if you have not; a wrong mapping uploads chapters onto someone else's title.",
         ],
         confirmLabel: "Add the mappings",
@@ -10062,14 +10092,16 @@ function autoMapCard(queue) {
   });
 
   return card(
-    "Auto-map by official MangaDex link",
+    "Auto-map onto titles MangaDex already has",
     el("p", {
       class: "dim small",
       text:
-        "Most series here are already on MangaDex, which records this publisher's page as the title's " +
-        "official English link. Where that link is exactly this series' url, and only one title carries it, " +
-        "the series can be mapped without creating anything. The yield is very uneven by source, so it is " +
-        "worth running one extension at a time.",
+        "Most series here are already on MangaDex and need mapping, not creating. Match on the official " +
+        "MangaDex link — the entry records this publisher's page as its official English release — which is " +
+        "close to certain but matches roughly one row in twenty. Or match on the exact title, which reaches " +
+        "most of the queue on weaker evidence: only names MangaDex holds verbatim, on exactly one entry, " +
+        "and never where that entry's own link points at a different series on the same site. The yield is " +
+        "very uneven by source, so it is worth running one extension at a time.",
     }),
     writable
       ? null
@@ -10089,6 +10121,12 @@ function autoMapCard(queue) {
         { class: "row tight" },
         el("label", { class: "inline", for: "automap-limit", text: "Check" }),
         limit,
+      ),
+      el(
+        "span",
+        { class: "row tight" },
+        el("label", { class: "inline", for: "automap-strategy", text: "Match on" }),
+        strategy,
       ),
     ),
     row(previewButton, commitButton),

@@ -22,6 +22,16 @@ const MAX_CREATE_ATTEMPTS = 3;
  */
 export const OFFICIAL_LINK_SOURCE = "auto:official-link";
 
+/**
+ * `tracked_manga.source` for a mapping the title pass made.
+ *
+ * Distinct from `auto:official-link` because the evidence is weaker -- a name
+ * MangaDex also holds, rather than this exact page recorded on the entry -- and
+ * an operator auditing a wrong mapping wants to know which of the two decided
+ * it before they know anything else.
+ */
+export const TITLE_MATCH_SOURCE = "auto:title-match";
+
 /** How many rows one auto-map pass searches MangaDex for. */
 const AUTO_MAP_BATCH = 20;
 
@@ -410,6 +420,137 @@ export class TitleService {
     // Distinct ids only: the same title coming back twice is a paging artefact,
     // not two series sharing a link.
     const ids = [...new Set(matches.map((m) => m.id))];
+    if (ids.length > 1) return "ambiguous";
+    return ids[0] ?? null;
+  }
+
+  /**
+   * Map every NEW series MangaDex already holds under this exact name.
+   *
+   * The companion to the official-link pass, and the one that reaches the
+   * backlog. Publishers mostly do not get their page recorded as a MangaDex
+   * title's official English link -- measured on this queue the link pass
+   * matches about one row in twenty -- while the name itself usually is on
+   * MangaDex verbatim, because the publisher's English title is what the
+   * catalogue's uploaders typed in. A 40-row sample across all four sources
+   * found an exact name on MangaDex for 34 of them.
+   *
+   * A name is weaker evidence than a url, so the strictness is where the url
+   * pass got it for free:
+   *
+   *   - equality, never containment. `titleMatches` (which the create path
+   *     uses to REFUSE, where a false positive is harmless) counts a substring
+   *     as a match; here that would map "Saki" onto "Saki: Achiga-hen" and
+   *     upload a series onto its own spin-off.
+   *   - one surviving candidate, or nobody is mapped. Two entries answering to
+   *     one name is exactly the case a person has to look at: measured here it
+   *     is a Japanese and a Korean series sharing an English name, or a
+   *     serialised title beside its own oneshot.
+   *   - a candidate whose link points at a DIFFERENT series on this very
+   *     publisher's site is dropped, not counted. That is MangaDex saying "this
+   *     title is that other page", which outweighs a matching name.
+   *   - variant editions (a oneshot, a fan-coloured re-release) are dropped
+   *     too: never the right target for a publisher's chapters, and their
+   *     presence is what makes an otherwise clean name ambiguous.
+   *   - very short names are skipped entirely. At three characters or fewer an
+   *     exact match is a coincidence as often as a match.
+   *
+   * `dryRun` is the default at every caller for the same reason as the link
+   * pass: this writes the series map, and the map decides where chapters land.
+   */
+  async autoMapByTitle(
+    opts: { limit?: number; dryRun?: boolean; extension?: string } = {},
+  ): Promise<AutoMapReport> {
+    const limit = opts.limit ?? AUTO_MAP_BATCH;
+    const dryRun = opts.dryRun ?? true;
+    const staleBefore = new Date(Date.now() - RECHECK_AFTER_MS);
+    const due = {
+      state: "NEW" as const,
+      ...(opts.extension ? { extension: opts.extension } : {}),
+      OR: [{ titleCheckedAt: null }, { titleCheckedAt: { lt: staleBefore } }],
+    };
+
+    const rows = await this.prisma.untrackedManga.findMany({
+      where: due,
+      orderBy: [{ titleCheckedAt: { sort: "asc", nulls: "first" } }, { createdAt: "asc" }],
+      take: limit,
+    });
+
+    const report: AutoMapReport = {
+      considered: rows.length,
+      mapped: [],
+      ambiguous: 0,
+      unmatched: 0,
+      remaining: 0,
+    };
+
+    for (const row of rows) {
+      const match = await this.titleMatch(row);
+
+      if (match === null || match === "ambiguous") {
+        // Marked even on a dry run: looking is what happened, and a preview
+        // that recorded nothing would re-read the same rows every time it was
+        // pressed while the rest of the queue sat behind them.
+        await this.markTitleChecked(row.id);
+        if (match === "ambiguous") report.ambiguous++;
+        else report.unmatched++;
+        continue;
+      }
+
+      if (dryRun) {
+        // Deliberately NOT marked: a match nobody has acted on yet has to still
+        // be here when they press the button that acts on it.
+        report.mapped.push({ row, mdMangaId: match });
+        continue;
+      }
+
+      const written = await this.writeMapping(row, match, TITLE_MATCH_SOURCE);
+      if (written) {
+        report.mapped.push({ row, mdMangaId: match });
+      } else {
+        await this.markTitleChecked(row.id);
+        report.unmatched++;
+      }
+    }
+
+    report.remaining = await this.prisma.untrackedManga.count({ where: due });
+    // Not announced to Discord, for the reason the link pass is not: this
+    // drains a queue thousands deep a batch at a time, and an embed per pass
+    // would bury the announcements that need reading. Each mapping is
+    // `auto:title-match` in the tracked map and in the audit log.
+    return report;
+  }
+
+  /** Record that the title pass has looked at this row. */
+  private async markTitleChecked(id: string): Promise<void> {
+    await this.prisma.untrackedManga.updateMany({
+      where: { id },
+      data: { titleCheckedAt: new Date() },
+    });
+  }
+
+  /**
+   * The one MangaDex title whose name is exactly this series' name.
+   *
+   * `null` for no match, `"ambiguous"` when more than one survives -- which is
+   * a question for a person, not a coin toss, because both answers are a real
+   * series and one of them would get someone else's chapters.
+   */
+  private async titleMatch(row: UntrackedManga): Promise<string | "ambiguous" | null> {
+    if (!isMatchableName(row.mangaName)) return null;
+
+    const candidates = await this.md.searchManga(row.mangaName, 25);
+    const survivors = candidates.filter(
+      (candidate) =>
+        exactNameMatch(candidate, row.mangaName) &&
+        !isVariantEdition(candidate) &&
+        !linkContradicts(candidate, row.mangaUrl),
+    );
+
+    // Distinct ids only: the same title returned twice is a paging artefact,
+    // not two series answering to one name.
+    const ids = [...new Set(survivors.map((c) => c.id))];
+    if (ids.length === 0) return null;
     if (ids.length > 1) return "ambiguous";
     return ids[0] ?? null;
   }
@@ -860,6 +1001,107 @@ function altTitleList(candidate: {
     }
   }
   return out;
+}
+
+/**
+ * A name reduced to what two records of the same series must agree on:
+ * case-folded, decomposed, and stripped of everything that is not a letter or
+ * a number. That is what makes "Saint☆Young Men", "Saint Young Men" and
+ * "SAINT YOUNG MEN" one name, which they are.
+ */
+function nameKey(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\p{Letter}\p{Number}]+/gu, "");
+}
+
+/** Every name MangaDex holds for a candidate: its titles and its alt titles. */
+function candidateNames(candidate: {
+  attributes: { title: Record<string, string>; altTitles: Record<string, string>[] };
+}): string[] {
+  return [
+    ...Object.values(candidate.attributes.title ?? {}),
+    ...(candidate.attributes.altTitles ?? []).flatMap((alt) => Object.values(alt)),
+  ];
+}
+
+/**
+ * Is this name specific enough to map on by itself?
+ *
+ * Three characters or fewer after normalisation is not evidence: "Ao", "GTO"
+ * and "Blue" collide with unrelated series on a catalogue this size, and an
+ * exact hit on one is as likely to be a coincidence as a match.
+ */
+export function isMatchableName(reported: string): boolean {
+  return nameKey(reported ?? "").length > 3;
+}
+
+/**
+ * Does MangaDex hold this candidate under exactly the reported name?
+ *
+ * Equality, not containment -- the difference between this and `titleMatches`,
+ * and the whole reason both exist. `titleMatches` guards the create path, where
+ * a false positive costs one operator click; this one writes the series map,
+ * where a false positive uploads a publisher's chapters onto a different
+ * series' page.
+ */
+export function exactNameMatch(
+  candidate: { attributes: { title: Record<string, string>; altTitles: Record<string, string>[] } },
+  reported: string,
+): boolean {
+  const target = nameKey(reported);
+  if (target.length === 0) return false;
+  return candidateNames(candidate).some((name) => nameKey(name) === target);
+}
+
+/**
+ * Markers MangaDex's uploaders put in a title to say "this is not the main
+ * entry": a oneshot pilot, a re-coloured re-release, a doujinshi. They share a
+ * name with the real series by design, so they are both the commonest cause of
+ * a name looking ambiguous and never the right target for a publisher's
+ * chapters.
+ *
+ * Matched as a parenthetical or suffix only, so a series legitimately called
+ * "Colorless" or "Oneshot Boy" is untouched.
+ */
+const VARIANT_EDITION =
+  /[([]\s*(oneshot|one-shot|fan[\s-]?colou?red|officially?[\s-]?colou?red|colou?red|doujinshi|anthology|spin[\s-]?off|remake|pilot|preview)\s*[)\]]/i;
+
+/** Is this candidate a variant edition rather than the serialised series? */
+export function isVariantEdition(candidate: {
+  attributes: { title: Record<string, string>; altTitles: Record<string, string>[] };
+}): boolean {
+  return candidateNames(candidate).some((name) => VARIANT_EDITION.test(name));
+}
+
+/**
+ * Does MangaDex say this candidate is a DIFFERENT series on the publisher's own
+ * site?
+ *
+ * The strongest available disconfirmation, and it costs nothing: when an entry
+ * records a link on the same host as the series being mapped but pointing at
+ * another page, the catalogue has already answered "which page is this" and the
+ * answer is not this one. Left as a match when the entry carries no link for
+ * that host at all -- most do not, and absence says nothing.
+ *
+ * Compared on host and path via `normaliseOfficialLink`, so a trailing slash or
+ * a `www.` never reads as a different series.
+ */
+export function linkContradicts(
+  candidate: { attributes: { links?: Record<string, string> | null } },
+  seriesUrl: string,
+): boolean {
+  const want = normaliseOfficialLink(seriesUrl);
+  if (want === null) return false;
+  const host = want.split("/")[0];
+  for (const link of Object.values(candidate.attributes.links ?? {})) {
+    const other = normaliseOfficialLink(link);
+    if (other === null) continue;
+    if (other.split("/")[0] !== host) continue;
+    if (other !== want) return true;
+  }
+  return false;
 }
 
 function titleMatches(candidate: { attributes: { title: Record<string, string>; altTitles: Record<string, string>[] } }, reported: string): boolean {
