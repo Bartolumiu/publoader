@@ -108,6 +108,7 @@ const store = {
      */
     chapterCursors: {},
     untrackedState: "NEW",
+    untrackedQuery: "",
     activitySeverity: "all",
     activityHours: 72,
     activityQuery: "",
@@ -9420,9 +9421,13 @@ const UNTRACKED_STATES = ["NEW", "CREATING", "CREATED", "TRACKED", "FAILED", "SK
 VIEWS.untracked = (route) => {
   if (route.param) return untrackedDetail(route.param);
 
-  const queue = new Resource("untracked", () =>
-    api(`/untracked?state=${encodeURIComponent(store.filters.untrackedState)}&limit=200`),
-  );
+  const queue = new Resource("untracked", () => {
+    const q = store.filters.untrackedQuery.trim();
+    return api(
+      `/untracked?state=${encodeURIComponent(store.filters.untrackedState)}&limit=200` +
+        (q ? `&q=${encodeURIComponent(q)}` : ""),
+    );
+  });
 
   const filter = el(
     "select",
@@ -9439,10 +9444,47 @@ VIEWS.untracked = (route) => {
     ),
   );
 
+  // The queue routinely holds thousands of rows in one state, and an operator
+  // arrives knowing the series name rather than where it sits in the list.
+  const search = el("input", {
+    id: "untracked-q",
+    type: "search",
+    value: store.filters.untrackedQuery,
+    placeholder: "series name, source id or extension",
+    onchange: (event) => {
+      setFilter({ untrackedQuery: event.target.value.trim() });
+      void queue.load({ force: true });
+    },
+  });
+
   return el(
     "div",
     {},
-    card("Filter", row(el("label", { class: "inline", for: "untracked-state", text: "State" }), filter)),
+    card(
+      "Filter",
+      row(
+        el(
+          "span",
+          { class: "row tight" },
+          el("label", { class: "inline", for: "untracked-state", text: "State" }),
+          filter,
+        ),
+        el(
+          "span",
+          { class: "row tight" },
+          el("label", { class: "inline", for: "untracked-q", text: "Search" }),
+          search,
+        ),
+        el("button", {
+          type: "button",
+          text: "Clear",
+          onclick: () => {
+            setFilter({ untrackedQuery: "" });
+            void queue.load({ force: true });
+          },
+        }),
+      ),
+    ),
     card(
       null,
       live(
@@ -9482,7 +9524,9 @@ VIEWS.untracked = (route) => {
               ],
             ]),
             {
-              empty: `Nothing is in the ${store.filters.untrackedState} state. The scrapers add rows here when they find a series MangaDex does not have.`,
+              empty: store.filters.untrackedQuery
+                ? `No ${store.filters.untrackedState} series matches “${store.filters.untrackedQuery}”.`
+                : `Nothing is in the ${store.filters.untrackedState} state. The scrapers add rows here when they find a series MangaDex does not have.`,
             },
           ),
         { reserve: 300, skeleton: () => skeletonTable(7, 7) },
@@ -9592,6 +9636,7 @@ function untrackedDetail(id) {
           row(copyLinkButton(routeTo("untracked", id, null))),
         ),
         untrackedEditCard(item, detail, data),
+        untrackedMapCard(item, detail),
         card(
           "Actions",
           row(
@@ -9612,6 +9657,152 @@ function untrackedDetail(id) {
       );
     },
     { reserve: 420, skeleton: () => el("div", {}, skeletonTable(7, 2), skeletonTable(4, 2)) },
+  );
+}
+
+/**
+ * Find the series on MangaDex and map the row onto it.
+ *
+ * The queue's other answer, and usually the right one: most series a scraper
+ * reports as untracked are already on MangaDex under a name that did not match
+ * automatically. Approving creates a second title for them, and un-duplicating
+ * a catalogue afterwards is other people's work — so finding the real title has
+ * to be at least as easy as approving, which means searching from this page
+ * rather than copying ids into the tracked map by hand.
+ */
+function untrackedMapCard(item, detail) {
+  const writable = can("untracked:write") && can("tracked:append");
+  const alreadyTracked = item.state === "TRACKED" && item.mdMangaId;
+
+  const input = el("input", {
+    id: "untracked-md-q",
+    type: "search",
+    // Seeded with the scraped name, which is the query an operator would type
+    // first anyway; widening it is the common second step.
+    value: item.mangaName,
+    placeholder: "title to search for on MangaDex",
+    disabled: !writable,
+  });
+
+  const results = el("div", { class: "md-candidates" });
+  const status = el("div", { class: "dim small" });
+
+  const mapTo = async (candidate, button) => {
+    if (
+      !(await confirmDialog({
+        title: `Map “${item.mangaName}” to an existing MangaDex title`,
+        lead: "This adds the series to the tracked map; uploads for it start going to this title.",
+        points: [
+          `Source: ${item.extension} · ${item.mangaId}`,
+          `MangaDex title: ${candidate.title}`,
+          candidate.url,
+          "No new title is created. Check this is the same series — a wrong mapping uploads chapters onto someone else's title.",
+        ],
+        confirmLabel: "Map to this title",
+      }))
+    ) {
+      return;
+    }
+    await act(
+      "untracked.map",
+      () => api(`/untracked/${item.id}/map`, { method: "POST", body: { mdMangaId: candidate.id } }),
+      { button, refresh: [detail] },
+    );
+  };
+
+  const render = (candidates, query) => {
+    results.replaceChildren();
+    if (candidates.length === 0) {
+      status.textContent = `MangaDex returned nothing for “${query}”. A narrower or romanised title often finds it.`;
+      return;
+    }
+    status.textContent = `${candidates.length} result(s) for “${query}”. Nothing is written until you map one.`;
+    for (const candidate of candidates) {
+      results.append(
+        el(
+          "div",
+          { class: "md-candidate" },
+          el(
+            "div",
+            {},
+            el(
+              "div",
+              {},
+              el("a", {
+                href: candidate.url,
+                target: "_blank",
+                rel: "noreferrer noopener",
+                text: candidate.title,
+              }),
+              candidate.likely
+                ? el("span", { class: "chip", text: "likely match", title: "Matches the scraped name" })
+                : null,
+            ),
+            candidate.altTitles.length
+              ? el("div", { class: "dim small", text: truncate(candidate.altTitles.join(" · "), 160) })
+              : null,
+            el("code", { class: "dim small", text: candidate.id }),
+          ),
+          gatedButton("untracked:write", {
+            class: "primary",
+            text: "Map",
+            disabled: !writable || alreadyTracked,
+            title: alreadyTracked
+              ? "Already tracked; repoint it in the tracked map instead"
+              : "Add this mapping to the tracked series map",
+            onclick: (event) => mapTo(candidate, event.currentTarget),
+          }),
+        ),
+      );
+    }
+  };
+
+  const runSearch = async (button) => {
+    const query = input.value.trim();
+    if (!query) {
+      status.textContent = "Type a title to search for.";
+      results.replaceChildren();
+      return;
+    }
+    await act(
+      "untracked.search",
+      async () => {
+        const body = await api(
+          `/mangadex/search?q=${encodeURIComponent(query)}` +
+            `&reportedName=${encodeURIComponent(item.mangaName)}`,
+        );
+        render(body.results ?? [], query);
+      },
+      { button },
+    );
+  };
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    void runSearch(null);
+  });
+
+  return card(
+    "Find it on MangaDex",
+    el("p", {
+      class: "dim small",
+      text: alreadyTracked
+        ? "This series is already mapped. Searching still works, but repointing an existing mapping belongs in the tracked map."
+        : "Search MangaDex for this series. Mapping it adds the series to the tracked map without creating a new title.",
+    }),
+    row(
+      el("span", { class: "row tight" }, el("label", { class: "inline", for: "untracked-md-q", text: "Title" }), input),
+      el("button", {
+        type: "button",
+        class: "primary",
+        text: "Search",
+        disabled: !writable,
+        onclick: (event) => runSearch(event.currentTarget),
+      }),
+    ),
+    status,
+    results,
   );
 }
 

@@ -1041,16 +1041,85 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       const query = z
         .object({
           state: z.enum(["NEW", "CREATING", "CREATED", "TRACKED", "FAILED", "SKIPPED"]).optional(),
+          /** Free text over the series name, the source's id, and the extension. */
+          q: z.string().trim().max(200).optional(),
           limit: z.coerce.number().int().min(1).max(500).default(100),
         })
         .parse(req.query ?? {});
+      // A state filter and a page cap are not enough to find one series: a
+      // busy queue holds thousands of NEW rows and the operator arrives
+      // knowing the name. Matching the external id and the extension too
+      // costs nothing and covers how the rows are actually referred to.
+      const search = query.q
+        ? {
+            OR: [
+              { mangaName: { contains: query.q, mode: "insensitive" as const } },
+              { mangaId: { contains: query.q, mode: "insensitive" as const } },
+              { extension: { contains: query.q, mode: "insensitive" as const } },
+            ],
+          }
+        : {};
       const rows = await ctx.prisma.untrackedManga.findMany({
-        where: query.state ? { state: query.state } : undefined,
+        where: {
+          ...(query.state ? { state: query.state } : {}),
+          ...search,
+        },
         orderBy: { createdAt: "desc" },
         take: query.limit,
       });
       return { untracked: rows };
     });
+
+    /**
+     * Candidate MangaDex titles for a series, so an operator can map an
+     * untracked row onto a title that already exists instead of creating a
+     * second one for it.
+     *
+     * Read-only and live: MangaDex is the authority on what it holds, and a
+     * cached answer here would be a cached answer about whether a duplicate is
+     * about to be created.
+     */
+    scope.get("/api/v1/admin/mangadex/search", { preHandler: requireScope("untracked:read") }, async (req, reply) => {
+      if (!ctx.titleService) {
+        return reply.code(503).send({ error: "title service not available on this instance" });
+      }
+      const query = z
+        .object({
+          q: z.string().trim().min(1).max(200),
+          /** The scraped name, when the query has been widened away from it. */
+          reportedName: z.string().trim().max(512).optional(),
+          limit: z.coerce.number().int().min(1).max(25).default(10),
+        })
+        .parse(req.query ?? {});
+      const results = await ctx.titleService.searchTitles(
+        query.q,
+        query.limit,
+        query.reportedName,
+      );
+      return { results };
+    });
+
+    /**
+     * Map an untracked series onto an existing MangaDex title: the "this is
+     * already on MangaDex" answer to the approve button's "create it".
+     *
+     * Needs untracked:write like the other queue actions, and tracked:append
+     * because it does write the series map — the whole point of the action.
+     */
+    scope.post(
+      "/api/v1/admin/untracked/:id/map",
+      { preHandler: [requireScope("untracked:write"), requireScope("tracked:append")] },
+      async (req, reply) => {
+        const { id } = req.params as { id: string };
+        if (!ctx.titleService) {
+          return reply.code(503).send({ error: "title service not available on this instance" });
+        }
+        const body = z.object({ mdMangaId: z.string().uuid() }).strict().parse(req.body ?? {});
+        const result = await ctx.titleService.mapToExisting(id, body.mdMangaId, actor(req));
+        if (!result.ok) return reply.code(409).send({ error: result.error });
+        return { ok: true, mdMangaId: result.mdMangaId };
+      },
+    );
 
     scope.post("/api/v1/admin/untracked/:id/approve", { preHandler: requireScope("untracked:write") }, async (req, reply) => {
       const { id } = req.params as { id: string };

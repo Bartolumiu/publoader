@@ -12,6 +12,16 @@ export interface TitleNotifier {
 
 const MAX_CREATE_ATTEMPTS = 3;
 
+/** One MangaDex title offered as a mapping target for an untracked series. */
+export interface TitleCandidate {
+  id: string;
+  title: string;
+  altTitles: string[];
+  url: string;
+  /** The reported name matches this candidate under the auto-create check. */
+  likely: boolean;
+}
+
 /** The three scraped fields an operator may correct on an untracked row. */
 export interface TitleFields {
   mangaName: string;
@@ -211,6 +221,107 @@ export class TitleService {
    */
   async mangadexTitle(mdMangaId: string): Promise<MdMangaDetail | null> {
     return this.md.mangaById(mdMangaId);
+  }
+
+  /**
+   * Candidate MangaDex titles for a query, for an operator deciding whether a
+   * series already exists rather than needing a new title.
+   *
+   * `likely` is the same comparison the auto-create path uses to refuse a
+   * duplicate, surfaced instead of hidden: the operator sees which candidate
+   * the pipeline itself would have treated as a match, which is also the
+   * reason a row is sitting in FAILED when it is.
+   */
+  async searchTitles(query: string, limit = 10, reportedName?: string): Promise<TitleCandidate[]> {
+    const candidates = await this.md.searchManga(query, limit);
+    // Match against the name the source reported when there is one: an
+    // operator may have widened the query to find the series at all, and
+    // "does this look like what the scraper saw" stays the useful question.
+    const compareTo = (reportedName ?? "").trim() || query;
+    return candidates.map((candidate) => ({
+      id: candidate.id,
+      title: primaryTitle(candidate),
+      altTitles: altTitleList(candidate),
+      url: `https://mangadex.org/title/${candidate.id}`,
+      likely: titleMatches(candidate, compareTo),
+    }));
+  }
+
+  /**
+   * Point an untracked row at a MangaDex title that already exists.
+   *
+   * The counterpart to `approve`: same bookkeeping, no title creation. Both
+   * end with the series in `tracked_manga` — the map is what unblocks uploads —
+   * and the row TRACKED. Creating a duplicate title is the one mistake in this
+   * pipeline that other people have to clean up, so an operator who finds the
+   * real title should have no more work to do than approving would have been.
+   *
+   * Two things it refuses rather than guesses at. A title id MangaDex does not
+   * know is a typo or a deleted entry, and mapping to it would wire uploads to
+   * nothing. And a series already mapped elsewhere is a repoint, which edits
+   * existing curation rather than adding to it; that belongs in the tracked-map
+   * editor where it is explicit, not behind a one-click button in a triage
+   * queue.
+   */
+  async mapToExisting(
+    untrackedId: string,
+    mdMangaId: string,
+    actor: string,
+  ): Promise<{ ok: true; mdMangaId: string } | { ok: false; error: string }> {
+    const row = await this.prisma.untrackedManga.findUnique({ where: { id: untrackedId } });
+    if (!row) return { ok: false, error: "unknown untracked manga" };
+    if (row.state === "CREATING") {
+      return { ok: false, error: "a title creation is in flight for this row; wait for it to finish" };
+    }
+    if (row.state === "TRACKED" && row.mdMangaId && row.mdMangaId !== mdMangaId) {
+      return {
+        ok: false,
+        error:
+          `this series is already tracked as ${row.mdMangaId}; repointing it is an edit, ` +
+          `so make it in the tracked map for ${row.extension}`,
+      };
+    }
+
+    const title = await this.md.mangaById(mdMangaId);
+    if (!title) {
+      return { ok: false, error: `MangaDex has no title ${mdMangaId}; check the id` };
+    }
+
+    const identity = {
+      extension: row.extension,
+      namespace: DEFAULT_NAMESPACE,
+      mangaId: row.mangaId,
+    };
+    const existing = await this.prisma.trackedManga.findUnique({
+      where: { extension_namespace_mangaId: identity },
+    });
+    if (existing && existing.mdMangaId !== mdMangaId) {
+      return {
+        ok: false,
+        error:
+          `${row.extension}:${row.mangaId} is already mapped to ${existing.mdMangaId}; ` +
+          `changing that mapping belongs in the tracked map, not here`,
+      };
+    }
+
+    // Track first (the map is what unblocks uploads), then finalize state —
+    // the same order as createOne, so a failure between the two leaves a
+    // mapped series rather than a row claiming to be tracked with nothing
+    // behind it.
+    await this.prisma.trackedManga.upsert({
+      where: { extension_namespace_mangaId: identity },
+      create: { ...identity, mdMangaId, source: `operator:${actor}` },
+      update: {},
+    });
+    await this.prisma.untrackedManga.update({
+      where: { id: row.id },
+      data: { state: "TRACKED", mdMangaId, lastError: null },
+    });
+    await this.audit.record(actor, "untracked.map", `${row.extension}:${row.mangaId}`, {
+      mdMangaId,
+      mangaName: row.mangaName,
+    });
+    return { ok: true, mdMangaId };
   }
 
   /**
@@ -483,6 +594,32 @@ export class TitleService {
  * punctuation/whitespace. A false positive costs one operator click; a false
  * negative creates a duplicate title on a public catalogue.
  */
+/**
+ * The one title to show for a candidate. English where MangaDex has it, else
+ * whatever it does have — a picker with a blank row is useless, and an id is
+ * not something an operator can recognise a series by.
+ */
+function primaryTitle(candidate: { attributes: { title: Record<string, string> } }): string {
+  const titles = candidate.attributes.title ?? {};
+  return titles["en"] ?? Object.values(titles)[0] ?? "(untitled)";
+}
+
+/** Alt titles, de-duplicated and minus the one already shown as the title. */
+function altTitleList(candidate: {
+  attributes: { title: Record<string, string>; altTitles: Record<string, string>[] };
+}): string[] {
+  const seen = new Set<string>([primaryTitle(candidate)]);
+  const out: string[] = [];
+  for (const alt of candidate.attributes.altTitles ?? []) {
+    for (const value of Object.values(alt)) {
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      out.push(value);
+    }
+  }
+  return out;
+}
+
 function titleMatches(candidate: { attributes: { title: Record<string, string>; altTitles: Record<string, string>[] } }, reported: string): boolean {
   const normalise = (value: string) =>
     value

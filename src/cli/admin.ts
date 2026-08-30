@@ -1367,13 +1367,14 @@ untracked
   .command("list")
   .description("untracked candidates, newest first")
   .option("--state <state>", "NEW | CREATING | CREATED | TRACKED | FAILED | SKIPPED")
+  .option("--q <text>", "match the series name, the source's id, or the extension")
   .option("--limit <n>", "how many rows", "100")
-  .action(async (opts: { state?: string; limit: string }) => {
+  .action(async (opts: { state?: string; q?: string; limit: string }) => {
     const state = opts.state?.toUpperCase();
     const valid = ["NEW", "CREATING", "CREATED", "TRACKED", "FAILED", "SKIPPED"];
     if (state && !valid.includes(state)) fail(`--state must be one of ${valid.join(", ")}`);
     const res = await api<{ untracked: Record<string, unknown>[] }>("/api/v1/admin/untracked", {
-      query: { state, limit: opts.limit },
+      query: { state, q: opts.q, limit: opts.limit },
     });
     table(res.untracked, [
       { header: "ID", get: (u) => u["id"] },
@@ -1393,6 +1394,42 @@ untracked
   .action(async (id: string) => {
     const res = await api<{ mdMangaId: string }>(`/api/v1/admin/untracked/${id}/approve`, {
       method: "POST",
+    });
+    kv({ mdMangaId: res.mdMangaId, url: `https://mangadex.org/title/${res.mdMangaId}` });
+  });
+
+untracked
+  .command("search <title>")
+  .description("candidate MangaDex titles for a series, before creating a new one")
+  .option("--reported-name <name>", "the scraped name, when the query has been widened away from it")
+  .option("--limit <n>", "how many candidates", "10")
+  .action(async (title: string, opts: { reportedName?: string; limit: string }) => {
+    const res = await api<{
+      results: { id: string; title: string; altTitles: string[]; url: string; likely: boolean }[];
+    }>("/api/v1/admin/mangadex/search", {
+      query: { q: title, reportedName: opts.reportedName, limit: opts.limit },
+    });
+    table(
+      res.results,
+      [
+        // `likely` is the same check the auto-create path uses to refuse a
+        // duplicate, so it is the column to read first.
+        { header: "", get: (r) => (r["likely"] ? "*" : " ") },
+        { header: "MANGADEX ID", get: (r) => r["id"] },
+        { header: "TITLE", get: (r) => String(r["title"] ?? "").slice(0, 50) },
+        { header: "ALT TITLES", get: (r) => (r["altTitles"] as string[]).join(" / ").slice(0, 50) || "-" },
+      ],
+      "MangaDex returned nothing; a narrower or romanised title often finds it",
+    );
+  });
+
+untracked
+  .command("map <id> <mdMangaId>")
+  .description("track this series against a MangaDex title that already exists")
+  .action(async (id: string, mdMangaId: string) => {
+    const res = await api<{ mdMangaId: string }>(`/api/v1/admin/untracked/${id}/map`, {
+      method: "POST",
+      json: { mdMangaId },
     });
     kv({ mdMangaId: res.mdMangaId, url: `https://mangadex.org/title/${res.mdMangaId}` });
   });

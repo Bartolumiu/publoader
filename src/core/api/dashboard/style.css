@@ -1176,6 +1176,31 @@ input[type="search"] {
   justify-content: flex-end;
 }
 
+/* MangaDex candidates offered for an untracked series: title and alt titles on
+   the left, the Map button held against the right edge so the buttons line up
+   down the list however long the titles are. */
+.md-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.md-candidate {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+
+.md-candidate > div {
+  min-width: 0;
+}
+
 /* ---- readouts ------------------------------------------------------------
    A gauge face: big mono value over a caption, sunken into the panel, with the
    value on the baseline the eye scans. */

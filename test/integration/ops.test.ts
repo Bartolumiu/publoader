@@ -1152,6 +1152,156 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     expect(dashed.statusCode).toBe(200);
   });
 
+  // ---- mapping an untracked series onto a title that already exists ----
+
+  const MATCH_ID = "5f5f5f5f-0000-4000-8000-000000000001";
+  const OTHER_ID = "5f5f5f5f-0000-4000-8000-000000000002";
+
+  /** A search hit, in the shape searchManga returns. */
+  const hit = (id: string, title: string, altTitles: Record<string, string>[] = []) => ({
+    id,
+    attributes: { title: { en: title }, altTitles, originalLanguage: "ja" },
+  });
+
+  /** A title MangaDex will admit to holding, so a map can be accepted. */
+  function liveTitle(id: string, title: string): void {
+    md.titles.set(id, {
+      id,
+      attributes: {
+        title: { en: title },
+        altTitles: [],
+        originalLanguage: "ja",
+        status: "ongoing",
+        contentRating: "safe",
+        links: {},
+        version: 1,
+      },
+    });
+  }
+
+  it("searches MangaDex and flags the candidate matching the scraped name", async () => {
+    md.searchManga = async () => [
+      hit(MATCH_ID, "Mangled Nmae"),
+      hit(OTHER_ID, "Something Else", [{ en: "Also Else" }, { ja: "Also Else" }]),
+    ];
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/mangadex/search?q=Mangled%20Nmae",
+      headers: root,
+    });
+    expect(res.statusCode).toBe(200);
+
+    const results = res.json().results as {
+      id: string;
+      title: string;
+      altTitles: string[];
+      url: string;
+      likely: boolean;
+    }[];
+    expect(results).toHaveLength(2);
+    expect(results[0]).toMatchObject({
+      id: MATCH_ID,
+      title: "Mangled Nmae",
+      url: `https://mangadex.org/title/${MATCH_ID}`,
+      likely: true,
+    });
+    // The operator sees which one the auto-create path would have called a
+    // duplicate, rather than that judgement staying hidden in the service.
+    expect(results[1]!.likely).toBe(false);
+    // Alt titles are de-duplicated across languages; the shown title is not
+    // repeated back as one of them.
+    expect(results[1]!.altTitles).toEqual(["Also Else"]);
+  });
+
+  it("maps a series onto an existing title, tracking it without creating one", async () => {
+    const row = await untracked();
+    liveTitle(MATCH_ID, "The Real Title");
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/untracked/${row.id}/map`,
+      headers: root,
+      payload: { mdMangaId: MATCH_ID },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, mdMangaId: MATCH_ID });
+
+    // The map is what unblocks uploads, so it is the part that must be there.
+    expect(
+      await prisma.trackedManga.findUniqueOrThrow({
+        where: {
+          extension_namespace_mangaId: {
+            extension: "opstest",
+            namespace: "",
+            mangaId: row.mangaId,
+          },
+        },
+      }),
+    ).toMatchObject({ mdMangaId: MATCH_ID });
+    expect(
+      await prisma.untrackedManga.findUniqueOrThrow({ where: { id: row.id } }),
+    ).toMatchObject({ state: "TRACKED", mdMangaId: MATCH_ID, lastError: null });
+    // The whole point: no second title for a series that already had one.
+    expect(md.drafts).toHaveLength(0);
+    await prisma.auditEvent.findFirstOrThrow({ where: { action: "untracked.map" } });
+  });
+
+  it("refuses a title id MangaDex does not have, rather than mapping to nothing", async () => {
+    const row = await untracked();
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/untracked/${row.id}/map`,
+      headers: root,
+      payload: { mdMangaId: OTHER_ID },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toContain("MangaDex has no title");
+    // A typo must leave the queue untouched, not half-map the row.
+    expect((await prisma.untrackedManga.findUniqueOrThrow({ where: { id: row.id } })).state).toBe("NEW");
+    expect(await prisma.trackedManga.count()).toBe(0);
+  });
+
+  it("refuses to repoint a series that is already mapped somewhere else", async () => {
+    const row = await untracked();
+    liveTitle(MATCH_ID, "The Real Title");
+    await prisma.trackedManga.create({
+      data: { extension: "opstest", namespace: "", mangaId: row.mangaId, mdMangaId: OTHER_ID, source: "test" },
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/untracked/${row.id}/map`,
+      headers: root,
+      payload: { mdMangaId: MATCH_ID },
+    });
+    // Repointing edits existing curation; it belongs in the tracked map, where
+    // it is explicit, not behind a one-click button in a triage queue.
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toContain("already mapped");
+    expect(
+      await prisma.trackedManga.findFirstOrThrow({ where: { mangaId: row.mangaId } }),
+    ).toMatchObject({ mdMangaId: OTHER_ID });
+  });
+
+  it("finds one series in the queue by name, id or extension", async () => {
+    const wanted = await untracked({ mangaName: "Findable Series", mangaId: "ext-needle-1" });
+    await untracked({ mangaName: "Something Unrelated", mangaId: "ext-haystack-1" });
+
+    const byName = await app.inject({ method: "GET", url: "/api/v1/admin/untracked?q=findable", headers: root });
+    expect(byName.statusCode).toBe(200);
+    expect((byName.json().untracked as { id: string }[]).map((r) => r.id)).toEqual([wanted.id]);
+
+    // The external id is how these rows get referred to in practice.
+    const byId = await app.inject({ method: "GET", url: "/api/v1/admin/untracked?q=needle", headers: root });
+    expect((byId.json().untracked as { id: string }[]).map((r) => r.id)).toEqual([wanted.id]);
+
+    // A search that matches nothing is an empty list, not every row.
+    const none = await app.inject({ method: "GET", url: "/api/v1/admin/untracked?q=zzzznope", headers: root });
+    expect(none.json().untracked).toEqual([]);
+  });
+
   // ---- correcting an untracked series ----
 
   /**
