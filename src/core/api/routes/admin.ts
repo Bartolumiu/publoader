@@ -1162,6 +1162,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           considered: report.considered,
           ambiguous: report.ambiguous,
           unmatched: report.unmatched,
+          remaining: report.remaining,
           mapped: report.mapped.map(({ row, mdMangaId }) => ({
             id: row.id,
             extension: row.extension,

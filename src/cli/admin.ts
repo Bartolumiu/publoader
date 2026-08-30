@@ -1451,6 +1451,7 @@ untracked
       considered: number;
       ambiguous: number;
       unmatched: number;
+      remaining: number;
       mapped: { extension: string; mangaName: string; mdMangaId: string; titleUrl: string }[];
     }>("/api/v1/admin/untracked/automap", {
       method: "POST",
@@ -1476,6 +1477,9 @@ untracked
       // Two candidates carrying one link is a catalogue problem for a human.
       ambiguous: res.ambiguous,
       unmatched: res.unmatched,
+      // A pass that maps nothing is normal at this hit rate; what the operator
+      // needs to know is how much queue is still unread behind it.
+      remaining: res.remaining,
     });
   });
 

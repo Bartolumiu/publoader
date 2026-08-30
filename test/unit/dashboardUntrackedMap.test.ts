@@ -80,6 +80,7 @@ const previewReport = () => ({
   considered: 25,
   ambiguous: 1,
   unmatched: 22,
+  remaining: 1987,
   mapped: [MAPPED_ROW],
 });
 
@@ -103,6 +104,7 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
     { match: /\/stats$/, body: { paused: false, workers: {}, jobs: {}, uploadTasks: [], quarantined: 0 } },
     { match: /\/mangadex\/search/, body: { results: SEARCH_RESULTS } },
     { match: /\/untracked\/automap$/, body: () => AUTOMAP_REPORT },
+    { match: /\/extensions$/, body: { extensions: [{ name: "opstest" }, { name: "mangaup_global" }] } },
     { match: /\/untracked\/[^/]+\/map$/, body: { ok: true, mdMangaId: MATCH_ID } },
     { match: /\/untracked\/[^/?]+$/, body: { untracked: ROW, mangadex: null } },
     { match: /\/untracked\?/, body: { untracked: [ROW] } },
@@ -273,22 +275,38 @@ describe("mapping an untracked series onto an existing MangaDex title", () => {
     const [, init] = calls("/untracked/automap")[0];
     expect(init.method).toBe("POST");
     // Preview must be a dry run; this endpoint writes the series map.
-    expect(JSON.parse(init.body ?? "{}")).toMatchObject({ dryRun: true, limit: 25 });
+    expect(JSON.parse(init.body ?? "{}")).toMatchObject({ dryRun: true, limit: 50 });
 
-    expect(text()).toContain("Would map 1 of 25 checked");
+    expect(text()).toContain("Would map 1 of the 25 row(s) checked");
+    // A pass that maps nothing is the normal case here, so the card has to say
+    // how much queue is left or a zero reads as a broken button.
+    expect(text()).toContain("1987 row(s) still to check");
     // Ambiguity is the one outcome that needs a person, so it is never folded
     // away into "unmatched".
     expect(text()).toContain("1 ambiguous");
     expect(text()).toContain("Nothing was written");
   });
 
+  it("offers the live extensions as a picker rather than a text box", async () => {
+    await goto("#/untracked");
+    await settle(15);
+    const ext = doc.getElementById("automap-extension");
+    expect(ext, "the extension picker is not rendered").toBeTruthy();
+    expect(ext.tagName).toBe("SELECT");
+
+    // A typo in a free-text box reads exactly like "nothing to map here",
+    // which is the same answer a correct name usually gives.
+    const options = [...ext.querySelectorAll("option")].map((o: { value: string }) => o.value);
+    expect(options).toEqual(["", "mangaup_global", "opstest"]);
+  });
+
   it("scopes the run to one extension when asked", async () => {
     await goto("#/untracked");
+    await settle(15);
     const ext = doc.getElementById("automap-extension");
     const limit = doc.getElementById("automap-limit");
-    expect(ext, "the extension box is not rendered").toBeTruthy();
     ext.value = "mangaup_global";
-    limit.value = "50";
+    limit.value = "100";
 
     click("Find matches");
     await settle(15);
@@ -296,7 +314,7 @@ describe("mapping an untracked series onto an existing MangaDex title", () => {
     const [, init] = calls("/untracked/automap")[0];
     expect(JSON.parse(init.body ?? "{}")).toMatchObject({
       dryRun: true,
-      limit: 50,
+      limit: 100,
       extension: "mangaup_global",
     });
   });
@@ -316,7 +334,11 @@ describe("mapping an untracked series onto an existing MangaDex title", () => {
     const writes = calls("/untracked/automap");
     expect(writes).toHaveLength(1);
     expect(JSON.parse(writes[0][1].body ?? "{}")).toMatchObject({ dryRun: false });
-    expect(text()).toContain("Mapped 1 of 25 checked");
+    expect(text()).toContain("Mapped 1 of the 25 row(s) checked");
+    // After a commit the card has to say the mapping happened; the rows
+    // themselves vanish from the NEW queue, which on its own looks like
+    // nothing was done.
+    expect(text()).toContain("auto:official-link");
   });
 
   it("writes nothing if the auto-map confirmation is dismissed", async () => {
