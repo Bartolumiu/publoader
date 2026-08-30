@@ -27,6 +27,13 @@ const LEASE_ERROR_BASE_MS = 2_000;
 const LEASE_ERROR_MAX_MS = 60_000;
 /** Never renew less often than this, however short the TTL. */
 const MIN_RENEW_INTERVAL_MS = 5_000;
+/**
+ * Gap after a renewal that failed for a reason worth retrying. Deliberately
+ * far shorter than the normal interval: the lease is already running down,
+ * and every missed renewal brings the sweeper closer to giving this job to
+ * someone else who would start it from the beginning.
+ */
+const RENEW_RETRY_MS = 5_000;
 
 /**
  * Credentials were rejected. Nothing the agent can do about it, the operator
@@ -231,8 +238,17 @@ export class WorkerAgent {
         return;
       }
     }
-    renewer.stop();
-
+    /**
+     * Renewals run through the submission too, not just the run.
+     *
+     * submitResult retries up to 8 times with a 120s timeout each, so a large
+     * envelope — a full catalogue from a big source — can stay in flight for
+     * far longer than LEASE_TTL_SECONDS (300 in production). Stopping
+     * renewals before the submit meant that whole window ran unprotected: the
+     * sweeper expired the lease and requeued a job whose results were already
+     * on their way, so the work was done twice and the first submission
+     * arrived against a lease that was no longer current.
+     */
     try {
       const result = await this.api.submitResult(envelope);
       log.info(
@@ -247,6 +263,8 @@ export class WorkerAgent {
       // The sweeper will expire the lease and requeue; the idempotency key
       // makes a later duplicate harmless if the core did receive this.
       log.error({ err }, "result submission failed after retries; job left to the sweeper");
+    } finally {
+      renewer.stop();
     }
   }
 
@@ -265,31 +283,61 @@ export class WorkerAgent {
       MIN_RENEW_INTERVAL_MS,
       Math.floor((grant.leaseTtlSeconds * 1000) / 3),
     );
-    const timer = setInterval(() => {
-      this.api
-        .renewLease(job.jobId, grant.leaseId)
-        .then((res) => {
-          if (res.cancelRequested && !abort.signal.aborted) {
-            log.warn("core requested cancellation");
-            abort.abort("cancelled");
-          }
-        })
-        .catch((err: unknown) => {
-          if (err instanceof CoreApiError && err.status === 409 && !abort.signal.aborted) {
-            log.error("lease no longer current; stopping runner");
-            abort.abort("lease-lost");
-            return;
-          }
-          if (err instanceof CoreApiError && err.isAuth) {
-            this.recordFatal(new FatalAuthError(`core rejected our credentials: ${err.message}`));
-            abort.abort("lease-lost");
-            return;
-          }
-          log.warn({ err }, "lease renewal failed; will retry on next tick");
-        });
-    }, intervalMs);
-    timer.unref();
-    return { stop: () => clearInterval(timer) };
+
+    let timer: NodeJS.Timeout | null = null;
+    let stopped = false;
+
+    const schedule = (delayMs: number): void => {
+      if (stopped) return;
+      timer = setTimeout(() => void tick(), delayMs);
+      timer.unref();
+    };
+
+    /**
+     * One renewal, then re-arm.
+     *
+     * Self-scheduling rather than setInterval for two reasons. A renewal that
+     * takes longer than the interval cannot overlap the next one, and a
+     * transient failure can re-arm sooner than the full interval — which
+     * matters more than it looks: renewals run every TTL/3, so two failures
+     * in a row leave a single attempt before the sweeper expires the lease,
+     * hands the job to another worker, and the whole run restarts from
+     * nothing. Retrying a network blip in seconds instead of ~100s is the
+     * difference between a hiccup and repeating an hour of work.
+     */
+    const tick = async (): Promise<void> => {
+      if (stopped) return;
+      try {
+        const res = await this.api.renewLease(job.jobId, grant.leaseId);
+        if (res.cancelRequested && !abort.signal.aborted) {
+          log.warn("core requested cancellation");
+          abort.abort("cancelled");
+          return;
+        }
+        schedule(intervalMs);
+      } catch (err: unknown) {
+        if (err instanceof CoreApiError && err.status === 409 && !abort.signal.aborted) {
+          log.error("lease no longer current; stopping runner");
+          abort.abort("lease-lost");
+          return;
+        }
+        if (err instanceof CoreApiError && err.isAuth) {
+          this.recordFatal(new FatalAuthError(`core rejected our credentials: ${err.message}`));
+          abort.abort("lease-lost");
+          return;
+        }
+        log.warn({ err }, "lease renewal failed; retrying shortly");
+        schedule(RENEW_RETRY_MS);
+      }
+    };
+
+    schedule(intervalMs);
+    return {
+      stop: () => {
+        stopped = true;
+        if (timer) clearTimeout(timer);
+      },
+    };
   }
 }
 
