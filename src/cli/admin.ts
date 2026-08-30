@@ -1547,13 +1547,20 @@ untracked
 
 untracked
   .command("automap")
-  .description("map every queued series MangaDex already lists under its own publisher url")
+  .description("map queued series onto the MangaDex title that is already theirs")
   .option("--extension <name>", "only this extension")
   .option("--limit <n>", "how many rows to check", "25")
+  .option(
+    "--by <evidence>",
+    "link: MangaDex lists this series' own publisher url | title: MangaDex holds this exact name",
+    "link",
+  )
   .option("--commit", "actually write the mappings (default is a dry run)")
-  .action(async (opts: { extension?: string; limit: string; commit?: boolean }) => {
+  .action(async (opts: { extension?: string; limit: string; by: string; commit?: boolean }) => {
+    if (opts.by !== "link" && opts.by !== "title") fail("--by must be link or title");
     const res = await api<{
       dryRun: boolean;
+      strategy: string;
       considered: number;
       ambiguous: number;
       unmatched: number;
@@ -1564,6 +1571,7 @@ untracked
       json: {
         dryRun: !opts.commit,
         limit: Number(opts.limit),
+        strategy: opts.by,
         ...(opts.extension ? { extension: opts.extension } : {}),
       },
     });
@@ -1574,13 +1582,17 @@ untracked
         { header: "MANGA", get: (m) => String(m["mangaName"] ?? "").slice(0, 40) },
         { header: "MANGADEX", get: (m) => m["titleUrl"] },
       ],
-      "nothing matched an official English link",
+      opts.by === "title"
+        ? "no MangaDex title holds one of these names exactly"
+        : "nothing matched an official English link",
     );
     kv({
       mode: res.dryRun ? "dry run (nothing written)" : "committed",
+      evidence: res.strategy,
       considered: res.considered,
       mapped: res.mapped.length,
-      // Two candidates carrying one link is a catalogue problem for a human.
+      // Two entries answering to one name (or carrying one link) is a
+      // catalogue problem for a human, not something to guess at.
       ambiguous: res.ambiguous,
       unmatched: res.unmatched,
       // A pass that maps nothing is normal at this hit rate; what the operator

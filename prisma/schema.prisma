@@ -472,6 +472,13 @@ model UntrackedManga {
   /// direction: a series with no official link on MangaDex today may have one
   /// next month, so a checked row is re-checked once it is old enough.
   officialLinkCheckedAt DateTime? @map("official_link_checked_at")
+  /// When the auto-map pass last searched MangaDex for a title holding this
+  /// series' exact name. NULL means never checked.
+  ///
+  /// Kept apart from officialLinkCheckedAt rather than shared: the two passes
+  /// ask different questions of MangaDex and go stale independently, so one
+  /// marking the other's column would silently skip work that was never done.
+  titleCheckedAt DateTime? @map("title_checked_at")
   createdAt     DateTime       @default(now()) @map("created_at")
   updatedAt     DateTime       @updatedAt @map("updated_at")
 

@@ -77,6 +77,7 @@ const MAPPED_ROW = {
 const previewReport = () => ({
   ok: true,
   dryRun: true,
+  strategy: "link",
   considered: 25,
   ambiguous: 1,
   unmatched: 22,
@@ -272,15 +273,17 @@ describe("mapping an untracked series onto an existing MangaDex title", () => {
 
   it("previews the auto-map without writing, and says what it would do", async () => {
     await goto("#/untracked");
-    expect(text()).toContain("Auto-map by official MangaDex link");
+    expect(text()).toContain("Auto-map onto titles MangaDex already has");
 
     click("Find matches");
     await settle(15);
 
     const [, init] = calls("/untracked/automap")[0];
     expect(init.method).toBe("POST");
-    // Preview must be a dry run; this endpoint writes the series map.
-    expect(JSON.parse(init.body ?? "{}")).toMatchObject({ dryRun: true, limit: 50 });
+    // Preview must be a dry run; this endpoint writes the series map. And the
+    // link is the default evidence: it is the stronger of the two, so the
+    // weaker one is never what an unchanged card runs.
+    expect(JSON.parse(init.body ?? "{}")).toMatchObject({ dryRun: true, limit: 50, strategy: "link" });
 
     expect(text()).toContain("Would map 1 of the 25 row(s) checked");
     // A pass that maps nothing is the normal case here, so the card has to say
@@ -290,6 +293,26 @@ describe("mapping an untracked series onto an existing MangaDex title", () => {
     // away into "unmatched".
     expect(text()).toContain("1 ambiguous");
     expect(text()).toContain("Nothing was written");
+  });
+
+  it("runs the title pass when asked, and says the evidence changed", async () => {
+    AUTOMAP_REPORT = { ...previewReport(), strategy: "title", ambiguous: 2, unmatched: 20 };
+    await goto("#/untracked");
+    await settle(15);
+    doc.getElementById("automap-strategy").value = "title";
+
+    click("Find matches");
+    await settle(15);
+
+    expect(JSON.parse(calls("/untracked/automap")[0][1].body ?? "{}")).toMatchObject({
+      dryRun: true,
+      strategy: "title",
+    });
+    // The two passes fail for different reasons, and an operator reading a zero
+    // needs to know which one they ran: "nobody links here" and "MangaDex
+    // spells it another way" have different next moves.
+    expect(text()).toContain("two titles answer to one name");
+    expect(text()).toContain("with no title of that exact name");
   });
 
   it("offers the live extensions as a picker rather than a text box", async () => {
