@@ -206,6 +206,8 @@ export interface QuarantineEntry {
   id: string;
   jobId: string;
   workerId: string | null;
+  /** Resolved by the core; null when the worker row is gone. */
+  workerName?: string | null;
   rejectReason: string | null;
   createdAt: string;
 }

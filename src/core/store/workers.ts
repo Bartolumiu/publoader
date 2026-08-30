@@ -110,3 +110,31 @@ export class WorkerStore {
     return this.prisma.worker.findMany({ orderBy: { createdAt: "asc" } });
   }
 }
+
+/**
+ * Worker id -> the operator-facing name, for the ids stored on jobs and
+ * submissions.
+ *
+ * `jobs.lease_worker_id` and `result_submissions.worker_id` are plain columns
+ * with no relation to `workers`, so a name needs this second read. Ids with no
+ * surviving row are simply absent from the map; callers fall back to the id,
+ * because a revoked worker still has to be identifiable in an old run.
+ */
+export async function workerNames(
+  prisma: PrismaClient,
+  ids: readonly (string | null | undefined)[],
+): Promise<Map<string, string>> {
+  const wanted = [...new Set(ids.filter((id): id is string => typeof id === "string" && id !== ""))];
+  if (wanted.length === 0) return new Map();
+  const rows = await prisma.worker.findMany({
+    where: { id: { in: wanted } },
+    select: { id: true, name: true },
+  });
+  return new Map(rows.map((row) => [row.id, row.name]));
+}
+
+/** The name if one is known, else a short id — never an empty cell. */
+export function workerLabel(id: string | null | undefined, names: Map<string, string>): string {
+  if (!id) return "-";
+  return names.get(id) ?? id.slice(0, 8);
+}

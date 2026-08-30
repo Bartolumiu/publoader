@@ -917,7 +917,7 @@ const commands: BotCommand[] = [
         .slice(0, 15)
         .map(
           (q) =>
-            `• job \`${q.jobId.slice(0, 8)}\` worker \`${(q.workerId ?? "?").slice(0, 8)}\` ` +
+            `• job \`${q.jobId.slice(0, 8)}\` worker \`${q.workerName ?? (q.workerId ?? "?").slice(0, 8)}\` ` +
             `${shortTime(q.createdAt)}; \`${(q.rejectReason ?? "no reason recorded").slice(0, 140)}\``,
         );
       if (quarantined.length > 15) rendered.push(`…and ${quarantined.length - 15} more`);

@@ -270,7 +270,12 @@ runs
       { header: "SEG", get: (j) => `${Number(j["segmentIndex"]) + 1}/${j["segmentTotal"]}` },
       { header: "STATE", get: (j) => j["state"] },
       { header: "ATTEMPT", get: (j) => `${j["attempt"]}/${j["maxAttempts"]}` },
-      { header: "WORKER", get: (j) => j["leaseWorkerId"] },
+      {
+        header: "WORKER",
+        // Name where the core could resolve one; a revoked worker leaves only
+        // its id behind, and that still has to identify the run.
+        get: (j) => j["leaseWorkerName"] ?? j["leaseWorkerId"],
+      },
       { header: "LEASE EXPIRES", get: (j) => j["leaseExpiresAt"] },
       { header: "ERROR", get: (j) => String(j["lastError"] ?? "").slice(0, 60) || "-" },
     ]);

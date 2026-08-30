@@ -500,6 +500,45 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     expect(trimmed.json().errors).toHaveLength(1);
   });
 
+  it("names the lease holder in the feed, falling back to an id for a worker that is gone", async () => {
+    // An operator reads "server", not "0523b7e8"; the id is meaningless to
+    // them and identical-looking across every worker they run.
+    const known = await prisma.worker.create({
+      data: {
+        id: "11111111-1111-4111-8111-111111111111",
+        name: "server",
+        tokenHash: `hash-${Date.now()}`,
+      },
+    });
+    const named = await job({ state: "SUCCEEDED" });
+    const orphaned = await job({ state: "SUCCEEDED" });
+    for (const [jobRow, workerId] of [
+      [named, known.id],
+      // No workers row: a revoked worker still has to be identifiable.
+      [orphaned, "deadbeef-0000-4000-8000-000000000000"],
+    ] as const) {
+      await prisma.resultSubmission.create({
+        data: {
+          idempotencyKey: `sub-${jobRow.id}`,
+          jobId: jobRow.id,
+          attempt: 1,
+          leaseId: "44444444-4444-4444-8444-444444444444",
+          workerId,
+          envelope: {},
+          state: "QUARANTINED",
+          rejectReason: "host not in allowed_hosts",
+        },
+      });
+    }
+
+    const res = await app.inject({ method: "GET", url: "/api/v1/admin/errors", headers: root });
+    expect(res.statusCode).toBe(200);
+    const subjects = (res.json().errors as { subject: string }[]).map((e) => e.subject);
+
+    expect(subjects).toContainEqual(`worker server · job ${named.id}`);
+    expect(subjects).toContainEqual(`worker deadbeef · job ${orphaned.id}`);
+  });
+
   // ---- clearing the error feed ----
 
   /** The three sources at once, so a feed assertion covers all of them. */
