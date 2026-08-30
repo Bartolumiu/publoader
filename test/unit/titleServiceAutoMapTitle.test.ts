@@ -209,6 +209,7 @@ describe("disconfirming evidence", () => {
     expect(isVariantEdition(manga("a", ["Berserk (Official Colored)"]))).toBe(true);
     expect(isVariantEdition(manga("a", ["Berserk (Colored)"]))).toBe(true);
     expect(isVariantEdition(manga("a", ["Maou 2099 (Trial Comic)"]))).toBe(true);
+    expect(isVariantEdition(manga("a", ["Even If the Villain's Daughter Regresses (Promo)"]))).toBe(true);
     // MangaDex puts the marker in front as often as behind.
     expect(isVariantEdition(manga("a", ["(Pre-Serialization) Tomodachi no Nee-chan"]))).toBe(true);
     // And spells the coloured re-release as an unbracketed trailing qualifier.

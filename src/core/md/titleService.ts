@@ -1069,7 +1069,7 @@ const VARIANT_EDITION = [
   // Bracketed, anywhere in the name -- MangaDex puts these both before and
   // after the title ("(Pre-Serialization) Tomodachi no Nee-chan ...").
   /[([]\s*(?:(?:fan|official(?:ly)?|digital|minimalist)[\s-]?)?colou?r(?:ed)?\s*[)\]]/i,
-  /[([]\s*(?:oneshot|one-shot|doujinshi|anthology|spin[\s-]?off|remake|pilot|preview|trial(?:\s+comic)?|pre-?serial(?:i[sz]ation)?|remaster(?:ed)?)\s*[)\]]/i,
+  /[([]\s*(?:oneshot|one-shot|doujinshi|anthology|spin[\s-]?off|remake|pilot|preview|promo(?:tion(?:al)?)?|trial(?:\s+comic)?|pre-?serial(?:i[sz]ation)?|remaster(?:ed)?)\s*[)\]]/i,
   // Unbracketed, and only as a trailing qualifier: "Golden Kamuy - Digital
   // Colored Comics", "Uchuu Kyoudai - Digital Colored Comics". Anchored at the
   // end so a series whose own name contains these words is untouched.
