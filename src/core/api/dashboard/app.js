@@ -108,7 +108,10 @@ const store = {
      */
     chapterCursors: {},
     untrackedState: "NEW",
+    untrackedExtension: "",
     untrackedQuery: "",
+    /** Cursors walked so far; one per page behind the current one. */
+    untrackedCursors: [],
     activitySeverity: "all",
     activityHours: 72,
     activityQuery: "",
@@ -9425,13 +9428,31 @@ const UNTRACKED_STATES = ["NEW", "CREATING", "CREATED", "TRACKED", "FAILED", "SK
 VIEWS.untracked = (route) => {
   if (route.param) return untrackedDetail(route.param);
 
+  const walked = () => store.filters.untrackedCursors ?? [];
+
   const queue = new Resource("untracked", () => {
+    const params = new URLSearchParams({ state: store.filters.untrackedState, limit: "50" });
     const q = store.filters.untrackedQuery.trim();
-    return api(
-      `/untracked?state=${encodeURIComponent(store.filters.untrackedState)}&limit=200` +
-        (q ? `&q=${encodeURIComponent(q)}` : ""),
-    );
+    if (q) params.set("q", q);
+    if (store.filters.untrackedExtension) params.set("extension", store.filters.untrackedExtension);
+    const trail = walked();
+    if (trail.length) params.set("cursor", trail[trail.length - 1]);
+    return api(`/untracked?${params}`);
   });
+
+  /**
+   * Changing what is being looked at has to drop the position in the old list.
+   * A cursor names a row in one ordering of one filter; carrying it across a
+   * filter change pages from a row that may not be in the new list at all.
+   */
+  const resetPaging = () => {
+    setFilter({ untrackedCursors: [] });
+    void queue.load({ force: true });
+  };
+  const page = (trail) => {
+    setFilter({ untrackedCursors: trail });
+    void queue.load({ force: true });
+  };
 
   const filter = el(
     "select",
@@ -9440,13 +9461,53 @@ VIEWS.untracked = (route) => {
       "aria-label": "Untracked state filter",
       onchange: (event) => {
         setFilter({ untrackedState: event.target.value });
-        void queue.load({ force: true });
+        resetPaging();
       },
     },
     UNTRACKED_STATES.map((value) =>
       el("option", { value, text: value, selected: value === store.filters.untrackedState }),
     ),
   );
+
+  /**
+   * Which source's queue to look at.
+   *
+   * A picker rather than leaning on the free-text box: "omoi" typed there also
+   * matches every series with omoi in its title, and cannot say "this source
+   * and no other" at all. The yield of the auto-map is very uneven by source,
+   * so which one you are looking at is the first question, not a refinement.
+   */
+  const extensionFilter = el(
+    "select",
+    {
+      id: "untracked-extension",
+      "aria-label": "Extension filter",
+      onchange: (event) => {
+        setFilter({ untrackedExtension: event.target.value });
+        resetPaging();
+      },
+    },
+    el("option", { value: "", text: "All extensions" }),
+  );
+  void api("/extensions")
+    .then((data) => {
+      const names = (data.extensions ?? [])
+        .map((e) => e.name ?? e)
+        .filter(Boolean)
+        .sort();
+      for (const name of names) {
+        extensionFilter.append(
+          el("option", {
+            value: name,
+            text: name,
+            selected: name === store.filters.untrackedExtension,
+          }),
+        );
+      }
+    })
+    .catch(() => {
+      // The list is a convenience; losing it must not cost the whole view.
+    });
 
   // The queue routinely holds thousands of rows in one state, and an operator
   // arrives knowing the series name rather than where it sits in the list.
@@ -9457,7 +9518,7 @@ VIEWS.untracked = (route) => {
     placeholder: "series name, source id or extension",
     onchange: (event) => {
       setFilter({ untrackedQuery: event.target.value.trim() });
-      void queue.load({ force: true });
+      resetPaging();
     },
   });
 
@@ -9477,6 +9538,12 @@ VIEWS.untracked = (route) => {
         el(
           "span",
           { class: "row tight" },
+          el("label", { class: "inline", for: "untracked-extension", text: "Extension" }),
+          extensionFilter,
+        ),
+        el(
+          "span",
+          { class: "row tight" },
           el("label", { class: "inline", for: "untracked-q", text: "Search" }),
           search,
         ),
@@ -9484,8 +9551,9 @@ VIEWS.untracked = (route) => {
           type: "button",
           text: "Clear",
           onclick: () => {
-            setFilter({ untrackedQuery: "" });
-            void queue.load({ force: true });
+            setFilter({ untrackedQuery: "", untrackedExtension: "" });
+            extensionFilter.value = "";
+            resetPaging();
           },
         }),
       ),
@@ -9495,7 +9563,10 @@ VIEWS.untracked = (route) => {
       live(
         [queue],
         (data) =>
-          table(
+          el(
+            "div",
+            {},
+            table(
             ["Series", "Extension", "Lang", "State", "Attempts", "Result", ""],
             data.untracked.map((item) => [
               el(
@@ -9534,11 +9605,51 @@ VIEWS.untracked = (route) => {
                 : `Nothing is in the ${store.filters.untrackedState} state. The scrapers add rows here when they find a series MangaDex does not have.`,
             },
           ),
+            untrackedPager(data, walked(), page),
+          ),
         { reserve: 300, skeleton: () => skeletonTable(7, 7) },
       ),
     ),
   );
 };
+
+/**
+ * Walk the queue a page at a time.
+ *
+ * The listing used to ask for 200 rows and show whatever came back, which on a
+ * queue thousands deep is a fixed window onto the newest rows that looks
+ * exactly like the whole list. The count is the honest part: "50 shown of
+ * 2,243" is the difference between "that is all of them" and "you are looking
+ * at one fortieth of this".
+ */
+function untrackedPager(data, trail, go) {
+  const shown = data.untracked?.length ?? 0;
+  const total = data.total ?? shown;
+  if (total <= shown && trail.length === 0) return null;
+  return el(
+    "div",
+    { class: "row pager" },
+    el("span", {
+      class: "dim small",
+      text:
+        `${shown} shown of ${total} matching` +
+        (trail.length ? ` · page ${trail.length + 1}` : ""),
+    }),
+    el("span", { class: "grow" }),
+    el("button", {
+      type: "button",
+      text: "← Back",
+      disabled: trail.length === 0,
+      onclick: () => go(trail.slice(0, -1)),
+    }),
+    el("button", {
+      type: "button",
+      text: "Next →",
+      disabled: !data.nextCursor,
+      onclick: () => go([...trail, data.nextCursor]),
+    }),
+  );
+}
 
 function untrackedApproveButton(item, refresh) {
   return gatedButton("untracked:write", {

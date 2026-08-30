@@ -87,6 +87,10 @@ const previewReport = () => ({
 /** Swapped by the commit test so one mount can answer a dry run, then a write. */
 let AUTOMAP_REPORT: unknown = previewReport();
 
+/** One page of the queue; the count is what tells the pager there is more. */
+const queuePage = () => ({ untracked: [ROW], total: 2243, limit: 50, nextCursor: "cursor-page-2" });
+let QUEUE_PAGE: unknown = queuePage();
+
 function apiRoutes(): { match: RegExp; body: unknown }[] {
   return [
     { match: /\/session$/, body: { actor: "ardax", role: "OWNER", userId: "u1", email: "a@b.c" } },
@@ -107,7 +111,7 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
     { match: /\/extensions$/, body: { extensions: [{ name: "opstest" }, { name: "mangaup_global" }] } },
     { match: /\/untracked\/[^/]+\/map$/, body: { ok: true, mdMangaId: MATCH_ID } },
     { match: /\/untracked\/[^/?]+$/, body: { untracked: ROW, mangadex: null } },
-    { match: /\/untracked\?/, body: { untracked: [ROW] } },
+    { match: /\/untracked\?/, body: () => QUEUE_PAGE },
   ];
 }
 
@@ -183,6 +187,7 @@ describe("mapping an untracked series onto an existing MangaDex title", () => {
   beforeEach(async () => {
     requested = [];
     AUTOMAP_REPORT = previewReport();
+    QUEUE_PAGE = queuePage();
     const html = readFileSync(INDEX_HTML, "utf8");
     const body = html.split("<body>")[1]?.split("</body>")[0];
     if (!body) throw new Error("index.html has no <body>: the dashboard shell cannot be mounted");
@@ -349,6 +354,51 @@ describe("mapping an untracked series onto an existing MangaDex title", () => {
     await settle(10);
 
     expect(calls("/untracked/automap")).toHaveLength(0);
+  });
+
+  it("says how much of the queue it is showing, and offers the next page", async () => {
+    await goto("#/untracked");
+    await settle(15);
+
+    // The original complaint: a fixed window onto a queue thousands deep looks
+    // exactly like the whole list unless the count says otherwise.
+    expect(text()).toContain("1 shown of 2243 matching");
+
+    const before = calls("/untracked?").length;
+    click("Next →");
+    await settle(15);
+
+    const last = calls("/untracked?").at(-1);
+    expect(calls("/untracked?").length).toBeGreaterThan(before);
+    expect(String(last[0])).toContain("cursor=cursor-page-2");
+    expect(text()).toContain("page 2");
+  });
+
+  it("filters by extension from a picker, and drops the page position when it changes", async () => {
+    await goto("#/untracked");
+    await settle(15);
+    const ext = doc.getElementById("untracked-extension");
+    expect(ext, "the extension filter is not rendered").toBeTruthy();
+    expect(ext.tagName).toBe("SELECT");
+    expect([...ext.querySelectorAll("option")].map((o: { value: string }) => o.value)).toEqual([
+      "",
+      "mangaup_global",
+      "opstest",
+    ]);
+
+    // Walk to page two first, so the reset is observable.
+    click("Next →");
+    await settle(15);
+
+    ext.value = "mangaup_global";
+    ext.dispatchEvent(new win.Event("change", { bubbles: true }));
+    await settle(15);
+
+    const last = String(calls("/untracked?").at(-1)[0]);
+    expect(last).toContain("extension=mangaup_global");
+    // A cursor names a row in one ordering of one filter; carrying it across a
+    // filter change pages from a row that may not be in the new list at all.
+    expect(last).not.toContain("cursor=");
   });
 
   it("searches the queue itself, so one series can be found among thousands", async () => {
