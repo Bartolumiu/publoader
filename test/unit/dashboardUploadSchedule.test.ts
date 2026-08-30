@@ -44,6 +44,8 @@ const SCHEDULE = {
   global: { perDay: 60, perMangaPerDay: 2, intervalHours: 12 },
   overrides: { viz: { perDay: 10 } },
   defaults: { perDay: 50, perMangaPerDay: 3, intervalHours: 24 },
+  scope: "global",
+  scopes: ["global", "extension"],
 };
 
 /** Swapped per test so the scope gate can be exercised. */
@@ -247,5 +249,46 @@ describe("release pacing is editable from the dashboard", () => {
     await settle(10);
     await goto("#/extensions");
     expect(cardByTitle("Release pacing")).toBeUndefined();
+  });
+
+  it("offers the budget as two radios naming what the number applies to", async () => {
+    await goto("#/extensions");
+    const card = cardByTitle("Release pacing");
+    const radios = [...card.querySelectorAll('input[type="radio"]')];
+
+    expect(radios).toHaveLength(2);
+    // The saved perDay is named in both, because the whole choice is what that
+    // one number applies to.
+    expect(card.textContent).toContain("60 a day shared across all extensions");
+    expect(card.textContent).toContain("60 a day for each extension");
+    // The stored scope is the one selected.
+    expect((radios[0] as any).checked).toBe(true);
+    expect((radios[1] as any).checked).toBe(false);
+  });
+
+  it("saves the scope the moment a radio is picked", async () => {
+    await goto("#/extensions");
+    const card = cardByTitle("Release pacing");
+    const perExtension = [...card.querySelectorAll('input[type="radio"]')][1] as any;
+
+    calls = [];
+    perExtension.checked = true;
+    perExtension.dispatchEvent(new win.Event("change"));
+    await settle();
+
+    const write = scheduleWrites()[0];
+    expect(write?.path).toContain("/upload-schedule/scope");
+    expect(write?.body).toEqual({ scope: "extension" });
+  });
+
+  it("does not arm the radios for a credential that cannot write settings", async () => {
+    scopes = ["settings:read", "extensions:read"];
+    mount();
+    await settle(10);
+    await goto("#/extensions");
+    const radios = [...cardByTitle("Release pacing").querySelectorAll('input[type="radio"]')];
+
+    expect(radios).toHaveLength(2);
+    expect(radios.every((r: any) => r.disabled)).toBe(true);
   });
 });

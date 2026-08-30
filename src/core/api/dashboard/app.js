@@ -7018,18 +7018,36 @@ function uploadScheduleControls(data, resource) {
   // The pool `perDay` counts against. Worth a control rather than a constant:
   // "50 a day" means something different when five extensions share it than
   // when each has its own, and only an operator knows which they meant.
+  //
+  // The saved `perDay` is named in both labels rather than "the budget",
+  // because the whole choice is what that one number applies to, and an
+  // operator reading "per extension" should not have to work out how many that
+  // is across five of them.
   const currentScope = data.scope ?? "global";
-  const scopeSelect = el(
-    "select",
-    { id: "schedule-scope", "aria-label": "Whether the per-day budget is shared or per extension" },
-    (data.scopes ?? ["global", "extension"]).map((name) =>
-      el("option", {
-        value: name,
-        text: name === "global" ? "Shared across extensions" : "Per extension",
-        ...(name === currentScope ? { selected: "selected" } : {}),
+  const perDayNow = values.perDay ?? 50;
+  const scopeRadio = (name, label) =>
+    el(
+      "label",
+      { class: "inline", for: `schedule-scope-${name}` },
+      el("input", {
+        id: `schedule-scope-${name}`,
+        type: "radio",
+        name: "schedule-scope",
+        checked: currentScope === name,
+        // Same gate the Save buttons carry: this writes a setting the moment it
+        // is clicked, so a reader must not be able to arm it.
+        disabled: !can("settings:write"),
+        onchange: (event) => {
+          if (!event.target.checked) return;
+          act(
+            "upload-schedule.scope",
+            () => api("/upload-schedule/scope", { method: "POST", body: { scope: name } }),
+            { refresh: [resource] },
+          );
+        },
       }),
-    ),
-  );
+      ` ${label}`,
+    );
 
   const overrides = Object.keys(data.overrides ?? {});
   return el("div", {}, [
@@ -7062,21 +7080,9 @@ function uploadScheduleControls(data, resource) {
       }),
     ),
     row(
-      el("label", { class: "inline", for: "schedule-scope", text: "Budget" }),
-      scopeSelect,
-      gatedButton("settings:write", {
-        text: "Save budget",
-        onclick: (event) =>
-          act(
-            "upload-schedule.scope",
-            () =>
-              api("/upload-schedule/scope", {
-                method: "POST",
-                body: { scope: scopeSelect.value },
-              }),
-            { button: event.currentTarget, refresh: [resource] },
-          ),
-      }),
+      el("span", { class: "inline", text: "Budget" }),
+      scopeRadio("global", `${perDayNow} a day shared across all extensions`),
+      scopeRadio("extension", `${perDayNow} a day for each extension`),
     ),
     el("p", {
       class: "dim small",
