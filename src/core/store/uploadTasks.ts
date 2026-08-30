@@ -241,11 +241,28 @@ export class UploadTaskStore {
   constructor(private readonly prisma: PrismaClient) {}
 
   /** Enqueue if absent. Returns true when a new task row was created. */
-  async enqueue(kind: UploadTaskKind, dedupeKey: string, chapter: unknown): Promise<boolean> {
+  /**
+   * `opts.notBefore` dates the row into the future, which is how a run spreads
+   * a backlog instead of making every chapter due at once (see
+   * processor/uploadSchedule.ts). Omitted, the column default `now()` applies
+   * and the task is claimable immediately, as it always was.
+   *
+   * DO NOTHING is what makes a future date stick: a later run that decides the
+   * same chapter again leaves the existing row, and its date, alone. Nothing
+   * here can pull a scheduled task forward — `requeueForChapter` and `reorder`
+   * are the deliberate ways to do that.
+   */
+  async enqueue(
+    kind: UploadTaskKind,
+    dedupeKey: string,
+    chapter: unknown,
+    opts: { notBefore?: Date } = {},
+  ): Promise<boolean> {
     const res = await this.prisma.$executeRaw(Prisma.sql`
-      INSERT INTO upload_tasks (id, kind, dedupe_key, chapter, state, created_at, updated_at)
+      INSERT INTO upload_tasks (id, kind, dedupe_key, chapter, state, not_before, created_at, updated_at)
       VALUES (${randomUUID()}, ${kind}::"UploadTaskKind", ${dedupeKey},
-              ${JSON.stringify(chapter)}::jsonb, 'PENDING', now(), now())
+              ${JSON.stringify(chapter)}::jsonb, 'PENDING',
+              coalesce(${opts.notBefore ?? null}::timestamptz, now()), now(), now())
       ON CONFLICT (kind, dedupe_key) DO NOTHING
     `);
     return res === 1;

@@ -1,0 +1,209 @@
+/**
+ * Deciding which day each newly-decided chapter is due on.
+ *
+ * The queue already had everything needed to run work later: `upload_tasks`
+ * carries `not_before`, the claim query reads
+ * `WHERE state = 'PENDING' AND not_before <= now() ORDER BY not_before ASC`,
+ * and `enqueue` is `ON CONFLICT DO NOTHING`. What was missing is that nothing
+ * ever set `not_before` to anything but `now()`, so every chapter a run decided
+ * became due the instant it was decided.
+ *
+ * That is right for a routine day — a couple of dozen chapters, all immediate —
+ * and wrong for the two cases that produce hundreds at once: an operator
+ * tracking a batch of new series, and the first run after an outage. Those
+ * flood MangaDex's latest-updates feed and sit in the upload queue in front of
+ * every ordinary update behind them.
+ *
+ * So this spreads the overflow across days instead. Nothing is dropped or
+ * withheld: every chapter is queued in the same pass, and a future-dated row is
+ * an ordinary PENDING task the claim query ignores until its date arrives.
+ * Because `enqueue` does nothing on conflict, a later run re-deciding the same
+ * chapter leaves the date it already has — the schedule is set once and stands.
+ */
+
+import type { UploadSchedule } from "../store/settings.js";
+
+/** The little a chapter must expose to be scheduled. */
+export interface SchedulableChapter {
+  /** Grouping key: the MangaDex title, falling back to the publisher's id. */
+  mdMangaId?: string | null;
+  mangaId?: string | null;
+  chapterNumber?: string | null;
+  chapterTimestamp?: string | Date | null;
+  chapterId?: string | null;
+}
+
+export interface ScheduledChapter<T> {
+  chapter: T;
+  /** When the task becomes claimable. Day 0 is `now`, i.e. immediately. */
+  notBefore: Date;
+  /** 0 for "today"; mostly here so a run can log the shape of what it queued. */
+  day: number;
+}
+
+/** Series with no id of any kind share one bucket rather than each being alone. */
+function mangaKey(chapter: SchedulableChapter): string {
+  return chapter.mdMangaId ?? chapter.mangaId ?? "";
+}
+
+function timestampOf(chapter: SchedulableChapter): number {
+  const raw = chapter.chapterTimestamp;
+  if (raw === null || raw === undefined) return Number.POSITIVE_INFINITY;
+  const parsed = raw instanceof Date ? raw.getTime() : Date.parse(raw);
+  return Number.isNaN(parsed) ? Number.POSITIVE_INFINITY : parsed;
+}
+
+/**
+ * Oldest first, then by chapter number, so a spread backlog is released in
+ * reading order rather than scattered.
+ */
+function compareChapters(a: SchedulableChapter, b: SchedulableChapter): number {
+  const at = timestampOf(a);
+  const bt = timestampOf(b);
+  if (at !== bt) return at - bt;
+
+  const an = Number(a.chapterNumber);
+  const bn = Number(b.chapterNumber);
+  const aValid = a.chapterNumber !== null && a.chapterNumber !== undefined && !Number.isNaN(an);
+  const bValid = b.chapterNumber !== null && b.chapterNumber !== undefined && !Number.isNaN(bn);
+  if (aValid && bValid && an !== bn) return an - bn;
+  if (aValid !== bValid) return aValid ? -1 : 1;
+
+  return (a.chapterId ?? "").localeCompare(b.chapterId ?? "");
+}
+
+/** 0 means "no limit" for both caps, matching `UploadSchedule`'s documented 0. */
+function limitOf(value: number): number {
+  return value > 0 ? value : Number.POSITIVE_INFINITY;
+}
+
+/**
+ * Assign every chapter a release day.
+ *
+ * Filling is round-robin over series, oldest chapter first, advancing a day
+ * when either cap is reached. Round-robin is the part that matters: filling one
+ * series at a time would put a single 300-chapter backlog in front of every
+ * other series for a week, so a title that published one new chapter today
+ * would wait behind it. Going a slice at a time per series keeps today's
+ * chapter on today.
+ *
+ * Ordering is stable — series sorted by key, chapters oldest-first — so the same
+ * input always produces the same schedule.
+ */
+export function planUploadSchedule<T extends SchedulableChapter>(
+  chapters: readonly T[],
+  schedule: UploadSchedule,
+  now: Date = new Date(),
+): ScheduledChapter<T>[] {
+  if (chapters.length === 0) return [];
+
+  const perDay = limitOf(schedule.perDay);
+  const perMangaPerDay = limitOf(schedule.perMangaPerDay);
+  const intervalMs = Math.max(1, schedule.intervalHours) * 60 * 60 * 1000;
+
+  // No caps: everything is due now, which is exactly the old behaviour.
+  if (perDay === Number.POSITIVE_INFINITY && perMangaPerDay === Number.POSITIVE_INFINITY) {
+    return chapters.map((chapter) => ({ chapter, notBefore: new Date(now), day: 0 }));
+  }
+
+  const queues = new Map<string, T[]>();
+  for (const chapter of chapters) {
+    const key = mangaKey(chapter);
+    const queue = queues.get(key);
+    if (queue) queue.push(chapter);
+    else queues.set(key, [chapter]);
+  }
+
+  const keys = [...queues.keys()].sort();
+  for (const key of keys) queues.get(key)!.sort(compareChapters);
+
+  const cursors = new Map<string, number>(keys.map((key) => [key, 0]));
+  const out: ScheduledChapter<T>[] = [];
+
+  let day = 0;
+  let remaining = chapters.length;
+
+  while (remaining > 0) {
+    let placedToday = 0;
+    const placedPerManga = new Map<string, number>();
+
+    // One pass per round so series interleave; repeated until the day is full
+    // or nothing more fits in it.
+    let progressed = true;
+    while (progressed && placedToday < perDay) {
+      progressed = false;
+
+      for (const key of keys) {
+        if (placedToday >= perDay) break;
+
+        const queue = queues.get(key)!;
+        const cursor = cursors.get(key)!;
+        if ((placedPerManga.get(key) ?? 0) >= perMangaPerDay) continue;
+
+        const next = queue[cursor];
+        if (next === undefined) continue;
+
+        out.push({
+          chapter: next,
+          notBefore: new Date(now.getTime() + day * intervalMs),
+          day,
+        });
+        cursors.set(key, cursor + 1);
+        placedPerManga.set(key, (placedPerManga.get(key) ?? 0) + 1);
+        placedToday++;
+        remaining--;
+        progressed = true;
+      }
+    }
+
+    // Nothing fitted in a whole day: only reachable if both caps are zero-ish,
+    // which `limitOf` already rules out. Guard anyway so this cannot spin.
+    if (placedToday === 0) {
+      for (const key of keys) {
+        const queue = queues.get(key)!;
+        for (let i = cursors.get(key)!; i < queue.length; i++) {
+          const chapter = queue[i];
+          if (chapter === undefined) continue;
+          out.push({
+            chapter,
+            notBefore: new Date(now.getTime() + day * intervalMs),
+            day,
+          });
+        }
+        cursors.set(key, queue.length);
+      }
+      break;
+    }
+
+    day++;
+  }
+
+  return out;
+}
+
+/** How many chapters land on each day, for the run log. */
+export function summariseSchedule<T>(scheduled: readonly ScheduledChapter<T>[]): {
+  immediate: number;
+  deferred: number;
+  days: number;
+  lastDate: string | null;
+} {
+  let immediate = 0;
+  let maxDay = 0;
+  let lastDate: string | null = null;
+
+  for (const entry of scheduled) {
+    if (entry.day === 0) immediate++;
+    if (entry.day >= maxDay) {
+      maxDay = entry.day;
+      lastDate = entry.notBefore.toISOString();
+    }
+  }
+
+  return {
+    immediate,
+    deferred: scheduled.length - immediate,
+    days: scheduled.length === 0 ? 0 : maxDay + 1,
+    lastDate,
+  };
+}

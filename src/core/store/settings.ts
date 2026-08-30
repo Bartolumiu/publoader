@@ -46,8 +46,81 @@ const REMOVAL_MODE_KEY = "chapter_removal_mode";
 const SIGNUPS_KEY = "dash_signups_enabled";
 const WEBHOOK_SUCCESSES_KEY = "webhook_upload_successes";
 const GITHUB_AUTO_SYNC_KEY = "github_auto_sync";
+const UPLOAD_SCHEDULE_KEY = "upload_schedule";
+const UPLOAD_SCHEDULE_OVERRIDES_KEY = "upload_schedule_overrides";
+
 const FETCH_THROTTLE_KEY = "fetch_throttle";
 const FETCH_THROTTLE_OVERRIDES_KEY = "fetch_throttle_overrides";
+
+/**
+ * How many chapters a run may put on MangaDex *today*, and how the rest are
+ * dated.
+ *
+ * This is spread, not suppression: every decided chapter is queued in the same
+ * pass either way, and `perDay` only decides which of them are due now and
+ * which carry a future `not_before`. A future-dated task is an ordinary PENDING
+ * row the claim query ignores until its date arrives, so nothing is dropped,
+ * retried, or recomputed to make it happen.
+ *
+ * The reason to want it: a routine day is a couple of dozen chapters and lands
+ * immediately, but tracking a batch of new series, or the first run after an
+ * outage, decides hundreds at once. Those flood MangaDex's latest-updates feed
+ * and sit in front of every ordinary update in the upload queue.
+ */
+export interface UploadSchedule {
+  /** Chapters dated to a given day, across every series. 0 disables spreading. */
+  perDay: number;
+  /**
+   * Chapters dated to a given day for one series.
+   *
+   * Separate from `perDay` because the two failure modes differ: `perDay`
+   * protects the feed and the queue, `perMangaPerDay` stops one series' backlog
+   * from being the only thing anyone sees for a week.
+   */
+  perMangaPerDay: number;
+  /** Gap between successive release days. */
+  intervalHours: number;
+}
+
+export const DEFAULT_UPLOAD_SCHEDULE: UploadSchedule = {
+  perDay: 50,
+  perMangaPerDay: 3,
+  intervalHours: 24,
+};
+
+/**
+ * Bounds, not preferences. `perDay: 0` is meaningful (spread nothing, the
+ * behaviour before this existed) so the floor is 0, not 1.
+ */
+function clampUploadSchedule(value: UploadSchedule): UploadSchedule {
+  const num = (raw: number, fallback: number, min: number, max: number): number =>
+    Number.isFinite(raw) ? Math.min(max, Math.max(min, Math.floor(raw))) : fallback;
+  return {
+    perDay: num(value.perDay, DEFAULT_UPLOAD_SCHEDULE.perDay, 0, 100_000),
+    perMangaPerDay: num(value.perMangaPerDay, DEFAULT_UPLOAD_SCHEDULE.perMangaPerDay, 0, 100_000),
+    intervalHours: num(value.intervalHours, DEFAULT_UPLOAD_SCHEDULE.intervalHours, 1, 24 * 30),
+  };
+}
+
+/** Reads whatever was stored without trusting any of it. */
+function parseUploadSchedule(raw: unknown): Partial<UploadSchedule> {
+  let value = raw;
+  if (typeof value === "string") {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return {};
+    }
+  }
+  if (typeof value !== "object" || value === null) return {};
+  const record = value as Record<string, unknown>;
+  const out: Partial<UploadSchedule> = {};
+  for (const key of ["perDay", "perMangaPerDay", "intervalHours"] as const) {
+    const field = record[key];
+    if (typeof field === "number") out[key] = field;
+  }
+  return out;
+}
 
 /** How a worker paces itself against one publisher. */
 export interface FetchThrottle {
@@ -217,6 +290,48 @@ export class SettingsStore {
     if (values === null) delete overrides[extension];
     else overrides[extension] = values;
     await this.setSetting(FETCH_THROTTLE_OVERRIDES_KEY, JSON.stringify(overrides));
+  }
+
+  // -- upload release spreading --
+
+  /**
+   * Resolved global-then-override, field by field, exactly like the fetch
+   * throttle: an extension can slow its own releases without restating the
+   * limits it was already happy with.
+   */
+  async getUploadSchedule(extension?: string): Promise<UploadSchedule> {
+    const [globalRaw, overridesRaw] = await Promise.all([
+      this.getSetting(UPLOAD_SCHEDULE_KEY),
+      extension ? this.getSetting(UPLOAD_SCHEDULE_OVERRIDES_KEY) : Promise.resolve(null),
+    ]);
+    const base = { ...DEFAULT_UPLOAD_SCHEDULE, ...parseUploadSchedule(globalRaw) };
+    if (!extension) return clampUploadSchedule(base);
+    const overrides = parseRecord(overridesRaw);
+    return clampUploadSchedule({ ...base, ...parseUploadSchedule(overrides[extension]) });
+  }
+
+  async setUploadSchedule(values: Partial<UploadSchedule>): Promise<void> {
+    const next = clampUploadSchedule({ ...(await this.getUploadSchedule()), ...values });
+    await this.setSetting(UPLOAD_SCHEDULE_KEY, JSON.stringify(next));
+  }
+
+  /** Every per-extension override, for the editor to render. */
+  async getUploadScheduleOverrides(): Promise<Record<string, Partial<UploadSchedule>>> {
+    const parsed = parseRecord(await this.getSetting(UPLOAD_SCHEDULE_OVERRIDES_KEY));
+    const out: Record<string, Partial<UploadSchedule>> = {};
+    for (const [name, value] of Object.entries(parsed)) out[name] = parseUploadSchedule(value);
+    return out;
+  }
+
+  /** `null` removes the override, so the extension follows the global again. */
+  async setUploadScheduleOverride(
+    extension: string,
+    values: Partial<UploadSchedule> | null,
+  ): Promise<void> {
+    const overrides = await this.getUploadScheduleOverrides();
+    if (values === null) delete overrides[extension];
+    else overrides[extension] = values;
+    await this.setSetting(UPLOAD_SCHEDULE_OVERRIDES_KEY, JSON.stringify(overrides));
   }
 
   // -- dashboard self-signup gate --
