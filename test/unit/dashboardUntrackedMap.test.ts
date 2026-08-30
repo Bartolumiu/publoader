@@ -361,8 +361,9 @@ describe("mapping an untracked series onto an existing MangaDex title", () => {
     await settle(15);
 
     // The original complaint: a fixed window onto a queue thousands deep looks
-    // exactly like the whole list unless the count says otherwise.
-    expect(text()).toContain("1 shown of 2243 matching");
+    // exactly like the whole list unless the count says otherwise. "Loaded"
+    // rather than "shown" since the table under it pages the batch at twenty.
+    expect(text()).toContain("1 loaded of 2243 matching");
 
     const before = calls("/untracked?").length;
     click("Next →");
