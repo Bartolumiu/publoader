@@ -1076,6 +1076,23 @@ export function isVariantEdition(candidate: {
 }
 
 /**
+ * Are two normalised urls on one site the same series?
+ *
+ * Equal, or one a path-prefix of the other at a segment boundary. That second
+ * case is not a nicety: MangaDex entries routinely record a deep link as the
+ * official English release -- `kmanga.kodansha.com/title/10028/episode/316940`
+ * where the scraper holds `kmanga.kodansha.com/title/10028` -- and reading that
+ * as a different series is worse than useless. It threw away the RIGHT
+ * candidate for Wind Breaker and left the Korean series of the same name
+ * looking like the only answer.
+ *
+ * The segment boundary is what keeps `/title/1002` from matching `/title/10028`.
+ */
+function sameSeriesLink(a: string, b: string): boolean {
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
+/**
  * Does MangaDex say this candidate is a DIFFERENT series on the publisher's own
  * site?
  *
@@ -1086,7 +1103,8 @@ export function isVariantEdition(candidate: {
  * that host at all -- most do not, and absence says nothing.
  *
  * Compared on host and path via `normaliseOfficialLink`, so a trailing slash or
- * a `www.` never reads as a different series.
+ * a `www.` never reads as a different series, and a deep link into the series
+ * counts as the series.
  */
 export function linkContradicts(
   candidate: { attributes: { links?: Record<string, string> | null } },
@@ -1095,13 +1113,18 @@ export function linkContradicts(
   const want = normaliseOfficialLink(seriesUrl);
   if (want === null) return false;
   const host = want.split("/")[0];
+  let contradicted = false;
   for (const link of Object.values(candidate.attributes.links ?? {})) {
     const other = normaliseOfficialLink(link);
     if (other === null) continue;
     if (other.split("/")[0] !== host) continue;
-    if (other !== want) return true;
+    // One link naming this series settles it, whatever the entry's other links
+    // for the same host say -- a publisher page and a deep link into it are
+    // both this series, and an entry carrying both must not read as a conflict.
+    if (sameSeriesLink(other, want)) return false;
+    contradicted = true;
   }
-  return false;
+  return contradicted;
 }
 
 function titleMatches(candidate: { attributes: { title: Record<string, string>; altTitles: Record<string, string>[] } }, reported: string): boolean {

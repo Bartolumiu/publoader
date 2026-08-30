@@ -153,6 +153,38 @@ describe("disconfirming evidence", () => {
     expect(linkContradicts(candidate, "https://kmanga.kodansha.com/title/10304")).toBe(true);
   });
 
+  it("keeps an entry that deep-links into the series it is being mapped to", () => {
+    // The live Wind Breaker failure, and the reason this is not plain string
+    // equality. MangaDex records the official English release as a link to a
+    // chapter inside the series; read as "a different page", it discarded the
+    // correct Japanese entry and left the unrelated Korean series of the same
+    // name looking like the only answer.
+    const candidate = manga("a", ["Wind Breaker"], {
+      links: { engtl: "https://kmanga.kodansha.com/title/10028/episode/316940" },
+    });
+    expect(linkContradicts(candidate, "https://kmanga.kodansha.com/title/10028")).toBe(false);
+  });
+
+  it("still separates two series whose ids share a prefix", () => {
+    // The boundary the prefix rule has to respect: /title/1002 is not /title/10028.
+    const candidate = manga("a", ["Wind Breaker"], {
+      links: { engtl: "https://kmanga.kodansha.com/title/1002" },
+    });
+    expect(linkContradicts(candidate, "https://kmanga.kodansha.com/title/10028")).toBe(true);
+  });
+
+  it("trusts the link that names this series over the entry's other links", () => {
+    // An entry may carry both the series page and a page for another edition;
+    // one link naming this series is enough, and must not be outvoted.
+    const candidate = manga("a", ["Wind Breaker"], {
+      links: {
+        engtl: "https://kmanga.kodansha.com/title/10028",
+        raw: "https://kmanga.kodansha.com/title/99999",
+      },
+    });
+    expect(linkContradicts(candidate, "https://kmanga.kodansha.com/title/10028")).toBe(false);
+  });
+
   it("keeps an entry whose link is the same page written differently", () => {
     const candidate = manga("a", ["Wind Breaker"], {
       links: { engtl: "http://www.kmanga.kodansha.com/title/10304/" },
