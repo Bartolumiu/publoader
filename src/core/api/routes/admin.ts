@@ -40,6 +40,7 @@ const WORKER_IMAGE = process.env["PUBLOADER_WORKER_IMAGE"] ?? "ardax/publoader-w
 import {
   DEFAULT_FETCH_THROTTLE,
   DEFAULT_UPLOAD_SCHEDULE,
+  UPLOAD_BUDGET_SCOPES,
   VALID_REMOVAL_MODES,
 } from "../../store/settings.js";
 import { BundleRejectedError } from "../../store/bundles.js";
@@ -700,6 +701,8 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         global: await ctx.settings.getUploadSchedule(),
         overrides: await ctx.settings.getUploadScheduleOverrides(),
         defaults: DEFAULT_UPLOAD_SCHEDULE,
+        scope: await ctx.settings.getUploadBudgetScope(),
+        scopes: UPLOAD_BUDGET_SCOPES,
       }),
     );
 
@@ -709,8 +712,33 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         perDay: z.coerce.number().int().min(0).max(100_000).optional(),
         perMangaPerDay: z.coerce.number().int().min(0).max(100_000).optional(),
         intervalHours: z.coerce.number().int().min(1).max(24 * 30).optional(),
+        // 0 is auto: spread the day's allowance evenly across the interval.
+        spacingMinutes: z.coerce.number().int().min(0).max(24 * 60).optional(),
       })
       .strict();
+
+    /**
+     * Whether `perDay` is one platform-wide pool or one per extension.
+     *
+     * Its own route rather than a field on the schedule body: a per-extension
+     * override cannot coherently choose the scope, so this is set once for
+     * everybody and the override routes stay about numbers.
+     */
+    scope.post(
+      "/api/v1/admin/upload-schedule/scope",
+      { preHandler: requireScope("settings:write") },
+      async (req) => {
+        const body = parseOrThrow(
+          z.object({ scope: z.enum(UPLOAD_BUDGET_SCOPES) }).strict(),
+          req.body ?? {},
+        );
+        await ctx.settings.setUploadBudgetScope(body.scope);
+        await ctx.audit.record(actor(req), "upload_schedule.scope", body.scope, {
+          scope: body.scope,
+        });
+        return { ok: true, scope: body.scope };
+      },
+    );
 
     scope.post(
       "/api/v1/admin/upload-schedule",

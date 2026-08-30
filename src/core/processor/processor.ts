@@ -629,11 +629,16 @@ export class RunProcessor {
       // now", and a cap that defers it would be answering a different question.
       const spread = run.kind === "CLEAN";
 
-      // Global, not per-extension. The cap protects MangaDex's feed and the
-      // shared upload queue, and neither of those has one budget per
-      // extension — five extensions each spending 50 is 250 chapters landing
-      // in a day against a cap that reads 50.
-      const schedule = spread ? await this.settings.getUploadSchedule() : null;
+      // Whose 50 a day it is. `global` is one pool for the platform, which is
+      // what protects MangaDex's feed — the feed does not care which extension
+      // a chapter came from, and five extensions each spending 50 is 250 a day
+      // against a cap that reads 50. `extension` gives each its own allowance,
+      // for when one publisher's backlog should not hold up another's routine
+      // updates. The scope picks both the settings and the load it counts, so
+      // the two can never disagree about which pool is being filled.
+      const scope = spread ? await this.settings.getUploadBudgetScope() : null;
+      const budgetOf = scope === "extension" ? run.extension : undefined;
+      const schedule = spread ? await this.settings.getUploadSchedule(budgetOf) : null;
 
       if (schedule === null) {
         for (const chapter of pendingUploads) {
@@ -651,7 +656,7 @@ export class RunProcessor {
           // What every other extension and every earlier run already put in
           // each bucket, so this run fills what is left rather than starting
           // the calendar over.
-          await this.tasks.scheduledLoad(intervalMsOf(schedule)),
+          await this.tasks.scheduledLoad(intervalMsOf(schedule), new Date(), budgetOf),
         );
         const shape = summariseSchedule(scheduled);
 
@@ -667,8 +672,10 @@ export class RunProcessor {
               deferred: shape.deferred,
               days: shape.days,
               lastRelease: shape.lastDate,
+              scope,
               perDay: schedule.perDay,
               perMangaPerDay: schedule.perMangaPerDay,
+              spacingMinutes: schedule.spacingMinutes,
             },
             "spreading this run's uploads over several days",
           );

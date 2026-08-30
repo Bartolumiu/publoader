@@ -120,9 +120,33 @@ export function bucketIndex(at: Date, intervalMs: number): number {
 }
 
 /** When a bucket opens. The current bucket opened in the past, so `now` wins. */
-function bucketStart(index: number, intervalMs: number, now: Date): Date {
-  const start = index * intervalMs;
-  return new Date(Math.max(start, now.getTime()));
+function bucketStart(index: number, intervalMs: number, now: Date): number {
+  return Math.max(index * intervalMs, now.getTime());
+}
+
+/**
+ * How far apart two consecutive uploads in one bucket are placed.
+ *
+ * Auto (`spacingMinutes: 0`) paces only a queue big enough to need it: a run
+ * that does not fill a day is the routine case, and dripping a dozen chapters
+ * across 24 hours would delay them for no benefit. Once the work does fill a
+ * day, the day's allowance is divided across the whole interval so it trickles
+ * rather than landing at once — without that, the cap spreads work across days
+ * and still bursts inside each one, which is exactly what a backlog does.
+ *
+ * An explicit `spacingMinutes` is an operator's decision and always applies.
+ * With no `perDay` there is nothing to divide by and nothing to burst.
+ */
+export function spacingMsOf(
+  schedule: UploadSchedule,
+  intervalMs: number,
+  /** Whether the work actually fills a day. False keeps a routine run immediate. */
+  crowded = true,
+): number {
+  if (schedule.spacingMinutes > 0) return schedule.spacingMinutes * 60 * 1000;
+  if (!crowded) return 0;
+  if (schedule.perDay > 0) return Math.floor(intervalMs / schedule.perDay);
+  return 0;
 }
 
 /**
@@ -170,8 +194,25 @@ export function planUploadSchedule<T extends SchedulableChapter>(
   const out: ScheduledChapter<T>[] = [];
 
   const firstBucket = bucketIndex(now, intervalMs);
+  // "Big queue" is the whole trigger for pacing: work that fits in today with
+  // room to spare is the routine case and goes out as it always did.
+  const crowded = chapters.length + (existing.total.get(firstBucket) ?? 0) > perDay;
+  const spacingMs = spacingMsOf(schedule, intervalMs, crowded);
   let day = 0;
   let remaining = chapters.length;
+
+  /**
+   * Where in its bucket the nth upload lands.
+   *
+   * `slot` counts prior load too, so a run topping up a bucket another run
+   * already partly filled queues behind that work rather than on top of it. The
+   * offset is clamped to the interval so a bucket's tail can never overtake the
+   * bucket after it.
+   */
+  const releaseAt = (bucket: number, slot: number): Date => {
+    const offset = Math.min(slot * spacingMs, Math.max(0, intervalMs - 1));
+    return new Date(bucketStart(bucket, intervalMs, now) + offset);
+  };
 
   while (remaining > 0) {
     const bucket = firstBucket + day;
@@ -198,7 +239,7 @@ export function planUploadSchedule<T extends SchedulableChapter>(
         const next = queue[cursor];
         if (next === undefined) continue;
 
-        out.push({ chapter: next, notBefore: bucketStart(bucket, intervalMs, now), day });
+        out.push({ chapter: next, notBefore: releaseAt(bucket, placedToday), day });
         cursors.set(key, cursor + 1);
         placedPerManga.set(key, (placedPerManga.get(key) ?? 0) + 1);
         placedToday++;
@@ -212,12 +253,13 @@ export function planUploadSchedule<T extends SchedulableChapter>(
     // still took nothing is unfillable, and dumping the rest there beats
     // spinning forever.
     if (placedToday === placedHere && placedHere === 0) {
+      let slot = 0;
       for (const key of keys) {
         const queue = queues.get(key)!;
         for (let i = cursors.get(key)!; i < queue.length; i++) {
           const chapter = queue[i];
           if (chapter === undefined) continue;
-          out.push({ chapter, notBefore: bucketStart(bucket, intervalMs, now), day });
+          out.push({ chapter, notBefore: releaseAt(bucket, slot++), day });
         }
         cursors.set(key, queue.length);
       }

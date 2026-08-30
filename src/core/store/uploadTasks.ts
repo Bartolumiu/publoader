@@ -440,7 +440,15 @@ export class UploadTaskStore {
    * planner uses (`floor(epoch_ms / intervalMs)`), so the two agree on
    * boundaries without passing a bucket list back and forth.
    */
-  async scheduledLoad(intervalMs: number, now: Date = new Date()): Promise<ScheduledLoad> {
+  async scheduledLoad(
+    intervalMs: number,
+    now: Date = new Date(),
+    /**
+     * Count only this extension's rows, for a per-extension budget. Omitted,
+     * every extension's work counts against one shared pool.
+     */
+    extension?: string,
+  ): Promise<ScheduledLoad> {
     const fromBucket = Math.floor(now.getTime() / intervalMs);
     const rows = await this.prisma.$queryRaw<{ bucket: bigint; manga: string; n: bigint }[]>(
       Prisma.sql`
@@ -450,6 +458,7 @@ export class UploadTaskStore {
         FROM upload_tasks
         WHERE kind = 'UPLOAD' AND state IN ('PENDING', 'LEASED', 'DONE')
           AND not_before >= to_timestamp(${(fromBucket * intervalMs) / 1000})
+          ${extension === undefined ? Prisma.empty : Prisma.sql`AND chapter->>'extensionName' = ${extension}`}
         GROUP BY 1, 2
       `,
     );

@@ -7005,6 +7005,31 @@ function uploadScheduleControls(data, resource) {
     value: String(values.intervalHours ?? 24),
     "aria-label": "Hours between release days",
   });
+  const spacing = el("input", {
+    id: "schedule-spacing",
+    type: "number",
+    min: "0",
+    max: "1440",
+    step: "1",
+    value: String(values.spacingMinutes ?? 0),
+    "aria-label": "Minutes between consecutive uploads within a day, 0 to spread evenly",
+  });
+
+  // The pool `perDay` counts against. Worth a control rather than a constant:
+  // "50 a day" means something different when five extensions share it than
+  // when each has its own, and only an operator knows which they meant.
+  const currentScope = data.scope ?? "global";
+  const scopeSelect = el(
+    "select",
+    { id: "schedule-scope", "aria-label": "Whether the per-day budget is shared or per extension" },
+    (data.scopes ?? ["global", "extension"]).map((name) =>
+      el("option", {
+        value: name,
+        text: name === "global" ? "Shared across extensions" : "Per extension",
+        ...(name === currentScope ? { selected: "selected" } : {}),
+      }),
+    ),
+  );
 
   const overrides = Object.keys(data.overrides ?? {});
   return el("div", {}, [
@@ -7015,6 +7040,8 @@ function uploadScheduleControls(data, resource) {
       perManga,
       el("label", { class: "inline", for: "schedule-interval", text: "Gap between days (h)" }),
       interval,
+      el("label", { class: "inline", for: "schedule-spacing", text: "Gap between uploads (min)" }),
+      spacing,
       gatedButton("settings:write", {
         text: "Save",
         onclick: (event) =>
@@ -7027,12 +7054,36 @@ function uploadScheduleControls(data, resource) {
                   perDay: Number(perDay.value),
                   perMangaPerDay: Number(perManga.value),
                   intervalHours: Number(interval.value),
+                  spacingMinutes: Number(spacing.value),
                 },
               }),
             { button: event.currentTarget, refresh: [resource] },
           ),
       }),
     ),
+    row(
+      el("label", { class: "inline", for: "schedule-scope", text: "Budget" }),
+      scopeSelect,
+      gatedButton("settings:write", {
+        text: "Save budget",
+        onclick: (event) =>
+          act(
+            "upload-schedule.scope",
+            () =>
+              api("/upload-schedule/scope", {
+                method: "POST",
+                body: { scope: scopeSelect.value },
+              }),
+            { button: event.currentTarget, refresh: [resource] },
+          ),
+      }),
+    ),
+    el("p", {
+      class: "dim small",
+      text:
+        "Gap between uploads: 0 spreads a day's allowance evenly across the gap between days, " +
+        "so a full day trickles instead of uploading back to back.",
+    }),
     // Named rather than counted, for the reason the pacing card above names
     // them: a number does not tell an operator whether the global they are
     // editing reaches the extension whose backlog they are worried about.
@@ -7082,6 +7133,14 @@ function extensionUploadScheduleControls(name, data, resource) {
     value: String(effective.intervalHours ?? 24),
     "aria-label": `Hours between release days for ${name}`,
   });
+  const spacing = el("input", {
+    type: "number",
+    min: "0",
+    max: "1440",
+    step: "1",
+    value: String(effective.spacingMinutes ?? 0),
+    "aria-label": `Minutes between consecutive ${name} uploads, 0 to spread evenly`,
+  });
 
   const post = (body, event) =>
     act("upload-schedule.set", () => api(`/upload-schedule/${encodeURIComponent(name)}`, { method: "POST", body }), {
@@ -7097,6 +7156,8 @@ function extensionUploadScheduleControls(name, data, resource) {
       perManga,
       el("span", { class: "inline", text: "Gap between days (h)" }),
       interval,
+      el("span", { class: "inline", text: "Gap between uploads (min)" }),
+      spacing,
       gatedButton("settings:write", {
         text: "Override",
         onclick: (event) =>
@@ -7105,6 +7166,7 @@ function extensionUploadScheduleControls(name, data, resource) {
               perDay: Number(perDay.value),
               perMangaPerDay: Number(perManga.value),
               intervalHours: Number(interval.value),
+              spacingMinutes: Number(spacing.value),
             },
             event,
           ),
