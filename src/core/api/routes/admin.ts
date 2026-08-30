@@ -23,6 +23,7 @@ import {
 } from "../../../contracts/manifest.js";
 import { MANGADEX_LANGUAGES } from "../../../contracts/languages.js";
 import { countOutstandingErrors } from "../../observability/errorFeed.js";
+import { workerNames } from "../../store/workers.js";
 
 /**
  * The worker image the enrolment snippet tells a new host to run. Set
@@ -318,7 +319,21 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       const { id } = req.params as { id: string };
       const run = await ctx.prisma.run.findUnique({ where: { id }, include: { jobs: true } });
       if (!run) return reply.code(404).send({ error: "unknown run" });
-      return { run };
+      // The lease holder is stored as an id; operators think in worker names,
+      // so resolve them here rather than making every surface do its own read.
+      const names = await workerNames(
+        ctx.prisma,
+        run.jobs.map((job) => job.leaseWorkerId),
+      );
+      return {
+        run: {
+          ...run,
+          jobs: run.jobs.map((job) => ({
+            ...job,
+            leaseWorkerName: job.leaseWorkerId ? (names.get(job.leaseWorkerId) ?? null) : null,
+          })),
+        },
+      };
     });
 
     /**
@@ -393,7 +408,16 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           createdAt: true,
         },
       });
-      return { quarantined: results };
+      const names = await workerNames(
+        ctx.prisma,
+        results.map((result) => result.workerId),
+      );
+      return {
+        quarantined: results.map((result) => ({
+          ...result,
+          workerName: result.workerId ? (names.get(result.workerId) ?? null) : null,
+        })),
+      };
     });
 
     // ---- pause / resume ----

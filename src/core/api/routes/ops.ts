@@ -13,6 +13,7 @@ import { sessionAuthenticator } from "../session.js";
 import { EXTENSION_NAME_RE, Manifest, hostAllowed, manifestSchedule } from "../../../contracts/manifest.js";
 import { normaliseMangadexLanguage } from "../../../contracts/languages.js";
 import { UPLOAD_TASK_KINDS, UPLOAD_TASK_STATES } from "../../store/uploadTasks.js";
+import { workerLabel, workerNames } from "../../store/workers.js";
 import { mangaEditPayload } from "../../md/titleService.js";
 import {
   ERROR_FEED_SOURCES,
@@ -968,6 +969,11 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
           : Promise.resolve([]),
       ]);
 
+      const activityWorkerNames = await workerNames(
+        ctx.prisma,
+        submissions.map((submission) => submission.workerId),
+      );
+
       const rows: ActivityRow[] = [
         ...runs.map((run): ActivityRow => ({
           at: run.updatedAt,
@@ -1006,7 +1012,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
           severity: submission.state === "QUARANTINED" ? "error" : "info",
           source: "submission",
           kind: `submission:${submission.state}`,
-          subject: `worker ${submission.workerId.slice(0, 8)} · job ${submission.jobId}`,
+          subject: `worker ${workerLabel(submission.workerId, activityWorkerNames)} · job ${submission.jobId}`,
           message: submission.rejectReason ?? "",
           id: submission.id,
           extension: null,

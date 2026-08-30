@@ -1,5 +1,6 @@
 import { ErrorSource } from "@prisma/client";
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { workerLabel, workerNames } from "../store/workers.js";
 
 /**
  * The merged error feed, and the acknowledgements that let an operator empty it.
@@ -220,6 +221,11 @@ export async function listErrors(
     }),
   ]);
 
+  const workerNameById = await workerNames(
+    prisma,
+    submissions.map((submission) => submission.workerId),
+  );
+
   const entries: ErrorFeedEntry[] = [
     ...jobs.map((job) => ({
       at: job.updatedAt,
@@ -241,7 +247,7 @@ export async function listErrors(
       at: submission.createdAt,
       kind: "submission:QUARANTINED",
       source: "submission" as const,
-      subject: `worker ${submission.workerId.slice(0, 8)} · job ${submission.jobId}`,
+      subject: `worker ${workerLabel(submission.workerId, workerNameById)} · job ${submission.jobId}`,
       message: submission.rejectReason ?? "",
       id: submission.id,
     })),

@@ -2385,7 +2385,11 @@ function runDetail(runId) {
               `${job.segmentIndex + 1}/${job.segmentTotal}`,
               chip(job.state),
               `${job.attempt}/${job.maxAttempts}`,
-              job.leaseWorkerId ? el("code", { text: job.leaseWorkerId.slice(0, 8) }) : "-",
+              job.leaseWorkerName
+                ? el("code", { text: job.leaseWorkerName })
+                : job.leaseWorkerId
+                  ? el("code", { text: job.leaseWorkerId.slice(0, 8) })
+                  : "-",
               fmtTime(job.leaseExpiresAt),
               truncate(job.lastError, 200),
               [
