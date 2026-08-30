@@ -701,6 +701,75 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
     expect(dry.json()).toMatchObject({ matched: 2, wouldDelete: 1, protectedRows: 1 });
   });
 
+  // ---- restagger ----
+
+  it("gives every pending row its own time, in the order the queue already had", async () => {
+    // All three due at once: the state a pulled-forward queue is in, and the
+    // one the uploader drains back to back.
+    const at = new Date(Date.now() - 60_000);
+    const first = await task({ notBefore: at });
+    const second = await task({ notBefore: at });
+    const third = await task({ notBefore: at });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/restagger",
+      headers: root,
+      payload: { gapSeconds: 60 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ moved: 3, gapSeconds: 60, spansSeconds: 120 });
+
+    const rows = await prisma.uploadTask.findMany({
+      where: { id: { in: [first.id, second.id, third.id] } },
+      orderBy: { notBefore: "asc" },
+    });
+    // Distinct times, a minute apart, and the claim order preserved.
+    expect(rows.map((r) => r.id)).toEqual([first.id, second.id, third.id]);
+    const times = rows.map((r) => r.notBefore.getTime());
+    expect(times[1]! - times[0]!).toBeGreaterThanOrEqual(59_000);
+    expect(times[2]! - times[1]!).toBeGreaterThanOrEqual(59_000);
+
+    // The head is not delayed: pacing a queue should not stall its front.
+    const claimed = await ctx.uploadTasks.claim("UPLOAD", 60);
+    expect(claimed?.id).toBe(first.id);
+    expect(await prisma.auditEvent.count({ where: { action: "queue.restagger" } })).toBe(1);
+  });
+
+  it("leaves a leased row alone while re-spacing the rest", async () => {
+    const a = await task({ notBefore: new Date(Date.now() - 30_000) });
+    await task({ notBefore: new Date(Date.now() - 20_000) });
+
+    // `a` is now LEASED, so a worker is mid-way through it and its date means
+    // nothing; re-spacing must not touch it.
+    const leased = await ctx.uploadTasks.claim("UPLOAD", 300);
+    expect(leased?.id).toBe(a.id);
+    const before = await prisma.uploadTask.findUniqueOrThrow({ where: { id: a.id } });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/restagger",
+      headers: root,
+      payload: { gapSeconds: 30 },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ moved: 1 });
+
+    const after = await prisma.uploadTask.findUniqueOrThrow({ where: { id: a.id } });
+    expect(after.notBefore.getTime()).toBe(before.notBefore.getTime());
+    expect(after.state).toBe("LEASED");
+  });
+
+  it("refuses a gap that is not a positive number of seconds", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/restagger",
+      headers: root,
+      payload: { gapSeconds: 0 },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
   // ---- reorder ----
 
   it("moves a task to the front of the queue the uploader actually claims from", async () => {

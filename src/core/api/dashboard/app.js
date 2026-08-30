@@ -3854,6 +3854,15 @@ function queueFilterCard(onChange) {
           })
         : null,
       gatedButton("runs:write", {
+        text: "Space out…",
+        title: "Give every pending row its own time so the queue stops uploading back to back",
+        // Follows the Kind filter, so an operator looking at the EDIT queue
+        // paces that one; UPLOAD when no kind is picked, because that is the
+        // queue that reaches MangaDex and the only one pacing protects.
+        onclick: () =>
+          queueRestaggerDialog(store.filters.queueKind || "UPLOAD", summary, onChange),
+      }),
+      gatedButton("runs:write", {
         class: "danger",
         text: "Purge…",
         title: "Delete every row matching the current filter",
@@ -4232,6 +4241,101 @@ function queueDeferDialog(ids, tasks, done) {
             );
             if (result) {
               reportQueueOutcome(result);
+              closeModal();
+              done();
+            }
+          },
+        }),
+      ),
+    ),
+  );
+}
+
+/**
+ * Re-space the whole pending queue to a fixed rate.
+ *
+ * Not a selection action, which is why it is here rather than beside Run
+ * next/last: it acts on every pending row of the kind, because pacing half a
+ * queue leaves the other half bunched and the two interleave into the same
+ * burst. The dialog names the queue size and the resulting finish time so the
+ * consequence is on screen before the button is pressed.
+ */
+function queueRestaggerDialog(kind, tasks, done) {
+  const rate = el("input", { id: "restagger-rate", type: "number", min: "1", max: "600", value: "1" });
+  const outcome = el("p", { class: "dim small" });
+  // Asked for rather than passed in: the estimate is the reason the dialog is
+  // worth opening, and a stale count would make it a guess.
+  let pending = null;
+
+  // Recomputed as the operator types: "1 a minute" means nothing without "and
+  // therefore the last one goes up in ten hours".
+  const describe = () => {
+    const perMinute = Number(rate.value);
+    if (!Number.isFinite(perMinute) || perMinute < 1) {
+      outcome.textContent = "Enter how many to upload each minute.";
+      return null;
+    }
+    const gapSeconds = Math.max(1, Math.round(60 / perMinute));
+    if (pending === null) {
+      outcome.textContent = `One every ${gapSeconds}s. Counting the queue…`;
+      return gapSeconds;
+    }
+    const spanMinutes = Math.round(((pending - 1) * gapSeconds) / 60);
+    outcome.textContent =
+      pending === 0
+        ? "Nothing is queued, so there is nothing to space out."
+        : `${pending} queued, one every ${gapSeconds}s. The last one becomes claimable in ` +
+          `${spanMinutes >= 120 ? `${Math.round(spanMinutes / 60)} hours` : `${spanMinutes} minutes`}.`;
+    return gapSeconds;
+  };
+  rate.oninput = describe;
+  describe();
+
+  // Quiet and best-effort: a failed count costs the estimate, not the action.
+  void api(`/queues?kind=${encodeURIComponent(kind)}&state=PENDING&limit=1`, { quiet: true })
+    .then((res) => {
+      pending = res?.total ?? null;
+      describe();
+    })
+    .catch(() => {});
+
+  openModal(
+    `Space out the ${kind.toLowerCase()} queue`,
+    el(
+      "div",
+      {},
+      el("p", {
+        class: "dim small",
+        text:
+          "Every pending row is given its own time, evenly spaced from now, in the order the queue is " +
+          "already in. Nothing is dropped or deferred indefinitely — this only changes when each row " +
+          "becomes claimable, so a queue that would upload back to back trickles instead.",
+      }),
+      row(
+        el("label", { class: "inline", for: "restagger-rate", text: "Uploads per minute" }),
+        rate,
+      ),
+      outcome,
+      el(
+        "div",
+        { class: "row end" },
+        el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+        gatedButton("runs:write", {
+          class: "primary",
+          text: "Space them out",
+          onclick: async (event) => {
+            const gapSeconds = describe();
+            if (gapSeconds === null) {
+              toast("enter how many to upload each minute", false);
+              return;
+            }
+            const result = await act(
+              "queue.restagger",
+              () => api("/queues/restagger", { method: "POST", body: { kind, gapSeconds } }),
+              { button: event.currentTarget, refresh: [tasks] },
+            );
+            if (result) {
+              toast(`spaced ${result.moved} row(s), one every ${result.gapSeconds}s`, true);
               closeModal();
               done();
             }
