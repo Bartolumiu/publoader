@@ -208,6 +208,12 @@ describe("disconfirming evidence", () => {
     expect(isVariantEdition(manga("a", ["Houseki no Kuni (Minimalist Color)"]))).toBe(true);
     expect(isVariantEdition(manga("a", ["Berserk (Official Colored)"]))).toBe(true);
     expect(isVariantEdition(manga("a", ["Berserk (Colored)"]))).toBe(true);
+    expect(isVariantEdition(manga("a", ["Maou 2099 (Trial Comic)"]))).toBe(true);
+    // MangaDex puts the marker in front as often as behind.
+    expect(isVariantEdition(manga("a", ["(Pre-Serialization) Tomodachi no Nee-chan"]))).toBe(true);
+    // And spells the coloured re-release as an unbracketed trailing qualifier.
+    expect(isVariantEdition(manga("a", ["Uchuu Kyoudai - Digital Colored Comics"]))).toBe(true);
+    expect(isVariantEdition(manga("a", ["Golden Kamuy - Digital Colored Comics"]))).toBe(true);
     // A marker has to be parenthetical: a series legitimately called this is
     // not a variant of anything.
     expect(isVariantEdition(manga("a", ["Colorless"]))).toBe(false);

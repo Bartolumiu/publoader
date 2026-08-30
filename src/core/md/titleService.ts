@@ -1065,14 +1065,24 @@ export function exactNameMatch(
  * Matched as a parenthetical or suffix only, so a series legitimately called
  * "Colorless" or "Oneshot Boy" is untouched.
  */
-const VARIANT_EDITION =
-  /[([]\s*(?:(?:fan|official(?:ly)?|digital|minimalist)[\s-]?)?colou?r(?:ed)?\s*[)\]]|[([]\s*(?:oneshot|one-shot|doujinshi|anthology|spin[\s-]?off|remake|pilot|preview|pre-?serial(?:i[sz]ation)?|remaster(?:ed)?)\s*[)\]]/i;
+const VARIANT_EDITION = [
+  // Bracketed, anywhere in the name -- MangaDex puts these both before and
+  // after the title ("(Pre-Serialization) Tomodachi no Nee-chan ...").
+  /[([]\s*(?:(?:fan|official(?:ly)?|digital|minimalist)[\s-]?)?colou?r(?:ed)?\s*[)\]]/i,
+  /[([]\s*(?:oneshot|one-shot|doujinshi|anthology|spin[\s-]?off|remake|pilot|preview|trial(?:\s+comic)?|pre-?serial(?:i[sz]ation)?|remaster(?:ed)?)\s*[)\]]/i,
+  // Unbracketed, and only as a trailing qualifier: "Golden Kamuy - Digital
+  // Colored Comics", "Uchuu Kyoudai - Digital Colored Comics". Anchored at the
+  // end so a series whose own name contains these words is untouched.
+  /[-–—]\s*(?:digital\s+)?colou?red\s+comics?\s*$/i,
+];
 
 /** Is this candidate a variant edition rather than the serialised series? */
 export function isVariantEdition(candidate: {
   attributes: { title: Record<string, string>; altTitles: Record<string, string>[] };
 }): boolean {
-  return candidateNames(candidate).some((name) => VARIANT_EDITION.test(name));
+  return candidateNames(candidate).some((name) =>
+    VARIANT_EDITION.some((pattern) => pattern.test(name)),
+  );
 }
 
 /**
