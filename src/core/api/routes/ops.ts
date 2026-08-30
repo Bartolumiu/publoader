@@ -13,6 +13,8 @@ import { sessionAuthenticator } from "../session.js";
 import { EXTENSION_NAME_RE, Manifest, hostAllowed, manifestSchedule } from "../../../contracts/manifest.js";
 import { normaliseMangadexLanguage } from "../../../contracts/languages.js";
 import { UPLOAD_TASK_KINDS, UPLOAD_TASK_STATES } from "../../store/uploadTasks.js";
+import { DEFAULT_NAMESPACE } from "../../store/trackedManga.js";
+import { OFFICIAL_LINK_SOURCE } from "../../md/titleService.js";
 import { workerLabel, workerNames } from "../../store/workers.js";
 import { mangaEditPayload } from "../../md/titleService.js";
 import {
@@ -1298,12 +1300,25 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
         const row = await ctx.prisma.untrackedManga.findUnique({ where: { id } });
         if (!row) return reply.code(404).send({ error: "unknown untracked manga" });
 
-        const [manifest, lastApply] = await Promise.all([
+        const [manifest, lastApply, mappingRow] = await Promise.all([
           manifestFor(row.extension),
           ctx.prisma.auditEvent.findFirst({
             where: { action: "untracked.mangadex_apply", subject: id },
             orderBy: { createdAt: "desc" },
             select: { actor: true, detail: true, createdAt: true },
+          }),
+          // Who put this series in the tracked map, and whether anyone did. A
+          // mapping nothing human chose has to say so on the page where its
+          // series is read, not only in the tracked map's own table.
+          ctx.prisma.trackedManga.findUnique({
+            where: {
+              extension_namespace_mangaId: {
+                extension: row.extension,
+                namespace: DEFAULT_NAMESPACE,
+                mangaId: row.mangaId,
+              },
+            },
+            select: { mdMangaId: true, source: true, createdAt: true },
           }),
         ]);
 
@@ -1371,6 +1386,14 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
               : null,
           canApplyToMangaDex: blocked === null,
           applyBlockedReason: blocked,
+          mapping: mappingRow
+            ? {
+                mdMangaId: mappingRow.mdMangaId,
+                source: mappingRow.source,
+                at: mappingRow.createdAt,
+                automatic: mappingRow.source === OFFICIAL_LINK_SOURCE,
+              }
+            : null,
           languageValidation: LANGUAGE_VALIDATION,
         };
       },

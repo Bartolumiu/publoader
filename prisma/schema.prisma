@@ -465,6 +465,13 @@ model UntrackedManga {
   /// depend on log retention. Both nullable, so nothing needs backfilling.
   mdAppliedAt   DateTime?      @map("md_applied_at")
   mdAppliedBy   String?        @map("md_applied_by")
+  /// When the auto-map pass last searched MangaDex for a title whose official
+  /// English link is this series' own url. NULL means never checked.
+  ///
+  /// A timestamp rather than a flag because the answer goes stale in the useful
+  /// direction: a series with no official link on MangaDex today may have one
+  /// next month, so a checked row is re-checked once it is old enough.
+  officialLinkCheckedAt DateTime? @map("official_link_checked_at")
   createdAt     DateTime       @default(now()) @map("created_at")
   updatedAt     DateTime       @updatedAt @map("updated_at")
 

@@ -12,6 +12,38 @@ export interface TitleNotifier {
 
 const MAX_CREATE_ATTEMPTS = 3;
 
+/**
+ * What `tracked_manga.source` says about a mapping the auto-map pass made.
+ *
+ * Distinct from `auto` (a title this service created) and `operator:<name>`
+ * (someone chose it): a mapping nothing human looked at should say so, because
+ * that is the one an operator wants to find first if a series turns out to be
+ * wired to the wrong title. The dashboard's tracked map shows this column.
+ */
+export const OFFICIAL_LINK_SOURCE = "auto:official-link";
+
+/** How many rows one auto-map pass searches MangaDex for. */
+const AUTO_MAP_BATCH = 20;
+
+/**
+ * How long a checked row waits before being checked again.
+ *
+ * "No official link on MangaDex" is a fact about MangaDex today, not about the
+ * series: entries gain links as people fill them in. Re-checking is one search,
+ * so the cost of being wrong here is small; never re-checking means a series
+ * stays in the queue forever after one early miss.
+ */
+const RECHECK_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** What one auto-map pass did, for the scheduler, the API and the CLI alike. */
+export interface AutoMapReport {
+  considered: number;
+  mapped: { row: UntrackedManga; mdMangaId: string }[];
+  /** More than one candidate carried the link; left for a human. */
+  ambiguous: number;
+  unmatched: number;
+}
+
 /** One MangaDex title offered as a mapping target for an untracked series. */
 export interface TitleCandidate {
   id: string;
@@ -172,6 +204,14 @@ export class TitleService {
 
   /** One pass: process NEW rows for extensions with auto_create_titles. */
   async tick(): Promise<void> {
+    // Mapping runs first, and for every extension. A series MangaDex already
+    // lists under this publisher's own url needs no new title, so resolving
+    // that before the create loop is what stops a duplicate being made; and
+    // unlike creating a title, mapping publishes nothing to MangaDex, so it is
+    // deliberately not behind `auto_create_titles`. That flag gates writing to
+    // a public catalogue. This only writes our own map.
+    await this.autoMapByOfficialLink();
+
     const candidates = await this.prisma.untrackedManga.findMany({
       where: { state: "NEW", attempts: { lt: MAX_CREATE_ATTEMPTS } },
       orderBy: { createdAt: "asc" },
@@ -221,6 +261,169 @@ export class TitleService {
    */
   async mangadexTitle(mdMangaId: string): Promise<MdMangaDetail | null> {
     return this.md.mangaById(mdMangaId);
+  }
+
+  /**
+   * Map every NEW series MangaDex already lists under its own publisher url.
+   *
+   * Most of these rows are not new series at all: MangaDex has the title, and
+   * records this publisher's page as its official English link. That link is a
+   * far stronger signal than the name comparison the create path falls back on
+   * — names are translated, romanised and abbreviated differently by every
+   * party, whereas the url either is or is not the one the scraper read.
+   *
+   * Deliberately strict, because a wrong mapping uploads chapters onto someone
+   * else's title:
+   *
+   *   - the urls must match exactly once normalised, so a title whose link
+   *     points at the same site but a different series is not a match. That
+   *     case is real — measured on the live queue, K MANGA rows turn it up
+   *     regularly — and a looser host-level match would map them wrongly.
+   *   - two candidates carrying the same link is an ambiguity a human should
+   *     look at, not a coin toss.
+   *   - a series already in the tracked map is left alone, mapped or not.
+   *
+   * `dryRun` reports what it would map and writes nothing, which is how the
+   * backlog gets checked before it gets acted on.
+   */
+  async autoMapByOfficialLink(
+    opts: { limit?: number; dryRun?: boolean; extension?: string } = {},
+  ): Promise<AutoMapReport> {
+    const limit = opts.limit ?? AUTO_MAP_BATCH;
+    const dryRun = opts.dryRun ?? false;
+    const staleBefore = new Date(Date.now() - RECHECK_AFTER_MS);
+
+    const rows = await this.prisma.untrackedManga.findMany({
+      where: {
+        state: "NEW",
+        ...(opts.extension ? { extension: opts.extension } : {}),
+        OR: [{ officialLinkCheckedAt: null }, { officialLinkCheckedAt: { lt: staleBefore } }],
+      },
+      // Never-checked rows first, then the stalest; `nulls: "first"` keeps a
+      // new arrival from queueing behind thousands of due re-checks.
+      orderBy: [{ officialLinkCheckedAt: { sort: "asc", nulls: "first" } }, { createdAt: "asc" }],
+      take: limit,
+    });
+
+    const report: AutoMapReport = { considered: rows.length, mapped: [], ambiguous: 0, unmatched: 0 };
+
+    for (const row of rows) {
+      const match = await this.officialLinkMatch(row);
+      if (!dryRun) {
+        await this.prisma.untrackedManga.updateMany({
+          where: { id: row.id },
+          data: { officialLinkCheckedAt: new Date() },
+        });
+      }
+      if (match === "ambiguous") {
+        report.ambiguous++;
+        continue;
+      }
+      if (match === null) {
+        report.unmatched++;
+        continue;
+      }
+      if (dryRun) {
+        report.mapped.push({ row, mdMangaId: match });
+        continue;
+      }
+      const written = await this.writeMapping(row, match, OFFICIAL_LINK_SOURCE);
+      if (written) report.mapped.push({ row, mdMangaId: match });
+      else report.unmatched++;
+    }
+
+    if (!dryRun && report.mapped.length > 0) await this.announceMapped(report.mapped);
+    return report;
+  }
+
+  /**
+   * The one MangaDex title whose official English link is this series' url.
+   *
+   * `null` for no match, `"ambiguous"` when more than one candidate carries the
+   * link — which is a catalogue problem for a human, not something to guess at.
+   *
+   * Scoped to what a title search returns, and honestly so: MangaDex has no way
+   * to query by link, so "no other series has this link" can only mean "none of
+   * the candidates for this name does". In practice that has been enough —
+   * across a 90-row sample of the live queue the ambiguous case never occurred
+   * once — but it is a search over names, so a title MangaDex holds under a
+   * name nothing like the scraped one is simply not found, and the row waits
+   * for an operator as it did before.
+   */
+  private async officialLinkMatch(row: UntrackedManga): Promise<string | "ambiguous" | null> {
+    const want = normaliseOfficialLink(row.mangaUrl);
+    if (want === null) return null;
+
+    const candidates = await this.md.searchManga(row.mangaName, 25);
+    const matches = candidates.filter(
+      (candidate) => normaliseOfficialLink(candidate.attributes.links?.["engtl"] ?? null) === want,
+    );
+    if (matches.length === 0) return null;
+
+    // Distinct ids only: the same title coming back twice is a paging artefact,
+    // not two series sharing a link.
+    const ids = [...new Set(matches.map((m) => m.id))];
+    if (ids.length > 1) return "ambiguous";
+    return ids[0] ?? null;
+  }
+
+  /**
+   * Tracked map upsert plus the row's state, shared by every path that maps.
+   *
+   * Returns false when the series is already mapped to a different title:
+   * repointing is an edit of existing curation and never something a pass or a
+   * one-click button should do silently.
+   */
+  private async writeMapping(
+    row: UntrackedManga,
+    mdMangaId: string,
+    source: string,
+  ): Promise<boolean> {
+    const identity = {
+      extension: row.extension,
+      namespace: DEFAULT_NAMESPACE,
+      mangaId: row.mangaId,
+    };
+    const existing = await this.prisma.trackedManga.findUnique({
+      where: { extension_namespace_mangaId: identity },
+    });
+    if (existing && existing.mdMangaId !== mdMangaId) return false;
+
+    // Track first (the map is what unblocks uploads), then finalize state, so
+    // a failure between the two leaves a mapped series rather than a row
+    // claiming to be tracked with nothing behind it.
+    await this.prisma.trackedManga.upsert({
+      where: { extension_namespace_mangaId: identity },
+      create: { ...identity, mdMangaId, source },
+      update: {},
+    });
+    await this.prisma.untrackedManga.update({
+      where: { id: row.id },
+      data: { state: "TRACKED", mdMangaId, lastError: null },
+    });
+    return true;
+  }
+
+  /** Say what was mapped without anyone asking, so it can be checked. */
+  private async announceMapped(mapped: { row: UntrackedManga; mdMangaId: string }[]): Promise<void> {
+    for (let i = 0; i < mapped.length; i += 20) {
+      const batch = mapped.slice(i, i + 20);
+      const lines = batch.map(
+        ({ row, mdMangaId }) =>
+          `**[${row.mangaName}](https://mangadex.org/title/${mdMangaId})** ` +
+          `(${row.mangaLanguage}): [source](${row.mangaUrl}) · \`${row.extension}\``,
+      );
+      await this.notifier.send({
+        title:
+          `Mapped ${mapped.length} series automatically ` +
+          `by official English link${mapped.length === 1 ? "" : "s"}`,
+        description:
+          `${lines.join("\n")}\n\n_No titles were created. ` +
+          `These matched MangaDex's own official English link, and are marked ` +
+          `\`${OFFICIAL_LINK_SOURCE}\` in the tracked map._`,
+        colour: "3B82F6",
+      });
+    }
   }
 
   /**
@@ -287,36 +490,24 @@ export class TitleService {
       return { ok: false, error: `MangaDex has no title ${mdMangaId}; check the id` };
     }
 
-    const identity = {
-      extension: row.extension,
-      namespace: DEFAULT_NAMESPACE,
-      mangaId: row.mangaId,
-    };
-    const existing = await this.prisma.trackedManga.findUnique({
-      where: { extension_namespace_mangaId: identity },
-    });
-    if (existing && existing.mdMangaId !== mdMangaId) {
+    const written = await this.writeMapping(row, mdMangaId, `operator:${actor}`);
+    if (!written) {
+      const existing = await this.prisma.trackedManga.findUnique({
+        where: {
+          extension_namespace_mangaId: {
+            extension: row.extension,
+            namespace: DEFAULT_NAMESPACE,
+            mangaId: row.mangaId,
+          },
+        },
+      });
       return {
         ok: false,
         error:
-          `${row.extension}:${row.mangaId} is already mapped to ${existing.mdMangaId}; ` +
+          `${row.extension}:${row.mangaId} is already mapped to ${existing?.mdMangaId}; ` +
           `changing that mapping belongs in the tracked map, not here`,
       };
     }
-
-    // Track first (the map is what unblocks uploads), then finalize state —
-    // the same order as createOne, so a failure between the two leaves a
-    // mapped series rather than a row claiming to be tracked with nothing
-    // behind it.
-    await this.prisma.trackedManga.upsert({
-      where: { extension_namespace_mangaId: identity },
-      create: { ...identity, mdMangaId, source: `operator:${actor}` },
-      update: {},
-    });
-    await this.prisma.untrackedManga.update({
-      where: { id: row.id },
-      data: { state: "TRACKED", mdMangaId, lastError: null },
-    });
     await this.audit.record(actor, "untracked.map", `${row.extension}:${row.mangaId}`, {
       mdMangaId,
       mangaName: row.mangaName,
@@ -594,6 +785,32 @@ export class TitleService {
  * punctuation/whitespace. A false positive costs one operator click; a false
  * negative creates a duplicate title on a public catalogue.
  */
+/**
+ * A url reduced to what two records of the same page must agree on.
+ *
+ * Publishers and MangaDex editors write the same page differently: with and
+ * without the trailing slash, with and without `www.`, http against https. All
+ * of those are the same series, and treating them as different would throw away
+ * most real matches. Query strings are kept — for some sources they carry the
+ * series identity — and the fragment is dropped, since it never does.
+ *
+ * Returns null for anything that is not an http(s) url, so a malformed link
+ * never compares equal to another malformed one.
+ */
+export function normaliseOfficialLink(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  let url: URL;
+  try {
+    url = new URL(String(raw).trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  const host = url.hostname.toLowerCase().replace(/^www\./, "");
+  const path = url.pathname.replace(/\/+$/, "");
+  return `${host}${path}${url.search}`;
+}
+
 /**
  * The one title to show for a candidate. English where MangaDex has it, else
  * whatever it does have — a picker with a blank row is useless, and an id is

@@ -1191,6 +1191,131 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     expect(dashed.statusCode).toBe(200);
   });
 
+  // ---- automatic mapping by MangaDex's official English link ----
+
+  const LINKED_ID = "6a6a6a6a-0000-4000-8000-000000000001";
+  const RIVAL_ID = "6a6a6a6a-0000-4000-8000-000000000002";
+
+  /** A search hit carrying an official English link. */
+  const linked = (id: string, title: string, engtl: string | null) => ({
+    id,
+    attributes: {
+      title: { en: title },
+      altTitles: [],
+      originalLanguage: "ja",
+      links: engtl ? { engtl } : {},
+    },
+  });
+
+  const mapped = (mangaId: string) =>
+    prisma.trackedManga.findUnique({
+      where: {
+        extension_namespace_mangaId: { extension: "opstest", namespace: "", mangaId },
+      },
+    });
+
+  it("maps a series MangaDex lists under this publisher's own url", async () => {
+    const row = await untracked({ mangaUrl: "https://example.com/series/1" });
+    md.searchManga = async () => [linked(LINKED_ID, "Mangled Nmae", "https://example.com/series/1")];
+
+    const report = await ctx.titleService!.autoMapByOfficialLink({ dryRun: false });
+    expect(report.mapped).toHaveLength(1);
+    expect(report.ambiguous).toBe(0);
+
+    expect(await prisma.untrackedManga.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      state: "TRACKED",
+      mdMangaId: LINKED_ID,
+    });
+    // Marked as automatic, because nobody looked at it: this is the mapping an
+    // operator needs to find first if a series is wired to the wrong title.
+    expect(await mapped(row.mangaId)).toMatchObject({
+      mdMangaId: LINKED_ID,
+      source: "auto:official-link",
+    });
+    // The whole point is that no title gets created for a series that has one.
+    expect(md.drafts).toHaveLength(0);
+  });
+
+  it("matches across a trailing slash, www. and the scheme", async () => {
+    // MangaDex editors and publishers write the same page differently; all of
+    // these are the same series and were measured on the live catalogue.
+    const row = await untracked({ mangaUrl: "https://example.com/series/1" });
+    md.searchManga = async () => [linked(LINKED_ID, "Mangled Nmae", "http://www.example.com/series/1/")];
+
+    const report = await ctx.titleService!.autoMapByOfficialLink({ dryRun: false });
+    expect(report.mapped).toHaveLength(1);
+    expect(await mapped(row.mangaId)).toMatchObject({ mdMangaId: LINKED_ID });
+  });
+
+  it("refuses a link on the same site but a different series", async () => {
+    // The dangerous near-miss, and a real one: K MANGA rows on the live queue
+    // turn up MangaDex titles whose engtl is kmanga.kodansha.com/title/<other>.
+    // A host-level match would map them onto the wrong title.
+    const row = await untracked({ mangaUrl: "https://example.com/series/1" });
+    md.searchManga = async () => [linked(LINKED_ID, "Mangled Nmae", "https://example.com/series/999")];
+
+    const report = await ctx.titleService!.autoMapByOfficialLink({ dryRun: false });
+    expect(report.mapped).toHaveLength(0);
+    expect(report.unmatched).toBe(1);
+    expect(await mapped(row.mangaId)).toBeNull();
+    expect((await prisma.untrackedManga.findUniqueOrThrow({ where: { id: row.id } })).state).toBe("NEW");
+  });
+
+  it("leaves two titles sharing one link for a human", async () => {
+    const row = await untracked({ mangaUrl: "https://example.com/series/1" });
+    md.searchManga = async () => [
+      linked(LINKED_ID, "Mangled Nmae", "https://example.com/series/1"),
+      linked(RIVAL_ID, "Mangled Nmae (2)", "https://example.com/series/1"),
+    ];
+
+    const report = await ctx.titleService!.autoMapByOfficialLink({ dryRun: false });
+    expect(report.ambiguous).toBe(1);
+    expect(report.mapped).toHaveLength(0);
+    // Guessing between them is exactly the mistake this pass exists to avoid.
+    expect(await mapped(row.mangaId)).toBeNull();
+  });
+
+  it("writes nothing on a dry run, and does not consume the re-check", async () => {
+    const row = await untracked({ mangaUrl: "https://example.com/series/1" });
+    md.searchManga = async () => [linked(LINKED_ID, "Mangled Nmae", "https://example.com/series/1")];
+
+    const report = await ctx.titleService!.autoMapByOfficialLink({ dryRun: true });
+    expect(report.mapped).toHaveLength(1);
+    expect(await mapped(row.mangaId)).toBeNull();
+    const after = await prisma.untrackedManga.findUniqueOrThrow({ where: { id: row.id } });
+    expect(after.state).toBe("NEW");
+    expect(after.officialLinkCheckedAt).toBeNull();
+  });
+
+  it("does not search the same unmatched row twice", async () => {
+    await untracked({ mangaUrl: "https://example.com/series/1" });
+    let searches = 0;
+    md.searchManga = async () => {
+      searches++;
+      return [];
+    };
+
+    await ctx.titleService!.autoMapByOfficialLink({ dryRun: false });
+    await ctx.titleService!.autoMapByOfficialLink({ dryRun: false });
+    // Re-searching every miss on every tick is ~2,400 calls a pass at the
+    // current queue depth; the checked-at column is what stops that.
+    expect(searches).toBe(1);
+  });
+
+  it("runs for extensions that never opted into auto-created titles", async () => {
+    // auto_create_titles gates publishing to a public catalogue. Mapping
+    // publishes nothing, so it must not share that gate — none of the sources
+    // this was built for set the flag, and gating it would mean it never ran.
+    // The bundle helper's manifest already has auto_create_titles: false.
+    await bundle();
+    const row = await untracked({ mangaUrl: "https://example.com/series/1" });
+    md.searchManga = async () => [linked(LINKED_ID, "Mangled Nmae", "https://example.com/series/1")];
+
+    await ctx.titleService!.tick();
+    expect(await mapped(row.mangaId)).toMatchObject({ source: "auto:official-link" });
+    expect(md.drafts).toHaveLength(0);
+  });
+
   // ---- mapping an untracked series onto a title that already exists ----
 
   const MATCH_ID = "5f5f5f5f-0000-4000-8000-000000000001";

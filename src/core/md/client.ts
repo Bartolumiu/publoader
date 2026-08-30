@@ -818,6 +818,7 @@ export class MdClient implements MdExtendedApi {
     const title = attrs.title;
     const altTitles = attrs.altTitles;
     const originalLanguage = attrs.originalLanguage;
+    const links = attrs.links;
     return {
       id: entity.id,
       attributes: {
@@ -825,6 +826,7 @@ export class MdClient implements MdExtendedApi {
           title !== null && typeof title === "object" ? (title as Record<string, string>) : {},
         altTitles: Array.isArray(altTitles) ? (altTitles as Record<string, string>[]) : [],
         originalLanguage: typeof originalLanguage === "string" ? originalLanguage : null,
+        links: links !== null && typeof links === "object" ? (links as Record<string, string>) : null,
       },
     };
   }

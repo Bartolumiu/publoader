@@ -9589,7 +9589,12 @@ function untrackedDetail(id) {
   const detail = new Resource(`untracked:${id}`, async () => {
     try {
       const body = await api(`/untracked/${encodeURIComponent(id)}`, { quiet: true });
-      return { row: body.untracked ?? body, mangadex: body.mangadex ?? null, detailEndpoint: true };
+      return {
+        row: body.untracked ?? body,
+        mangadex: body.mangadex ?? null,
+        mapping: body.mapping ?? null,
+        detailEndpoint: true,
+      };
     } catch (err) {
       if (err.status !== 404) throw err;
       // The per-row endpoint is newer than this page. Until it lands the row is
@@ -9598,7 +9603,7 @@ function untrackedDetail(id) {
       const { untracked } = await api("/untracked?limit=500");
       const found = untracked.find((r) => r.id === id);
       if (!found) throw new ApiError(404, `no untracked series with id ${id}`);
-      return { row: found, mangadex: null, detailEndpoint: false };
+      return { row: found, mangadex: null, mapping: null, detailEndpoint: false };
     }
   });
 
@@ -9632,6 +9637,7 @@ function untrackedDetail(id) {
             ["External id", el("code", { text: item.mangaId })],
             ["Attempts", String(item.attempts)],
             ["MangaDex title", item.mdMangaId ? mdTitleLink(item.mdMangaId, item.mdMangaId) : "not created yet"],
+            data.mapping ? ["Mapped", mappingProvenance(data.mapping)] : null,
             ["First seen", fmtTime(item.createdAt)],
             ["Updated", fmtTime(item.updatedAt)],
             item.lastError ? ["Last error", el("span", { class: "error", text: item.lastError })] : null,
@@ -9661,6 +9667,27 @@ function untrackedDetail(id) {
       );
     },
     { reserve: 420, skeleton: () => el("div", {}, skeletonTable(7, 2), skeletonTable(4, 2)) },
+  );
+}
+
+/**
+ * How this series came to be in the tracked map.
+ *
+ * A mapping nothing human chose is the one an operator most needs to be able to
+ * spot: it is the first thing to check if a series turns out to be wired to the
+ * wrong title. So it is said in words here, on the page where the series is
+ * read, rather than left to be inferred from a `source` string in another view.
+ */
+function mappingProvenance(mapping) {
+  if (!mapping.automatic) {
+    return el("span", {}, el("code", { text: mapping.source || "unknown" }), ` · ${fmtTime(mapping.at)}`);
+  }
+  return el(
+    "span",
+    {},
+    el("span", { class: "chip warn", text: "automatic" }),
+    " matched MangaDex's own official English link for this series — nobody reviewed it. ",
+    el("span", { class: "dim", text: fmtTime(mapping.at) }),
   );
 }
 

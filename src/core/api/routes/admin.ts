@@ -1124,6 +1124,57 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     });
 
     /**
+     * Run the official-English-link auto-map over the queue on demand.
+     *
+     * The scheduler already does a batch a tick, but a backlog built up before
+     * this existed drains at that rate for a long time, and an operator wants
+     * to see what it would do before it does it. `dryRun` is the default for
+     * exactly that reason: this writes to the series map, and the map decides
+     * where chapters get uploaded.
+     */
+    scope.post(
+      "/api/v1/admin/untracked/automap",
+      { preHandler: [requireScope("untracked:write"), requireScope("tracked:append")] },
+      async (req, reply) => {
+        if (!ctx.titleService) {
+          return reply.code(503).send({ error: "title service not available on this instance" });
+        }
+        const body = z
+          .object({
+            dryRun: z.boolean().default(true),
+            limit: z.number().int().min(1).max(200).default(25),
+            extension: z.string().max(64).optional(),
+          })
+          .strict()
+          .parse(req.body ?? {});
+
+        const report = await ctx.titleService.autoMapByOfficialLink(body);
+        if (!body.dryRun && report.mapped.length > 0) {
+          await ctx.audit.record(actor(req), "untracked.automap", body.extension ?? "all", {
+            mapped: report.mapped.length,
+            ambiguous: report.ambiguous,
+            considered: report.considered,
+          });
+        }
+        return {
+          ok: true,
+          dryRun: body.dryRun,
+          considered: report.considered,
+          ambiguous: report.ambiguous,
+          unmatched: report.unmatched,
+          mapped: report.mapped.map(({ row, mdMangaId }) => ({
+            id: row.id,
+            extension: row.extension,
+            mangaName: row.mangaName,
+            mangaUrl: row.mangaUrl,
+            mdMangaId,
+            titleUrl: `https://mangadex.org/title/${mdMangaId}`,
+          })),
+        };
+      },
+    );
+
+    /**
      * Map an untracked series onto an existing MangaDex title: the "this is
      * already on MangaDex" answer to the approve button's "create it".
      *
