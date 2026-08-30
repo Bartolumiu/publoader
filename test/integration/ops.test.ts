@@ -1203,7 +1203,7 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
       title: { en: title },
       altTitles: [],
       originalLanguage: "ja",
-      links: engtl ? { engtl } : {},
+      links: (engtl ? { engtl } : {}) as Record<string, string>,
     },
   });
 

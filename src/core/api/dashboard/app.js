@@ -9464,6 +9464,7 @@ VIEWS.untracked = (route) => {
   return el(
     "div",
     {},
+    autoMapCard(queue),
     card(
       "Filter",
       row(
@@ -9667,6 +9668,165 @@ function untrackedDetail(id) {
       );
     },
     { reserve: 420, skeleton: () => el("div", {}, skeletonTable(7, 2), skeletonTable(4, 2)) },
+  );
+}
+
+/**
+ * Run the official-link auto-map over the queue, from the queue.
+ *
+ * The scheduler already does a batch a tick, but a backlog built up before this
+ * existed drains slowly at that rate, and the yield is very uneven by source —
+ * worth pointing at one extension rather than waiting. Preview first and commit
+ * second, in that order and never the other way round: this writes the series
+ * map, and the map decides where chapters get uploaded.
+ */
+function autoMapCard(queue) {
+  const writable = can("untracked:write") && can("tracked:append");
+  const results = el("div", {});
+
+  const extension = el("input", {
+    id: "automap-extension",
+    type: "text",
+    maxlength: "64",
+    placeholder: "all extensions",
+    disabled: !writable,
+  });
+  const limit = el("input", {
+    id: "automap-limit",
+    type: "number",
+    min: "1",
+    max: "200",
+    value: "25",
+    disabled: !writable,
+  });
+
+  const requestBody = (dryRun) => {
+    const name = extension.value.trim();
+    return {
+      dryRun,
+      limit: Math.min(200, Math.max(1, Number(limit.value) || 25)),
+      ...(name ? { extension: name } : {}),
+    };
+  };
+
+  /**
+   * `ambiguous` earns a line of its own even at zero. It counts the series
+   * where MangaDex has two titles claiming one link, which is a catalogue
+   * problem someone has to settle by hand; folding it into "unmatched" would
+   * hide the only outcome here that needs a person.
+   */
+  const draw = (report) => {
+    const mapped = report.mapped ?? [];
+    setChildren(
+      results,
+      mapped.length
+        ? table(
+            ["Extension", "Series", "MangaDex title"],
+            mapped.map((m) => [
+              m.extension,
+              el(
+                "div",
+                {},
+                el("div", { text: truncate(m.mangaName, 60) }),
+                el("a", {
+                  href: m.mangaUrl,
+                  target: "_blank",
+                  rel: "noreferrer noopener",
+                  class: "dim small",
+                  text: truncate(m.mangaUrl, 70),
+                }),
+              ),
+              mdTitleLink(m.mdMangaId, m.mdMangaId),
+            ]),
+            { empty: "" },
+          )
+        : null,
+      el("p", {
+        class: "dim small",
+        text:
+          `${report.dryRun ? "Would map" : "Mapped"} ${mapped.length} of ${report.considered ?? 0} checked. ` +
+          `${report.ambiguous ?? 0} ambiguous (two titles share one link; left for you), ` +
+          `${report.unmatched ?? 0} with no matching official link.`,
+      }),
+      report.dryRun && mapped.length
+        ? el("p", { class: "dim small", text: "Nothing was written. Map them writes these mappings." })
+        : null,
+    );
+  };
+
+  const previewButton = el("button", {
+    type: "button",
+    text: "Find matches",
+    disabled: !writable,
+    onclick: async (event) => {
+      const report = await act(
+        "untracked.automap.preview",
+        () => api("/untracked/automap", { method: "POST", body: requestBody(true) }),
+        { button: event.currentTarget },
+      );
+      if (report) draw(report);
+    },
+  });
+
+  const commitButton = el("button", {
+    type: "button",
+    class: "primary",
+    text: "Map them",
+    disabled: !writable,
+    onclick: async (event) => {
+      const confirmed = await confirmDialog({
+        title: "Map these series automatically",
+        lead: "This adds mappings to the tracked series map. Uploads for those series start going to the matched titles.",
+        points: [
+          "Only series whose url is MangaDex's own official English link are mapped.",
+          "No MangaDex titles are created.",
+          "Each mapping is recorded as auto:official-link, so they can be found later.",
+          "Preview with Find matches first if you have not; a wrong mapping uploads chapters onto someone else's title.",
+        ],
+        confirmLabel: "Add the mappings",
+      });
+      if (!confirmed) return;
+      const report = await act(
+        "untracked.automap.run",
+        () => api("/untracked/automap", { method: "POST", body: requestBody(false) }),
+        { button: event.currentTarget, refresh: [queue] },
+      );
+      if (report) draw(report);
+    },
+  });
+
+  return card(
+    "Auto-map by official MangaDex link",
+    el("p", {
+      class: "dim small",
+      text:
+        "Most series here are already on MangaDex, which records this publisher's page as the title's " +
+        "official English link. Where that link is exactly this series' url, and only one title carries it, " +
+        "the series can be mapped without creating anything. The yield is very uneven by source, so it is " +
+        "worth running one extension at a time.",
+    }),
+    writable
+      ? null
+      : el("p", {
+          class: "dim small",
+          text: 'Mapping needs the "untracked:write" and "tracked:append" scopes.',
+        }),
+    row(
+      el(
+        "span",
+        { class: "row tight" },
+        el("label", { class: "inline", for: "automap-extension", text: "Extension" }),
+        extension,
+      ),
+      el(
+        "span",
+        { class: "row tight" },
+        el("label", { class: "inline", for: "automap-limit", text: "Check" }),
+        limit,
+      ),
+    ),
+    row(previewButton, commitButton),
+    results,
   );
 }
 
