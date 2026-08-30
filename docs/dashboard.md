@@ -236,6 +236,65 @@ session, issuing and rotating client tokens, are in
 
 ---
 
+## Reading a table
+
+Every table on the console behaves the same way, because they are all the one
+helper.
+
+**Twenty rows to a page, and the pages are numbered.** Not a next/back pair: the
+first and last page are always one click away, the current page keeps two
+neighbours either side, and the rest collapse to an ellipsis, so the control is
+nine slots wide whether the table has three pages or three hundred. The row
+count under it (`41-45 of 45`) is what the page is showing, not what the server
+holds. A table that fits on one page shows no pager at all.
+
+**Any column header sorts.** Click it to order by that column, click it again to
+reverse; the caret marks the column doing the ordering and it is the only
+coloured thing in the header row. A column is read as numbers, as a duration
+(`5m ago`, `in 2h`), as a timestamp, or as text, decided from the whole column,
+so segment counts do not sort `1, 10, 2` and staleness does not sort `9s ago`
+after `10d ago`. Timestamps are read back in whatever field order this browser
+writes them in, so a day-first console sorts them chronologically and not by day
+of the month. Blanks — `-` and `never` — stay at the bottom in both directions;
+they are not values. A column of buttons is never sortable.
+
+The chosen sort and page **survive a redraw**, which matters because most views
+poll: an operator reading page four of a sorted list is not thrown back to the
+top of page one every ten seconds. Changing a *filter* does return to page one,
+because a filter is a new question. Keyboard focus stays on whichever header or
+page number was just pressed, so reversing a sort is two presses of one key.
+
+**"Select all on this page" means the twenty rows in front of you**, not the
+batch behind them. Where a bulk bar sits above a table — the queue's Tasks tab,
+the chapter archives, the re-card picker — it counts and selects only the drawn
+page, because the buttons beside it retry, remove and delete. The batch and the
+whole matching total are the two numbers on the server pager below, labelled
+*loaded* and *matching* to keep them distinct from what is on screen.
+
+**What sorting does not do** is reach the server. It orders the rows on screen.
+Where a view also has its own pager — the keyset queues, the audit log, a run's
+chapter list — that one fetches the next batch and this one moves within it, so
+a sort orders the batch, not the whole table. Narrow with the filters first.
+
+Below 620px the header row is hidden (rows become labelled cards), so the same
+sort is offered there as a column picker and a direction toggle above the table.
+
+**An extension filter is always a picker**, never a typed name: the queues, the
+chapter archives, the activity feed, the untracked queue and the re-card and
+auto-map cards all offer the extensions that actually exist. An exact-match text
+box over a name has two failure modes an operator gets no warning about — a typo
+reads as "no rows match" rather than as a typo, and the name has to be
+remembered in full before the filter does anything at all.
+
+The exception is a credential that cannot read the registry. The queues and the
+activity feed are reached with `runs:read`, but the list behind the picker wants
+`extensions:read`, so an api-token can be entitled to filter by extension and
+not entitled to be told which ones exist. There the typed box comes back rather
+than leaving a picker with nothing in it; the server honours the name either
+way.
+
+---
+
 ## Curating the series map
 
 An extension reports chapters against *its own* manga ids. The series map
@@ -243,8 +302,10 @@ An extension reports chapters against *its own* manga ids. The series map
 table where a wrong row means uploading to the wrong series. It lives under
 **Extensions → (an extension) → Open**.
 
-The table is searchable (external id, MangaDex id, or source) and paged 50 rows
-at a time, so an extension with a few thousand mappings is still navigable.
+The table is searchable (external id, MangaDex id, or source), and the whole map
+is held in the browser, so an extension with a few thousand mappings is still
+navigable: the search and the sort both cover every mapping, not a window into
+them, and the pager walks the result twenty rows at a time.
 
 Four ways to edit it:
 
@@ -606,10 +667,11 @@ inlines the real stylesheet, in the "Publoader Control Plane" design project.
 ### Responsiveness
 
 Usable down to a phone. The sidebar becomes a drawer; below 620px tables restack
-as cards, with each cell labelled from its column header. A wide table always
-scrolls inside its own container; the page body never scrolls sideways at any
-width. Touch targets are at least 40px once there is no pointer to be precise
-with.
+as cards, with each cell labelled from its column header, and the sort that
+lives in the header row above that width moves into a picker above the table. A
+wide table always scrolls inside its own container; the page body never scrolls
+sideways at any width. Touch targets are at least 40px once there is no pointer
+to be precise with.
 
 ### Files
 

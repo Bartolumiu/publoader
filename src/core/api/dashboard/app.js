@@ -456,45 +456,550 @@ const card = (title, ...kids) =>
 const row = (...kids) => el("div", { class: "row" }, ...kids);
 
 /**
- * A table that survives a phone.
+ * Rows a table shows at once before the pager takes over.
+ *
+ * Twenty is the most that fits a laptop viewport without the operator losing
+ * the header row off the top of the card, which is the point at which a long
+ * table stops being readable and starts being scrolled through.
+ */
+const TABLE_PAGE = 20;
+
+/**
+ * The sort column and page number of every table on the page, held outside the
+ * DOM.
+ *
+ * A view rebuilds its tables from scratch on every redraw, and a poll redraws
+ * roughly every ten seconds, so state kept on the nodes themselves would be
+ * thrown away the moment fresh data landed: the operator would be dropped back
+ * to page one, unsorted, mid-read. Keyed state here is what survives that.
+ *
+ * The key is the route plus the header row. Headers identify a table within a
+ * view (no view draws two tables with identical columns), and the route keeps
+ * one run's or one extension's table from inheriting the sort chosen on
+ * another's. A caller with two genuinely identical tables on one page can pass
+ * `key` to separate them.
+ */
+const tableViews = new Map();
+
+/** How many table states to keep; per-id routes would otherwise accumulate. */
+const TABLE_VIEW_CAP = 400;
+
+function tableViewKey(headers) {
+  const { section, param, tab } = store.route;
+  return `${section ?? ""}/${param ?? ""}/${tab ?? ""}|${headers.join("|")}`;
+}
+
+/**
+ * What a cell sorts by: an explicit `data-sort` if the cell carries one, and
+ * otherwise the text the operator can actually see.
+ *
+ * Sorting on rendered text rather than on the underlying record is what lets
+ * this live inside `table()` and cover all forty-odd call sites at once. The
+ * cost is that a column has to be recognisable from its text, which is what
+ * `columnKind` below is for; `data-sort` is the escape hatch for a cell whose
+ * text cannot express its order.
+ */
+function cellSortText(cell) {
+  if (cell == null || cell === "" || Array.isArray(cell)) return "";
+  if (cell.nodeType) {
+    const explicit = cell.getAttribute?.("data-sort");
+    return String(explicit ?? cell.textContent ?? "").trim();
+  }
+  return String(cell).trim();
+}
+
+const NUMERIC = /^[-+]?\d[\d,]*(?:\.\d+)?\s*%?$/;
+
+function parseNumeric(text) {
+  if (!NUMERIC.test(text)) return null;
+  const value = Number.parseFloat(text.replace(/,/g, ""));
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * The output of `ago()` and `duration()`, back as a number of seconds.
+ *
+ * Signed by direction: "5m ago" is -300 and "in 5m" is +300, so ascending runs
+ * oldest-first through the past and on into the future, which is the order the
+ * text itself reads in. Without this a staleness column sorts alphabetically
+ * and puts "9s ago" after "10d ago".
+ */
+const ELAPSED_UNITS = { s: 1, m: 60, h: 3600, d: 86_400 };
+const ELAPSED = /^(?:in\s+)?\d+\s*[smhd](?:\s+\d+\s*[smhd])*(?:\s+ago)?$/i;
+
+function parseElapsed(text) {
+  if (!ELAPSED.test(text)) return null;
+  let seconds = 0;
+  for (const [, count, unit] of text.matchAll(/(\d+)\s*([smhd])/gi)) {
+    seconds += Number(count) * ELAPSED_UNITS[unit.toLowerCase()];
+  }
+  return /ago$/i.test(text) ? -seconds : seconds;
+}
+
+/**
+ * A timestamp column, as milliseconds.
+ *
+ * Guarded by a shape test before `Date.parse` is allowed near it, because the
+ * parser is far too willing: it reads a bare "5" as a date, which would sort a
+ * column of chapter numbers as though it were a calendar.
+ */
+/**
+ * A four-digit year is required, in one of the three places a locale puts it.
+ *
+ * Looser than this and a version column becomes a date column: "1.2.3" is three
+ * numbers separated by the same character a German date uses, and would be read
+ * as the third of February in the year 3, which sorts nothing like a version.
+ */
+const DATEISH = /\d{4}[-./]\s?\d{1,2}[-./]\s?\d{1,2}|\d{1,2}[-./]\d{1,2}[-./]\d{4}/;
+
+/**
+ * The order `fmtTime` writes a timestamp's fields in, on this browser.
+ *
+ * `fmtTime` renders with `toLocaleString()`, and `Date.parse` can only read
+ * that back in a US-ordered locale. On an en-GB console it is handed
+ * "30/08/2026, 18:16:05" and returns NaN; on de-DE, "30.8.2026, 18:16:05" and
+ * the same. A timestamp column would then be sorted as text, which orders it by
+ * day of the month — the sort looks plausible and is wrong, which is the worst
+ * way for this to fail.
+ *
+ * These are exactly the options `Date.prototype.toLocaleString` resolves to
+ * with no arguments, so the parts come back in the order `fmtTime`'s own output
+ * is written in, whatever locale the operator's browser is set to.
+ */
+const LOCALE_TIME_FIELDS = (() => {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "numeric",
+      second: "numeric",
+    })
+      .formatToParts(new Date(2026, 7, 30, 18, 16, 5))
+      .filter((part) => /^(year|month|day|hour|minute|second)$/.test(part.type))
+      .map((part) => part.type);
+  } catch {
+    return null;
+  }
+})();
+
+/** A `fmtTime` string read back through the field order above. */
+function parseLocaleTime(text) {
+  if (!LOCALE_TIME_FIELDS) return null;
+  const numbers = text.match(/\d+/g);
+  if (!numbers || numbers.length < 3) return null;
+  const field = {};
+  LOCALE_TIME_FIELDS.forEach((name, at) => {
+    if (numbers[at] != null) field[name] = Number(numbers[at]);
+  });
+  if (field.year == null || field.month == null || field.day == null) return null;
+  // A 12-hour locale writes the half-day as a word, which is not among the
+  // numbers; without this, every afternoon sorts among the mornings.
+  let hour = field.hour ?? 0;
+  if (/\bp\.?m\.?\b/i.test(text) && hour < 12) hour += 12;
+  else if (/\ba\.?m\.?\b/i.test(text) && hour === 12) hour = 0;
+  const ms = new Date(field.year, field.month - 1, field.day, hour, field.minute ?? 0, field.second ?? 0).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}/;
+
+/**
+ * A timestamp column's cell, as milliseconds.
+ *
+ * The local format is tried BEFORE `Date.parse`, which is the whole point.
+ * `Date.parse` does not refuse a day-first date, it misreads it: "05/02/2026"
+ * comes back as the 2nd of May, and only the days past the 12th come back as
+ * NaN. A column parsed that way is half right, which sorts worse than a column
+ * that is uniformly wrong because nothing about it looks broken.
+ */
+function parseDateish(text) {
+  if (text.length < 6 || !DATEISH.test(text)) return null;
+  if (!ISO_DATE.test(text)) {
+    const local = parseLocaleTime(text);
+    if (local != null) return local;
+  }
+  const ms = Date.parse(text);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Which of the four orders a column wants, decided from the whole column
+ * rather than cell by cell.
+ *
+ * One text value anywhere demotes the column to a string sort. Mixing orders
+ * within a column is the failure mode worth avoiding: a column read as numeric
+ * where half the cells are not would sort those halves independently and look,
+ * to an operator, simply wrong.
+ */
+function columnKind(values) {
+  let kind = null;
+  for (const value of values) {
+    const own =
+      parseNumeric(value) != null
+        ? "number"
+        : parseElapsed(value) != null
+          ? "elapsed"
+          : parseDateish(value) != null
+            ? "date"
+            : "text";
+    if (own === "text" || (kind && kind !== own)) return "text";
+    kind = own;
+  }
+  return kind ?? "text";
+}
+
+const COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+/** Placeholders. Neither is a value, so neither should sort among the values. */
+const isBlankSort = (text) => text === "" || text === "-" || text.toLowerCase() === "never";
+
+/**
+ * Order `rows` by one column, stably, and return the row indices in that order.
+ *
+ * Blanks sort last in both directions rather than flipping to the top on the
+ * second click: "-" and "never" mean "nothing here", and a descending sort is a
+ * request for the largest values, not for the empty ones. Ties keep their
+ * original order, which is the server's, so whatever the endpoint already
+ * ordered by acts as an implicit second sort column.
+ */
+function sortRows(rows, index, dir) {
+  const texts = rows.map((cells) => {
+    const text = cellSortText(cells[index]);
+    return isBlankSort(text) ? "" : text;
+  });
+  const kind = columnKind(texts.filter(Boolean));
+  const asNumber =
+    kind === "number"
+      ? parseNumeric
+      : kind === "elapsed"
+        ? parseElapsed
+        : kind === "date"
+          ? parseDateish
+          : null;
+  const order = dir === "desc" ? -1 : 1;
+  // Indices out, not rows: the caller needs to be able to map a drawn row back
+  // to the record it was built from, which the cells themselves cannot say.
+  return rows
+    .map((_, at) => ({ at, text: texts[at] }))
+    .sort((a, b) => {
+      if (!a.text || !b.text) return (a.text ? -1 : b.text ? 1 : 0) || a.at - b.at;
+      const cmp = asNumber
+        ? (asNumber(a.text) ?? 0) - (asNumber(b.text) ?? 0)
+        : COLLATOR.compare(a.text, b.text);
+      return cmp * order || a.at - b.at;
+    })
+    .map((entry) => entry.at);
+}
+
+/** One body row; every cell carries its column name for the stacked layout. */
+function tableRow(headers, cells) {
+  return el(
+    "tr",
+    {},
+    cells.map((cell, index) => {
+      const label = headers[index] || "";
+      if (Array.isArray(cell)) {
+        return el("td", { class: "actions row tight", "data-label": label }, cell);
+      }
+      if (cell && cell.nodeType) return el("td", { "data-label": label }, cell);
+      return el("td", { "data-label": label, text: cell == null || cell === "" ? "-" : cell });
+    }),
+  );
+}
+
+/**
+ * The header row. A sortable column is a real `<button>` inside its `<th>`
+ * rather than a click handler on the cell, so it is reachable by keyboard and
+ * announced as the control it is; `aria-sort` on the `<th>` is what tells a
+ * screen reader which way the table is currently ordered.
+ */
+function tableHead(headers, sortable, view, onSort) {
+  return el(
+    "thead",
+    {},
+    el(
+      "tr",
+      {},
+      headers.map((header, index) => {
+        if (!sortable[index]) return el("th", { text: header });
+        const active = view.column === index;
+        const ascending = view.dir === "asc";
+        return el(
+          "th",
+          {
+            class: `sortable${active ? " sorted" : ""}`,
+            "aria-sort": active ? (ascending ? "ascending" : "descending") : "none",
+          },
+          el(
+            "button",
+            {
+              type: "button",
+              class: "th-sort",
+              "data-focus": `sort:${index}`,
+              title: active
+                ? `Sorted by ${header}, ${ascending ? "ascending" : "descending"}. Click to reverse.`
+                : `Sort by ${header}`,
+              onclick: () => onSort(index),
+            },
+            el("span", { class: "th-label", text: header }),
+            el("span", {
+              class: "sort-mark",
+              "aria-hidden": "true",
+              text: active ? (ascending ? "▲" : "▼") : "↕",
+            }),
+          ),
+        );
+      }),
+    ),
+  );
+}
+
+/**
+ * Which page numbers to draw, given there can be hundreds of them.
+ *
+ * The first and last pages are always reachable in one click, the current page
+ * keeps two neighbours either side, and each remaining run collapses to a
+ * single ellipsis. That caps the control at nine slots however long the table
+ * is, so it never wraps into a second line on a phone.
+ */
+function pageWindow(page, pages, span = 2) {
+  const wanted = new Set([0, pages - 1]);
+  for (let n = page - span; n <= page + span; n++) if (n >= 0 && n < pages) wanted.add(n);
+  const out = [];
+  let previous = null;
+  for (const n of [...wanted].sort((a, b) => a - b)) {
+    if (previous != null && n - previous > 1) out.push(null);
+    out.push(n);
+    previous = n;
+  }
+  return out;
+}
+
+/**
+ * Numbered pager. Distinct from `pager()` above, which walks a server's pages
+ * one request at a time and so can only offer the next one; this one is over
+ * rows already in hand, so every page is a destination.
+ */
+function numberedPager(total, page, size, onChange) {
+  const pages = Math.max(1, Math.ceil(total / size));
+  const first = page * size + 1;
+  const last = Math.min(total, first + size - 1);
+  return el(
+    "nav",
+    { class: "row pager table-pager", "aria-label": "Table pages" },
+    el("button", {
+      type: "button",
+      class: "page-step",
+      "data-focus": "step:prev",
+      text: "‹ Prev",
+      disabled: page === 0,
+      onclick: () => onChange(page - 1),
+    }),
+    el(
+      "div",
+      { class: "page-numbers" },
+      pageWindow(page, pages).map((n) =>
+        n == null
+          ? el("span", { class: "page-gap dim", "aria-hidden": "true", text: "…" })
+          : el("button", {
+              type: "button",
+              class: `page-n${n === page ? " current" : ""}`,
+              "data-focus": `page:${n}`,
+              text: String(n + 1),
+              "aria-label": `Page ${n + 1}`,
+              "aria-current": n === page ? "page" : null,
+              onclick: () => onChange(n),
+            }),
+      ),
+    ),
+    el("button", {
+      type: "button",
+      class: "page-step",
+      "data-focus": "step:next",
+      text: "Next ›",
+      disabled: page >= pages - 1,
+      onclick: () => onChange(page + 1),
+    }),
+    el("span", { class: "dim small page-count", text: `${first}-${last} of ${total}` }),
+  );
+}
+
+/**
+ * The sort control for the stacked layout.
+ *
+ * Below 620px the header row is hidden (the rows become labelled cards, so a
+ * header row would be a column of names with nothing under it), which would
+ * otherwise take sorting away exactly where a twenty-row page is hardest to
+ * scan. Same state, a different control: a column picker and a direction
+ * toggle, shown only where the headers are not.
+ */
+function tableSortBar(headers, sortable, view, onSort) {
+  const columns = headers
+    .map((header, index) => ({ header, index }))
+    .filter(({ index }) => sortable[index]);
+  if (!columns.length) return null;
+  const ascending = view.dir === "asc";
+  return el(
+    "div",
+    { class: "row tight table-sortbar" },
+    el("span", { class: "dim small", text: "Sort" }),
+    el(
+      "select",
+      {
+        "aria-label": "Sort column",
+        "data-focus": "sortcol",
+        onchange: (event) => onSort(event.target.value === "" ? null : Number(event.target.value), "set"),
+      },
+      el("option", { value: "", text: "Unsorted", selected: view.column == null }),
+      columns.map(({ header, index }) =>
+        el("option", { value: String(index), text: header, selected: view.column === index }),
+      ),
+    ),
+    el("button", {
+      type: "button",
+      class: "sort-dir",
+      "data-focus": "sortdir",
+      text: ascending ? "▲ Asc" : "▼ Desc",
+      disabled: view.column == null,
+      "aria-label": `Sort direction: ${ascending ? "ascending" : "descending"}`,
+      onclick: () => onSort(view.column, "flip"),
+    }),
+  );
+}
+
+/**
+ * Put keyboard focus back where the operator left it, across a redraw.
+ *
+ * Sorting and paging both replace the whole table, including the button that
+ * was just pressed, which drops focus to `<body>`. For a keyboard operator that
+ * turns "page forward twice" into a walk back through the nav rail and twenty
+ * rows of links, and reversing a sort is BY DESIGN a second press on the same
+ * control, so this is not an edge case.
+ *
+ * Every control in the table chrome carries a `data-focus` name that survives
+ * the rebuild. A control that comes back disabled (the Prev button on page one)
+ * hands focus to the fallback the caller names instead, so focus never lands on
+ * something inert and never falls out of the table.
+ */
+function keepFocus(host, draw) {
+  const active = document.activeElement;
+  const held = host.contains(active) ? active.getAttribute("data-focus") : null;
+  draw();
+  if (!held) return;
+  const back = host.querySelector(`[data-focus="${held}"]`);
+  if (back && !back.disabled) return void back.focus();
+  // The named control is gone or inert: the nearest equivalent is the page
+  // number now current, and failing that anything the chrome still offers.
+  const fallback = host.querySelector(".page-n.current") ?? host.querySelector("[data-focus]:not(:disabled)");
+  fallback?.focus();
+}
+
+/**
+ * A table that survives a phone, sorts on any column, and pages at twenty rows.
  *
  * Every cell carries its column name in `data-label`, which is what lets the
  * stylesheet restack the rows as cards below 620px instead of showing a column
  * of unlabelled values. Wider than that it scrolls inside `.scroll`: never
  * taking the page sideways with it.
+ *
+ * Sorting and paging are client-side, over the rows handed in. Where a view
+ * also has a server pager (the queues, the audit log, a run's chapters) the two
+ * compose rather than conflict: this one moves within the batch on screen, that
+ * one fetches the next batch. What it does mean is that a sort here orders the
+ * batch and not the whole table, so a column the server can already order by is
+ * still better ordered there.
+ *
+ * A column holding action buttons is never sortable; ordering rows by the
+ * buttons in them is meaningless, and such a column's header is blank anyway.
+ *
+ * Options:
+ *   `empty`     what to show instead when there are no rows at all.
+ *   `stack`     restack as cards below 620px; on for everything so far.
+ *   `key`       override the derived state key, for two identical tables on one page.
+ *   `pageSize`  rows per page.
+ *   `resetOn`   a value naming the current filter. When it changes, the page
+ *               goes back to one; without it a filter typed while on page
+ *               twelve shows the twelfth page of the new result, which is not
+ *               what anybody means by searching.
+ *   `onPage`    called after every draw with the rows actually on screen, as
+ *               indices into `rows`. This is what lets a bulk bar act on the
+ *               page rather than on the whole batch behind it.
  */
-function table(headers, rows, { empty, stack = true } = {}) {
-  if (!rows.length) return emptyState(empty ?? "Nothing here.");
-  return el(
-    "div",
-    { class: "scroll" },
-    el(
-      "table",
-      { class: stack ? "stack" : null },
-      el("thead", {}, el("tr", {}, headers.map((h) => el("th", { text: h })))),
+function table(headers, rows, { empty, stack = true, key, pageSize = TABLE_PAGE, resetOn, onPage } = {}) {
+  if (!rows.length) {
+    onPage?.([]);
+    return emptyState(empty ?? "Nothing here.");
+  }
+
+  const id = key ?? tableViewKey(headers);
+  if (!tableViews.has(id) && tableViews.size >= TABLE_VIEW_CAP) tableViews.clear();
+  const view = tableViews.get(id) ?? { column: null, dir: "asc", page: 0, resetOn };
+  tableViews.set(id, view);
+  if (view.resetOn !== resetOn) {
+    view.resetOn = resetOn;
+    view.page = 0;
+  }
+
+  const sortable = headers.map(
+    (header, index) => Boolean(header) && !rows.some((cells) => Array.isArray(cells[index])),
+  );
+  // A column can stop being sortable between redraws, once the rows that gain
+  // it an action button arrive; drop a sort that no longer has a column.
+  if (view.column != null && !sortable[view.column]) view.column = null;
+
+  const host = el("div", { class: "table-host" });
+
+  const onSort = (index, how = "toggle") => {
+    if (index == null || Number.isNaN(index) || !sortable[index]) {
+      view.column = null;
+    } else if (how === "flip" || (how === "toggle" && view.column === index)) {
+      view.dir = view.dir === "asc" ? "desc" : "asc";
+      view.column = index;
+    } else {
+      view.column = index;
+      view.dir = "asc";
+    }
+    // A new order makes the current page number meaningless: the operator asked
+    // for one end of this column, so give them the first page of it.
+    view.page = 0;
+    keepFocus(host, draw);
+  };
+
+  const draw = () => {
+    // Indices rather than the rows themselves, so `onPage` can hand the caller
+    // back its own records instead of the cells this built out of them.
+    const order = view.column == null ? rows.map((_, at) => at) : sortRows(rows, view.column, view.dir);
+    const pages = Math.max(1, Math.ceil(order.length / pageSize));
+    view.page = Math.min(Math.max(view.page, 0), pages - 1);
+    const start = view.page * pageSize;
+    const shown = order.slice(start, start + pageSize);
+    setChildren(
+      host,
+      tableSortBar(headers, sortable, view, onSort),
       el(
-        "tbody",
-        {},
-        rows.map((cells) =>
-          el(
-            "tr",
-            {},
-            cells.map((cell, index) => {
-              const label = headers[index] || "";
-              if (Array.isArray(cell)) {
-                return el("td", { class: "actions row tight", "data-label": label }, cell);
-              }
-              if (cell && cell.nodeType) return el("td", { "data-label": label }, cell);
-              return el("td", {
-                "data-label": label,
-                text: cell == null || cell === "" ? "-" : cell,
-              });
-            }),
-          ),
+        "div",
+        { class: "scroll" },
+        el(
+          "table",
+          { class: stack ? "stack" : null },
+          tableHead(headers, sortable, view, onSort),
+          el("tbody", {}, shown.map((at) => tableRow(headers, rows[at]))),
         ),
       ),
-    ),
-  );
+      pages > 1
+        ? numberedPager(order.length, view.page, pageSize, (next) => {
+            view.page = next;
+            keepFocus(host, draw);
+          })
+        : null,
+    );
+    onPage?.(shown);
+  };
+
+  draw();
+  return host;
 }
 
 /** A definition list, for the "one thing, in full" panels. */
@@ -724,6 +1229,92 @@ function pager(total, page, size, onChange) {
       onclick: () => onChange(clamped + 1),
     }),
   );
+}
+
+/**
+ * The published extension names, fetched once per page load and shared by every
+ * filter that offers them.
+ *
+ * A memoised promise rather than a `Resource`: the list is a convenience laid
+ * over a filter, so it must never be able to put an error panel where a control
+ * belongs (which is what `live()` would do with a 403 from a principal that can
+ * read the queue but not the extension registry), and a view with two extension
+ * filters on it must not cost two requests. A failed fetch clears the memo, so
+ * the next mount tries again.
+ */
+let extensionNamesOnce = null;
+
+function extensionNames() {
+  extensionNamesOnce ??= api("/extensions", { quiet: true })
+    .then((data) =>
+      (data.extensions ?? [])
+        .map((entry) => entry.name ?? entry)
+        .filter(Boolean)
+        .sort(),
+    )
+    .catch((err) => {
+      // A 403 is a permanent answer, and this credential will keep getting it:
+      // remembering it is what stops every redraw of a filter card asking again.
+      // Anything else might be transient, so let the next mount retry.
+      if (!(err instanceof ApiError && err.status === 403)) extensionNamesOnce = null;
+      return [];
+    });
+  return extensionNamesOnce;
+}
+
+/**
+ * An extension filter, as a picker over the extensions that actually exist.
+ *
+ * These used to be exact-match text boxes, which have two failure modes an
+ * operator gets no feedback about: a typo reads as "no rows match" rather than
+ * as a typo, and a name has to be remembered exactly and in full before the
+ * filter does anything at all. The registry is short and known, so offer it.
+ *
+ * It falls back to the old text box when the registry cannot be read. The
+ * queues and the activity feed are reached with `runs:read`, but `GET
+ * /extensions` wants `extensions:read`, so a narrowly scoped api-token can be
+ * entitled to filter by extension and not entitled to be told which ones exist.
+ * A picker with nothing in it would take that filter away entirely; the server
+ * still honours a typed name, so offer typing.
+ *
+ * `onPick` receives the chosen name and owns the whole update, because the
+ * views differ in what else a filter change has to reset; the keyset queues
+ * have to drop their cursors, and an offset one does not.
+ */
+function extensionPicker(id, label, key, onPick) {
+  const held = store.filters[key];
+  const select = el(
+    "select",
+    { id, onchange: (event) => onPick(event.target.value) },
+    el("option", { value: "", text: "all", selected: !held }),
+    // A name the filter already holds is offered before the list lands, so a
+    // filter arrived at from a row link (the activity feed does exactly that)
+    // has something to select and is not silently widened back to "all".
+    held ? el("option", { value: held, text: held, selected: true }) : null,
+  );
+  const slot = el("span", { class: "row tight" }, el("label", { class: "inline", for: id, text: label }), select);
+
+  void extensionNames().then((names) => {
+    if (!names.length) {
+      // Nothing to pick from. Swap the control rather than leave a select whose
+      // only option is "all", which reads as "this extension is the only one".
+      return void select.replaceWith(
+        el("input", {
+          id,
+          type: "text",
+          value: held ?? "",
+          placeholder: "exact name",
+          onchange: (event) => onPick(event.target.value.trim()),
+        }),
+      );
+    }
+    for (const name of names) {
+      if (name === held) continue;
+      select.append(el("option", { value: name, text: name }));
+    }
+  });
+
+  return slot;
 }
 
 // ------------------------------------------------------------------- feedback
@@ -2807,13 +3398,15 @@ VIEWS.queues = (route) => {
         (data) => {
           const rows = data.tasks ?? [];
           reconcile(rows);
-          return el(
-            "div",
-            {},
-            queueBulkBar(selected, activeFilter, rows, tasks, reload),
-            queueTable(rows, selected, tasks, reload),
-            queuePager(data, tasks, selected),
+          // The bar is built from the page the table drew, not from the batch
+          // behind it, and redrawn whenever that page changes: "Select all on
+          // this page" has to mean the rows the operator can see, because the
+          // buttons next to it delete what it selects.
+          const bar = el("div", {});
+          const body = queueTable(rows, selected, tasks, reload, (page) =>
+            setChildren(bar, queueBulkBar(selected, activeFilter, page, tasks, reload)),
           );
+          return el("div", {}, bar, body, queuePager(data, tasks, selected));
         },
         { reserve: 320, skeleton: () => skeletonTable(8, 8) },
       ),
@@ -3018,7 +3611,9 @@ function queueChaptersPanel() {
           el("label", { class: "inline", for: "queue-chapter-q", text: "Search" }),
           search,
         ),
-        facet("queue-chapter-extension", "Extension", "queueChapterExtension", "exact name"),
+        extensionPicker("queue-chapter-extension", "Extension", "queueChapterExtension", (value) =>
+          refilter({ queueChapterExtension: value }),
+        ),
         facet("queue-chapter-language", "Language", "queueChapterLanguage", "exact code, e.g. en"),
         el("button", {
           type: "button",
@@ -3141,7 +3736,7 @@ function queueChapterPager(data, chapters) {
     { class: "row pager" },
     el("span", {
       class: "dim small",
-      text: `${data.chapters?.length ?? 0} shown of ${data.total ?? 0} matching · claim order: ${data.order ?? "unknown"}`,
+      text: `${data.chapters?.length ?? 0} loaded of ${data.total ?? 0} matching · claim order: ${data.order ?? "unknown"}`,
     }),
     el("span", { class: "grow" }),
     el("button", {
@@ -3231,7 +3826,10 @@ function queueFilterCard(onChange) {
       text("queue-q", "Search", "queueQ", {
         placeholder: "series, title, number or either MangaDex id",
       }),
-      text("queue-extension", "Extension", "queueExtension", { placeholder: "exact name" }),
+      extensionPicker("queue-extension", "Extension", "queueExtension", (value) => {
+        setFilter({ queueExtension: value });
+        onChange();
+      }),
       text("queue-language", "Language", "queueLanguage", { placeholder: "exact code, e.g. en" }),
     ),
     row(
@@ -3275,6 +3873,8 @@ function queueFilterCard(onChange) {
 function queueBulkBar(selected, activeFilter, rows, tasks, reload) {
   const count = selected.size;
   const ids = () => [...selected];
+  // `rows` is the page on screen, not the batch behind it.
+  const pageTicked = rows.length > 0 && rows.every((row) => selected.has(row.id));
 
   const bulk = (label, action, run) =>
     gatedButton("runs:write", {
@@ -3361,10 +3961,10 @@ function queueBulkBar(selected, activeFilter, rows, tasks, reload) {
     el("span", { class: "grow" }),
     el("button", {
       type: "button",
-      text: rows.length && count === rows.length ? "Select none" : "Select all on this page",
+      text: pageTicked ? "Select none" : "Select all on this page",
       disabled: rows.length === 0,
       onclick: () => {
-        if (count === rows.length) selected.clear();
+        if (pageTicked) for (const row of rows) selected.delete(row.id);
         else for (const row of rows) selected.add(row.id);
         reload();
       },
@@ -3461,7 +4061,7 @@ function queueChapterCell(identity) {
   );
 }
 
-function queueTable(rows, selected, tasks, reload) {
+function queueTable(rows, selected, tasks, reload, onPage) {
   return table(
     ["", "Kind", "State", "Chapter", "Dedupe key", "Attempts", "Not before", "Last error", ""],
     rows.map((task) => {
@@ -3544,7 +4144,10 @@ function queueTable(rows, selected, tasks, reload) {
         ],
       ];
     }),
-    { empty: "No upload task matches this filter." },
+    {
+      empty: "No upload task matches this filter.",
+      onPage: (shown) => onPage?.(shown.map((at) => rows[at])),
+    },
   );
 }
 
@@ -3562,7 +4165,7 @@ function queuePager(data, tasks, selected) {
     { class: "row pager" },
     el("span", {
       class: "dim small",
-      text: `${data.tasks?.length ?? 0} shown of ${data.total ?? 0} matching · claim order: ${data.order ?? "unknown"}`,
+      text: `${data.tasks?.length ?? 0} loaded of ${data.total ?? 0} matching · claim order: ${data.order ?? "unknown"}`,
     }),
     el("span", { class: "grow" }),
     el("button", {
@@ -4188,13 +4791,14 @@ VIEWS.chapters = (route) => {
         (data) => {
           const rows = data.chapters ?? [];
           reconcile(rows);
-          return el(
-            "div",
-            {},
-            chapterBulkBar(selected, scope, rows, data, activeFilter, archive, reload),
-            chapterTable(rows, archive, selected, reload),
-            chapterPager(data, cursors(), page),
+          // Built from the page the table drew, and redrawn when that page
+          // changes; the bulk actions behind this bar edit and delete public
+          // MangaDex pages, so "this page" must mean the rows on screen.
+          const bar = el("div", {});
+          const body = chapterTable(rows, archive, selected, reload, (page_) =>
+            setChildren(bar, chapterBulkBar(selected, scope, page_, data, activeFilter, archive, reload)),
           );
+          return el("div", {}, bar, body, chapterPager(data, cursors(), page));
         },
         { reserve: 320, skeleton: () => skeletonTable(8, 7) },
       ),
@@ -5205,6 +5809,9 @@ function recheckCard(archive, filter, filterHooks = []) {
  * sees the actual list of public pages they are about to change.
  */
 function chapterBulkBar(selected, scope, rows, data, activeFilter, archive, reload) {
+  // `rows` is the page on screen, not the batch behind it: the selection spans
+  // pages, so "is this page all ticked" has to be asked of the page.
+  const pageTicked = rows.length > 0 && rows.every((entry) => selected.has(entry.mdChapterId));
   const count = selected.size;
   const total = data.total ?? 0;
   const targeting = scope.wholeFilter ? total : count;
@@ -5265,10 +5872,10 @@ function chapterBulkBar(selected, scope, rows, data, activeFilter, archive, relo
     ),
     el("button", {
       type: "button",
-      text: rows.length && count === rows.length ? "Select none" : "Select all on this page",
+      text: pageTicked ? "Select none" : "Select all on this page",
       disabled: rows.length === 0 || scope.wholeFilter,
       onclick: () => {
-        if (count === rows.length) selected.clear();
+        if (pageTicked) for (const entry of rows) selected.delete(entry.mdChapterId);
         else for (const entry of rows) selected.add(entry.mdChapterId);
         reload();
       },
@@ -5358,7 +5965,7 @@ function chapterFilterCard(extensions, onChange) {
   );
 }
 
-function chapterTable(rows, archive, selected, reload) {
+function chapterTable(rows, archive, selected, reload, onPage) {
   return table(
     ["", "Series", "Chapter", "Language", "Extension", CHAPTER_ARCHIVE_LABELS[archive] ?? "When", ""],
     rows.map((entry) => [
@@ -5393,6 +6000,7 @@ function chapterTable(rows, archive, selected, reload) {
         archive === "uploaded"
           ? "No chapter has been published yet, or none matches this filter."
           : "Nothing in this archive matches.",
+      onPage: (shown) => onPage?.(shown.map((at) => rows[at])),
     },
   );
 }
@@ -5410,7 +6018,7 @@ function chapterPager(data, walked, go) {
     { class: "row pager" },
     el("span", {
       class: "dim small",
-      text: `${data.chapters?.length ?? 0} shown of ${data.total ?? 0} matching · ${data.order ?? ""}`,
+      text: `${data.chapters?.length ?? 0} loaded of ${data.total ?? 0} matching · ${data.order ?? ""}`,
     }),
     el("span", { class: "grow" }),
     el("button", {
@@ -6202,6 +6810,17 @@ VIEWS.activity = () => {
           store.filters.activityLimit,
           "activityLimit",
         ),
+        // The feed's extension filter is also arrived at by clicking an
+        // extension in a row, so the picker has to be able to show a name it
+        // was given as well as take one.
+        // Rebuilt on any filter change so Clear, and anything else that writes
+        // the filter without redrawing this card, is reflected in the picker.
+        liveState(["filters"], () =>
+          extensionPicker("activity-extension", "Extension", "activityExtension", (value) => {
+            setFilter({ activityExtension: value });
+            void feed.load({ force: true });
+          }),
+        ),
         search,
         el("button", { type: "button", text: "Search", onclick: apply }),
         el("button", {
@@ -6213,11 +6832,6 @@ VIEWS.activity = () => {
             void feed.load({ force: true });
           },
         }),
-      ),
-      liveState(["filters"], () =>
-        store.filters.activityExtension
-          ? el("p", { class: "dim small", text: `Filtered to extension ${store.filters.activityExtension}.` })
-          : el("span", {}),
       ),
     ),
     card(
@@ -8323,8 +8937,6 @@ function versionsPanel(name) {
 
 // ------------------------------------------------------------- the series map
 
-const TRACKED_PAGE = 50;
-
 /** `externalId,mdMangaId`: the one format the paste box and the export share. */
 /**
  * One line of the paste/export format.
@@ -8518,7 +9130,6 @@ function pauseDialog(name, item, tracked) {
 
 function trackedCard(name, tracked) {
   const encoded = encodeURIComponent(name);
-  let page = 0;
 
   // Outside the reactive region so a redraw does not take the caret with it.
   const search = el("input", {
@@ -8549,10 +9160,6 @@ function trackedCard(name, tracked) {
             [item.mangaId, item.mdMangaId, item.source, item.namespace].some((field) => (field || "").toLowerCase().includes(needle)),
           )
         : rows;
-      const pages = Math.max(1, Math.ceil(matches.length / TRACKED_PAGE));
-      page = Math.min(page, pages - 1);
-      const slice = matches.slice(page * TRACKED_PAGE, page * TRACKED_PAGE + TRACKED_PAGE);
-
       return el(
         "div",
         {},
@@ -8565,7 +9172,7 @@ function trackedCard(name, tracked) {
         ),
         table(
           ["Catalogue", "External id", "MangaDex id", "Source", "Added", "Runs", ""],
-          slice.map((item) => [
+          matches.map((item) => [
             // "default" rather than blank: an empty cell reads as missing data,
             // and the flat id space is a real answer.
             item.namespace ? el("code", { text: item.namespace }) : el("span", { class: "dim", text: "default" }),
@@ -8659,23 +9266,27 @@ function trackedCard(name, tracked) {
             empty: needle
               ? `Nothing matches “${needle}”. ${rows.length} mapping(s) in total.`
               : "This extension tracks nothing yet. Add a mapping above, or paste a batch below.",
+            // Typing in the search box is a new question, so it is answered
+            // from the first page; the sort the operator chose is kept.
+            resetOn: needle,
           },
         ),
-        matches.length > TRACKED_PAGE
-          ? pager(matches.length, page, TRACKED_PAGE, (next) => {
-              page = next;
-              tracked.emit();
-            })
-          : el("p", { class: "dim small", text: `${matches.length} of ${rows.length} mapping(s).` }),
+        el("p", { class: "dim small", text: `${matches.length} of ${rows.length} mapping(s).` }),
       );
     },
     { reserve: 260, skeleton: () => skeletonTable(7, 5) },
   );
 
+  // Debounced, because a redraw here rebuilds the rows for the whole map and
+  // this endpoint is unpaged: on a catalogue of several thousand that is real
+  // work to do between two keystrokes, and none of it is worth doing until the
+  // operator stops typing. Short enough to still feel like live filtering.
+  let typing = null;
   search.addEventListener("input", () => {
-    page = 0;
-    tracked.emit();
+    clearTimeout(typing);
+    typing = setTimeout(() => tracked.emit(), 120);
   });
+  onTeardown(() => clearTimeout(typing));
 
   return card(
     "Tracked series",
@@ -9807,9 +10418,13 @@ VIEWS.untracked = (route) => {
  *
  * The listing used to ask for 200 rows and show whatever came back, which on a
  * queue thousands deep is a fixed window onto the newest rows that looks
- * exactly like the whole list. The count is the honest part: "50 shown of
+ * exactly like the whole list. The count is the honest part: "50 loaded of
  * 2,243" is the difference between "that is all of them" and "you are looking
  * at one fortieth of this".
+ *
+ * "Loaded", not "shown": the table under this draws twenty of the batch at a
+ * time and has its own numbered pager, so the two numbers here are the batch
+ * and the total, and neither is what is on the screen.
  */
 function untrackedPager(data, trail, go) {
   const shown = data.untracked?.length ?? 0;
@@ -9821,7 +10436,7 @@ function untrackedPager(data, trail, go) {
     el("span", {
       class: "dim small",
       text:
-        `${shown} shown of ${total} matching` +
+        `${shown} loaded of ${total} matching` +
         (trail.length ? ` · page ${trail.length + 1}` : ""),
     }),
     el("span", { class: "grow" }),
@@ -11276,26 +11891,37 @@ function unavailableCardsPanel() {
             const rows = data.chapters ?? [];
             const present = new Set(rows.map((entry) => entry.mdChapterId));
             for (const id of [...selected]) if (!present.has(id)) selected.delete(id);
+            // The bar counts and selects the page the table drew, not the
+            // batch behind it; it is redrawn each time that page changes.
+            const bar = el("div", {});
+            const drawBar = (page) =>
+              setChildren(
+                bar,
+                el("div", { class: "row" }, [
+                  el("span", {
+                    class: "dim small",
+                    text: `${selected.size} selected · ${page.length} on this page, ${rows.length} loaded of ${data.total ?? 0}`,
+                  }),
+                  el("span", { class: "grow" }),
+                  el("button", {
+                    type: "button",
+                    text:
+                      page.length && page.every((entry) => selected.has(entry.mdChapterId))
+                        ? "Select none"
+                        : "Select all on this page",
+                    disabled: page.length === 0,
+                    onclick: () => {
+                      if (page.every((entry) => selected.has(entry.mdChapterId))) selected.clear();
+                      else for (const entry of page) selected.add(entry.mdChapterId);
+                      void listing.load({ force: true });
+                    },
+                  }),
+                ]),
+              );
             return el(
               "div",
               {},
-              el("div", { class: "row" }, [
-                el("span", {
-                  class: "dim small",
-                  text: `${selected.size} selected · ${rows.length} shown of ${data.total ?? 0}`,
-                }),
-                el("span", { class: "grow" }),
-                el("button", {
-                  type: "button",
-                  text: rows.length && selected.size === rows.length ? "Select none" : "Select all on this page",
-                  disabled: rows.length === 0,
-                  onclick: () => {
-                    if (selected.size === rows.length) selected.clear();
-                    else for (const entry of rows) selected.add(entry.mdChapterId);
-                    void listing.load({ force: true });
-                  },
-                }),
-              ]),
+              bar,
               table(
                 ["", "Series", "Chapter", "Language", "Extension", "Marked unavailable"],
                 rows.map((entry) => [
@@ -11315,7 +11941,10 @@ function unavailableCardsPanel() {
                   entry.extension || "-",
                   fmtTime(entry.at),
                 ]),
-                { empty: "No chapter in the unavailable archive matches this filter." },
+                {
+                  empty: "No chapter in the unavailable archive matches this filter.",
+                  onPage: (shown) => drawBar(shown.map((at) => rows[at])),
+                },
               ),
               chapterPager(data, cursors, (walked) => {
                 cursors.length = 0;

@@ -2262,6 +2262,181 @@ dialog::backdrop {
   font-family: var(--mono);
 }
 
+/* ---- sortable headers, numbered pages -------------------------------------
+   A table is the console's main instrument, and the two things an operator
+   does to one are re-order it and walk it. Both controls are built from the
+   panel greys: neither is an abnormal condition, so neither gets a colour.
+   Only the cyan sort caret is allowed one, on the single column currently
+   ordering the table, because that IS a state and it has to be findable from
+   across the row of columns. */
+
+.table-host {
+  display: block;
+}
+
+/* The whole header cell is the target, so the button owns the padding the
+   `th` would otherwise have; a header you have to hit precisely is a header
+   that gets mis-clicked at density. */
+th.sortable {
+  padding: 0;
+}
+
+th.sortable > .th-sort {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 0;
+  padding: 6px 9px;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  font: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+th.sortable > .th-sort:hover {
+  background: var(--panel-3);
+  color: var(--text);
+}
+
+th.sortable > .th-sort:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -2px;
+}
+
+th.sorted {
+  color: var(--text);
+}
+
+/* The caret is 9px because it is a mark on a legend, not a legend of its own.
+   Held at a fixed width so a column does not shift sideways as the mark
+   changes between the neutral and the two sorted glyphs. */
+.sort-mark {
+  flex: 0 0 auto;
+  width: 1ch;
+  text-align: right;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--dimmer);
+  opacity: 0.55;
+}
+
+th.sortable > .th-sort:hover .sort-mark {
+  opacity: 1;
+}
+
+th.sorted .sort-mark {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.th-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The pager sits under the table it belongs to and inside the same card, so it
+   takes `.pager`'s hairline and reads as the foot of that instrument rather
+   than as a control floating between panels. */
+.table-pager {
+  gap: 6px;
+}
+
+.page-numbers {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.page-n,
+.page-step {
+  min-height: 26px;
+  padding: 3px 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.page-n {
+  min-width: 26px;
+  padding: 3px 6px;
+  justify-content: center;
+}
+
+/* The current page is a selection, not a disabled control: it stays legible
+   and stays clickable, and the cyan edge is the same "you are here" mark the
+   navigation rail uses. */
+.page-n.current {
+  background: var(--accent-bg);
+  border-color: var(--accent-2);
+  color: var(--text);
+  cursor: default;
+}
+
+.page-n.current:hover {
+  background: var(--accent-bg);
+  border-color: var(--accent-2);
+}
+
+.page-gap {
+  padding: 0 2px;
+  font-family: var(--mono);
+  user-select: none;
+}
+
+/* Pushed to the far end so the row count reads as an instrument total rather
+   than as another button in the group. */
+.page-count {
+  margin-left: auto;
+}
+
+/* Sorting from the stacked layout. Hidden wherever the header row is visible,
+   because there it would be a second control for the same state. */
+.table-sortbar {
+  display: none;
+  padding-bottom: 8px;
+}
+
+.table-sortbar select {
+  min-height: 28px;
+  font-size: 11px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.table-sortbar .sort-dir {
+  min-height: 28px;
+  padding: 3px 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+@media (max-width: 620px) {
+  .table-sortbar {
+    display: flex;
+  }
+
+  /* Numbers before words: on a narrow deck the pages are what the thumb wants,
+     and "Prev"/"Next" would push them off the end of the row. */
+  .table-pager {
+    gap: 4px;
+  }
+
+  .page-count {
+    margin-left: 0;
+    flex: 1 0 100%;
+  }
+}
+
 /* ---- chapter card preview ------------------------------------------------ */
 
 /* The unavailable card is a square 2000x2000 PNG. Constrained by width AND by
