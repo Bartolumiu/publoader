@@ -44,6 +44,8 @@ const SCHEDULE = {
   global: { perDay: 60, perMangaPerDay: 2, intervalHours: 12 },
   overrides: { viz: { perDay: 10 } },
   defaults: { perDay: 50, perMangaPerDay: 3, intervalHours: 24 },
+  scope: "global",
+  scopes: ["global", "extension"],
 };
 
 /** Swapped per test so the scope gate can be exercised. */
@@ -168,7 +170,7 @@ describe("release pacing is editable from the dashboard", () => {
     await goto("#/extensions");
     const card = cardByTitle("Release pacing");
     expect(card).toBeTruthy();
-    expect(numbers(card)).toEqual(["60", "2", "12"]);
+    expect(numbers(card)).toEqual(["60", "2", "12", "0"]);
     // An addition, not a replacement: the two pacing settings are different
     // things and the operator needs both on the page.
     expect(cardByTitle("Publisher fetch pacing")).toBeTruthy();
@@ -188,7 +190,7 @@ describe("release pacing is editable from the dashboard", () => {
     expect(cardByTitle("Release pacing").textContent).toContain("Overridden for: viz");
   });
 
-  it("saves all three fields together", async () => {
+  it("saves all four fields together", async () => {
     await goto("#/extensions");
     const card = cardByTitle("Release pacing");
     const [perDay, perManga, interval] = [...card.querySelectorAll('input[type="number"]')];
@@ -205,7 +207,7 @@ describe("release pacing is editable from the dashboard", () => {
     expect(write?.path).toContain("/upload-schedule");
     // 0 is sent as 0, not dropped as falsy: it is a value the endpoint accepts
     // and means something different from leaving the field alone.
-    expect(write?.body).toEqual({ perDay: 80, perMangaPerDay: 0, intervalHours: 6 });
+    expect(write?.body).toEqual({ perDay: 80, perMangaPerDay: 0, intervalHours: 6, spacingMinutes: 0 });
   });
 
   it("seeds an extension's form with what that extension actually uses", async () => {
@@ -213,7 +215,7 @@ describe("release pacing is editable from the dashboard", () => {
     const card = cardByTitle("Release pacing");
     expect(card).toBeTruthy();
     // perDay from the override, the other two from the global it merges over.
-    expect(numbers(card)).toEqual(["10", "2", "12"]);
+    expect(numbers(card)).toEqual(["10", "2", "12", "0"]);
     expect(card.textContent).toContain("Overridden for viz");
   });
 
@@ -235,7 +237,7 @@ describe("release pacing is editable from the dashboard", () => {
   it("offers no way to unfollow a global an extension is already following", async () => {
     await goto("#/extensions/mangaplus/config");
     const card = cardByTitle("Release pacing");
-    expect(numbers(card)).toEqual(["60", "2", "12"]);
+    expect(numbers(card)).toEqual(["60", "2", "12", "0"]);
     expect(card.textContent).toContain("Following the global");
     expect(buttonLabelled(card, "Follow global")).toBeUndefined();
     expect(buttonLabelled(card, "Override")).toBeTruthy();
@@ -247,5 +249,46 @@ describe("release pacing is editable from the dashboard", () => {
     await settle(10);
     await goto("#/extensions");
     expect(cardByTitle("Release pacing")).toBeUndefined();
+  });
+
+  it("offers the budget as two radios naming what the number applies to", async () => {
+    await goto("#/extensions");
+    const card = cardByTitle("Release pacing");
+    const radios = [...card.querySelectorAll('input[type="radio"]')];
+
+    expect(radios).toHaveLength(2);
+    // The saved perDay is named in both, because the whole choice is what that
+    // one number applies to.
+    expect(card.textContent).toContain("60 a day shared across all extensions");
+    expect(card.textContent).toContain("60 a day for each extension");
+    // The stored scope is the one selected.
+    expect((radios[0] as any).checked).toBe(true);
+    expect((radios[1] as any).checked).toBe(false);
+  });
+
+  it("saves the scope the moment a radio is picked", async () => {
+    await goto("#/extensions");
+    const card = cardByTitle("Release pacing");
+    const perExtension = [...card.querySelectorAll('input[type="radio"]')][1] as any;
+
+    calls = [];
+    perExtension.checked = true;
+    perExtension.dispatchEvent(new win.Event("change"));
+    await settle();
+
+    const write = scheduleWrites()[0];
+    expect(write?.path).toContain("/upload-schedule/scope");
+    expect(write?.body).toEqual({ scope: "extension" });
+  });
+
+  it("does not arm the radios for a credential that cannot write settings", async () => {
+    scopes = ["settings:read", "extensions:read"];
+    mount();
+    await settle(10);
+    await goto("#/extensions");
+    const radios = [...cardByTitle("Release pacing").querySelectorAll('input[type="radio"]')];
+
+    expect(radios).toHaveLength(2);
+    expect(radios.every((r: any) => r.disabled)).toBe(true);
   });
 });

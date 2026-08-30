@@ -19,7 +19,7 @@ import { ResultStore } from "../store/results.js";
 import { activeTrackedTitles } from "../store/trackedManga.js";
 import { AuditLog, SettingsStore, type RemovalMode } from "../store/settings.js";
 import { UploadTaskStore, uploadDedupeKey } from "../store/uploadTasks.js";
-import { planUploadSchedule, summariseSchedule } from "./uploadSchedule.js";
+import { intervalMsOf, planUploadSchedule, summariseSchedule } from "./uploadSchedule.js";
 import {
   aggregateChapterIds,
   backfillVolumes,
@@ -618,29 +618,70 @@ export class RunProcessor {
     // and none is recomputed later: a future-dated row is an ordinary PENDING
     // task waiting for its date.
     if (pendingUploads.length > 0) {
-      const schedule = await this.settings.getUploadSchedule(run.extension);
-      const scheduled = planUploadSchedule(pendingUploads, schedule);
-      const shape = summariseSchedule(scheduled);
+      // Only a CLEAN run spreads. A routine UPDATE is the day's handful of new
+      // chapters and the whole reason to run it is to publish them promptly;
+      // dating those forward buys nothing (they are already under any sane cap)
+      // and costs the thing the schedule was never meant to touch. Backlogs —
+      // an operator tracking a batch of series, the first run after an outage —
+      // arrive via CLEAN, which is what the cap exists for.
+      //
+      // FORCE is deliberately immediate too: it is an operator saying "do this
+      // now", and a cap that defers it would be answering a different question.
+      const spread = run.kind === "CLEAN";
 
-      for (const { chapter, notBefore } of scheduled) {
-        await this.tasks.enqueue("UPLOAD", uploadDedupeKey(chapter), chapter, { notBefore });
-      }
+      // Whose 50 a day it is. `global` is one pool for the platform, which is
+      // what protects MangaDex's feed — the feed does not care which extension
+      // a chapter came from, and five extensions each spending 50 is 250 a day
+      // against a cap that reads 50. `extension` gives each its own allowance,
+      // for when one publisher's backlog should not hold up another's routine
+      // updates. The scope picks both the settings and the load it counts, so
+      // the two can never disagree about which pool is being filled.
+      const scope = spread ? await this.settings.getUploadBudgetScope() : null;
+      const budgetOf = scope === "extension" ? run.extension : undefined;
+      const schedule = spread ? await this.settings.getUploadSchedule(budgetOf) : null;
 
-      if (shape.deferred > 0) {
-        log.info(
-          {
-            queued: scheduled.length,
-            immediate: shape.immediate,
-            deferred: shape.deferred,
-            days: shape.days,
-            lastRelease: shape.lastDate,
-            perDay: schedule.perDay,
-            perMangaPerDay: schedule.perMangaPerDay,
-          },
-          "spreading this run's uploads over several days",
+      if (schedule === null) {
+        for (const chapter of pendingUploads) {
+          await this.tasks.enqueue("UPLOAD", uploadDedupeKey(chapter), chapter);
+        }
+        log.debug(
+          { queued: pendingUploads.length, kind: run.kind },
+          "queued this run's uploads, all due now",
         );
       } else {
-        log.debug({ queued: scheduled.length }, "queued this run's uploads, all due now");
+        const scheduled = planUploadSchedule(
+          pendingUploads,
+          schedule,
+          new Date(),
+          // What every other extension and every earlier run already put in
+          // each bucket, so this run fills what is left rather than starting
+          // the calendar over.
+          await this.tasks.scheduledLoad(intervalMsOf(schedule), new Date(), budgetOf),
+        );
+        const shape = summariseSchedule(scheduled);
+
+        for (const { chapter, notBefore } of scheduled) {
+          await this.tasks.enqueue("UPLOAD", uploadDedupeKey(chapter), chapter, { notBefore });
+        }
+
+        if (shape.deferred > 0) {
+          log.info(
+            {
+              queued: scheduled.length,
+              immediate: shape.immediate,
+              deferred: shape.deferred,
+              days: shape.days,
+              lastRelease: shape.lastDate,
+              scope,
+              perDay: schedule.perDay,
+              perMangaPerDay: schedule.perMangaPerDay,
+              spacingMinutes: schedule.spacingMinutes,
+            },
+            "spreading this run's uploads over several days",
+          );
+        } else {
+          log.debug({ queued: scheduled.length }, "queued this run's uploads, all due now");
+        }
       }
     }
 

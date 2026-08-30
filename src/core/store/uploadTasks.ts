@@ -1,3 +1,4 @@
+import type { ScheduledLoad } from "../processor/uploadSchedule.js";
 import { randomUUID } from "node:crypto";
 import {
   Prisma,
@@ -421,6 +422,62 @@ export class UploadTaskStore {
   }
 
   // ---------------------------------------------------------------- operator
+
+  /**
+   * What is already dated into each release bucket, for the upload scheduler.
+   *
+   * The point is a budget shared across extensions: without this every run
+   * plans against an empty calendar, so `perDay` becomes a per-run quota and
+   * the real ceiling is `perDay × runs × extensions`. Reading the queue back
+   * makes a bucket fill once.
+   *
+   * `DONE` and `LEASED` count alongside `PENDING` because the cap is about how
+   * much reaches MangaDex in a window, and work already uploaded in this
+   * window spent that budget just as surely as work still waiting. Buckets
+   * before the current one are not read: they are spent and unreachable.
+   *
+   * Bucket arithmetic is done in SQL against the same absolute grid the
+   * planner uses (`floor(epoch_ms / intervalMs)`), so the two agree on
+   * boundaries without passing a bucket list back and forth.
+   */
+  async scheduledLoad(
+    intervalMs: number,
+    now: Date = new Date(),
+    /**
+     * Count only this extension's rows, for a per-extension budget. Omitted,
+     * every extension's work counts against one shared pool.
+     */
+    extension?: string,
+  ): Promise<ScheduledLoad> {
+    const fromBucket = Math.floor(now.getTime() / intervalMs);
+    const rows = await this.prisma.$queryRaw<{ bucket: bigint; manga: string; n: bigint }[]>(
+      Prisma.sql`
+        SELECT floor(extract(epoch FROM not_before) * 1000 / ${intervalMs})::bigint AS bucket,
+               coalesce(chapter->>'mdMangaId', chapter->>'mangaId', '') AS manga,
+               count(*)::bigint AS n
+        FROM upload_tasks
+        WHERE kind = 'UPLOAD' AND state IN ('PENDING', 'LEASED', 'DONE')
+          AND not_before >= to_timestamp(${(fromBucket * intervalMs) / 1000})
+          ${extension === undefined ? Prisma.empty : Prisma.sql`AND chapter->>'extensionName' = ${extension}`}
+        GROUP BY 1, 2
+      `,
+    );
+
+    const total = new Map<number, number>();
+    const perManga = new Map<number, Map<string, number>>();
+    for (const row of rows) {
+      const bucket = Number(row.bucket);
+      const n = Number(row.n);
+      total.set(bucket, (total.get(bucket) ?? 0) + n);
+      let byManga = perManga.get(bucket);
+      if (byManga === undefined) {
+        byManga = new Map<string, number>();
+        perManga.set(bucket, byManga);
+      }
+      byManga.set(row.manga, (byManga.get(row.manga) ?? 0) + n);
+    }
+    return { total, perManga };
+  }
 
   /**
    * One page of the queue in the order it will actually drain, plus the total

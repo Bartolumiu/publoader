@@ -19,6 +19,18 @@
  * an ordinary PENDING task the claim query ignores until its date arrives.
  * Because `enqueue` does nothing on conflict, a later run re-deciding the same
  * chapter leaves the date it already has — the schedule is set once and stands.
+ *
+ * Two properties make the cap mean what it says:
+ *
+ *  - **The grid is absolute.** Buckets are `floor(t / intervalMs)` anchored at
+ *    the unix epoch, not `now + n * interval` measured from whenever a run
+ *    happened to start. Runs start at arbitrary times, so run-relative buckets
+ *    never line up between runs and two runs an hour apart would each believe
+ *    they owned a fresh day. A fixed grid gives every run the same boundaries.
+ *  - **The budget is shared.** `existing` carries what is already queued in
+ *    each bucket, across every extension, so a bucket fills once rather than
+ *    once per extension. Without it `perDay` is a per-run quota and the real
+ *    ceiling is `perDay × runs × extensions`.
  */
 
 import type { UploadSchedule } from "../store/settings.js";
@@ -35,11 +47,27 @@ export interface SchedulableChapter {
 
 export interface ScheduledChapter<T> {
   chapter: T;
-  /** When the task becomes claimable. Day 0 is `now`, i.e. immediately. */
+  /** When the task becomes claimable. The current bucket means immediately. */
   notBefore: Date;
-  /** 0 for "today"; mostly here so a run can log the shape of what it queued. */
+  /** 0 for "the bucket this run is in"; mostly here for the run log. */
   day: number;
 }
+
+/**
+ * What is already queued, so a run fills what is left of each bucket rather
+ * than starting every bucket empty.
+ *
+ * Keyed by absolute bucket index (`bucketIndex`), and within a bucket by the
+ * same manga key the planner groups on, so both caps see prior load.
+ */
+export interface ScheduledLoad {
+  /** Rows already dated into this bucket, all extensions, all series. */
+  total: Map<number, number>;
+  /** Rows already dated into this bucket, per manga key. */
+  perManga: Map<number, Map<string, number>>;
+}
+
+export const EMPTY_LOAD: ScheduledLoad = { total: new Map(), perManga: new Map() };
 
 /** Series with no id of any kind share one bucket rather than each being alone. */
 function mangaKey(chapter: SchedulableChapter): string {
@@ -77,10 +105,54 @@ function limitOf(value: number): number {
   return value > 0 ? value : Number.POSITIVE_INFINITY;
 }
 
+export function intervalMsOf(schedule: UploadSchedule): number {
+  return Math.max(1, schedule.intervalHours) * 60 * 60 * 1000;
+}
+
 /**
- * Assign every chapter a release day.
+ * The absolute bucket a moment falls in.
  *
- * Filling is round-robin over series, oldest chapter first, advancing a day
+ * Anchored at the unix epoch so every run, of every extension, agrees on where
+ * one bucket ends and the next begins.
+ */
+export function bucketIndex(at: Date, intervalMs: number): number {
+  return Math.floor(at.getTime() / intervalMs);
+}
+
+/** When a bucket opens. The current bucket opened in the past, so `now` wins. */
+function bucketStart(index: number, intervalMs: number, now: Date): number {
+  return Math.max(index * intervalMs, now.getTime());
+}
+
+/**
+ * How far apart two consecutive uploads in one bucket are placed.
+ *
+ * Auto (`spacingMinutes: 0`) paces only a queue big enough to need it: a run
+ * that does not fill a day is the routine case, and dripping a dozen chapters
+ * across 24 hours would delay them for no benefit. Once the work does fill a
+ * day, the day's allowance is divided across the whole interval so it trickles
+ * rather than landing at once — without that, the cap spreads work across days
+ * and still bursts inside each one, which is exactly what a backlog does.
+ *
+ * An explicit `spacingMinutes` is an operator's decision and always applies.
+ * With no `perDay` there is nothing to divide by and nothing to burst.
+ */
+export function spacingMsOf(
+  schedule: UploadSchedule,
+  intervalMs: number,
+  /** Whether the work actually fills a day. False keeps a routine run immediate. */
+  crowded = true,
+): number {
+  if (schedule.spacingMinutes > 0) return schedule.spacingMinutes * 60 * 1000;
+  if (!crowded) return 0;
+  if (schedule.perDay > 0) return Math.floor(intervalMs / schedule.perDay);
+  return 0;
+}
+
+/**
+ * Assign every chapter a release bucket.
+ *
+ * Filling is round-robin over series, oldest chapter first, advancing a bucket
  * when either cap is reached. Round-robin is the part that matters: filling one
  * series at a time would put a single 300-chapter backlog in front of every
  * other series for a week, so a title that published one new chapter today
@@ -94,12 +166,13 @@ export function planUploadSchedule<T extends SchedulableChapter>(
   chapters: readonly T[],
   schedule: UploadSchedule,
   now: Date = new Date(),
+  existing: ScheduledLoad = EMPTY_LOAD,
 ): ScheduledChapter<T>[] {
   if (chapters.length === 0) return [];
 
   const perDay = limitOf(schedule.perDay);
   const perMangaPerDay = limitOf(schedule.perMangaPerDay);
-  const intervalMs = Math.max(1, schedule.intervalHours) * 60 * 60 * 1000;
+  const intervalMs = intervalMsOf(schedule);
 
   // No caps: everything is due now, which is exactly the old behaviour.
   if (perDay === Number.POSITIVE_INFINITY && perMangaPerDay === Number.POSITIVE_INFINITY) {
@@ -120,15 +193,38 @@ export function planUploadSchedule<T extends SchedulableChapter>(
   const cursors = new Map<string, number>(keys.map((key) => [key, 0]));
   const out: ScheduledChapter<T>[] = [];
 
+  const firstBucket = bucketIndex(now, intervalMs);
+  // "Big queue" is the whole trigger for pacing: work that fits in today with
+  // room to spare is the routine case and goes out as it always did.
+  const crowded = chapters.length + (existing.total.get(firstBucket) ?? 0) > perDay;
+  const spacingMs = spacingMsOf(schedule, intervalMs, crowded);
   let day = 0;
   let remaining = chapters.length;
 
-  while (remaining > 0) {
-    let placedToday = 0;
-    const placedPerManga = new Map<string, number>();
+  /**
+   * Where in its bucket the nth upload lands.
+   *
+   * `slot` counts prior load too, so a run topping up a bucket another run
+   * already partly filled queues behind that work rather than on top of it. The
+   * offset is clamped to the interval so a bucket's tail can never overtake the
+   * bucket after it.
+   */
+  const releaseAt = (bucket: number, slot: number): Date => {
+    const offset = Math.min(slot * spacingMs, Math.max(0, intervalMs - 1));
+    return new Date(bucketStart(bucket, intervalMs, now) + offset);
+  };
 
-    // One pass per round so series interleave; repeated until the day is full
-    // or nothing more fits in it.
+  while (remaining > 0) {
+    const bucket = firstBucket + day;
+
+    // Prior load counts against both caps, so a bucket another extension
+    // already filled is skipped rather than doubled up on.
+    let placedToday = existing.total.get(bucket) ?? 0;
+    const placedPerManga = new Map<string, number>(existing.perManga.get(bucket) ?? []);
+    const placedHere = placedToday;
+
+    // One pass per round so series interleave; repeated until the bucket is
+    // full or nothing more fits in it.
     let progressed = true;
     while (progressed && placedToday < perDay) {
       progressed = false;
@@ -143,11 +239,7 @@ export function planUploadSchedule<T extends SchedulableChapter>(
         const next = queue[cursor];
         if (next === undefined) continue;
 
-        out.push({
-          chapter: next,
-          notBefore: new Date(now.getTime() + day * intervalMs),
-          day,
-        });
+        out.push({ chapter: next, notBefore: releaseAt(bucket, placedToday), day });
         cursors.set(key, cursor + 1);
         placedPerManga.set(key, (placedPerManga.get(key) ?? 0) + 1);
         placedToday++;
@@ -156,19 +248,18 @@ export function planUploadSchedule<T extends SchedulableChapter>(
       }
     }
 
-    // Nothing fitted in a whole day: only reachable if both caps are zero-ish,
-    // which `limitOf` already rules out. Guard anyway so this cannot spin.
-    if (placedToday === 0) {
+    // Nothing fitted in this bucket. If prior load is why, the next bucket is
+    // the answer and the loop simply moves on; only a bucket that was empty and
+    // still took nothing is unfillable, and dumping the rest there beats
+    // spinning forever.
+    if (placedToday === placedHere && placedHere === 0) {
+      let slot = 0;
       for (const key of keys) {
         const queue = queues.get(key)!;
         for (let i = cursors.get(key)!; i < queue.length; i++) {
           const chapter = queue[i];
           if (chapter === undefined) continue;
-          out.push({
-            chapter,
-            notBefore: new Date(now.getTime() + day * intervalMs),
-            day,
-          });
+          out.push({ chapter, notBefore: releaseAt(bucket, slot++), day });
         }
         cursors.set(key, queue.length);
       }

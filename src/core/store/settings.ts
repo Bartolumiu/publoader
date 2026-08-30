@@ -48,6 +48,7 @@ const WEBHOOK_SUCCESSES_KEY = "webhook_upload_successes";
 const GITHUB_AUTO_SYNC_KEY = "github_auto_sync";
 const UPLOAD_SCHEDULE_KEY = "upload_schedule";
 const UPLOAD_SCHEDULE_OVERRIDES_KEY = "upload_schedule_overrides";
+const UPLOAD_BUDGET_SCOPE_KEY = "upload_budget_scope";
 
 const FETCH_THROTTLE_KEY = "fetch_throttle";
 const FETCH_THROTTLE_OVERRIDES_KEY = "fetch_throttle_overrides";
@@ -80,13 +81,41 @@ export interface UploadSchedule {
   perMangaPerDay: number;
   /** Gap between successive release days. */
   intervalHours: number;
+  /**
+   * Minimum gap between two consecutive uploads inside one release day.
+   *
+   * Without this a day's whole allowance carries the same `not_before`, so the
+   * uploader claims all of it back to back the instant the day opens: the cap
+   * spreads work across days but does nothing to the burst inside one. A big
+   * backlog is exactly where that shows, because a big backlog fills every day
+   * to the cap.
+   *
+   * `0` means auto: the day's allowance is spread evenly across the whole
+   * interval (`intervalHours / perDay` apart), so a full day trickles rather
+   * than lands. Set a number to force at least that gap instead.
+   */
+  spacingMinutes: number;
 }
 
 export const DEFAULT_UPLOAD_SCHEDULE: UploadSchedule = {
   perDay: 50,
   perMangaPerDay: 3,
   intervalHours: 24,
+  spacingMinutes: 0,
 };
+
+/**
+ * Whose budget `perDay` is.
+ *
+ * `global` is one pool for the whole platform: five extensions share 50/day,
+ * which is what protects MangaDex's feed, since the feed does not care which
+ * extension a chapter came from. `extension` gives each extension its own
+ * allowance, which is what you want when one publisher's backlog should not
+ * hold up another's routine updates.
+ */
+export type UploadBudgetScope = "global" | "extension";
+export const UPLOAD_BUDGET_SCOPES = ["global", "extension"] as const;
+export const DEFAULT_UPLOAD_BUDGET_SCOPE: UploadBudgetScope = "global";
 
 /**
  * Bounds, not preferences. `perDay: 0` is meaningful (spread nothing, the
@@ -99,6 +128,9 @@ function clampUploadSchedule(value: UploadSchedule): UploadSchedule {
     perDay: num(value.perDay, DEFAULT_UPLOAD_SCHEDULE.perDay, 0, 100_000),
     perMangaPerDay: num(value.perMangaPerDay, DEFAULT_UPLOAD_SCHEDULE.perMangaPerDay, 0, 100_000),
     intervalHours: num(value.intervalHours, DEFAULT_UPLOAD_SCHEDULE.intervalHours, 1, 24 * 30),
+    // Capped at a day: a gap longer than the interval would push a day's tail
+    // past the day it belongs to.
+    spacingMinutes: num(value.spacingMinutes, DEFAULT_UPLOAD_SCHEDULE.spacingMinutes, 0, 24 * 60),
   };
 }
 
@@ -115,7 +147,7 @@ function parseUploadSchedule(raw: unknown): Partial<UploadSchedule> {
   if (typeof value !== "object" || value === null) return {};
   const record = value as Record<string, unknown>;
   const out: Partial<UploadSchedule> = {};
-  for (const key of ["perDay", "perMangaPerDay", "intervalHours"] as const) {
+  for (const key of ["perDay", "perMangaPerDay", "intervalHours", "spacingMinutes"] as const) {
     const field = record[key];
     if (typeof field === "number") out[key] = field;
   }
@@ -313,6 +345,22 @@ export class SettingsStore {
   async setUploadSchedule(values: Partial<UploadSchedule>): Promise<void> {
     const next = clampUploadSchedule({ ...(await this.getUploadSchedule()), ...values });
     await this.setSetting(UPLOAD_SCHEDULE_KEY, JSON.stringify(next));
+  }
+
+  /**
+   * Whether `perDay` is one platform-wide pool or one pool per extension.
+   *
+   * Read as a whole-platform policy rather than a field on `UploadSchedule`,
+   * because a per-extension override choosing its own scope is incoherent: the
+   * question "is this budget shared?" has one answer for everybody.
+   */
+  async getUploadBudgetScope(): Promise<UploadBudgetScope> {
+    const raw = await this.getSetting(UPLOAD_BUDGET_SCOPE_KEY);
+    return raw === "extension" ? "extension" : DEFAULT_UPLOAD_BUDGET_SCOPE;
+  }
+
+  async setUploadBudgetScope(scope: UploadBudgetScope): Promise<void> {
+    await this.setSetting(UPLOAD_BUDGET_SCOPE_KEY, scope);
   }
 
   /** Every per-extension override, for the editor to render. */
