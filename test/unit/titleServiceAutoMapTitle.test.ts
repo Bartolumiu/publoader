@@ -202,7 +202,16 @@ describe("disconfirming evidence", () => {
   it("recognises the variant editions that share a serialised title's name", () => {
     expect(isVariantEdition(manga("a", ["Amagami-san Chi no Enmusubi (Oneshot)"]))).toBe(true);
     expect(isVariantEdition(manga("a", ["That Time I Got Reincarnated as a Slime (Fan Colored)"]))).toBe(true);
+    // Both seen on the live queue, both alongside the serialised entry they
+    // share a name with: GALAXIAS and Land of the Lustrous.
+    expect(isVariantEdition(manga("a", ["GALAXIAS (Pre-Serialization)"]))).toBe(true);
+    expect(isVariantEdition(manga("a", ["Houseki no Kuni (Minimalist Color)"]))).toBe(true);
+    expect(isVariantEdition(manga("a", ["Berserk (Official Colored)"]))).toBe(true);
+    expect(isVariantEdition(manga("a", ["Berserk (Colored)"]))).toBe(true);
+    // A marker has to be parenthetical: a series legitimately called this is
+    // not a variant of anything.
     expect(isVariantEdition(manga("a", ["Colorless"]))).toBe(false);
+    expect(isVariantEdition(manga("a", ["Oneshot Boy"]))).toBe(false);
   });
 });
 

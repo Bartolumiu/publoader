@@ -1066,7 +1066,7 @@ export function exactNameMatch(
  * "Colorless" or "Oneshot Boy" is untouched.
  */
 const VARIANT_EDITION =
-  /[([]\s*(oneshot|one-shot|fan[\s-]?colou?red|officially?[\s-]?colou?red|colou?red|doujinshi|anthology|spin[\s-]?off|remake|pilot|preview)\s*[)\]]/i;
+  /[([]\s*(?:(?:fan|official(?:ly)?|digital|minimalist)[\s-]?)?colou?r(?:ed)?\s*[)\]]|[([]\s*(?:oneshot|one-shot|doujinshi|anthology|spin[\s-]?off|remake|pilot|preview|pre-?serial(?:i[sz]ation)?|remaster(?:ed)?)\s*[)\]]/i;
 
 /** Is this candidate a variant edition rather than the serialised series? */
 export function isVariantEdition(candidate: {
