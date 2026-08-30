@@ -505,6 +505,29 @@ model TrackedManga {
   source    String   @default("auto")
   createdAt DateTime @default(now()) @map("created_at")
 
+  /// When this series becomes eligible for runs again; NULL means not paused.
+  ///
+  /// A series whose free set is frozen — Comikey's permanently-free prefix is
+  /// the motivating case — has an answer no run can change, and re-deriving it
+  /// costs a call per language on every clean run. Suppressing it is what makes
+  /// clean runs cheap enough to run often on the series that do change.
+  ///
+  /// Compared against the clock rather than paired with a boolean, so a
+  /// cooldown expires by itself: there is no sweep to run and no flag to go
+  /// stale. Suppressed while `recheckAfter > now`, due once it is not.
+  recheckAfter DateTime? @map("recheck_after")
+  /// Days to roll `recheckAfter` forward by once a clean run covers this series.
+  ///
+  /// NULL is a one-shot pause — the series comes back and stays back. Set, it
+  /// self-renews, which is the difference between "hold this while I fix the
+  /// mapping" and "this prefix is frozen, look every quarter".
+  cooldownDays Int?      @map("cooldown_days")
+  /// Why this series is paused, for the operator reading it six months later.
+  /// Audit history lives in audit_events; this is current state.
+  pausedAt     DateTime? @map("paused_at")
+  pausedBy     String?   @map("paused_by")
+  pauseReason  String?   @map("pause_reason")
+
   @@unique([extension, namespace, mangaId])
   @@index([extension])
   @@index([extension, namespace])

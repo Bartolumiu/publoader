@@ -36,6 +36,7 @@ import {
   type WorkerAction,
 } from "./apiClient.js";
 import type { Sensitivity } from "./authz.js";
+import { DEFAULT_COOLDOWN_DAYS, MAX_COOLDOWN_DAYS } from "../core/store/trackedManga.js";
 
 /** Discord's hard cap is 2000 characters; leave room for our own framing. */
 const DISCORD_BODY_LIMIT = 1900;
@@ -1759,7 +1760,9 @@ const commands: BotCommand[] = [
   {
     name: "tracked",
     description: "The external-id to MangaDex-id mapping for an extension.",
-    sensitivity: { list: "read", set: "mutate", remove: "mutate" },
+    // Pausing is a mutate, not a destructive: it changes what runs cover but
+    // takes nothing down, and it is reversible with one unpause.
+    sensitivity: { list: "read", set: "mutate", remove: "mutate", pause: "mutate", unpause: "mutate", paused: "read" },
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("tracked")
@@ -1794,6 +1797,47 @@ const commands: BotCommand[] = [
           .addStringOption((o) =>
             o.setName("manga-id").setDescription("The extension's own id for the series.").setRequired(true),
           ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("pause")
+          .setDescription("Leave a series out of runs until its cooldown expires.")
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
+          )
+          .addStringOption((o) =>
+            o.setName("manga-id").setDescription("The extension's own id for the series.").setRequired(true),
+          )
+          .addIntegerOption((o) =>
+            o
+              .setName("days")
+              .setDescription(`How long to pause for (default ${DEFAULT_COOLDOWN_DAYS}).`)
+              .setMinValue(1)
+              .setMaxValue(MAX_COOLDOWN_DAYS),
+          )
+          .addBooleanOption((o) =>
+            o.setName("once").setDescription("A one-shot hold: it expires for good instead of re-arming."),
+          )
+          .addStringOption((o) => o.setName("reason").setDescription("Why, for whoever reads this later.")),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("unpause")
+          .setDescription("Put a paused series back in runs immediately.")
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
+          )
+          .addStringOption((o) =>
+            o.setName("manga-id").setDescription("The extension's own id for the series.").setRequired(true),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("paused")
+          .setDescription("Series currently suppressed from runs, soonest to return first.")
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
+          ),
       ),
     async run(ctx) {
       const sub = ctx.options.subcommand();
@@ -1805,6 +1849,20 @@ const commands: BotCommand[] = [
         if (tracked.length > 30) rendered.push(`…and ${tracked.length - 30} more`);
         return { text: lines([`**${tracked.length} tracked manga for \`${extension}\`**`, ...rendered]) };
       }
+      if (sub === "paused") {
+        const { paused } = await ctx.api.pausedTracked(ctx.actor, extension);
+        if (paused.length === 0) return { text: `Nothing is paused for \`${extension}\`.` };
+        const rendered = paused
+          .slice(0, 30)
+          .map(
+            (p) =>
+              `• \`${p.mangaId}\` returns ${shortTime(p.recheckAfter)}` +
+              (p.cooldownDays ? ` (every ${p.cooldownDays}d)` : " (once)") +
+              (p.pauseReason ? ` — ${p.pauseReason}` : ""),
+          );
+        if (paused.length > 30) rendered.push(`…and ${paused.length - 30} more`);
+        return { text: lines([`**${paused.length} paused series in \`${extension}\`**`, ...rendered]) };
+      }
       const mangaId = requireString(ctx.options, "manga-id");
       if (sub === "remove") {
         const result = await ctx.api.removeTracked(ctx.actor, extension, mangaId);
@@ -1812,6 +1870,37 @@ const commands: BotCommand[] = [
           text: result.removed
             ? `:wastebasket: \`${extension}\`/\`${mangaId}\` is no longer tracked. Nothing on MangaDex was changed.`
             : `\`${extension}\`/\`${mangaId}\` was not tracked; nothing changed.`,
+        };
+      }
+      if (sub === "pause") {
+        const days = ctx.options.integer("days") ?? DEFAULT_COOLDOWN_DAYS;
+        const renew = ctx.options.boolean("once") !== true;
+        const reason = ctx.options.string("reason");
+        const result = await ctx.api.pauseTracked(ctx.actor, extension, {
+          mangaIds: [mangaId],
+          days,
+          renew,
+          ...(reason ? { reason } : {}),
+        });
+        if (result.changed === 0) {
+          return { text: `\`${extension}\`/\`${mangaId}\` is not tracked; nothing was paused.` };
+        }
+        return {
+          text:
+            `:pause_button: \`${extension}\`/\`${mangaId}\` is out of runs until ` +
+            `${shortTime(result.recheckAfter)}` +
+            (renew ? `, then re-arms every ${days} days after each clean run.` : " (one-shot).") +
+            "\nIt is neither fetched nor considered for removal while paused; " +
+            "its chapters on MangaDex are untouched.",
+        };
+      }
+      if (sub === "unpause") {
+        const result = await ctx.api.unpauseTracked(ctx.actor, extension, { mangaIds: [mangaId] });
+        return {
+          text:
+            result.changed > 0
+              ? `:arrow_forward: \`${extension}\`/\`${mangaId}\` is back in runs from the next one onwards.`
+              : `\`${extension}\`/\`${mangaId}\` is not tracked; nothing changed.`,
         };
       }
       const mdMangaId = requireString(ctx.options, "md-manga-id");

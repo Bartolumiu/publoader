@@ -6,6 +6,7 @@ import { JobStore } from "../store/jobs.js";
 import { BundleStore } from "../store/bundles.js";
 import { SettingsStore, AuditLog } from "../store/settings.js";
 import { UploadTaskStore } from "../store/uploadTasks.js";
+import { activeTrackedWhere } from "../store/trackedManga.js";
 import { computeSegments, dueSlot, effectiveSchedules, slotId } from "./slots.js";
 import type { DiscordEmbedInput } from "../md/webhook.js";
 import { runStartedEmbed } from "../md/webhookEmbeds.js";
@@ -234,8 +235,13 @@ export class SchedulerService {
       //
       // The DB (TrackedManga) is the source of truth for the tracked catalogue;
       // bundle data files only seed it at publish time.
+      // Paused series are left out, so segments are sized by the work a run
+      // will actually do. Including them would spread the real series thinner
+      // across the same number of workers and, on an extension with many
+      // paused rows, hand a worker a segment that is entirely suppressed and
+      // therefore does nothing.
       const tracked = await this.prisma.trackedManga.findMany({
-        where: { extension: manifest.name },
+        where: activeTrackedWhere(manifest.name),
         select: { namespace: true, mangaId: true },
       });
       // `segmentMangaIds` is a flat list of external ids on the wire, so it

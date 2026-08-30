@@ -16,6 +16,7 @@ import {
 import { chapterFromRecord, uploaderId, type Chapter, type MdApi, type MdChapter } from "../md/types.js";
 import { ExtensionConfigStore } from "../store/extensionConfig.js";
 import { ResultStore } from "../store/results.js";
+import { activeTrackedTitles } from "../store/trackedManga.js";
 import { AuditLog, SettingsStore, type RemovalMode } from "../store/settings.js";
 import { UploadTaskStore, uploadDedupeKey } from "../store/uploadTasks.js";
 import { planUploadSchedule, summariseSchedule } from "./uploadSchedule.js";
@@ -28,6 +29,8 @@ import {
   mdChapterMangaId,
   type OverrideOptionsLike,
 } from "./dedupe.js";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Turns committed result envelopes into MangaDex work.
@@ -686,8 +689,63 @@ export class RunProcessor {
 
     await this.reportRevivedChapters(run.extension, merged.allChapters, log);
 
+    if (!scoped && run.kind === "CLEAN" && allByManga !== null) {
+      await this.rearmRecheckCooldowns(run.extension, log);
+    }
+
     log.info({ ...totals, dupes }, "run processed");
     await this.markProcessed(run.id, log);
+  }
+
+  /**
+   * Roll expired cooldowns forward, so a paused series is re-examined on a
+   * schedule instead of drifting until somebody remembers it.
+   *
+   * A due series is one whose `recheckAfter` has passed: it rejoins the lease
+   * map, this run fetches it like any other, and this is where it goes quiet
+   * again for another `cooldownDays`. That cycle is the whole reason the pause
+   * is a cooldown and not a boolean -- "this free prefix will never grow" is a
+   * claim about a publisher's future, and the recheck is what would notice if
+   * Comikey widened a prefix from one chapter to five.
+   *
+   * Three conditions, each load-bearing:
+   *
+   *   CLEAN      only a clean run re-derives a series from the publisher's full
+   *              listing. An update run may legitimately skip it -- every new
+   *              extension narrows by a change signal -- so re-arming on one
+   *              would restart the cooldown on the strength of a look that
+   *              never happened.
+   *   unscoped   a scoped run is an operator probing one series, not the
+   *              periodic sweep the cooldown is counting down to.
+   *   allChapters present
+   *              a clean run that refused to claim a complete catalogue (a
+   *              region-narrowed view, a shrunken catalogue, an unreadable
+   *              series) did not perform the re-derivation either.
+   *
+   * `cooldownDays` NULL is left alone: that is a one-shot pause, and it has now
+   * expired for good.
+   */
+  private async rearmRecheckCooldowns(extension: string, log: Logger): Promise<void> {
+    const now = new Date();
+    const due = await this.prisma.trackedManga.findMany({
+      where: { extension, recheckAfter: { not: null, lte: now }, cooldownDays: { not: null } },
+      select: { id: true, mangaId: true, cooldownDays: true },
+    });
+    if (due.length === 0) return;
+
+    // Measured from now rather than from the old `recheckAfter`, so a cooldown
+    // that came due while runs were paused does not immediately come due again
+    // for every interval it slept through.
+    for (const row of due) {
+      await this.prisma.trackedManga.update({
+        where: { id: row.id },
+        data: { recheckAfter: new Date(now.getTime() + row.cooldownDays! * DAY_MS) },
+      });
+    }
+    log.info(
+      { extension, rearmed: due.length, series: due.slice(0, 20).map((r) => r.mangaId) },
+      "re-armed recheck cooldowns for series this clean run covered",
+    );
   }
 
   // -- envelope loading -----------------------------------------------------
@@ -761,10 +819,14 @@ export class RunProcessor {
   ): Promise<string[]> {
     const rows = await this.prisma.trackedManga.findMany({
       where: { extension },
-      select: { mdMangaId: true },
-      distinct: ["mdMangaId"],
+      select: { mdMangaId: true, recheckAfter: true },
     });
-    return [...new Set([...rows.map((row) => row.mdMangaId), ...reportedByWorkers])];
+
+    // Paused series are excluded here, and this is the half of the pause that
+    // is load-bearing rather than merely thrifty: see activeTrackedTitles for
+    // why filtering only the lease map would withdraw chapters instead of
+    // skipping series.
+    return activeTrackedTitles(rows, reportedByWorkers);
   }
 
   /**

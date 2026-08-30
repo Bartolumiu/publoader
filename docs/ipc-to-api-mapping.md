@@ -85,6 +85,9 @@ surface them because they are where operational problems now appear.
 | `GET /extensions/:name/tracked` | `tracked list <ext>` | Extensions → Configure → Tracked manga | The external-id → MangaDex-id mapping. **Replaces `manga_id_map.json`**: the database is the config authority. |
 | `PUT /extensions/:name/tracked` | `tracked set <ext> <mangaId> <mdMangaId>` | Extensions → Configure → Tracked manga → Add / repoint | Add or repoint a mapping. |
 | `DELETE /extensions/:name/tracked/:mangaId` | `tracked remove <ext> <mangaId>` | Extensions → Configure → Tracked manga → Remove | Stop tracking a manga. Does not touch MangaDex. |
+| `POST /extensions/:name/tracked/pause` | `tracked pause <ext> <mangaIds…>` | Extensions → Configure → Tracked manga → Pause | Leave series out of runs until their cooldown expires. Suppressed from the fetch **and** from removal detection, so chapters already on MangaDex are untouched. Bulk; ids may come from stdin. |
+| `POST /extensions/:name/tracked/unpause` | `tracked unpause <ext> <mangaIds…>` | Extensions → Configure → Tracked manga → Unpause | Put paused series back in runs immediately. |
+| `GET /extensions/:name/tracked/paused` | `tracked paused <ext>` | Extensions → Configure → Tracked manga (Runs column) | Series currently suppressed, soonest to return first, with the reason and who set it. |
 | `GET /extensions/:name/config` | `ext-config get <ext>` | Extensions → Configure → Override options | Override options as JSON. **Replaces `override_options.json`.** |
 | `PUT /extensions/:name/config` | `ext-config set <ext> [file]` | Extensions → Configure → Override options → Save (JSON validated) | Replace the override options (whole-document, not a merge). CLI reads a file or stdin. |
 | `GET /untracked?state=` | `untracked list [--state]` | Untracked (state filter) | Series an extension reported with no MangaDex title yet. |
@@ -226,7 +229,7 @@ and a slash command). The new bot is slash-only.
 
 `/runs show <id>`, `/jobs cancel <id>`, `/jobs retry <id>`, `/dead-letter`,
 `/quarantine`, `/errors list|clear|restore`, `/workers list|drain|activate|revoke`, `/enroll`,
-`/untracked list|approve|skip`, `/tracked list|set|remove`,
+`/untracked list|approve|skip`, `/tracked list|set|remove|pause|unpause|paused`,
 `/queue retry|cancel|requeue-stale`, `/audit`, `/whoami`: the endpoints listed
 under "New capabilities" above plus those in `routes/ops.ts`, now reachable from
 chat.

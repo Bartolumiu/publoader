@@ -8363,6 +8363,91 @@ function repointDialog(name, item, tracked) {
   );
 }
 
+/** Whether a tracked row is suppressed from runs at this moment. */
+function isPaused(item) {
+  return item.recheckAfter != null && new Date(item.recheckAfter).getTime() > Date.now();
+}
+
+/**
+ * Take a series out of runs for a while.
+ *
+ * The case this is for: a publisher whose free set is a frozen prefix, where a
+ * series with one free chapter has an answer no run can change, and every clean
+ * run pays a request to re-derive it anyway. Pausing it is what makes clean
+ * runs cheap enough to run often on the series that do move.
+ *
+ * A cooldown rather than an off switch, and the dialog says so, because "this
+ * will never change" is a claim about a publisher's future. The recheck is what
+ * would notice if the publisher widened the free prefix.
+ */
+function pauseDialog(name, item, tracked) {
+  const encoded = encodeURIComponent(name);
+  const days = el("input", { id: "pause-days", type: "number", min: "1", max: "3650", value: "90" });
+  const reason = el("input", { id: "pause-reason", type: "text", placeholder: "why, for whoever reads this later" });
+  const renew = el("input", { id: "pause-renew", type: "checkbox", checked: true });
+
+  openModal(
+    `Pause ${item.mangaId}`,
+    el(
+      "div",
+      {},
+      el("p", {
+        class: "dim small",
+        text:
+          "While paused this series is left out of every run: it is not fetched, and it is not a " +
+          "candidate for chapter removal either. Chapters already on MangaDex stay exactly as they are.",
+      }),
+      el("label", { for: "pause-days", text: "Pause for (days)" }),
+      days,
+      el(
+        "label",
+        { class: "inline", for: "pause-renew" },
+        renew,
+        " Re-arm after each clean run that covers it",
+      ),
+      el("p", {
+        class: "dim small",
+        text:
+          "Re-arming makes this a recurring cooldown: the series comes back, one clean run looks at " +
+          "it properly, and it goes quiet again. Unchecked, the pause expires once and for good.",
+      }),
+      el("label", { for: "pause-reason", text: "Reason" }),
+      reason,
+      el(
+        "div",
+        { class: "row end" },
+        el("button", { type: "button", text: "Cancel", onclick: closeModal }),
+        gatedButton("tracked:write", {
+          class: "primary",
+          text: "Pause it",
+          onclick: async (event) => {
+            const value = Number(days.value);
+            if (!Number.isInteger(value) || value < 1 || value > 3650) {
+              return void toast("pause length must be a whole number of days, 1 to 3650", false);
+            }
+            const ok = await act(
+              "tracked_manga.pause",
+              () =>
+                api(`/extensions/${encoded}/tracked/pause`, {
+                  method: "POST",
+                  body: {
+                    mangaIds: [item.mangaId],
+                    days: value,
+                    renew: renew.checked,
+                    ...(item.namespace ? { namespace: item.namespace } : {}),
+                    ...(reason.value.trim() ? { reason: reason.value.trim() } : {}),
+                  },
+                }),
+              { button: event.currentTarget, refresh: [tracked] },
+            );
+            if (ok) closeModal();
+          },
+        }),
+      ),
+    ),
+  );
+}
+
 function trackedCard(name, tracked) {
   const encoded = encodeURIComponent(name);
   let page = 0;
@@ -8411,7 +8496,7 @@ function trackedCard(name, tracked) {
           (data.namespaces ?? []).filter(Boolean).map((ns) => el("option", { value: ns })),
         ),
         table(
-          ["Catalogue", "External id", "MangaDex id", "Source", "Added", ""],
+          ["Catalogue", "External id", "MangaDex id", "Source", "Added", "Runs", ""],
           slice.map((item) => [
             // "default" rather than blank: an empty cell reads as missing data,
             // and the flat id space is a real answer.
@@ -8420,12 +8505,48 @@ function trackedCard(name, tracked) {
             mdTitleLink(item.mdMangaId),
             item.source,
             fmtTime(item.createdAt),
+            // Says WHEN it comes back rather than just "paused": an operator
+            // scanning this column wants to know whether the pause is about to
+            // lapse, and a bare badge would make them open the row to find out.
+            isPaused(item)
+              ? el("span", {
+                  class: "dim",
+                  text: `paused until ${fmtTime(item.recheckAfter)}${item.cooldownDays ? ` (every ${item.cooldownDays}d)` : ""}`,
+                  title: item.pauseReason
+                    ? `${item.pauseReason}${item.pausedBy ? ` — ${item.pausedBy}` : ""}`
+                    : "No reason recorded",
+                })
+              : el("span", { text: "active" }),
             [
               gatedButton("tracked:write", {
                 text: "Repoint",
                 title: "Point this external id at a different MangaDex title",
                 onclick: () => repointDialog(name, item, tracked),
               }),
+              isPaused(item)
+                ? gatedButton("tracked:write", {
+                    text: "Unpause",
+                    title: "Put this series back in runs immediately",
+                    onclick: async (event) => {
+                      await act(
+                        "tracked_manga.unpause",
+                        () =>
+                          api(`/extensions/${encoded}/tracked/unpause`, {
+                            method: "POST",
+                            body: {
+                              mangaIds: [item.mangaId],
+                              ...(item.namespace ? { namespace: item.namespace } : {}),
+                            },
+                          }),
+                        { button: event.currentTarget, refresh: [tracked] },
+                      );
+                    },
+                  })
+                : gatedButton("tracked:write", {
+                    text: "Pause",
+                    title: "Leave this series out of runs until its cooldown expires",
+                    onclick: () => pauseDialog(name, item, tracked),
+                  }),
               gatedButton("tracked:write", {
                 class: "danger",
                 text: "Remove",
@@ -8480,7 +8601,7 @@ function trackedCard(name, tracked) {
           : el("p", { class: "dim small", text: `${matches.length} of ${rows.length} mapping(s).` }),
       );
     },
-    { reserve: 260, skeleton: () => skeletonTable(6, 5) },
+    { reserve: 260, skeleton: () => skeletonTable(7, 5) },
   );
 
   search.addEventListener("input", () => {

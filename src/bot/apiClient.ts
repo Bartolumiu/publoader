@@ -227,6 +227,11 @@ export interface TrackedEntry {
   mdMangaId: string;
   source?: string | null;
   createdAt: string;
+  /** Set while the series is suppressed from runs; see the recheck cooldown. */
+  recheckAfter?: string | null;
+  cooldownDays?: number | null;
+  pausedBy?: string | null;
+  pauseReason?: string | null;
 }
 
 export interface AuditEntry {
@@ -1289,6 +1294,43 @@ export class AdminApiClient {
         `/tracked/${encodeURIComponent(mangaId)}`,
       scope: "extensions:write",
       actor,
+    });
+  }
+
+  pausedTracked(actor: string, extension: string): Promise<{ paused: TrackedEntry[] }> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/admin/extensions/${encodeURIComponent(extension)}/tracked/paused`,
+      scope: "extensions:read",
+      actor,
+    });
+  }
+
+  pauseTracked(
+    actor: string,
+    extension: string,
+    body: { mangaIds: string[]; days?: number; renew?: boolean; reason?: string; namespace?: string },
+  ): Promise<{ ok: boolean; changed: number; notFound: { mangaId: string }[]; recheckAfter: string }> {
+    return this.request({
+      method: "POST",
+      path: `/api/v1/admin/extensions/${encodeURIComponent(extension)}/tracked/pause`,
+      scope: "extensions:write",
+      actor,
+      json: body,
+    });
+  }
+
+  unpauseTracked(
+    actor: string,
+    extension: string,
+    body: { mangaIds: string[]; namespace?: string },
+  ): Promise<{ ok: boolean; changed: number; notFound: { mangaId: string }[] }> {
+    return this.request({
+      method: "POST",
+      path: `/api/v1/admin/extensions/${encodeURIComponent(extension)}/tracked/unpause`,
+      scope: "extensions:write",
+      actor,
+      json: body,
     });
   }
 }

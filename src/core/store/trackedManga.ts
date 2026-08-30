@@ -189,6 +189,103 @@ export interface MangaIdMapPayload {
 }
 
 /**
+ * The `where` clause naming the series an extension may act on right now.
+ *
+ * A paused series is suppressed from BOTH sides of every run, and the second
+ * side is the one that bites. Filtering only the lease map looks like it works:
+ * the extension stops fetching the series and stops reporting it in
+ * `allChapters`. But `authoritativeTrackedIds` rebuilds the tracked set from
+ * this table, `removeMangaWithoutExternalChapters` then takes every tracked id
+ * NOT in `allChapters` as a series the publisher has dropped, and the paused
+ * series matches exactly that shape. A half-applied pause does not skip a
+ * series; it takes its chapters down from MangaDex.
+ *
+ * So this predicate is the single definition of "in play", and every site that
+ * decides what a run covers uses it: the lease map (what gets fetched), the
+ * authoritative tracked set (what can be withdrawn), and the partitioner (what
+ * gets segmented). Sites that merely RESOLVE an id — chapterReconcile mapping a
+ * MangaDex title back to an external one, ingest validating that an envelope
+ * only names titles the extension owns — deliberately do not use it: a paused
+ * series still has a mapping and its worker may hold a lease taken before the
+ * pause, and rejecting that envelope would fail an otherwise good run.
+ *
+ * `now` is a parameter so the boundary is testable without touching the clock.
+ */
+export function activeTrackedWhere(extension: string, now: Date = new Date()) {
+  return {
+    extension,
+    // Due counts as active: the cooldown has expired and this run is the one
+    // that should look at it.
+    OR: [{ recheckAfter: null }, { recheckAfter: { lte: now } }],
+  };
+}
+
+/** The complement of {@link activeTrackedWhere}: series suppressed right now. */
+export function pausedTrackedWhere(extension: string, now: Date = new Date()) {
+  return { extension, recheckAfter: { gt: now } };
+}
+
+/**
+ * The same judgement as {@link activeTrackedWhere}, applied to a row in hand.
+ *
+ * Exists so the clock comparison is written once. Callers that have to decide
+ * per MangaDex title rather than per row need this: uniqueness is on the
+ * EXTERNAL side, so one title can carry several external rows (mangaplus keeps
+ * one per language edition), and such a title is only really paused when every
+ * one of its rows is. A `where` clause cannot express that; it would return the
+ * title as active on the strength of a single unpaused row, or as paused on a
+ * single paused one, depending which way it was written.
+ */
+export function isTrackedRowActive(
+  row: { recheckAfter: Date | null },
+  now: Date = new Date(),
+): boolean {
+  return row.recheckAfter === null || row.recheckAfter.getTime() <= now.getTime();
+}
+
+/**
+ * The MangaDex titles a run may act on, from this extension's tracked rows and
+ * whatever the workers reported.
+ *
+ * This is the withdrawal side of the pause, and it is the half that bites.
+ * `removeMangaWithoutExternalChapters` queues a removal for every tracked id
+ * absent from `allChapters` -- and a paused series is absent from `allChapters`
+ * by construction, because it was withheld from the lease map. A pause applied
+ * only to the lease map therefore does not skip a series; it takes its chapters
+ * down from MangaDex.
+ *
+ * Two rules, both load-bearing:
+ *
+ *   per TITLE, not per row  one title can carry several external rows
+ *                           (mangaplus keeps one per language edition) and is
+ *                           only paused when all of them are. Otherwise pausing
+ *                           one edition withdraws the others.
+ *   the database wins       a worker that leased before the pause landed still
+ *                           names the series, honestly. Unioning its report
+ *                           blind would let an in-flight run undo the pause;
+ *                           ids the database knows must also be active. Ids it
+ *                           does NOT know still pass, which is what admits a
+ *                           title mapped since the run started.
+ *
+ * Pure and exported so the rule is testable without a database.
+ */
+export function activeTrackedTitles(
+  rows: readonly { mdMangaId: string; recheckAfter: Date | null }[],
+  reportedByWorkers: readonly string[],
+  now: Date = new Date(),
+): string[] {
+  const known = new Set<string>();
+  const active = new Set<string>();
+  for (const row of rows) {
+    known.add(row.mdMangaId);
+    if (isTrackedRowActive(row, now)) active.add(row.mdMangaId);
+  }
+  return [...new Set([...known, ...reportedByWorkers])].filter(
+    (id) => !known.has(id) || active.has(id),
+  );
+}
+
+/**
  * Build the lease payload from tracked rows.
  *
  * Rows in the default id space keep the `""` key when any other row is
@@ -212,8 +309,147 @@ export function buildMangaIdMap(
   return { mangaIdMap: nested, namespaced: true };
 }
 
+/**
+ * How long a pause lasts when the caller does not say.
+ *
+ * A quarter is chosen to be long enough to be worth doing — it takes a frozen
+ * series out of roughly twelve weekly clean runs — and short enough that a
+ * publisher's change is noticed in a season rather than never.
+ */
+export const DEFAULT_COOLDOWN_DAYS = 90;
+/** A decade. Past this the value is a typo, not an intention. */
+export const MAX_COOLDOWN_DAYS = 3650;
+
+export interface PauseTarget {
+  mangaId: string;
+  namespace?: string;
+}
+
+export interface PauseRequest {
+  targets: PauseTarget[];
+  /** Days to suppress for; defaults to {@link DEFAULT_COOLDOWN_DAYS}. */
+  days?: number;
+  /**
+   * Whether the cooldown re-arms itself after each clean run that covers the
+   * series. True is the frozen-catalogue case and the sensible default; false
+   * is a one-shot hold that expires for good.
+   */
+  renew?: boolean;
+  reason?: string;
+  actor: string;
+}
+
+export interface PauseResult {
+  changed: number;
+  notFound: PauseTarget[];
+  /** When the paused series next rejoins a run. Absent when unpausing. */
+  recheckAfter?: Date;
+}
+
 export class TrackedMangaStore {
   constructor(private readonly prisma: PrismaClient) {}
+
+  /**
+   * Suppress series from runs until their cooldown expires.
+   *
+   * Bulk by design. The motivating case is not one series but the long tail of
+   * them: on Comikey a free set is the first N episodes and nothing else, so
+   * "every series whose free set is one chapter" is hundreds of rows found by
+   * one query and paused in one action. A per-row API would make the useful
+   * operation a loop the operator has to write.
+   *
+   * Rows are matched on (namespace, mangaId) and missing ones are REPORTED
+   * rather than failing the batch, matching applyBatch: an operator pasting 200
+   * ids wants to know which three were wrong.
+   */
+  async pause(extension: string, request: PauseRequest): Promise<PauseResult> {
+    const days = request.days ?? DEFAULT_COOLDOWN_DAYS;
+    const now = new Date();
+    const recheckAfter = new Date(now.getTime() + days * 86_400_000);
+    const renew = request.renew ?? true;
+
+    const { matched, notFound } = await this.resolveTargets(extension, request.targets);
+    if (matched.length === 0) return { changed: 0, notFound, recheckAfter };
+
+    const result = await this.prisma.trackedManga.updateMany({
+      where: { id: { in: matched.map((row) => row.id) } },
+      data: {
+        recheckAfter,
+        // NULL is what makes a pause one-shot, so `renew: false` must clear any
+        // interval a previous pause left behind rather than inherit it.
+        cooldownDays: renew ? days : null,
+        pausedAt: now,
+        pausedBy: request.actor,
+        pauseReason: request.reason ?? null,
+      },
+    });
+    return { changed: result.count, notFound, recheckAfter };
+  }
+
+  /**
+   * Put paused series back in play immediately.
+   *
+   * Clears the interval as well as the deadline: leaving `cooldownDays` set on
+   * an unpaused row would do nothing today (nothing reads it while
+   * `recheckAfter` is NULL) but would silently re-arm the series if it were
+   * ever paused again without an explicit interval.
+   */
+  async unpause(extension: string, targets: PauseTarget[]): Promise<PauseResult> {
+    const { matched, notFound } = await this.resolveTargets(extension, targets);
+    if (matched.length === 0) return { changed: 0, notFound };
+
+    const result = await this.prisma.trackedManga.updateMany({
+      where: { id: { in: matched.map((row) => row.id) } },
+      data: {
+        recheckAfter: null,
+        cooldownDays: null,
+        pausedAt: null,
+        pausedBy: null,
+        pauseReason: null,
+      },
+    });
+    return { changed: result.count, notFound };
+  }
+
+  /**
+   * Currently-suppressed series, soonest to return first.
+   *
+   * Rows whose cooldown has expired are deliberately absent: they are due, and
+   * a run will pick them up, so listing them as "paused" would report a state
+   * the system no longer acts on.
+   */
+  async listPaused(extension: string, now: Date = new Date()) {
+    return this.prisma.trackedManga.findMany({
+      where: pausedTrackedWhere(extension, now),
+      orderBy: [{ recheckAfter: "asc" }, { mangaId: "asc" }],
+    });
+  }
+
+  /** Match pause targets to rows, reporting the ones that do not exist. */
+  private async resolveTargets(
+    extension: string,
+    targets: PauseTarget[],
+  ): Promise<{ matched: { id: string }[]; notFound: PauseTarget[] }> {
+    const wanted = new Map<string, PauseTarget>();
+    for (const target of targets) {
+      const namespace = normaliseNamespace(target.namespace);
+      wanted.set(pairKey(namespace, target.mangaId), { mangaId: target.mangaId, namespace });
+    }
+
+    const rows = await this.prisma.trackedManga.findMany({
+      where: { extension, mangaId: { in: targets.map((t) => t.mangaId) } },
+      select: { id: true, namespace: true, mangaId: true },
+    });
+
+    const matched: { id: string }[] = [];
+    for (const row of rows) {
+      const key = pairKey(row.namespace, row.mangaId);
+      if (!wanted.has(key)) continue;
+      matched.push({ id: row.id });
+      wanted.delete(key);
+    }
+    return { matched, notFound: [...wanted.values()] };
+  }
 
   async list(extension: string, namespace?: string) {
     return this.prisma.trackedManga.findMany({
