@@ -8211,6 +8211,21 @@ function uploadScheduleControls(data, resource) {
       ` ${label}`,
     );
 
+  const paused = new Set(data.paused ?? []);
+  const setPaused = (name, on) => {
+    const next = new Set(paused);
+    if (on) next.add(name);
+    else next.delete(name);
+    act(
+      "upload-schedule.paused",
+      () =>
+        api("/upload-schedule/paused", {
+          method: "POST",
+          body: { extensions: [...next].sort() },
+        }),
+      { refresh: [resource] },
+    );
+  };
   const priority = new Set(data.priority ?? []);
   // Every extension the platform knows, not just the ones already prioritised,
   // so turning priority ON is a click rather than knowing a name to type.
@@ -8241,6 +8256,23 @@ function uploadScheduleControls(data, resource) {
             // Writes the setting on click, so a reader must not arm it.
             disabled: !can("settings:write"),
             onchange: (event) => setPriority(name, event.target.checked),
+          }),
+          ` ${name}`,
+        ),
+      )
+    : [el("span", { class: "dim small", text: "No extensions configured yet." })];
+
+  const pausedBoxes = knownExtensions.length
+    ? knownExtensions.map((name) =>
+        el(
+          "label",
+          { class: "inline", for: `schedule-paused-${name}` },
+          el("input", {
+            id: `schedule-paused-${name}`,
+            type: "checkbox",
+            checked: paused.has(name),
+            disabled: !can("settings:write"),
+            onchange: (event) => setPaused(name, event.target.checked),
           }),
           ` ${name}`,
         ),
@@ -8297,6 +8329,14 @@ function uploadScheduleControls(data, resource) {
         "queue however long it is, and go out whether or not the day's budget is spent. For a " +
         "daily publisher whose chapters are worth little late. Clean runs are never prioritised — " +
         "a clean run is the backlog, and spreading it is the point.",
+    }),
+    row(el("span", { class: "inline", text: "Paused" }), ...pausedBoxes),
+    el("p", {
+      class: "dim small",
+      text:
+        "A paused extension's queued work is held: the uploader steps over it and everybody " +
+        "else keeps draining. Nothing is cancelled or re-dated, so un-pausing resumes exactly " +
+        "where the queue was. It does not stop the queue growing — runs still add to it.",
     }),
     // Named rather than counted, for the reason the pacing card above names
     // them: a number does not tell an operator whether the global they are

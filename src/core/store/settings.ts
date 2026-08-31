@@ -50,6 +50,7 @@ const UPLOAD_SCHEDULE_KEY = "upload_schedule";
 const UPLOAD_SCHEDULE_OVERRIDES_KEY = "upload_schedule_overrides";
 const UPLOAD_BUDGET_SCOPE_KEY = "upload_budget_scope";
 const UPLOAD_PRIORITY_KEY = "upload_priority_extensions";
+const UPLOAD_PAUSED_KEY = "upload_paused_extensions";
 
 const FETCH_THROTTLE_KEY = "fetch_throttle";
 const FETCH_THROTTLE_OVERRIDES_KEY = "fetch_throttle_overrides";
@@ -152,6 +153,23 @@ export const DEFAULT_UPLOAD_BUDGET_SCOPE: UploadBudgetScope = "global";
  * to fix rather than a new way to cause it.
  */
 export const DEFAULT_UPLOAD_PRIORITY_EXTENSIONS: string[] = [];
+
+/**
+ * Extensions whose queued work is held, without being cancelled.
+ *
+ * The global pause stops the whole platform, which is the wrong instrument when
+ * one publisher is the problem: a comikey backlog that needs looking at should
+ * not also stop MANGA Plus publishing today's chapters. This holds one
+ * extension's tasks and leaves everybody else draining.
+ *
+ * It is a claim-time filter, not a state change. Tasks stay PENDING with their
+ * dates untouched, so nothing is cancelled, re-queued or re-dated, and removing
+ * the name resumes exactly where the queue was. That also means a paused
+ * extension keeps ACCUMULATING work -- runs still decide and enqueue normally;
+ * only the uploader declines to pick it up. Pausing to stop a runaway backlog
+ * growing is the one thing this does not do.
+ */
+export const DEFAULT_UPLOAD_PAUSED_EXTENSIONS: string[] = [];
 
 /**
  * Bounds, not preferences. `perDay: 0` is meaningful (spread nothing, the
@@ -421,6 +439,30 @@ export class SettingsStore {
   async setUploadPriorityExtensions(names: string[]): Promise<string[]> {
     const clean = [...new Set(names.filter((n) => typeof n === "string" && n !== ""))].sort();
     await this.setSetting(UPLOAD_PRIORITY_KEY, JSON.stringify(clean));
+    return clean;
+  }
+
+  /**
+   * Extensions the uploader is currently declining to claim work for.
+   *
+   * Malformed content reads as "nothing is paused", the same direction the
+   * priority list fails in: a bad value must not silently stop the queue.
+   */
+  async getUploadPausedExtensions(): Promise<string[]> {
+    const raw = await this.getSetting(UPLOAD_PAUSED_KEY);
+    if (!raw) return [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return [...new Set(parsed.filter((v): v is string => typeof v === "string" && v !== ""))].sort();
+    } catch {
+      return [];
+    }
+  }
+
+  async setUploadPausedExtensions(names: string[]): Promise<string[]> {
+    const clean = [...new Set(names.filter((n) => typeof n === "string" && n !== ""))].sort();
+    await this.setSetting(UPLOAD_PAUSED_KEY, JSON.stringify(clean));
     return clean;
   }
 
