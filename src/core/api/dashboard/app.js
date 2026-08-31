@@ -1621,6 +1621,7 @@ const NAV = [
       ["uploaded", "On MangaDex"],
       ["unavailable", "Unavailable"],
       ["restores", "Restores"],
+      ["collisions", "Collisions"],
       ["deleted", "Deleted"],
       ["edited", "Edited"],
     ],
@@ -4843,12 +4844,114 @@ function chapterRestores() {
   );
 }
 
+/**
+ * Uploads that landed on a chapter number our own group already held.
+ *
+ * NOT an error list, which is why it is here and not under Errors: every upload
+ * on this page was intended and every one succeeded. It exists because the
+ * duplicate check is the url — the publisher's chapter token has to appear in
+ * the MangaDex externalUrl — and an extension whose ids are shaped differently
+ * fails that check silently, for every chapter, forever. comikey's "EPI-"
+ * prefix did exactly that and one clean run put up 66 chapters that were
+ * already there. Nothing was watching the number. This is that watch.
+ *
+ * A row is a question, not a verdict. Publishers legitimately reuse a number:
+ * a re-release under a new episode id, a split chapter, a "Volume 3" episode
+ * whose number is a volume. Acknowledging says "looked, it is fine" and hides
+ * it without deleting it.
+ */
+function chapterCollisions() {
+  const showAck = { value: false };
+  const collisions = new Resource("chapter-collisions", () =>
+    api(`/chapters/collisions?limit=200&includeAcknowledged=${showAck.value}`),
+  );
+  const writable = can("chapters:write") && isOperator();
+
+  const acknowledge = async (ids, undo) => {
+    try {
+      const res = await api("/chapters/collisions/acknowledge", {
+        method: "POST",
+        json: { ids, undo },
+      });
+      toast(`${res.changed} ${undo ? "reopened" : "acknowledged"}`);
+      void collisions.load({ force: true });
+    } catch (err) {
+      toast(err.message ?? "could not update", "error");
+    }
+  };
+
+  const toggle = el("input", { type: "checkbox" });
+  toggle.addEventListener("change", () => {
+    showAck.value = toggle.checked;
+    void collisions.load({ force: true });
+  });
+
+  return el(
+    "div",
+    {},
+    card(
+      "Number collisions",
+      el("p", {
+        class: "dim small",
+        text:
+          "Chapters we published onto a number and language our own group already had on " +
+          "MangaDex. These uploads were not blocked — a repeated number is often legitimate — " +
+          "but a run of them in one series usually means duplicate detection is not matching, " +
+          "and the chapters went up twice.",
+      }),
+      el("label", { class: "small" }, [toggle, el("span", { text: " show acknowledged" })]),
+      live([collisions], (data) => {
+        const rows = data?.entries ?? [];
+        const outstanding = data?.outstanding ?? 0;
+        return el("div", {}, [
+          el("p", {
+            class: outstanding > 0 ? "warn-text small" : "small",
+            text: `${outstanding} not yet looked at · ${data?.total ?? 0} listed`,
+          }),
+          table(
+            ["Series", "Lang", "Ch", "Extension", "Already there", "Seen", ""],
+            rows.map((r) => [
+              r.mangaName ?? r.mdMangaId ?? "—",
+              r.chapterLanguage ?? "—",
+              r.chapterNumber ?? "—",
+              r.extension ?? "—",
+              el(
+                "div",
+                { class: "small" },
+                (r.existing ?? []).map((e) =>
+                  el("div", {}, [
+                    el("code", { text: (e.mdChapterId ?? "—").slice(0, 8) }),
+                    el("span", {
+                      class: "dim",
+                      text: ` ${(e.createdAt ?? "").slice(0, 10)} ${e.chapterTitle ?? ""}`,
+                    }),
+                  ]),
+                ),
+              ),
+              el("span", { class: "dim small", text: (r.detectedAt ?? "").slice(0, 10) }),
+              writable
+                ? el("button", {
+                    type: "button",
+                    text: r.acknowledgedAt ? "Reopen" : "OK",
+                    onclick: () => acknowledge([r.id], Boolean(r.acknowledgedAt)),
+                  })
+                : el("span", { class: "dim", text: r.acknowledgedAt ? "acknowledged" : "" }),
+            ]),
+            { empty: "No number collisions recorded." },
+          ),
+        ]);
+      }),
+    ),
+  );
+}
+
 VIEWS.chapters = (route) => {
   if (route.param) return chapterDetail(route.param);
   // Not an archive: these are chapters spread across archives, grouped by a
   // decision made about them. It shares the section because that is where an
   // operator looks, not because it shares the listing machinery.
   if (route.tab === "restores") return chapterRestores();
+  if (route.tab === "collisions") return chapterCollisions();
   const archive = route.tab ?? "uploaded";
   const f = () => store.filters;
   const cursors = () => f().chapterCursors[archive] ?? [];

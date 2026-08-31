@@ -90,6 +90,31 @@ describe("checkChapterUrlSame", () => {
     expect(checkChapterUrlSame("https://site.com/chapter/12345", "99999")).toBe(false);
   });
 
+  it("matches a namespaced chapter id against the bare url segment", () => {
+    // The comikey shape: the id is "EPI-<token>", the url carries "<token>".
+    expect(
+      checkChapterUrlSame(
+        "https://comikey.com/read/kengan-omega-manga/jDvJnD/chapter-0/?utm_source=mgd",
+        "EPI-jDvJnD",
+      ),
+    ).toBe(true);
+    // The token still has to be the one in the url.
+    expect(
+      checkChapterUrlSame("https://comikey.com/read/kengan-omega-manga/jDvJnD/chapter-0/", "EPI-kEvQXD"),
+    ).toBe(false);
+  });
+
+  it("will not strip a prefix down to something short enough to be a word", () => {
+    // "x-read" must not match the "read" every comikey url contains, or two
+    // unrelated chapters become the same chapter.
+    expect(checkChapterUrlSame("https://site.com/read/abc/1", "x-read")).toBe(false);
+    expect(checkChapterUrlSame("https://site.com/read/abc/1", "EPI-abc")).toBe(false);
+    // A prefix that is itself too long to be a namespace is left alone.
+    expect(checkChapterUrlSame("https://site.com/c/token123", "averylongprefix-token123")).toBe(
+      false,
+    );
+  });
+
   it("never throws on input that is not a url", () => {
     expect(checkChapterUrlSame("not-a-real-url", "x")).toBe(false);
     expect(checkChapterUrlSame(null, "12345")).toBe(false);
@@ -159,6 +184,40 @@ describe("backfillVolumes", () => {
     expect(chapters[0]!.chapterVolume).toBe("2");
   });
 
+  it("matches a split-numbered series, where the aggregate holds no whole numbers", () => {
+    // The comikey shape, and the case this was silently inert for: the aggregate
+    // lists 1.1/1.2/1.3 and never a bare "1", so truncating only our side found
+    // nothing and the whole catalogue uploaded with no volume.
+    const split = {
+      "1": {
+        volume: "1",
+        chapters: {
+          "1.1": { chapter: "1.1", id: "a" },
+          "1.2": { chapter: "1.2", id: "b" },
+        },
+      },
+    };
+    const chapters = [
+      chapter({ chapterNumber: "1.1" }),
+      // Not listed at all, but its integer part is.
+      chapter({ chapterNumber: "1.7" }),
+    ];
+    backfillVolumes(chapters, split);
+    expect(chapters.map((c) => c.chapterVolume)).toEqual(["1", "1"]);
+  });
+
+  it("prefers the exact number over the integer part when volumes straddle one", () => {
+    // Volume 1 ends at 10, volume 2 opens with 10.5. "10" belongs to both by
+    // integer part; only volume 1 actually lists it.
+    const straddle = {
+      "1": { volume: "1", chapters: { "10": { chapter: "10", id: "a" } } },
+      "2": { volume: "2", chapters: { "10.5": { chapter: "10.5", id: "b" } } },
+    };
+    const chapters = [chapter({ chapterNumber: "10" }), chapter({ chapterNumber: "10.5" })];
+    backfillVolumes(chapters, straddle);
+    expect(chapters.map((c) => c.chapterVolume)).toEqual(["1", "2"]);
+  });
+
   it("collects chapter ids and their others for the dupe sweep", () => {
     expect(aggregateChapterIds(dictAggregate).sort()).toEqual(["c-none", "c1", "c1b", "c2"]);
   });
@@ -210,6 +269,176 @@ describe("decideForManga", () => {
     expect(result.toEdit[0]!.oldInfo.groups).toEqual(["grp"]);
     expect(result.skipped).toHaveLength(1);
     expect(result.toRemove).toEqual([]);
+  });
+
+  it("never clears a MangaDex volume just because the publisher has none", () => {
+    const withVolume = mdChapter("md-v", {
+      chapter: "3",
+      volume: "2",
+      title: "Old",
+      externalUrl: "https://pub.example/chapter/fff",
+    });
+    // Comikey and MANGA Plus both report no volume at all, so this is the
+    // normal case, not an edge one.
+    const noVolume = chapter({
+      chapterId: "fff",
+      chapterNumber: "3",
+      chapterTitle: "New",
+      chapterVolume: null,
+      chapterUrl: "https://pub.example/chapter/fff",
+    });
+
+    const result = decide({ updatedChapters: [noVolume], chaptersOnMd: [withVolume] });
+    expect(result.toEdit).toHaveLength(1);
+    // The title change goes through; the volume is left alone.
+    expect(result.toEdit[0]!.payload.title).toBe("New");
+    expect(result.toEdit[0]!.payload.volume).toBe("2");
+  });
+
+  it("still writes a volume we do have", () => {
+    const withVolume = mdChapter("md-v2", {
+      chapter: "3",
+      volume: "2",
+      externalUrl: "https://pub.example/chapter/ggg",
+    });
+    const corrected = chapter({
+      chapterId: "ggg",
+      chapterNumber: "3",
+      chapterVolume: "4",
+      chapterUrl: "https://pub.example/chapter/ggg",
+    });
+
+    const result = decide({ updatedChapters: [corrected], chaptersOnMd: [withVolume] });
+    expect(result.toEdit).toHaveLength(1);
+    expect(result.toEdit[0]!.payload.volume).toBe("4");
+  });
+
+  it("can edit a chapter whose id is namespaced", () => {
+    // buildEdit used a raw substring of the chapter id, which "EPI-jDvJnD"
+    // never satisfies, so a comikey chapter recognised as a duplicate would
+    // have been silently un-editable.
+    const onMdComikey = mdChapter("md-ck", {
+      chapter: "0",
+      title: "Old",
+      externalUrl: "https://comikey.com/read/kengan-omega-manga/jDvJnD/chapter-0/?utm_source=mgd",
+    });
+    const retitled = chapter({
+      chapterId: "EPI-jDvJnD",
+      chapterNumber: "0",
+      chapterTitle: "Prologue",
+      chapterUrl: "https://comikey.com/read/kengan-omega-manga/jDvJnD/chapter-0/",
+    });
+
+    const result = decide({ updatedChapters: [retitled], chaptersOnMd: [onMdComikey] });
+    expect(result.toUpload).toEqual([]);
+    expect(result.toEdit).toHaveLength(1);
+    expect(result.toEdit[0]!.mdChapterId).toBe("md-ck");
+    expect(result.toEdit[0]!.payload.title).toBe("Prologue");
+  });
+
+  it("does not renumber a sibling when one external chapter backs several numbers", () => {
+    // The real case: MANGA Plus viewer 1019959 is Girl Meets Rock! chapters 1
+    // to 4. Every one has the same externalUrl, so taking the first url match
+    // renumbered chapter 2 to 1 and cleared its volume on 2026-08-26.
+    const url = "https://mangaplus.shueisha.co.jp/viewer/1019959";
+    const onMdTwo = mdChapter("md-two", { chapter: "2", volume: "1", externalUrl: url });
+    const onMdThree = mdChapter("md-three", { chapter: "3", volume: "1", externalUrl: url });
+
+    const parts = ["1", "2", "3", "4"].map((n) =>
+      chapter({ chapterId: "1019959", chapterNumber: n, chapterUrl: url }),
+    );
+
+    const result = decide({
+      updatedChapters: parts,
+      chaptersOnMd: [onMdTwo, onMdThree],
+    });
+
+    // 2 and 3 are the ones already up; they are recognised as themselves.
+    expect(result.skipped.map((c) => c.mdChapterId).sort()).toEqual(["md-three", "md-two"]);
+    // 1 and 4 are siblings that are not on MangaDex yet, so they are uploaded
+    // rather than written over 2 or 3.
+    expect(result.toUpload.map((c) => c.chapterNumber).sort()).toEqual(["1", "4"]);
+    // Nothing is renumbered.
+    expect(result.toEdit).toEqual([]);
+  });
+
+  it("still edits a lone chapter whose number changed", () => {
+    // Not a split id: one url, one MangaDex chapter, number corrected. This has
+    // to keep working, which is why the fallback to the single url match stays.
+    const renumbered = mdChapter("md-r", {
+      chapter: "7",
+      externalUrl: "https://pub.example/chapter/ddd",
+    });
+    const now = chapter({
+      chapterId: "ddd",
+      chapterNumber: "7.5",
+      chapterUrl: "https://pub.example/chapter/ddd",
+    });
+
+    const result = decide({ updatedChapters: [now], chaptersOnMd: [renumbered] });
+    expect(result.toUpload).toEqual([]);
+    expect(result.toEdit).toHaveLength(1);
+    expect(result.toEdit[0]!.mdChapterId).toBe("md-r");
+    expect(result.toEdit[0]!.payload.chapter).toBe("7.5");
+  });
+
+  it("honours multi_chapters even when one run shows the id only once", () => {
+    // A publisher whose split is not visible in a single run still needs the
+    // override, so it is unioned with what the run shows.
+    const url = "https://pub.example/chapter/eee";
+    const onMdOne = mdChapter("md-o", { chapter: "1", externalUrl: url });
+    const second = chapter({ chapterId: "eee", chapterNumber: "2", chapterUrl: url });
+
+    const guarded = decide({
+      updatedChapters: [second],
+      chaptersOnMd: [onMdOne],
+      overrideOptions: { multi_chapters: { eee: ["1", "2"] } },
+    });
+    expect(guarded.toUpload.map((c) => c.chapterNumber)).toEqual(["2"]);
+    expect(guarded.toEdit).toEqual([]);
+  });
+
+  it("reports an upload onto a number our group already holds, without blocking it", () => {
+    // The comikey shape: the extension id never matches the url, so the url
+    // check says "new" and the chapter is uploaded onto a taken number.
+    const already = mdChapter("md-old", {
+      chapter: "1",
+      title: "Prologue",
+      externalUrl: "https://comikey.com/read/some-manga/jDvJnD/chapter-1/?utm_source=mgd",
+    });
+    const again = chapter({
+      chapterId: "UNRELATED-token",
+      chapterNumber: "1",
+      chapterTitle: "Prologue",
+      chapterUrl: "https://comikey.com/read/some-manga/other/chapter-1/",
+    });
+
+    const result = decide({ updatedChapters: [again], chaptersOnMd: [already] });
+
+    // Still uploaded: the number is not the identity.
+    expect(result.toUpload.map((c) => c.chapterId)).toEqual(["UNRELATED-token"]);
+    expect(result.numberCollisions).toHaveLength(1);
+    expect(result.numberCollisions[0]!.chapter.chapterId).toBe("UNRELATED-token");
+    expect(result.numberCollisions[0]!.language).toBe("en");
+    expect(result.numberCollisions[0]!.existing.map((c) => c.id)).toEqual(["md-old"]);
+  });
+
+  it("does not call a different language, or a chapter it matched by url, a collision", () => {
+    const otherLanguage = mdChapter("md-es", {
+      chapter: "2",
+      translatedLanguage: "es",
+      externalUrl: "https://pub.example/chapter/zzz",
+    });
+
+    // `fresh` is number 2 in en; the only chapter on that number is es.
+    const result = decide({ updatedChapters: [fresh], chaptersOnMd: [otherLanguage] });
+    expect(result.toUpload).toHaveLength(1);
+    expect(result.numberCollisions).toEqual([]);
+
+    // A chapter recognised by url is an edit or a skip, never an upload, so it
+    // can never be a collision either.
+    const matched = decide({ updatedChapters: [unchanged], chaptersOnMd: [onMdUnchanged] });
+    expect(matched.numberCollisions).toEqual([]);
   });
 
   it("carries the matched MangaDex id onto skipped chapters for bookkeeping", () => {
