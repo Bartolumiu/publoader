@@ -797,6 +797,17 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         defaults: DEFAULT_UPLOAD_SCHEDULE,
         scope: await ctx.settings.getUploadBudgetScope(),
         scopes: UPLOAD_BUDGET_SCOPES,
+        priority: await ctx.settings.getUploadPriorityExtensions(),
+        // The names the priority picker offers. Read here rather than left to
+        // the client because the picker must not be able to arm an extension
+        // that does not exist, and the client's own extension list is a
+        // different page's resource.
+        extensions: (
+          await ctx.prisma.extensionConfig.findMany({
+            select: { extension: true },
+            orderBy: { extension: "asc" },
+          })
+        ).map((row) => row.extension),
       }),
     );
 
@@ -831,6 +842,37 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           scope: body.scope,
         });
         return { ok: true, scope: body.scope };
+      },
+    );
+
+    /**
+     * Which extensions ignore the queue entirely.
+     *
+     * A list rather than a flag on the per-extension override, because the
+     * override body is about numbers and this is not a number: it says the
+     * pacing arithmetic does not apply at all. Set wholesale so the answer to
+     * "who has priority?" is one row an operator can read, not a field to hunt
+     * for across every extension.
+     */
+    scope.post(
+      "/api/v1/admin/upload-schedule/priority",
+      { preHandler: requireScope("settings:write") },
+      async (req, reply) => {
+        const body = parseOrThrow(
+          z
+            .object({ extensions: z.array(z.string().max(64)).max(50) })
+            .strict(),
+          req.body ?? {},
+        );
+        const bad = body.extensions.filter((name) => !EXTENSION_NAME_RE.test(name));
+        if (bad.length > 0) {
+          return reply.code(400).send({ error: `not extension names: ${bad.join(", ")}` });
+        }
+        const applied = await ctx.settings.setUploadPriorityExtensions(body.extensions);
+        await ctx.audit.record(actor(req), "upload_schedule.priority", undefined, {
+          extensions: applied,
+        });
+        return { ok: true, priority: applied };
       },
     );
 

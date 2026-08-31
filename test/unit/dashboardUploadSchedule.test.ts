@@ -46,6 +46,9 @@ const SCHEDULE = {
   defaults: { perDay: 50, perMangaPerDay: 3, intervalHours: 24 },
   scope: "global",
   scopes: ["global", "extension"],
+  // One prioritised and two not, so a box read off the wrong extension shows.
+  extensions: ["comikey", "mangaplus", "viz"],
+  priority: ["mangaplus"],
 };
 
 /** Swapped per test so the scope gate can be exercised. */
@@ -290,5 +293,73 @@ describe("release pacing is editable from the dashboard", () => {
 
     expect(radios).toHaveLength(2);
     expect(radios.every((r: any) => r.disabled)).toBe(true);
+  });
+
+  /**
+   * Priority is the one control here that is not a number, and the one whose
+   * effect is invisible from the queue: a prioritised extension's chapters are
+   * simply due now. So what it does is pinned in words, not just wired.
+   */
+  it("offers a box per extension, ticked for the prioritised ones", async () => {
+    await goto("#/extensions");
+    const card = cardByTitle("Release pacing");
+    const boxes = [...card.querySelectorAll('input[type="checkbox"]')];
+
+    expect(boxes.map((b: any) => b.id)).toEqual([
+      "schedule-priority-comikey",
+      "schedule-priority-mangaplus",
+      "schedule-priority-viz",
+    ]);
+    expect(boxes.map((b: any) => b.checked)).toEqual([false, true, false]);
+  });
+
+  it("says that priority ignores the queue and the budget, and spares clean runs", async () => {
+    await goto("#/extensions");
+    const text = cardByTitle("Release pacing").textContent;
+
+    expect(text).toContain("ignore the queue however long it is");
+    expect(text).toContain("whether or not the day's budget is spent");
+    // The exclusion matters most: it is why one catalogue import cannot use
+    // this to jump every other extension.
+    expect(text).toContain("Clean runs are never prioritised");
+  });
+
+  it("sends the whole list when a box is ticked, not just the change", async () => {
+    await goto("#/extensions");
+    const card = cardByTitle("Release pacing");
+    const comikey = card.querySelector("#schedule-priority-comikey") as any;
+
+    calls = [];
+    comikey.checked = true;
+    comikey.dispatchEvent(new win.Event("change"));
+    await settle();
+
+    const write = scheduleWrites()[0];
+    expect(write?.path).toContain("/upload-schedule/priority");
+    expect(write?.body).toEqual({ extensions: ["comikey", "mangaplus"] });
+  });
+
+  it("removes an extension by unticking it", async () => {
+    await goto("#/extensions");
+    const card = cardByTitle("Release pacing");
+    const mangaplus = card.querySelector("#schedule-priority-mangaplus") as any;
+
+    calls = [];
+    mangaplus.checked = false;
+    mangaplus.dispatchEvent(new win.Event("change"));
+    await settle();
+
+    expect(scheduleWrites()[0]?.body).toEqual({ extensions: [] });
+  });
+
+  it("does not arm the boxes for a credential that cannot write settings", async () => {
+    scopes = ["settings:read", "extensions:read"];
+    mount();
+    await settle(10);
+    await goto("#/extensions");
+    const boxes = [...cardByTitle("Release pacing").querySelectorAll('input[type="checkbox"]')];
+
+    expect(boxes.length).toBeGreaterThan(0);
+    expect(boxes.every((b: any) => b.disabled)).toBe(true);
   });
 });

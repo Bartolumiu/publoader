@@ -704,6 +704,14 @@ export class RunProcessor {
       //
       // FORCE is deliberately immediate too: it is an operator saying "do this
       // now", and a cap that defers it would be answering a different question.
+      // A priority extension's routine updates are due now, whatever is queued
+      // ahead of them and whatever the day's budget has already been spent on.
+      // Not honoured for a clean run: that run IS a backlog, and spreading it
+      // is the point (see `getUploadPriorityExtensions`).
+      const prioritised =
+        run.kind !== "CLEAN" &&
+        (await this.settings.getUploadPriorityExtensions()).includes(run.extension);
+
       const spread = run.kind === "CLEAN";
 
       // Whose 50 a day it is. `global` is one pool for the platform, which is
@@ -724,11 +732,25 @@ export class RunProcessor {
         // `spacingSeconds` exists to stop. Each row queues behind the tail.
         const { spacingSeconds } = await this.settings.getUploadSchedule(run.extension);
         for (const chapter of pendingUploads) {
-          await this.tasks.enqueue("UPLOAD", uploadDedupeKey(chapter), chapter, { spacingSeconds });
+          // An explicit `notBefore` beats the pacing tail inside `enqueue`, so
+          // this is what "ignore the queue" is: no chaining behind anyone.
+          await this.tasks.enqueue(
+            "UPLOAD",
+            uploadDedupeKey(chapter),
+            chapter,
+            prioritised ? { notBefore: new Date() } : { spacingSeconds },
+          );
         }
-        log.debug(
-          { queued: pendingUploads.length, kind: run.kind, spacingSeconds },
-          "queued this run's uploads, paced but not spread",
+        log.info(
+          {
+            queued: pendingUploads.length,
+            kind: run.kind,
+            spacingSeconds: prioritised ? 0 : spacingSeconds,
+            prioritised,
+          },
+          prioritised
+            ? "queued this run's uploads as due now: extension has upload priority"
+            : "queued this run's uploads, paced but not spread",
         );
       } else {
         const scheduled = planUploadSchedule(
