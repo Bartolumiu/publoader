@@ -10,6 +10,7 @@ import type { RemovalMode } from "../../store/settings.js";
 import { chapterToTaskPayload } from "../../md/chapterRows.js";
 import { ReconcileRunner } from "../../md/reconcileRunner.js";
 import { DuplicateRunner } from "../../md/duplicateRunner.js";
+import { ChapterCollisionStore, MAX_COLLISION_PAGE } from "../../store/chapterCollisions.js";
 import type { MdExtendedApi } from "../../md/client.js";
 import { generateChapterCard } from "../../md/card.js";
 import { unavailableCardOptions } from "../../md/unavailableCard.js";
@@ -717,6 +718,82 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           return { ok: true, state: "idle", note: "this deployment has no MangaDex client" };
         }
         return { ok: true, ...(await duplicates(ctx.md).status()) };
+      },
+    );
+
+    /**
+     * Chapters we uploaded onto a number our own group already holds.
+     *
+     * A warning list, not a failure list, so it is deliberately NOT in the
+     * Errors feed: nothing here failed, and every one of these uploads was
+     * intended. It answers the question that had no home before — "did we just
+     * publish a second copy of something?" — which is the question the comikey
+     * re-upload needed somebody to be able to ask.
+     */
+    scope.get(
+      "/api/v1/admin/chapters/collisions",
+      { preHandler: requireScope("chapters:read") },
+      async (req) => {
+        const query = parseOrThrow(
+          z.object({
+            extension: z.string().max(64).optional(),
+            includeAcknowledged: z.coerce.boolean().default(false),
+            limit: z.coerce.number().int().min(1).max(MAX_COLLISION_PAGE).default(DEFAULT_PAGE),
+            offset: z.coerce.number().int().min(0).default(0),
+          }),
+          req.query ?? {},
+        );
+
+        const page = await new ChapterCollisionStore(ctx.prisma).list({
+          extension: query.extension ?? null,
+          includeAcknowledged: query.includeAcknowledged,
+          limit: query.limit,
+          offset: query.offset,
+        });
+        return { ok: true, ...page };
+      },
+    );
+
+    /**
+     * Mark collisions as looked at, or put one back.
+     *
+     * Hides, never deletes, the same contract as the error feed: the row stays
+     * for the audit trail and `includeAcknowledged` lists it again.
+     */
+    scope.post(
+      "/api/v1/admin/chapters/collisions/acknowledge",
+      { preHandler: requireScope("chapters:write") },
+      async (req, reply) => {
+        if (req.principal?.kind === "api-token") {
+          return reply.code(403).send({ error: TOKEN_REFUSAL, requiredRole: "ADMIN" });
+        }
+        if (req.adminRole !== "OWNER" && req.adminRole !== "ADMIN") {
+          return reply.code(403).send({ error: ROLE_REFUSAL, requiredRole: "ADMIN" });
+        }
+
+        const body = parseOrThrow(
+          z
+            .object({
+              ids: z.array(z.string().uuid()).min(1).max(MAX_COLLISION_PAGE),
+              /** Undo, for one judged too quickly. */
+              undo: z.boolean().default(false),
+            })
+            .strict(),
+          req.body ?? {},
+        );
+
+        const store = new ChapterCollisionStore(ctx.prisma);
+        const who = actor(req);
+        const changed = body.undo
+          ? await store.unacknowledge(body.ids)
+          : await store.acknowledge(body.ids, who);
+        await ctx.audit.record(
+          who,
+          body.undo ? "chapter.collision.unacknowledge" : "chapter.collision.acknowledge",
+          undefined,
+          { ids: body.ids.slice(0, 50), changed },
+        );
+        return { ok: true, changed };
       },
     );
 

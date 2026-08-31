@@ -14,6 +14,7 @@ import {
   type UntrackedMangaLike,
 } from "../md/webhookEmbeds.js";
 import { chapterFromRecord, uploaderId, type Chapter, type MdApi, type MdChapter } from "../md/types.js";
+import { ChapterCollisionStore, type CollisionRecord } from "../store/chapterCollisions.js";
 import { ExtensionConfigStore } from "../store/extensionConfig.js";
 import { ResultStore } from "../store/results.js";
 import { activeTrackedTitles } from "../store/trackedManga.js";
@@ -27,6 +28,7 @@ import {
   findDuplicateChapters,
   formatTitle,
   mdChapterMangaId,
+  type NumberCollision,
   type OverrideOptionsLike,
 } from "./dedupe.js";
 
@@ -138,6 +140,7 @@ export class RunProcessor {
   private readonly notifier: { enabled: boolean; send(embeds: DiscordEmbedInput[]): Promise<void> } | null;
   private readonly botUserId: string | null;
   private readonly audit: AuditLog;
+  private readonly collisions: ChapterCollisionStore;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -150,6 +153,7 @@ export class RunProcessor {
     this.settings = new SettingsStore(prisma);
     this.config = new ExtensionConfigStore(prisma);
     this.audit = new AuditLog(prisma);
+    this.collisions = new ChapterCollisionStore(prisma);
     this.maxRunsPerTick = options.maxRunsPerTick ?? 10;
     this.notifier = options.notifier ?? null;
     this.botUserId = options.botUserId ?? null;
@@ -158,6 +162,57 @@ export class RunProcessor {
         "no MangaDex bot user id configured: every removal pass is disabled. " +
           "Set MANGADEX_BOT_USER_ID, or use a personal client id that embeds it.",
       );
+    }
+  }
+
+  /**
+   * Persist the number collisions a manga's decision turned up, and say so in
+   * the log.
+   *
+   * Swallowed on failure, with a warning. This is an observation about work the
+   * run has already decided to do; losing the note is worth far less than
+   * failing a run whose uploads are correct.
+   */
+  private async recordCollisions(
+    collisions: NumberCollision[],
+    runId: string,
+    extension: string,
+    mangaId: string,
+  ): Promise<void> {
+    if (collisions.length === 0) return;
+
+    const records: CollisionRecord[] = collisions.map(({ chapter, language, existing }) => ({
+      extension,
+      chapterId: chapter.chapterId,
+      chapterUrl: chapter.chapterUrl,
+      mdMangaId: chapter.mdMangaId || mangaId,
+      mangaName: this.mangaNames.get(mangaId) ?? chapter.mangaName ?? null,
+      chapterNumber: chapter.chapterNumber,
+      chapterLanguage: language,
+      existing: existing.map((mdChapter) => ({
+        mdChapterId: mdChapter.id,
+        chapterUrl: mdChapter.attributes.externalUrl ?? null,
+        chapterTitle: mdChapter.attributes.title ?? null,
+        createdAt: (mdChapter.attributes as { createdAt?: string }).createdAt ?? null,
+      })),
+      runId,
+    }));
+
+    try {
+      await this.collisions.record(records);
+      this.log.warn(
+        {
+          extension,
+          mangaId,
+          mangaName: this.mangaNames.get(mangaId) ?? mangaId,
+          collisions: records.length,
+          numbers: records.map((r) => `${r.chapterNumber ?? "?"} (${r.chapterLanguage})`),
+        },
+        "uploading onto chapter numbers our group already holds; uploads not blocked, " +
+          "see the Chapters > Collisions tab",
+      );
+    } catch (err) {
+      this.log.warn({ err, extension, mangaId }, "could not record number collisions");
     }
   }
 
@@ -509,20 +564,36 @@ export class RunProcessor {
         else chaptersOnMdByManga.set(owner, [mdChapter]);
       }
 
-      backfillVolumes(updatedChapters, await this.aggregateFor(mangaId, groupId));
+      // A title the run could not read gets null, the same "no removal
+      // information" this passes for a run that published no catalogue at all.
+      // Letting it fall through to `?? []` would say the publisher holds
+      // nothing for this series and unpublish every chapter of it, on the
+      // strength of a request that failed.
+      const allMangaChapters =
+        allByManga === null || failedMdIds.has(mangaId)
+          ? null
+          : (allByManga.get(mangaId) ?? []);
+
+      // Both arrays, because on a CLEAN run `decideCandidates` uploads chapters
+      // that are in the listing and not in the updates, and backfilling only
+      // the updates left exactly those with no volume.
+      const needVolumes = [...updatedChapters, ...(allMangaChapters ?? [])];
+      backfillVolumes(needVolumes, await this.aggregateFor(mangaId, groupId));
+      // Our own group's aggregate is empty for a title we are uploading to for
+      // the first time, and some publishers (comikey, for one) expose no volume
+      // metadata at all, so those chapters would go up with no volume forever.
+      // Everyone else's chapter-to-volume mapping for the same work is the best
+      // remaining evidence, so fall back to the unscoped aggregate — but only
+      // for what is still missing, and only when something still is, to keep
+      // this off the hot path for the titles that were already answered.
+      if (needVolumes.some((chapter) => chapter.chapterVolume === null)) {
+        backfillVolumes(needVolumes, await this.aggregateFor(mangaId, ""));
+      }
 
       const decision = decideForManga({
         mangadexMangaId: mangaId,
         updatedChapters,
-        // A title the run could not read gets null, the same "no removal
-        // information" this passes for a run that published no catalogue at
-        // all. Letting it fall through to `?? []` would say the publisher holds
-        // nothing for this series and unpublish every chapter of it, on the
-        // strength of a request that failed.
-        allMangaChapters:
-          allByManga === null || failedMdIds.has(mangaId)
-            ? null
-            : (allByManga.get(mangaId) ?? []),
+        allMangaChapters,
         chaptersOnMd,
         // Uploads happen asynchronously off the UploadTask queue, so nothing has
         // been posted to MangaDex by the time this run is processed.
@@ -534,6 +605,12 @@ export class RunProcessor {
         extensionPublishesPages,
         botUserId: this.botUserId,
       });
+
+      // Recorded, not acted on. These uploads go ahead exactly as decided; the
+      // row is so a person can see that a number we were about to publish was
+      // already taken, which is the only signal that would have caught the
+      // comikey re-upload while the url check was quietly returning false.
+      await this.recordCollisions(decision.numberCollisions, run.id, run.extension, mangaId);
 
       // Held rather than queued here: the release schedule caps how many
       // chapters a day takes across every series, which cannot be decided one
@@ -946,10 +1023,14 @@ export class RunProcessor {
   // -- MangaDex helpers -----------------------------------------------------
 
   private async aggregateFor(mangaId: string, groupId: string): Promise<unknown> {
-    const cached = this.aggregates.get(mangaId);
+    // Keyed by group as well as manga: the volume backfill asks for the
+    // unscoped aggregate too, and a manga-only key would hand the dupe sweep
+    // every group's chapter ids and queue other people's uploads for deletion.
+    const key = `${mangaId} ${groupId}`;
+    const cached = this.aggregates.get(key);
     if (cached !== undefined) return cached;
     const aggregate = await this.md.mangaAggregate(mangaId, groupId);
-    this.aggregates.set(mangaId, aggregate);
+    this.aggregates.set(key, aggregate);
     return aggregate;
   }
 

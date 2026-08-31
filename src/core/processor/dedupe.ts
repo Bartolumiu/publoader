@@ -79,6 +79,18 @@ export interface DecideInput {
   extensionPublishesPages?: boolean;
 }
 
+/**
+ * An upload whose number and language are already taken in our own group.
+ * `existing` is never empty; it is plural because a number can already be
+ * doubled up before this run adds to it.
+ */
+export interface NumberCollision {
+  chapter: Chapter;
+  /** `chapter.chapterLanguage`, narrowed: a chapter without one cannot collide. */
+  language: string;
+  existing: MdChapter[];
+}
+
 export interface DecideResult {
   toUpload: Chapter[];
   toEdit: ChapterEdit[];
@@ -92,6 +104,11 @@ export interface DecideResult {
   skippedDifferentId: Chapter[];
   /** Chapters on MangaDex that no longer belong there. */
   toRemove: MdChapter[];
+  /**
+   * Uploads that reuse a number already on MangaDex under our group. Reported,
+   * never acted on: see `findNumberCollisions`.
+   */
+  numberCollisions: NumberCollision[];
   /**
    * Clean runs only: chapters the publisher still lists, that are not on
    * MangaDex, and that this run cannot publish because it holds no pages for
@@ -175,7 +192,30 @@ export function checkChapterUrlSame(
 
   const pathSegments = stripSlashes(urlPath(mdExternalUrl)).split("/");
   const idSegments = stripSlashes(chapterId).split("/");
-  return idSegments.some((segment) => pathSegments.includes(segment));
+  return idSegments.some(
+    (segment) =>
+      pathSegments.includes(segment) ||
+      // An extension may namespace its ids to keep two id spaces apart —
+      // comikey emits "EPI-jDvJnD" for the url segment "jDvJnD" — and the
+      // prefixed form matches no url segment, so every such chapter looked new
+      // forever. The comikey CLEAN run of 2026-08-30 re-uploaded 66 chapters
+      // that were already on MangaDex because of exactly this.
+      pathSegments.includes(stripIdNamespace(segment)),
+  );
+}
+
+/**
+ * A leading `NAME-` namespace on an extension chapter id, removed.
+ *
+ * Deliberately narrow. The remainder has to stay long enough to be an
+ * identifier rather than a word, because the url segments it is about to be
+ * compared against include things like "read" and "chapter": a two-character
+ * remainder colliding with one of those would call two unrelated chapters the
+ * same chapter, which is worse than the duplicate this is fixing.
+ */
+function stripIdNamespace(segment: string): string {
+  const match = /^[A-Za-z][A-Za-z0-9]{1,7}-(.{4,})$/.exec(segment);
+  return match?.[1] ?? segment;
 }
 
 /**
@@ -591,7 +631,58 @@ export function decideForManga(input: DecideInput): DecideResult {
     chapter.mdGroupId = input.groupId;
   }
 
-  return { toUpload, toEdit, skipped, skippedDifferentId, toRemove, missingWithoutPages };
+  return {
+    toUpload,
+    toEdit,
+    skipped,
+    skippedDifferentId,
+    toRemove,
+    missingWithoutPages,
+    numberCollisions: findNumberCollisions(toUpload, input),
+  };
+}
+
+/**
+ * Uploads whose number and language are already taken, in our own group, by a
+ * chapter on MangaDex.
+ *
+ * A warning, deliberately not a gate. The url is the identity, and the number
+ * is not: publishers reissue a chapter under a new episode id, split one across
+ * numbers, and sell whole volumes as episodes whose "number" is a volume
+ * number. Refusing on a number match would drop real chapters, so this changes
+ * no decision and only records what a person should look at.
+ *
+ * The reason it is worth recording at all is that the url check fails SILENTLY.
+ * `checkChapterUrlSame` needs the publisher's chapter token to appear in the
+ * MangaDex externalUrl; an extension whose ids do not (comikey's `EPI-` prefix)
+ * gets `false` for every chapter of every series, forever, and re-uploads the
+ * lot on the first clean run. Nothing was watching the number, so nothing said
+ * anything. This does.
+ */
+function findNumberCollisions(toUpload: Chapter[], input: DecideInput): NumberCollision[] {
+  const byNumber = new Map<string, MdChapter[]>();
+  for (const mdChapter of input.chaptersOnMd) {
+    // Carded chapters have been deliberately retired; their number is free.
+    if (isCarded(mdChapter)) continue;
+    const attrs = mdChapter.attributes;
+    const key = `${attrs.chapter ?? ""} ${attrs.translatedLanguage}`;
+    const bucket = byNumber.get(key);
+    if (bucket) bucket.push(mdChapter);
+    else byNumber.set(key, [mdChapter]);
+  }
+
+  const collisions: NumberCollision[] = [];
+  for (const chapter of toUpload) {
+    // A chapter with no language cannot be compared against one that has one,
+    // and MangaDex will refuse it regardless; that is the upload's problem to
+    // report, not this check's.
+    const language = chapter.chapterLanguage;
+    if (language === null) continue;
+    const existing = byNumber.get(`${chapter.chapterNumber ?? ""} ${language}`);
+    if (!existing || existing.length === 0) continue;
+    collisions.push({ chapter, language, existing });
+  }
+  return collisions;
 }
 
 /**

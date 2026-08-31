@@ -90,6 +90,31 @@ describe("checkChapterUrlSame", () => {
     expect(checkChapterUrlSame("https://site.com/chapter/12345", "99999")).toBe(false);
   });
 
+  it("matches a namespaced chapter id against the bare url segment", () => {
+    // The comikey shape: the id is "EPI-<token>", the url carries "<token>".
+    expect(
+      checkChapterUrlSame(
+        "https://comikey.com/read/kengan-omega-manga/jDvJnD/chapter-0/?utm_source=mgd",
+        "EPI-jDvJnD",
+      ),
+    ).toBe(true);
+    // The token still has to be the one in the url.
+    expect(
+      checkChapterUrlSame("https://comikey.com/read/kengan-omega-manga/jDvJnD/chapter-0/", "EPI-kEvQXD"),
+    ).toBe(false);
+  });
+
+  it("will not strip a prefix down to something short enough to be a word", () => {
+    // "x-read" must not match the "read" every comikey url contains, or two
+    // unrelated chapters become the same chapter.
+    expect(checkChapterUrlSame("https://site.com/read/abc/1", "x-read")).toBe(false);
+    expect(checkChapterUrlSame("https://site.com/read/abc/1", "EPI-abc")).toBe(false);
+    // A prefix that is itself too long to be a namespace is left alone.
+    expect(checkChapterUrlSame("https://site.com/c/token123", "averylongprefix-token123")).toBe(
+      false,
+    );
+  });
+
   it("never throws on input that is not a url", () => {
     expect(checkChapterUrlSame("not-a-real-url", "x")).toBe(false);
     expect(checkChapterUrlSame(null, "12345")).toBe(false);
@@ -210,6 +235,49 @@ describe("decideForManga", () => {
     expect(result.toEdit[0]!.oldInfo.groups).toEqual(["grp"]);
     expect(result.skipped).toHaveLength(1);
     expect(result.toRemove).toEqual([]);
+  });
+
+  it("reports an upload onto a number our group already holds, without blocking it", () => {
+    // The comikey shape: the extension id never matches the url, so the url
+    // check says "new" and the chapter is uploaded onto a taken number.
+    const already = mdChapter("md-old", {
+      chapter: "1",
+      title: "Prologue",
+      externalUrl: "https://comikey.com/read/some-manga/jDvJnD/chapter-1/?utm_source=mgd",
+    });
+    const again = chapter({
+      chapterId: "UNRELATED-token",
+      chapterNumber: "1",
+      chapterTitle: "Prologue",
+      chapterUrl: "https://comikey.com/read/some-manga/other/chapter-1/",
+    });
+
+    const result = decide({ updatedChapters: [again], chaptersOnMd: [already] });
+
+    // Still uploaded: the number is not the identity.
+    expect(result.toUpload.map((c) => c.chapterId)).toEqual(["UNRELATED-token"]);
+    expect(result.numberCollisions).toHaveLength(1);
+    expect(result.numberCollisions[0]!.chapter.chapterId).toBe("UNRELATED-token");
+    expect(result.numberCollisions[0]!.language).toBe("en");
+    expect(result.numberCollisions[0]!.existing.map((c) => c.id)).toEqual(["md-old"]);
+  });
+
+  it("does not call a different language, or a chapter it matched by url, a collision", () => {
+    const otherLanguage = mdChapter("md-es", {
+      chapter: "2",
+      translatedLanguage: "es",
+      externalUrl: "https://pub.example/chapter/zzz",
+    });
+
+    // `fresh` is number 2 in en; the only chapter on that number is es.
+    const result = decide({ updatedChapters: [fresh], chaptersOnMd: [otherLanguage] });
+    expect(result.toUpload).toHaveLength(1);
+    expect(result.numberCollisions).toEqual([]);
+
+    // A chapter recognised by url is an edit or a skip, never an upload, so it
+    // can never be a collision either.
+    const matched = decide({ updatedChapters: [unchanged], chaptersOnMd: [onMdUnchanged] });
+    expect(matched.numberCollisions).toEqual([]);
   });
 
   it("carries the matched MangaDex id onto skipped chapters for bookkeeping", () => {
