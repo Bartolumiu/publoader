@@ -1,6 +1,19 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { chapterFromColumns, type StoredChapterRow } from "../md/chapterRows.js";
 import type { Chapter } from "../md/types.js";
+import {
+  encodeSortCursor,
+  numberKeys,
+  numericTextKeys,
+  ordering,
+  resolveSort,
+  sortedBy,
+  textKeys,
+  timeKeys,
+  type OrderKey,
+  type SortColumns,
+  type SortRequest,
+} from "./ordering.js";
 
 /**
  * Read access to the four chapter history tables; what this platform has put
@@ -46,6 +59,53 @@ export const ARCHIVES: Record<ChapterArchive, ArchiveSpec> = {
 export function isChapterArchive(value: string): value is ChapterArchive {
   return Object.hasOwn(ARCHIVES, value);
 }
+
+/**
+ * What an archive listing may be ordered by, under the names the console's
+ * columns carry.
+ *
+ * A closed map, not a column name taken from the request: these become SQL. It
+ * is also the contract the dashboard's header buttons are wired against, so a
+ * column the console offers and this does not is a 400 rather than a table that
+ * silently ignores the click.
+ */
+export const CHAPTER_SORTS = ["series", "chapter", "language", "extension", "at"] as const;
+
+export function chapterSortColumns(spec: ArchiveSpec): SortColumns {
+  return {
+    series: textKeys(Prisma.sql`c.manga_name`),
+    chapter: numericTextKeys(Prisma.sql`c.chapter_number`),
+    language: textKeys(Prisma.sql`c.chapter_language`),
+    extension: textKeys(Prisma.sql`c.extension`),
+    at: timeKeys(Prisma.raw(`c.${spec.instant}`)),
+  };
+}
+
+/** The tiebreak that makes any of the above a total order. */
+const CHAPTER_ID: OrderKey = { sql: Prisma.sql`c.id`, cast: "text", dir: "follow" };
+
+/**
+ * What the per-series listing may be ordered by.
+ *
+ * Every key is an aggregate, because every column of that listing is: the row
+ * is a title, not a chapter, and its name, extensions and instant are all
+ * folded from the chapters under it. They are spelled the same way here as in
+ * the SELECT so the two cannot describe different things.
+ */
+export const SERIES_SORTS = ["series", "count", "extension", "at"] as const;
+
+function seriesSortColumns(spec: ArchiveSpec): SortColumns {
+  const instant = Prisma.raw(`c.${spec.instant}`);
+  return {
+    series: textKeys(Prisma.sql`(array_agg(c.manga_name ORDER BY ${instant} DESC))[1]`),
+    count: numberKeys(Prisma.sql`count(*)`),
+    extension: textKeys(Prisma.sql`(array_agg(DISTINCT coalesce(c.extension, '')))[1]`),
+    at: timeKeys(Prisma.sql`max(${instant})`),
+  };
+}
+
+/** Grouped by title, so the title's id is what makes the ordering total. */
+const SERIES_ID: OrderKey = { sql: Prisma.sql`c.md_manga_id`, cast: "text", dir: "follow" };
 
 /** A row of any of the four tables, plus the instant that dates it. */
 export interface ChapterRow extends StoredChapterRow {
@@ -132,22 +192,32 @@ export class ChapterStore {
   async list(
     archive: ChapterArchive,
     filter: ChapterFilter,
-    opts: { limit: number; cursor?: ChapterCursor | null },
+    opts: { limit: number; cursor?: ChapterCursor | null; sort?: SortRequest | null },
   ): Promise<{ chapters: ChapterRow[]; total: number; nextCursor: string | null }> {
     const spec = ARCHIVES[archive];
     const instant = Prisma.raw(`c.${spec.instant}`);
     const from = Prisma.raw(spec.table);
     const parts = chapterWhere(filter, spec);
-    if (opts.cursor) {
+
+    // A sort replaces the default ordering outright rather than being appended
+    // to it: the operator asked for the whole archive by that column, and an
+    // `at DESC` ahead of it would order by date and break ties by the column
+    // they picked, which is not what any header click means.
+    const sorted = opts.sort ? sortedBy(chapterSortColumns(spec), opts.sort, CHAPTER_ID) : null;
+    if (sorted) {
+      const after = sorted.order.after(sorted.after);
+      if (after) parts.push(after);
+    } else if (opts.cursor) {
       parts.push(Prisma.sql`(${instant}, c.id) < (${opts.cursor.at}, ${opts.cursor.id})`);
     }
 
     // One row beyond the page, so "is there another page?" costs no extra query.
     const [rows, counted] = await Promise.all([
-      this.prisma.$queryRaw<ChapterRow[]>(Prisma.sql`
-        SELECT ${chapterColumns(spec)} FROM ${from} c
+      this.prisma.$queryRaw<(ChapterRow & Record<string, unknown>)[]>(Prisma.sql`
+        SELECT ${chapterColumns(spec)}${sorted ? Prisma.sql`, ${sorted.order.select}` : Prisma.empty}
+        FROM ${from} c
         ${combine(parts)}
-        ORDER BY ${instant} DESC, c.id DESC
+        ORDER BY ${sorted ? sorted.order.orderBy : Prisma.sql`${instant} DESC, c.id DESC`}
         LIMIT ${opts.limit + 1}
       `),
       this.prisma.$queryRaw<{ total: bigint }[]>(Prisma.sql`
@@ -157,10 +227,16 @@ export class ChapterStore {
 
     const page = rows.slice(0, opts.limit);
     const last = page[page.length - 1];
+    const more = rows.length > opts.limit && last !== undefined;
     return {
-      chapters: page,
+      // Read the cursor off the last row before stripping the keys it is made of.
+      nextCursor: !more
+        ? null
+        : sorted
+          ? encodeSortCursor(sorted.name, sorted.dir, sorted.order.cursorOf(last))
+          : encodeChapterCursor(last),
+      chapters: sorted ? page.map((row) => sorted.order.strip(row)) : page,
       total: Number(counted[0]?.total ?? 0),
-      nextCursor: rows.length > opts.limit && last ? encodeChapterCursor(last) : null,
     };
   }
 
@@ -331,7 +407,7 @@ export class ChapterStore {
   async bySeries(
     archive: ChapterArchive,
     filter: ChapterFilter = {},
-    page: { limit?: number; offset?: number } = {},
+    page: { limit?: number; offset?: number; column?: SortRequest | null } = {},
   ): Promise<{ series: SeriesGroup[]; total: number }> {
     const limit = page.limit ?? 100;
     const offset = page.offset ?? 0;
@@ -363,7 +439,12 @@ export class ChapterStore {
         FROM ${from} c
         ${where}
         GROUP BY c.md_manga_id
-        ORDER BY count(*) DESC, max(${instant}) DESC, c.md_manga_id ASC
+        ORDER BY ${
+          page.column
+            ? ordering(resolveSort(seriesSortColumns(spec), page.column.name, SERIES_ID)!.keys, page.column.dir)
+                .orderBy
+            : Prisma.sql`count(*) DESC, max(${instant}) DESC, c.md_manga_id ASC`
+        }
         LIMIT ${limit} OFFSET ${offset}
       `),
       this.prisma.$queryRaw<{ total: bigint }[]>(Prisma.sql`

@@ -26,6 +26,56 @@ import {
 import { MANGADEX_LANGUAGES } from "../../../contracts/languages.js";
 import { countOutstandingErrors } from "../../observability/errorFeed.js";
 import { workerNames } from "../../store/workers.js";
+import {
+  encodeSortCursor,
+  numberKeys,
+  sortedBy,
+  textKeys,
+  type OrderKey,
+  type SortColumns,
+} from "../../store/ordering.js";
+
+/**
+ * The untracked queue's columns, aliased to the names the API answers with.
+ *
+ * Spelled out rather than read through the model because the listing is sorted
+ * and paged in SQL: the ordering, the keyset predicate and the cursor are all
+ * SQL expressions, and a query built half in Prisma's object language and half
+ * in SQL would have two spellings of one filter to keep in agreement.
+ */
+const UNTRACKED_COLUMNS = Prisma.sql`u.id, u.extension, u.manga_id AS "mangaId",
+  u.manga_name AS "mangaName", u.manga_language AS "mangaLanguage",
+  u.manga_url AS "mangaUrl", u.state::text AS state, u.md_manga_id AS "mdMangaId",
+  u.attempts, u.last_error AS "lastError", u.md_applied_at AS "mdAppliedAt",
+  u.md_applied_by AS "mdAppliedBy",
+  u.official_link_checked_at AS "officialLinkCheckedAt",
+  u.title_checked_at AS "titleCheckedAt", u.created_at AS "createdAt",
+  u.updated_at AS "updatedAt"`;
+
+interface UntrackedRow {
+  id: string;
+  [key: string]: unknown;
+}
+
+/** What the untracked listing may be ordered by, as the console's columns. */
+const UNTRACKED_SORTS = ["series", "extension", "language", "state", "attempts", "result"] as const;
+
+const UNTRACKED_SORT_COLUMNS: SortColumns = {
+  series: textKeys(Prisma.sql`u.manga_name`),
+  extension: textKeys(Prisma.sql`u.extension`),
+  language: textKeys(Prisma.sql`u.manga_language`),
+  state: textKeys(Prisma.sql`u.state::text`),
+  attempts: numberKeys(Prisma.sql`u.attempts`),
+  // The Result column shows the MangaDex link when there is one and the last
+  // error when there is not, so it orders by that same split first: ascending
+  // gathers the series that made it, descending gathers the ones that did not.
+  result: [
+    { sql: Prisma.sql`(u.md_manga_id IS NULL)`, cast: "boolean", dir: "follow" },
+    ...textKeys(Prisma.sql`u.last_error`),
+  ],
+};
+
+const UNTRACKED_ID: OrderKey = { sql: Prisma.sql`u.id`, cast: "text", dir: "follow" };
 
 /**
  * The worker image the enrolment snippet tells a new host to run. Set
@@ -1190,67 +1240,97 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
            */
           extension: z.string().trim().max(64).optional(),
           limit: z.coerce.number().int().min(1).max(500).default(100),
-          /** Keyset position: the id of the last row of the previous page. */
-          cursor: z.string().uuid().optional(),
+          /**
+           * Keyset position. In the default ordering that is the id of the last
+           * row of the previous page; under `orderBy` it is the cursor that
+           * ordering issued, which carries the key values as well as the id.
+           */
+          cursor: z.string().max(512).optional(),
+          /**
+           * Order the whole queue by one column rather than newest-first. What
+           * the console's header buttons send: ordering only the fifty rows
+           * already fetched would answer "the first of this page" to a question
+           * asked about the whole queue.
+           */
+          orderBy: z.enum(UNTRACKED_SORTS).optional(),
+          dir: z.enum(["asc", "desc"]).default("asc"),
         })
         .parse(req.query ?? {});
+
       // A state filter and a page cap are not enough to find one series: a
       // busy queue holds thousands of NEW rows and the operator arrives
       // knowing the name. Matching the external id and the extension too
       // costs nothing and covers how the rows are actually referred to.
-      const search = query.q
-        ? {
-            OR: [
-              { mangaName: { contains: query.q, mode: "insensitive" as const } },
-              { mangaId: { contains: query.q, mode: "insensitive" as const } },
-              { extension: { contains: query.q, mode: "insensitive" as const } },
-            ],
-          }
-        : {};
-      const where: Prisma.UntrackedMangaWhereInput = {
-        ...(query.state ? { state: query.state } : {}),
-        ...(query.extension ? { extension: query.extension } : {}),
-        ...search,
-      };
+      const filter: Prisma.Sql[] = [];
+      if (query.state) filter.push(Prisma.sql`u.state = ${query.state}::"UntrackedState"`);
+      if (query.extension) filter.push(Prisma.sql`u.extension = ${query.extension}`);
+      if (query.q) {
+        const like = `%${query.q}%`;
+        filter.push(
+          Prisma.sql`(u.manga_name ILIKE ${like} OR u.manga_id ILIKE ${like} OR u.extension ILIKE ${like})`,
+        );
+      }
 
-      // Keyset paging needs the cursor row's own sort key, so it is read first.
-      // An unknown cursor is a client error rather than an empty page, which
-      // would read as "there is nothing after this".
-      let keyset: Prisma.UntrackedMangaWhereInput | null = null;
-      if (query.cursor) {
+      const page = [...filter];
+      const sorted = sortedBy(
+        UNTRACKED_SORT_COLUMNS,
+        query.orderBy ? { name: query.orderBy, dir: query.dir, cursor: query.cursor ?? null } : null,
+        UNTRACKED_ID,
+      );
+      if (sorted) {
+        const after = sorted.order.after(sorted.after);
+        if (after) page.push(after);
+      } else if (query.cursor) {
+        // The default ordering's cursor is a row id, so the row's own sort key
+        // is read first. An unknown cursor is a client error rather than an
+        // empty page, which would read as "there is nothing after this".
         const at = await ctx.prisma.untrackedManga.findUnique({
           where: { id: query.cursor },
           select: { id: true, createdAt: true },
         });
         if (!at) return reply.code(400).send({ error: `unknown cursor: ${query.cursor}` });
-        keyset = {
-          OR: [{ createdAt: { lt: at.createdAt } }, { createdAt: at.createdAt, id: { lt: at.id } }],
-        };
+        page.push(Prisma.sql`(u.created_at, u.id) < (${at.createdAt}, ${at.id})`);
       }
 
-      const [rows, total] = await Promise.all([
-        ctx.prisma.untrackedManga.findMany({
-          where: keyset ? { AND: [where, keyset] } : where,
-          // Tie-broken by id: createdAt alone is not unique here — a run
-          // reports a whole catalogue at once, so hundreds of rows can share a
-          // millisecond, and a keyset on a non-unique key silently skips or
-          // repeats rows at every page boundary.
-          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-          take: query.limit,
-        }),
+      const predicate = (parts: Prisma.Sql[]) =>
+        parts.length > 0 ? Prisma.sql`WHERE ${Prisma.join(parts, " AND ")}` : Prisma.empty;
+
+      const [rows, counted] = await Promise.all([
+        ctx.prisma.$queryRaw<(UntrackedRow & Record<string, unknown>)[]>(Prisma.sql`
+          SELECT ${UNTRACKED_COLUMNS}${sorted ? Prisma.sql`, ${sorted.order.select}` : Prisma.empty}
+          FROM untracked_manga u
+          ${predicate(page)}
+          -- Tie-broken by id: created_at alone is not unique here — a run
+          -- reports a whole catalogue at once, so hundreds of rows can share a
+          -- millisecond, and a keyset on a non-unique key silently skips or
+          -- repeats rows at every page boundary.
+          ORDER BY ${sorted ? sorted.order.orderBy : Prisma.sql`u.created_at DESC, u.id DESC`}
+          LIMIT ${query.limit}
+        `),
         // The total is what makes paging honest: without it a caller cannot
         // tell "that is all of them" from "here is the first page of two
         // thousand", which is exactly what the old fixed cap looked like.
-        ctx.prisma.untrackedManga.count({ where }),
+        ctx.prisma.$queryRaw<{ total: bigint }[]>(
+          Prisma.sql`SELECT count(*) AS total FROM untracked_manga u ${predicate(filter)}`,
+        ),
       ]);
 
+      const last = rows[rows.length - 1];
       return {
-        untracked: rows,
-        total,
-        limit: query.limit,
         // Null on the last page, so a caller can stop without a second request
         // that comes back empty.
-        nextCursor: rows.length === query.limit ? (rows[rows.length - 1]?.id ?? null) : null,
+        nextCursor:
+          rows.length === query.limit && last
+            ? sorted
+              ? encodeSortCursor(sorted.name, sorted.dir, sorted.order.cursorOf(last))
+              : last.id
+            : null,
+        untracked: sorted ? rows.map((row) => sorted.order.strip(row)) : rows,
+        total: Number(counted[0]?.total ?? 0),
+        limit: query.limit,
+        orderedBy: query.orderBy ?? null,
+        dir: query.dir,
+        sortable: UNTRACKED_SORTS,
       };
     });
 

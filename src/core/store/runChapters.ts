@@ -1,4 +1,14 @@
 import { Prisma, type PrismaClient } from "@prisma/client";
+import {
+  isoTimeKeys,
+  numericTextKeys,
+  ordering,
+  resolveSort,
+  textKeys,
+  type OrderKey,
+  type SortColumns,
+  type SortRequest,
+} from "./ordering.js";
 
 /**
  * What a run actually found, read back out of the result envelopes.
@@ -24,6 +34,43 @@ import { Prisma, type PrismaClient } from "@prisma/client";
  */
 
 /** Which array of the envelope to read. */
+/**
+ * What a run's chapter listing can be ordered by, under the console's column
+ * names. `position` is the default: the order the extension reported them in,
+ * which is the only ordering the envelope itself asserts.
+ */
+export const RUN_CHAPTER_SORTS = [
+  "position",
+  "series",
+  "chapter",
+  "volume",
+  "title",
+  "language",
+  "released",
+  "segment",
+] as const;
+
+const RUN_CHAPTER_SORT_COLUMNS: SortColumns = {
+  position: [
+    { sql: Prisma.sql`j.segment_index`, cast: "numeric", dir: "follow" },
+    { sql: Prisma.sql`c.position`, cast: "numeric", dir: "follow" },
+  ],
+  series: textKeys(Prisma.sql`c.value->>'mangaName'`),
+  chapter: numericTextKeys(Prisma.sql`c.value->>'chapterNumber'`),
+  volume: numericTextKeys(Prisma.sql`c.value->>'chapterVolume'`),
+  title: textKeys(Prisma.sql`c.value->>'chapterTitle'`),
+  language: textKeys(Prisma.sql`c.value->>'chapterLanguage'`),
+  released: isoTimeKeys(Prisma.sql`c.value->>'chapterTimestamp'`),
+  segment: [{ sql: Prisma.sql`j.segment_index`, cast: "numeric", dir: "follow" }],
+};
+
+/**
+ * The tiebreak. There is no id here — a chapter is an element of a JSON array,
+ * not a row — so its place in the envelope stands in for one, which is unique
+ * within a job and paired with the job id below.
+ */
+const RUN_CHAPTER_ID: OrderKey = { sql: Prisma.sql`(j.id::text || ':' || c.position)`, cast: "text", dir: "follow" };
+
 export const CHAPTER_SETS = ["updated", "all"] as const;
 export type ChapterSet = (typeof CHAPTER_SETS)[number];
 
@@ -119,8 +166,13 @@ export class RunChapterStore {
     runId: string,
     set: ChapterSet,
     filter: RunChapterFilter,
-    opts: { limit: number; offset: number },
+    opts: { limit: number; offset: number; column?: SortRequest | null },
   ): Promise<{ chapters: RunChapterRow[]; total: number }> {
+    // Offset paging needs only the ORDER BY: there is no cursor to keep in step
+    // with it, because the envelope this reads cannot change under the reader.
+    const sorted = opts.column
+      ? ordering(resolveSort(RUN_CHAPTER_SORT_COLUMNS, opts.column.name, RUN_CHAPTER_ID)!.keys, opts.column.dir)
+      : null;
     const source = Prisma.sql`
       FROM jobs j
       JOIN result_submissions rs ON rs.job_id = j.id AND rs.state = 'COMMITTED'
@@ -136,7 +188,7 @@ export class RunChapterStore {
         SELECT j.id AS "jobId", j.segment_index AS "segmentIndex", j.segment_key AS "segmentKey",
                c.position::int AS "position", c.value AS "chapter"
         ${source}
-        ORDER BY j.segment_index ASC, c.position ASC
+        ORDER BY ${sorted ? sorted.orderBy : Prisma.sql`j.segment_index ASC, c.position ASC`}
         LIMIT ${opts.limit} OFFSET ${opts.offset}
       `),
       this.prisma.$queryRaw<{ total: bigint }[]>(Prisma.sql`
