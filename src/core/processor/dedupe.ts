@@ -706,7 +706,17 @@ export function decideForManga(input: DecideInput): DecideResult {
     .map((dupe) => dupe.chapter)
     .filter((chapter) => !uploadedOrEdited.has(chapterIdentity(chapter)));
 
-  for (const chapter of toUpload) {
+  // Both buckets, not just the uploads. A skipped chapter is written straight
+  // back to `uploaded_chapters` by `recordUploaded`, and that upsert overwrites
+  // every column -- so a chapter recognised as already-published, which is the
+  // ordinary outcome for anything uploaded on an earlier run, had its
+  // `md_group_id` replaced with the null it has carried since the extension
+  // reported it. The row it overwrote was correct. 56 mangaup_global rows and
+  // 48 k_manga rows lost their group that way, and comikey kept its only
+  // because its schedule is disabled and it has not re-run.
+  //
+  // `toEdit` needs nothing here: `buildEdit` stamps the same two fields.
+  for (const chapter of [...toUpload, ...skipped]) {
     chapter.mdMangaId = chapter.mdMangaId || input.mangadexMangaId;
     chapter.mdGroupId = input.groupId;
   }

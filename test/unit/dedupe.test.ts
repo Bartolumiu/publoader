@@ -441,6 +441,22 @@ describe("decideForManga", () => {
     expect(matched.numberCollisions).toEqual([]);
   });
 
+  it("stamps the group onto skipped chapters, not only uploads", () => {
+    // `recordUploaded` writes skipped chapters straight back to
+    // uploaded_chapters and its upsert overwrites every column, so a chapter
+    // that is merely recognised has to arrive complete. Leaving the group off
+    // replaced a correct md_group_id with the null the extension reported it
+    // with: 56 mangaup_global rows and 48 k_manga rows lost theirs that way.
+    const result = decide({
+      updatedChapters: [unchanged],
+      chaptersOnMd: [onMdUnchanged],
+    });
+
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0]!.mdGroupId).toBe("grp");
+    expect(result.skipped[0]!.mdMangaId).toBe("md-manga");
+  });
+
   it("carries the matched MangaDex id onto skipped chapters for bookkeeping", () => {
     const result = decide({
       updatedChapters: [unchanged],
