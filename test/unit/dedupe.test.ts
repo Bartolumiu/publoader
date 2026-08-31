@@ -271,6 +271,133 @@ describe("decideForManga", () => {
     expect(result.toRemove).toEqual([]);
   });
 
+  it("never clears a MangaDex volume just because the publisher has none", () => {
+    const withVolume = mdChapter("md-v", {
+      chapter: "3",
+      volume: "2",
+      title: "Old",
+      externalUrl: "https://pub.example/chapter/fff",
+    });
+    // Comikey and MANGA Plus both report no volume at all, so this is the
+    // normal case, not an edge one.
+    const noVolume = chapter({
+      chapterId: "fff",
+      chapterNumber: "3",
+      chapterTitle: "New",
+      chapterVolume: null,
+      chapterUrl: "https://pub.example/chapter/fff",
+    });
+
+    const result = decide({ updatedChapters: [noVolume], chaptersOnMd: [withVolume] });
+    expect(result.toEdit).toHaveLength(1);
+    // The title change goes through; the volume is left alone.
+    expect(result.toEdit[0]!.payload.title).toBe("New");
+    expect(result.toEdit[0]!.payload.volume).toBe("2");
+  });
+
+  it("still writes a volume we do have", () => {
+    const withVolume = mdChapter("md-v2", {
+      chapter: "3",
+      volume: "2",
+      externalUrl: "https://pub.example/chapter/ggg",
+    });
+    const corrected = chapter({
+      chapterId: "ggg",
+      chapterNumber: "3",
+      chapterVolume: "4",
+      chapterUrl: "https://pub.example/chapter/ggg",
+    });
+
+    const result = decide({ updatedChapters: [corrected], chaptersOnMd: [withVolume] });
+    expect(result.toEdit).toHaveLength(1);
+    expect(result.toEdit[0]!.payload.volume).toBe("4");
+  });
+
+  it("can edit a chapter whose id is namespaced", () => {
+    // buildEdit used a raw substring of the chapter id, which "EPI-jDvJnD"
+    // never satisfies, so a comikey chapter recognised as a duplicate would
+    // have been silently un-editable.
+    const onMdComikey = mdChapter("md-ck", {
+      chapter: "0",
+      title: "Old",
+      externalUrl: "https://comikey.com/read/kengan-omega-manga/jDvJnD/chapter-0/?utm_source=mgd",
+    });
+    const retitled = chapter({
+      chapterId: "EPI-jDvJnD",
+      chapterNumber: "0",
+      chapterTitle: "Prologue",
+      chapterUrl: "https://comikey.com/read/kengan-omega-manga/jDvJnD/chapter-0/",
+    });
+
+    const result = decide({ updatedChapters: [retitled], chaptersOnMd: [onMdComikey] });
+    expect(result.toUpload).toEqual([]);
+    expect(result.toEdit).toHaveLength(1);
+    expect(result.toEdit[0]!.mdChapterId).toBe("md-ck");
+    expect(result.toEdit[0]!.payload.title).toBe("Prologue");
+  });
+
+  it("does not renumber a sibling when one external chapter backs several numbers", () => {
+    // The real case: MANGA Plus viewer 1019959 is Girl Meets Rock! chapters 1
+    // to 4. Every one has the same externalUrl, so taking the first url match
+    // renumbered chapter 2 to 1 and cleared its volume on 2026-08-26.
+    const url = "https://mangaplus.shueisha.co.jp/viewer/1019959";
+    const onMdTwo = mdChapter("md-two", { chapter: "2", volume: "1", externalUrl: url });
+    const onMdThree = mdChapter("md-three", { chapter: "3", volume: "1", externalUrl: url });
+
+    const parts = ["1", "2", "3", "4"].map((n) =>
+      chapter({ chapterId: "1019959", chapterNumber: n, chapterUrl: url }),
+    );
+
+    const result = decide({
+      updatedChapters: parts,
+      chaptersOnMd: [onMdTwo, onMdThree],
+    });
+
+    // 2 and 3 are the ones already up; they are recognised as themselves.
+    expect(result.skipped.map((c) => c.mdChapterId).sort()).toEqual(["md-three", "md-two"]);
+    // 1 and 4 are siblings that are not on MangaDex yet, so they are uploaded
+    // rather than written over 2 or 3.
+    expect(result.toUpload.map((c) => c.chapterNumber).sort()).toEqual(["1", "4"]);
+    // Nothing is renumbered.
+    expect(result.toEdit).toEqual([]);
+  });
+
+  it("still edits a lone chapter whose number changed", () => {
+    // Not a split id: one url, one MangaDex chapter, number corrected. This has
+    // to keep working, which is why the fallback to the single url match stays.
+    const renumbered = mdChapter("md-r", {
+      chapter: "7",
+      externalUrl: "https://pub.example/chapter/ddd",
+    });
+    const now = chapter({
+      chapterId: "ddd",
+      chapterNumber: "7.5",
+      chapterUrl: "https://pub.example/chapter/ddd",
+    });
+
+    const result = decide({ updatedChapters: [now], chaptersOnMd: [renumbered] });
+    expect(result.toUpload).toEqual([]);
+    expect(result.toEdit).toHaveLength(1);
+    expect(result.toEdit[0]!.mdChapterId).toBe("md-r");
+    expect(result.toEdit[0]!.payload.chapter).toBe("7.5");
+  });
+
+  it("honours multi_chapters even when one run shows the id only once", () => {
+    // A publisher whose split is not visible in a single run still needs the
+    // override, so it is unioned with what the run shows.
+    const url = "https://pub.example/chapter/eee";
+    const onMdOne = mdChapter("md-o", { chapter: "1", externalUrl: url });
+    const second = chapter({ chapterId: "eee", chapterNumber: "2", chapterUrl: url });
+
+    const guarded = decide({
+      updatedChapters: [second],
+      chaptersOnMd: [onMdOne],
+      overrideOptions: { multi_chapters: { eee: ["1", "2"] } },
+    });
+    expect(guarded.toUpload.map((c) => c.chapterNumber)).toEqual(["2"]);
+    expect(guarded.toEdit).toEqual([]);
+  });
+
   it("reports an upload onto a number our group already holds, without blocking it", () => {
     // The comikey shape: the extension id never matches the url, so the url
     // check says "new" and the chapter is uploaded onto a taken number.

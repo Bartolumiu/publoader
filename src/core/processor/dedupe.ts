@@ -465,37 +465,91 @@ function findExtraChapters(input: DecideInput): MdChapter[] {
 }
 
 /**
+ * Extension chapter ids that back MORE THAN ONE MangaDex chapter, worked out
+ * from what this run itself reported.
+ *
+ * A publisher regularly serves several numbered chapters from one entry: MANGA
+ * Plus viewer 1019959 is chapters 1, 2, 3 and 4 of Girl Meets Rock!. Every one
+ * of those is a different chapter behind an identical externalUrl, so the url
+ * alone cannot tell them apart and the number has to be part of the identity.
+ *
+ * The `multi_chapters` override declares exactly this, and is the right answer
+ * when a publisher's split cannot be seen in a single run. It is also, in
+ * practice, configured for no extension at all — so relying on it alone left
+ * the case unhandled everywhere. The run's own chapters are evidence for it
+ * that needs no configuration and cannot go stale, so they are used first and
+ * the override is unioned in on top.
+ */
+function splitChapterIds(candidates: Chapter[], input: DecideInput): Set<string> {
+  const numbersById = new Map<string, Set<string>>();
+  for (const chapter of candidates) {
+    if (chapter.chapterId === null) continue;
+    const seen = numbersById.get(chapter.chapterId);
+    if (seen) seen.add(chapter.chapterNumber ?? "");
+    else numbersById.set(chapter.chapterId, new Set([chapter.chapterNumber ?? ""]));
+  }
+
+  const split = new Set<string>();
+  for (const [chapterId, numbers] of numbersById) {
+    if (numbers.size > 1) split.add(chapterId);
+  }
+  for (const chapterId of Object.keys(input.overrideOptions.multi_chapters ?? {})) {
+    split.add(chapterId);
+  }
+  return split;
+}
+
+/**
  * Is this chapter already on MangaDex? Matched by comparing the MD
  * externalUrl's path components against the extension chapter id. Chapters
  * listed as an alternate id in the `same` override are never matched here;
  * `checkUploadedDifferentId` handles them.
+ *
+ * Among several MangaDex chapters sharing the url, the one with the same
+ * chapter number wins. Taking the first was a real defect and not a
+ * theoretical one: uploading Girl Meets Rock! chapter 1 matched the MangaDex
+ * chapter that was chapter 2 behind the same viewer url, and the edit that
+ * followed renumbered it 2 -> 1 and cleared its volume. Three titles were
+ * renumbered that way on 2026-08-26.
+ *
+ * For an id known to back several chapters the number match is REQUIRED, so a
+ * part that is not on MangaDex yet is uploaded instead of being written over
+ * one of its siblings.
  */
 function checkForDuplicate(
   chapter: Chapter,
   input: DecideInput,
   sameChapterIds: Set<string>,
+  splitIds: Set<string>,
 ): { chapter: Chapter; mdChapter: MdChapter } | null {
-  const multiChapters = input.overrideOptions.multi_chapters ?? {};
+  if (chapter.chapterId !== null && sameChapterIds.has(chapter.chapterId)) return null;
 
-  for (const mdChapter of input.chaptersOnMd) {
-    if (!mdChapter.attributes.externalUrl) continue;
-    if (chapter.chapterId !== null && sameChapterIds.has(chapter.chapterId)) continue;
+  const matches = input.chaptersOnMd.filter(
+    (mdChapter) =>
+      mdChapter.attributes.externalUrl &&
+      checkChapterUrlSame(mdChapter.attributes.externalUrl, chapter.chapterId),
+  );
+  if (matches.length === 0) return null;
 
-    if (!checkChapterUrlSame(mdChapter.attributes.externalUrl, chapter.chapterId)) continue;
+  const sameNumber =
+    matches.find((mdChapter) => mdChapter.attributes.chapter === chapter.chapterNumber) ?? null;
 
-    // A single external chapter can legitimately back several MangaDex chapter
-    // numbers; only the declared numbers count as the same chapter.
-    if (chapter.chapterId !== null && chapter.chapterId in multiChapters) {
-      const allowedNumbers = multiChapters[chapter.chapterId] ?? [];
-      if (chapter.chapterNumber === null || !allowedNumbers.includes(chapter.chapterNumber)) {
-        continue;
-      }
-    }
-
-    chapter.mdChapterId = mdChapter.id;
-    return { chapter, mdChapter };
+  // One external chapter, several MangaDex chapters: only the same number is
+  // the same chapter. Anything else is a sibling, and writing to it would
+  // renumber somebody's chapter.
+  const isSplit = chapter.chapterId !== null && splitIds.has(chapter.chapterId);
+  if (isSplit) {
+    if (sameNumber === null) return null;
+    chapter.mdChapterId = sameNumber.id;
+    return { chapter, mdChapter: sameNumber };
   }
-  return null;
+
+  // Not a split id, so the url identifies one chapter. Prefer the matching
+  // number anyway; falling back to the first is what lets a number corrected on
+  // MangaDex, or changed by the publisher, still be recognised and edited.
+  const mdChapter = sameNumber ?? matches[0]!;
+  chapter.mdChapterId = mdChapter.id;
+  return { chapter, mdChapter };
 }
 
 /**
@@ -548,16 +602,22 @@ function buildEdit(
   // the old and the new MangaDex state in the same shape.
   const oldInfo: MdChapterPayload = { ...payload, groups: [...payload.groups] };
 
-  if (
-    chapter.chapterId === null ||
-    !attrs.externalUrl ||
-    !attrs.externalUrl.includes(chapter.chapterId)
-  ) {
+  // The same match `checkForDuplicate` used, not a raw substring of the id.
+  // A namespaced id ("EPI-jDvJnD") never appears verbatim in the url, so the
+  // substring test rejected every comikey chapter: once url matching started
+  // recognising them, they would have been recognised as duplicates and then
+  // found un-editable here, and no title or number would ever be corrected.
+  if (chapter.chapterId === null || !checkChapterUrlSame(attrs.externalUrl, chapter.chapterId)) {
     return null;
   }
 
   let changed = false;
-  if (chapter.chapterVolume !== attrs.volume) {
+  // A volume we do not have is not a volume we know to be wrong. Most
+  // publishers expose no volume at all, so `chapterVolume` is usually null, and
+  // writing that null over MangaDex's value deletes a fact to replace it with
+  // an absence. Three chapters were stripped of their volume that way on
+  // 2026-08-26. Only a volume we actually hold overwrites one.
+  if (chapter.chapterVolume !== null && chapter.chapterVolume !== attrs.volume) {
     payload.volume = chapter.chapterVolume;
     changed = true;
   }
@@ -613,8 +673,10 @@ export function decideForManga(input: DecideInput): DecideResult {
   const skippedDifferentId: Chapter[] = [];
   const dupes: { chapter: Chapter; mdChapter: MdChapter }[] = [];
 
+  const splitIds = splitChapterIds(candidates, input);
+
   for (const chapter of updated) {
-    const dupe = checkForDuplicate(chapter, input, sameChapterIds);
+    const dupe = checkForDuplicate(chapter, input, sameChapterIds, splitIds);
     if (dupe) {
       dupes.push(dupe);
     } else if (checkUploadedDifferentId(chapter, input, sameChapterIds)) {
