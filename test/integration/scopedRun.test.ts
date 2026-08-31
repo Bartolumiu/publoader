@@ -37,6 +37,16 @@ describe.skipIf(!dbReady())("scoped runs", () => {
     await closeDb();
   });
 
+  /**
+   * Publisher urls here carry the chapter id as a path component ("/a/a1", not
+   * "/a/1") because that is the only thing that ties a MangaDex chapter back to
+   * an extension chapter: `checkChapterUrlSame` looks for the id among the
+   * url's WHOLE path components, and "a1" is not a component of "/a/1".
+   *
+   * These fixtures once used "/a/1" against ids "a1", which no longer matched
+   * anything, so every already-published chapter looked new. The test that
+   * cared said so; the others pass either way, which is why it stayed broken.
+   */
   /** One MangaDex chapter of ours, as `chaptersForManga` reports it. */
   function mdChapter(id: string, externalUrl: string | null): MdChapter {
     return {
@@ -76,12 +86,12 @@ describe.skipIf(!dbReady())("scoped runs", () => {
   function fakeMd(): MdApi {
     const holdings: Record<string, MdChapter[]> = {
       [SERIES_A]: [
-        mdChapter("aaaa1111-0000-4000-8000-000000000001", "https://publisher.example/a/1"),
-        mdChapter("aaaa2222-0000-4000-8000-000000000002", "https://publisher.example/a/2"),
+        mdChapter("aaaa1111-0000-4000-8000-000000000001", "https://publisher.example/a/a1"),
+        mdChapter("aaaa2222-0000-4000-8000-000000000002", "https://publisher.example/a/a2"),
       ],
       [SERIES_B]: [
-        mdChapter("bbbb1111-0000-4000-8000-000000000001", "https://publisher.example/b/1"),
-        mdChapter("bbbb2222-0000-4000-8000-000000000002", "https://publisher.example/b/2"),
+        mdChapter("bbbb1111-0000-4000-8000-000000000001", "https://publisher.example/b/b1"),
+        mdChapter("bbbb2222-0000-4000-8000-000000000002", "https://publisher.example/b/b2"),
       ],
     };
     const unreached = (name: string) => () => {
@@ -223,7 +233,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
       mdMangaId: SERIES_A,
       mangaId: "series-a",
       chapterId: "a1",
-      url: "https://publisher.example/a/1",
+      url: "https://publisher.example/a/a1",
     },
   ];
 
@@ -339,8 +349,8 @@ describe.skipIf(!dbReady())("scoped runs", () => {
       scopeMangaIds: [],
       // Both series still listed, each having lost its second chapter.
       stillListed: [
-        { mdMangaId: SERIES_A, mangaId: "series-a", chapterId: "a1", url: "https://publisher.example/a/1" },
-        { mdMangaId: SERIES_B, mangaId: "series-b", chapterId: "b1", url: "https://publisher.example/b/1" },
+        { mdMangaId: SERIES_A, mangaId: "series-a", chapterId: "a1", url: "https://publisher.example/a/a1" },
+        { mdMangaId: SERIES_B, mangaId: "series-b", chapterId: "b1", url: "https://publisher.example/b/b1" },
       ],
       // And the extension flagged nothing as new, the way a dormant series goes.
       updated: [],
@@ -370,10 +380,10 @@ describe.skipIf(!dbReady())("scoped runs", () => {
     const { run } = await runWithEnvelope({
       scopeMangaIds: [],
       stillListed: [
-        { mdMangaId: SERIES_A, mangaId: "series-a", chapterId: "a1", url: "https://publisher.example/a/1" },
-        { mdMangaId: SERIES_A, mangaId: "series-a", chapterId: "a3", url: "https://publisher.example/a/3" },
-        { mdMangaId: SERIES_B, mangaId: "series-b", chapterId: "b1", url: "https://publisher.example/b/1" },
-        { mdMangaId: SERIES_B, mangaId: "series-b", chapterId: "b2", url: "https://publisher.example/b/2" },
+        { mdMangaId: SERIES_A, mangaId: "series-a", chapterId: "a1", url: "https://publisher.example/a/a1" },
+        { mdMangaId: SERIES_A, mangaId: "series-a", chapterId: "a3", url: "https://publisher.example/a/a3" },
+        { mdMangaId: SERIES_B, mangaId: "series-b", chapterId: "b1", url: "https://publisher.example/b/b1" },
+        { mdMangaId: SERIES_B, mangaId: "series-b", chapterId: "b2", url: "https://publisher.example/b/b2" },
       ],
       updated: [],
     });
@@ -425,7 +435,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
         mdChapterId: "aaaa1111-0000-4000-8000-000000000001",
         unavailableAt: new Date("2026-08-26T12:00:00Z"),
         extension: "testext",
-        chapterUrl: "https://publisher.example/a/1",
+        chapterUrl: "https://publisher.example/a/a1",
         chapterNumber: "1",
         chapterLanguage: "en",
         mangaName: "Series A",
@@ -436,7 +446,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
     const { run } = await runWithEnvelope({
       scopeMangaIds: [],
       stillListed: [
-        { mdMangaId: SERIES_A, mangaId: "series-a", chapterId: "a1", url: "https://publisher.example/a/1" },
+        { mdMangaId: SERIES_A, mangaId: "series-a", chapterId: "a1", url: "https://publisher.example/a/a1" },
       ],
       updated: [],
     });
