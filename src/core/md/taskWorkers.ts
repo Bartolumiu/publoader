@@ -52,6 +52,26 @@ export class TaskError extends Error {
   }
 }
 
+/**
+ * The chapter as MangaDex holds it after an edit: the extension's chapter with
+ * the fields the edit actually sent laid over it.
+ *
+ * `body` is the full edit body, so its values are the post-edit truth whether
+ * they came from the payload or from what MangaDex already had. Only the four
+ * fields our own rows carry are copied; `groups`, `version` and `externalUrl`
+ * live elsewhere or are not ours to restate.
+ */
+export function appliedChapter(chapter: Chapter, body: Record<string, unknown>): Chapter {
+  const str = (value: unknown): string | null => (typeof value === "string" ? value : null);
+  return {
+    ...chapter,
+    chapterVolume: str(body["volume"]),
+    chapterNumber: str(body["chapter"]),
+    chapterTitle: str(body["title"]),
+    chapterLanguage: str(body["translatedLanguage"]) ?? chapter.chapterLanguage,
+  };
+}
+
 export interface TaskWorkerDeps {
   prisma: PrismaClient;
   md: MdExtendedApi;
@@ -474,12 +494,21 @@ export class UploadTaskWorkers {
       throw err;
     }
 
-    await this.appendEdit(mdChapterId, chapter, oldInfo, payload);
-    await this.recordUploadedChapter(chapter, mdChapterId);
+    // Mirror what MangaDex now holds, not what the extension reported. The two
+    // differ on exactly the fields an edit exists to change, and the edit is
+    // usually queued BECAUSE the extension's value is not the wanted one: a
+    // volume backfilled from the aggregate is sent in the payload while the
+    // extension chapter still carries null, and mirroring the chapter wrote
+    // that null back. `uploaded_chapters` then said "no volume" about a chapter
+    // MangaDex had just been given one for, so the same edit was found and
+    // queued again on every later sweep.
+    const applied = appliedChapter(chapter, body);
+    await this.appendEdit(mdChapterId, applied, oldInfo, payload);
+    await this.recordUploadedChapter(applied, mdChapterId);
 
     metrics.uploadsTotal.inc({ outcome: "edit_ok" });
     log.info({ mdChapterId, fields: Object.keys(payload) }, "chapter edited");
-    this.queue("Edit", chapter, mdChapterId, true);
+    this.queue("Edit", applied, mdChapterId, true);
   }
 
   private async appendEdit(
