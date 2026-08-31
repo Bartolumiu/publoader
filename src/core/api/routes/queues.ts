@@ -13,6 +13,7 @@ import {
   UPLOAD_TASK_KINDS,
   UPLOAD_TASK_STATES,
   decodeTaskCursor,
+  TASK_SORTS,
   taskDedupeKey,
   type ReorderMode,
   type UploadTaskFilter,
@@ -337,6 +338,15 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
             limit: z.coerce.number().int().min(1).max(500).default(100),
             cursor: z.string().max(512).optional(),
             sort: z.enum(["asc", "desc"]).default("asc"),
+            /**
+             * Order the whole queue by one column instead of by claim order.
+             * Separate from `sort`, which only reverses the claim order: this
+             * is what the console's header buttons send, and sorting just the
+             * page already fetched would answer a narrower question than the
+             * one a header click asks.
+             */
+            orderBy: z.enum(TASK_SORTS).optional(),
+            dir: z.enum(["asc", "desc"]).default("asc"),
           })
           .refine(
             (value) =>
@@ -348,8 +358,13 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
         req.query ?? {},
       );
 
-      const cursor = query.cursor ? decodeTaskCursor(query.cursor) : null;
-      if (query.cursor && !cursor) {
+      // A cursor names a position in one ordering, so only the decoder for the
+      // ordering in force can read it; `orderBy` is what says which that is.
+      const column = query.orderBy
+        ? { name: query.orderBy, dir: query.dir, cursor: query.cursor ?? null }
+        : null;
+      const cursor = !column && query.cursor ? decodeTaskCursor(query.cursor) : null;
+      if (!column && query.cursor && !cursor) {
         throw Object.assign(new Error("invalid cursor: not a cursor this endpoint issued"), {
           statusCode: 400,
         });
@@ -357,7 +372,7 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
 
       const sort: TaskSort = query.sort;
       const [page, summary] = await Promise.all([
-        ctx.uploadTasks.list(toFilter(query), { limit: query.limit, cursor, sort }),
+        ctx.uploadTasks.list(toFilter(query), { limit: query.limit, cursor, sort, column }),
         ctx.uploadTasks.depths(),
       ]);
 
@@ -367,9 +382,17 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
         limit: query.limit,
         nextCursor: page.nextCursor,
         sort,
+        orderedBy: column?.name ?? null,
+        dir: query.dir,
+        sortable: TASK_SORTS,
         // The claim order, and what `POST /queues/reorder` rewrites; reversed
-        // when `sort=desc` asked for the newest first.
-        order: sort === "desc" ? "notBefore,createdAt,id DESC" : "notBefore,createdAt,id",
+        // when `sort=desc` asked for the newest first. A column sort replaces
+        // it outright, and says so.
+        order: column
+          ? `${column.name},id (${column.dir}ending)`
+          : sort === "desc"
+            ? "notBefore,createdAt,id DESC"
+            : "notBefore,createdAt,id",
         summary,
       };
     });

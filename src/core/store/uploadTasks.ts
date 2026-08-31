@@ -7,6 +7,18 @@ import {
   type UploadTaskKind,
   type UploadTaskState,
 } from "@prisma/client";
+import {
+  encodeSortCursor,
+  numberKeys,
+  numericTextKeys,
+  plainKey,
+  sortedBy,
+  textKeys,
+  timeKeys,
+  type OrderKey,
+  type SortColumns,
+  type SortRequest,
+} from "./ordering.js";
 
 /**
  * Central MangaDex work queues, replacing the Mongo `to_upload` / `to_edit` /
@@ -201,6 +213,73 @@ export interface TaskCursor {
  * would answer a question nobody asked.
  */
 export type TaskSort = "asc" | "desc";
+
+/**
+ * The columns the queue's two listings can be ordered by, under the names the
+ * console's headers carry.
+ *
+ * Distinct from `TaskSort`, which reverses the queue's own ordering and is the
+ * only thing that can be said about the claim order. These order the whole
+ * filtered set by something else entirely, because that is what a click on a
+ * column header means; `position` in the chapters listing stays the claim
+ * order's numbering either way, so a sorted page still says where each row
+ * stands in the queue.
+ */
+export const TASK_SORTS = [
+  "kind",
+  "state",
+  "chapter",
+  "dedupeKey",
+  "attempts",
+  "notBefore",
+  "lastError",
+] as const;
+
+export const QUEUED_CHAPTER_SORTS = [
+  "position",
+  "kind",
+  "series",
+  "chapter",
+  "volume",
+  "title",
+  "language",
+  "due",
+  "state",
+] as const;
+
+/**
+ * The Chapter column shows a series and a number together, so it orders by
+ * both: by series alone it would look sorted while scattering each title's
+ * chapters, which is the one thing a reader of that column is looking for.
+ */
+const TASK_SORT_COLUMNS: SortColumns = {
+  kind: textKeys(Prisma.sql`t.kind::text`),
+  state: textKeys(Prisma.sql`t.state::text`),
+  chapter: [
+    ...textKeys(Prisma.sql`t.chapter->>'mangaName'`),
+    ...numericTextKeys(Prisma.sql`t.chapter->>'chapterNumber'`),
+  ],
+  dedupeKey: textKeys(Prisma.sql`t.dedupe_key`),
+  attempts: numberKeys(Prisma.sql`t.attempt`),
+  notBefore: timeKeys(Prisma.sql`t.not_before`),
+  lastError: textKeys(Prisma.sql`t.last_error`),
+};
+
+const QUEUED_CHAPTER_SORT_COLUMNS: SortColumns = {
+  position: plainKey(Prisma.sql`o.position`, "numeric"),
+  kind: textKeys(Prisma.sql`o.kind`),
+  series: textKeys(Prisma.sql`o."mangaName"`),
+  chapter: numericTextKeys(Prisma.sql`o."chapterNumber"`),
+  volume: numericTextKeys(Prisma.sql`o."chapterVolume"`),
+  title: textKeys(Prisma.sql`o."chapterTitle"`),
+  language: textKeys(Prisma.sql`o."chapterLanguage"`),
+  due: timeKeys(Prisma.sql`o."notBefore"`),
+  state: textKeys(Prisma.sql`o.state`),
+};
+
+/** The tiebreak that makes each of the above a total order. */
+const TASK_ID: OrderKey = { sql: Prisma.sql`t.id`, cast: "text", dir: "follow" };
+const QUEUED_CHAPTER_ID: OrderKey = { sql: Prisma.sql`o.id`, cast: "text", dir: "follow" };
 
 export function encodeTaskCursor(row: TaskCursor): string {
   const raw = `${row.notBefore.toISOString()}|${row.createdAt.toISOString()}|${row.id}`;
@@ -505,11 +584,19 @@ export class UploadTaskStore {
    */
   async list(
     filter: UploadTaskFilter,
-    opts: { limit: number; cursor?: TaskCursor | null; sort?: TaskSort },
+    opts: { limit: number; cursor?: TaskCursor | null; sort?: TaskSort; column?: SortRequest | null },
   ): Promise<{ tasks: UploadTaskRow[]; total: number; nextCursor: string | null }> {
     const descending = opts.sort === "desc";
     const parts = taskWhere(filter);
-    if (opts.cursor) {
+
+    // A column sort replaces the claim order rather than refining it. The claim
+    // order answers "what runs next"; a header click asks a different question
+    // about the same rows, and answering both at once answers neither.
+    const sorted = sortedBy(TASK_SORT_COLUMNS, opts.column, TASK_ID);
+    if (sorted) {
+      const after = sorted.order.after(sorted.after);
+      if (after) parts.push(after);
+    } else if (opts.cursor) {
       const position = Prisma.sql`(${opts.cursor.notBefore}, ${opts.cursor.createdAt}, ${opts.cursor.id})`;
       parts.push(
         descending
@@ -519,12 +606,17 @@ export class UploadTaskStore {
     }
     // One row beyond the page, so "is there a next page?" needs no second count.
     const [rows, counted] = await Promise.all([
-      this.prisma.$queryRaw<UploadTaskRow[]>(Prisma.sql`
-        SELECT ${TASK_COLUMNS}, ${TASK_IDENTITY} FROM upload_tasks t
+      this.prisma.$queryRaw<(UploadTaskRow & Record<string, unknown>)[]>(Prisma.sql`
+        SELECT ${TASK_COLUMNS}, ${TASK_IDENTITY}${sorted ? Prisma.sql`, ${sorted.order.select}` : Prisma.empty}
+        FROM upload_tasks t
         ${combine(parts)}
-        ${descending
-          ? Prisma.sql`ORDER BY t.not_before DESC, t.created_at DESC, t.id DESC`
-          : Prisma.sql`ORDER BY t.not_before ASC, t.created_at ASC, t.id ASC`}
+        ORDER BY ${
+          sorted
+            ? sorted.order.orderBy
+            : descending
+              ? Prisma.sql`t.not_before DESC, t.created_at DESC, t.id DESC`
+              : Prisma.sql`t.not_before ASC, t.created_at ASC, t.id ASC`
+        }
         LIMIT ${opts.limit + 1}
       `),
       this.prisma.$queryRaw<{ total: bigint }[]>(Prisma.sql`
@@ -534,10 +626,16 @@ export class UploadTaskStore {
 
     const page = rows.slice(0, opts.limit);
     const last = page[page.length - 1];
+    const more = rows.length > opts.limit && last !== undefined;
     return {
-      tasks: page,
+      // Minted before the sort keys are stripped off the row they are read from.
+      nextCursor: !more
+        ? null
+        : sorted
+          ? encodeSortCursor(sorted.name, sorted.dir, sorted.order.cursorOf(last))
+          : encodeTaskCursor(last),
+      tasks: sorted ? page.map((row) => sorted.order.strip(row)) : page,
       total: Number(counted[0]?.total ?? 0),
-      nextCursor: rows.length > opts.limit && last ? encodeTaskCursor(last) : null,
     };
   }
 
@@ -552,12 +650,20 @@ export class UploadTaskStore {
    */
   async listChapters(
     filter: UploadTaskFilter,
-    opts: { limit: number; cursor?: TaskCursor | null; sort?: TaskSort },
+    opts: { limit: number; cursor?: TaskCursor | null; sort?: TaskSort; column?: SortRequest | null },
   ): Promise<{ chapters: QueuedChapterRow[]; total: number; nextCursor: string | null }> {
     const descending = opts.sort === "desc";
     const parts = taskWhere(filter);
     const page: Prisma.Sql[] = [];
-    if (opts.cursor) {
+
+    // Applied outside the CTE, like the cursor it replaces: `position` is a
+    // window over the claim order across everything matching the filter, so
+    // narrowing inside the CTE would renumber the rows to the page.
+    const sorted = sortedBy(QUEUED_CHAPTER_SORT_COLUMNS, opts.column, QUEUED_CHAPTER_ID);
+    if (sorted) {
+      const after = sorted.order.after(sorted.after);
+      if (after) page.push(after);
+    } else if (opts.cursor) {
       const position = Prisma.sql`(${opts.cursor.notBefore}, ${opts.cursor.createdAt}, ${opts.cursor.id})`;
       page.push(
         descending
@@ -566,7 +672,7 @@ export class UploadTaskStore {
       );
     }
 
-    const rows = await this.prisma.$queryRaw<QueuedChapterRow[]>(Prisma.sql`
+    const rows = await this.prisma.$queryRaw<(QueuedChapterRow & Record<string, unknown>)[]>(Prisma.sql`
       WITH ordered AS (
         SELECT ${TASK_COLUMNS},
                row_number() OVER (ORDER BY t.not_before ASC, t.created_at ASC, t.id ASC) AS position,
@@ -592,11 +698,15 @@ export class UploadTaskStore {
         FROM upload_tasks t
         ${combine(parts)}
       )
-      SELECT o.* FROM ordered o
+      SELECT o.*${sorted ? Prisma.sql`, ${sorted.order.select}` : Prisma.empty} FROM ordered o
       ${combine(page)}
-      ${descending
-        ? Prisma.sql`ORDER BY o."notBefore" DESC, o."createdAt" DESC, o.id DESC`
-        : Prisma.sql`ORDER BY o."notBefore" ASC, o."createdAt" ASC, o.id ASC`}
+      ORDER BY ${
+        sorted
+          ? sorted.order.orderBy
+          : descending
+            ? Prisma.sql`o."notBefore" DESC, o."createdAt" DESC, o.id DESC`
+            : Prisma.sql`o."notBefore" ASC, o."createdAt" ASC, o.id ASC`
+      }
       LIMIT ${opts.limit + 1}
     `);
 
@@ -604,12 +714,20 @@ export class UploadTaskStore {
       SELECT count(*) AS total FROM upload_tasks t ${combine(taskWhere(filter))}
     `);
 
-    const chapters = rows.slice(0, opts.limit).map((row) => ({ ...row, position: Number(row.position) }));
-    const last = chapters[chapters.length - 1];
+    const wanted = rows.slice(0, opts.limit);
+    const last = wanted[wanted.length - 1];
+    const more = rows.length > opts.limit && last !== undefined;
     return {
-      chapters,
+      nextCursor: !more
+        ? null
+        : sorted
+          ? encodeSortCursor(sorted.name, sorted.dir, sorted.order.cursorOf(last))
+          : encodeTaskCursor(last),
+      chapters: wanted.map((row) => ({
+        ...(sorted ? sorted.order.strip(row) : row),
+        position: Number(row.position),
+      })),
       total: Number(counted[0]?.total ?? 0),
-      nextCursor: rows.length > opts.limit && last ? encodeTaskCursor(last) : null,
     };
   }
 

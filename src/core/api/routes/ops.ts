@@ -16,6 +16,14 @@ import { UPLOAD_TASK_KINDS, UPLOAD_TASK_STATES } from "../../store/uploadTasks.j
 import { DEFAULT_NAMESPACE } from "../../store/trackedManga.js";
 import { OFFICIAL_LINK_SOURCE } from "../../md/titleService.js";
 import { workerLabel, workerNames } from "../../store/workers.js";
+import {
+  ordering,
+  resolveSort,
+  textKeys,
+  timeKeys,
+  type OrderKey,
+  type SortColumns,
+} from "../../store/ordering.js";
 import { mangaEditPayload } from "../../md/titleService.js";
 import {
   ERROR_FEED_SOURCES,
@@ -27,6 +35,27 @@ import {
 
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024;
 const DEFAULT_WINDOW_HOURS = 72;
+
+/**
+ * What the audit log may be ordered by, as the console's columns.
+ *
+ * Offset paging here, not keyset: the log is append-only in one direction, and
+ * every ordering but the default is a question about history rather than a walk
+ * along its head. `detail` is ordered as text because that is what the column
+ * shows — a rendered JSON blob — and ordering it any other way would order by
+ * something the reader cannot see.
+ */
+const AUDIT_SORTS = ["when", "actor", "action", "subject", "detail"] as const;
+
+const AUDIT_SORT_COLUMNS: SortColumns = {
+  when: timeKeys(Prisma.sql`created_at`),
+  actor: textKeys(Prisma.sql`actor`),
+  action: textKeys(Prisma.sql`action`),
+  subject: textKeys(Prisma.sql`subject`),
+  detail: textKeys(Prisma.sql`detail::text`),
+};
+
+const AUDIT_ID: OrderKey = { sql: Prisma.sql`id`, cast: "text", dir: "follow" };
 
 /** Written by MdClient (core/md/client.ts); read-only here. */
 const MD_ACCESS_KEY = "mdauth_access";
@@ -1074,6 +1103,13 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
           until: z.coerce.date().optional(),
           limit: z.coerce.number().int().min(1).max(500).default(100),
           offset: z.coerce.number().int().min(0).max(100_000).default(0),
+          /**
+           * Order the whole log by one column rather than newest-first. What
+           * the console's header buttons send; ordering the hundred rows on
+           * screen would answer a question about this page, not about the log.
+           */
+          orderBy: z.enum(AUDIT_SORTS).optional(),
+          dir: z.enum(["asc", "desc"]).default("asc"),
         }),
         req.query ?? {},
       );
@@ -1101,7 +1137,14 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
         >(
           Prisma.sql`SELECT id, actor, action, subject, detail, created_at
                      FROM audit_events ${predicate}
-                     ORDER BY created_at DESC
+                     ORDER BY ${
+                       query.orderBy
+                         ? ordering(
+                             resolveSort(AUDIT_SORT_COLUMNS, query.orderBy, AUDIT_ID)!.keys,
+                             query.dir,
+                           ).orderBy
+                         : Prisma.sql`created_at DESC`
+                     }
                      LIMIT ${query.limit} OFFSET ${query.offset}`,
         ),
         // The total is what makes paging honest: without it the UI cannot tell
@@ -1123,6 +1166,9 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
         total: Number(counted[0]?.total ?? 0),
         limit: query.limit,
         offset: query.offset,
+        orderedBy: query.orderBy ?? null,
+        dir: query.dir,
+        sortable: AUDIT_SORTS,
       };
     });
 

@@ -80,6 +80,15 @@ const store = {
     /** Keyset cursors already walked, so "Back" does not need a second scheme. */
     queueCursors: [],
     /**
+     * The column the server is ordering by, for the tables it also pages.
+     *
+     * Kept with the filters rather than inside the table because it IS a
+     * filter, in the only sense that matters here: it is part of the request,
+     * so it has to survive the redraw that request causes, and changing it
+     * invalidates the cursors walked under the old ordering.
+     */
+    queueSort: { column: null, dir: "asc" },
+    /**
      * The queue read as chapters. Separate keys from the row view above rather
      * than shared ones: the two answer different questions ("what is stuck" vs
      * "what is about to be published") and an operator switching tabs to check
@@ -91,11 +100,13 @@ const store = {
     queueChapterExtension: "",
     queueChapterLanguage: "",
     queueChapterCursors: [],
+    queueChapterSort: { column: null, dir: "asc" },
     /** What a run found, on the run detail page. */
     runChapterSet: "updated",
     runChapterQuery: "",
     runChapterSegment: "",
     runChapterPage: 0,
+    runChapterSort: { column: null, dir: "asc" },
     /** The chapter archives (uploaded / edited / unavailable / deleted). */
     chapterExtension: "",
     chapterLanguage: "",
@@ -107,11 +118,13 @@ const store = {
      * page the wrong table the moment a tab changed.
      */
     chapterCursors: {},
+    chapterSort: { column: null, dir: "asc" },
     untrackedState: "NEW",
     untrackedExtension: "",
     untrackedQuery: "",
     /** Cursors walked so far; one per page behind the current one. */
     untrackedCursors: [],
+    untrackedSort: { column: null, dir: "asc" },
     activitySeverity: "all",
     activityHours: 72,
     activityQuery: "",
@@ -125,6 +138,7 @@ const store = {
     auditSince: "",
     auditUntil: "",
     auditOffset: 0,
+    auditSort: { column: null, dir: "asc" },
   },
 };
 
@@ -883,6 +897,62 @@ function tableSortBar(headers, sortable, view, onSort) {
  * hands focus to the fallback the caller names instead, so focus never lands on
  * something inert and never falls out of the table.
  */
+/**
+ * Focus to restore after a redraw that the control which asked for it does not
+ * own.
+ *
+ * `keepFocus` below covers a table rebuilding itself. A server-side sort is the
+ * other case: the click sends a request, and the whole region is rebuilt around
+ * the answer whenever it lands. Nothing survives that except a name, so the name
+ * is left here and `live()` picks it up on its next draw.
+ *
+ * Stamped with a time so an intent that is never claimed — the region redrew
+ * without the control, or the operator navigated away — expires instead of
+ * stealing focus from whatever they went on to do.
+ */
+let pendingFocus = null;
+const FOCUS_INTENT_MS = 10_000;
+
+function holdFocus(name) {
+  pendingFocus = { name, at: Date.now() };
+}
+
+/**
+ * Held across every draw of the request, not just the first.
+ *
+ * A refetch draws twice — once when the request goes out and the region is
+ * marked refreshing, once when the answer lands — and each draw replaces the
+ * node the previous one focused. Claiming the intent on the first would put
+ * focus back only to have the second take it away again, which is the whole
+ * failure this exists to prevent.
+ *
+ * So the intent stands until the operator themselves moves focus, or until it
+ * goes stale. Both are needed: without the first it would fight a keyboard user
+ * who moved on, and without the second a region that never redraws would leave
+ * it lying in wait.
+ */
+function claimFocus(host) {
+  if (!pendingFocus) return;
+  if (Date.now() - pendingFocus.at > FOCUS_INTENT_MS) {
+    pendingFocus = null;
+    return;
+  }
+  const back = host.querySelector(`[data-focus="${pendingFocus.name}"]`);
+  if (!back || back.disabled || document.activeElement === back) return;
+  back.focus();
+}
+
+// Focus moved by anything but the restore above is the operator's own, and ends
+// the claim. The restore refocuses the same named control, so it does not.
+document.addEventListener(
+  "focusin",
+  (event) => {
+    if (!pendingFocus) return;
+    if (event.target?.getAttribute?.("data-focus") !== pendingFocus.name) pendingFocus = null;
+  },
+  true,
+);
+
 function keepFocus(host, draw) {
   const active = document.activeElement;
   const held = host.contains(active) ? active.getAttribute("data-focus") : null;
@@ -904,12 +974,17 @@ function keepFocus(host, draw) {
  * of unlabelled values. Wider than that it scrolls inside `.scroll`: never
  * taking the page sideways with it.
  *
- * Sorting and paging are client-side, over the rows handed in. Where a view
- * also has a server pager (the queues, the audit log, a run's chapters) the two
- * compose rather than conflict: this one moves within the batch on screen, that
- * one fetches the next batch. What it does mean is that a sort here orders the
- * batch and not the whole table, so a column the server can already order by is
- * still better ordered there.
+ * Paging is client-side, over the rows handed in. Where a view also has a
+ * server pager (the queues, the audit log, a run's chapters) the two compose:
+ * this one moves within the batch on screen, that one fetches the next batch.
+ *
+ * Sorting is client-side ONLY where the rows handed in are the whole result.
+ * For a table the server pages, ordering the batch would answer the wrong
+ * question — "the oldest of the hundred rows already fetched" is not what
+ * clicking a column header asks — so those tables pass `sort`, and the click
+ * becomes a request for the whole listing in that order. The two cases look
+ * identical to the operator, which is the point; what differs is where the
+ * ordering happens.
  *
  * A column holding action buttons is never sortable; ordering rows by the
  * buttons in them is meaningless, and such a column's header is blank anyway.
@@ -926,8 +1001,17 @@ function keepFocus(host, draw) {
  *   `onPage`    called after every draw with the rows actually on screen, as
  *               indices into `rows`. This is what lets a bulk bar act on the
  *               page rather than on the whole batch behind it.
+ *   `sort`      hands sorting to the server, for a table the server pages:
+ *               `{ keys, value, onSort }`. `keys` names the column each header
+ *               orders by, server-side, and is null where the server cannot
+ *               order by it (which makes that header unsortable, rather than
+ *               offering an order it would not honour). `value` is the ordering
+ *               in force, `{ column, dir }`, as the request that fetched these
+ *               rows asked for it. `onSort(column, dir)` is called with the
+ *               ordering wanted next; the caller re-asks the server for the
+ *               first page of it.
  */
-function table(headers, rows, { empty, stack = true, key, pageSize = TABLE_PAGE, resetOn, onPage } = {}) {
+function table(headers, rows, { empty, stack = true, key, pageSize = TABLE_PAGE, resetOn, onPage, sort } = {}) {
   if (!rows.length) {
     onPage?.([]);
     return emptyState(empty ?? "Nothing here.");
@@ -943,15 +1027,60 @@ function table(headers, rows, { empty, stack = true, key, pageSize = TABLE_PAGE,
   }
 
   const sortable = headers.map(
-    (header, index) => Boolean(header) && !rows.some((cells) => Array.isArray(cells[index])),
+    (header, index) =>
+      Boolean(header) &&
+      !rows.some((cells) => Array.isArray(cells[index])) &&
+      // A server-sorted table can only offer the columns the server will order
+      // by. Showing a button for the rest would promise an ordering that comes
+      // back refused, which reads as a sort that does not work.
+      (!sort || sort.keys[index] != null),
   );
   // A column can stop being sortable between redraws, once the rows that gain
   // it an action button arrive; drop a sort that no longer has a column.
   if (view.column != null && !sortable[view.column]) view.column = null;
 
+  /**
+   * The ordering the headers show.
+   *
+   * A server-sorted table keeps none of its own: the order these rows are in is
+   * a property of the request that fetched them, so it is read back from the
+   * caller rather than remembered here. Two tables would otherwise disagree
+   * about the same thing, and the one on screen would be the wrong one.
+   */
+  const remote = sort
+    ? {
+        column: sort.value?.column ? sort.keys.indexOf(sort.value.column) : -1,
+        dir: sort.value?.dir ?? "asc",
+      }
+    : null;
+  if (remote && remote.column < 0) remote.column = null;
+  const state = remote ?? view;
+
+  // A new server ordering is a new list, so it starts at its first page. Held
+  // here rather than asked of every caller: they would all have to remember.
+  if (sort) {
+    const ordering = `${sort.value?.column ?? ""}:${sort.value?.dir ?? ""}`;
+    if (view.ordering !== ordering) {
+      view.ordering = ordering;
+      view.page = 0;
+    }
+  }
+
   const host = el("div", { class: "table-host" });
 
   const onSort = (index, how = "toggle") => {
+    if (sort) {
+      // Focus is about to be lost to a redraw this table does not own: the
+      // rows are refetched, and the whole region is rebuilt around them. The
+      // control that was pressed is named so it can be found again afterwards,
+      // which matters most here because reversing a sort is a second press of
+      // the same button.
+      const held = document.activeElement?.getAttribute?.("data-focus");
+      if (held) holdFocus(held);
+      if (index == null || Number.isNaN(index) || !sortable[index]) return sort.onSort(null, "asc");
+      const reversing = how === "flip" || (how === "toggle" && state.column === index);
+      return sort.onSort(sort.keys[index], reversing && state.dir === "asc" ? "desc" : "asc");
+    }
     if (index == null || Number.isNaN(index) || !sortable[index]) {
       view.column = null;
     } else if (how === "flip" || (how === "toggle" && view.column === index)) {
@@ -969,22 +1098,23 @@ function table(headers, rows, { empty, stack = true, key, pageSize = TABLE_PAGE,
 
   const draw = () => {
     // Indices rather than the rows themselves, so `onPage` can hand the caller
-    // back its own records instead of the cells this built out of them.
-    const order = view.column == null ? rows.map((_, at) => at) : sortRows(rows, view.column, view.dir);
+    // back its own records instead of the cells this built out of them. Already
+    // ordered when the server did the ordering, so the rows stand as they came.
+    const order = sort || view.column == null ? rows.map((_, at) => at) : sortRows(rows, view.column, view.dir);
     const pages = Math.max(1, Math.ceil(order.length / pageSize));
     view.page = Math.min(Math.max(view.page, 0), pages - 1);
     const start = view.page * pageSize;
     const shown = order.slice(start, start + pageSize);
     setChildren(
       host,
-      tableSortBar(headers, sortable, view, onSort),
+      tableSortBar(headers, sortable, state, onSort),
       el(
         "div",
         { class: "scroll" },
         el(
           "table",
           { class: stack ? "stack" : null },
-          tableHead(headers, sortable, view, onSort),
+          tableHead(headers, sortable, state, onSort),
           el("tbody", {}, shown.map((at) => tableRow(headers, rows[at]))),
         ),
       ),
@@ -1533,7 +1663,10 @@ function live(resources, render, { reserve = 0, skeleton } = {}) {
     if (loading) return setChildren(host, skeleton ? skeleton() : skeletonTable());
     // setChildren, not replaceChildren: a view whose render returns nothing for
     // an empty payload would otherwise paint the string "undefined".
-    return setChildren(host, render(...resources.map((r) => r.data)));
+    setChildren(host, render(...resources.map((r) => r.data)));
+    // A control that asked for this redraw and was replaced by it gets the
+    // keyboard back; see `holdFocus`.
+    claimFocus(host);
   };
 
   for (const resource of resources) onTeardown(resource.subscribe(draw));
@@ -3109,7 +3242,12 @@ function runChaptersCard(runId) {
     // Assigned directly rather than through setFilter: this runs inside a
     // render, and notifying subscribers mid-render would redraw the region
     // currently being built.
-    Object.assign(store.filters, { runChapterQuery: "", runChapterSegment: "", runChapterPage: 0 });
+    Object.assign(store.filters, {
+      runChapterQuery: "",
+      runChapterSegment: "",
+      runChapterPage: 0,
+      runChapterSort: { column: null, dir: "asc" },
+    });
   }
 
   const f = () => store.filters;
@@ -3127,6 +3265,10 @@ function runChaptersCard(runId) {
     });
     if (f().runChapterQuery) q.set("q", f().runChapterQuery);
     if (f().runChapterSegment !== "") q.set("segmentIndex", f().runChapterSegment);
+    if (f().runChapterSort.column) {
+      q.set("orderBy", f().runChapterSort.column);
+      q.set("dir", f().runChapterSort.dir);
+    }
     return q;
   };
   const chapters = new Resource(`run-chapters:${runId}`, () =>
@@ -3229,6 +3371,23 @@ function runChaptersCard(runId) {
                 set() === "all"
                   ? "This run's extension sent no full-catalogue snapshot. Only some extensions do; removal detection is skipped without one."
                   : "No chapter in this run matches. A completed run with nothing here found nothing new.",
+              // A big run reports tens of thousands of chapters over many
+              // pages, so the ordering has to be asked of the server.
+              sort: {
+                keys: [
+                  "position",
+                  "series",
+                  "chapter",
+                  "volume",
+                  "title",
+                  "language",
+                  "released",
+                  "segment",
+                  null,
+                ],
+                value: f().runChapterSort,
+                onSort: (column, dir) => refilter({ runChapterSort: { column, dir } }),
+              },
             },
           ),
           pager(data.total ?? 0, f().runChapterPage, RUN_CHAPTER_PAGE, (page) => {
@@ -3399,6 +3558,12 @@ VIEWS.queues = (route) => {
     if (f().queueExtension) q.set("extension", f().queueExtension);
     if (f().queueLanguage) q.set("language", f().queueLanguage);
     if (f().queueQ) q.set("q", f().queueQ);
+    // The column an operator picked from the headers, ordered over the whole
+    // queue rather than over the page this fetches.
+    if (f().queueSort.column) {
+      q.set("orderBy", f().queueSort.column);
+      q.set("dir", f().queueSort.dir);
+    }
     for (const [k, v] of Object.entries(extra)) if (v != null) q.set(k, v);
     return q;
   };
@@ -3611,6 +3776,10 @@ function queueChaptersPanel() {
     if (f().queueChapterQuery) q.set("q", f().queueChapterQuery);
     if (f().queueChapterExtension) q.set("extension", f().queueChapterExtension);
     if (f().queueChapterLanguage) q.set("language", f().queueChapterLanguage);
+    if (f().queueChapterSort.column) {
+      q.set("orderBy", f().queueChapterSort.column);
+      q.set("dir", f().queueChapterSort.dir);
+    }
     const cursor = cursorNow();
     if (cursor) q.set("cursor", cursor);
     return q;
@@ -3774,6 +3943,25 @@ function queueChaptersPanel() {
                   f().queueChapterState === "PENDING"
                     ? "Nothing is queued for MangaDex. The uploader has drained everything it was given."
                     : "No queued chapter matches this filter.",
+                sort: {
+                  keys: [
+                    "position",
+                    "kind",
+                    "series",
+                    "chapter",
+                    "volume",
+                    "title",
+                    "language",
+                    "due",
+                    "state",
+                    null,
+                  ],
+                  value: f().queueChapterSort,
+                  onSort: (column, dir) => {
+                    setFilter({ queueChapterSort: { column, dir }, queueChapterCursors: [] });
+                    reload();
+                  },
+                },
               },
             ),
             queueChapterPager(data, chapters),
@@ -4218,6 +4406,20 @@ function queueTable(rows, selected, tasks, reload, onPage) {
     {
       empty: "No upload task matches this filter.",
       onPage: (shown) => onPage?.(shown.map((at) => rows[at])),
+      // Ordered by the server: this table shows one keyset page of a queue that
+      // is usually thousands deep, so ordering what is on screen would sort a
+      // hundredth of the answer.
+      sort: {
+        keys: [null, "kind", "state", "chapter", "dedupeKey", "attempts", "notBefore", "lastError", null],
+        value: store.filters.queueSort,
+        onSort: (column, dir) => {
+          // The walked cursors name rows in the ordering that issued them, so a
+          // new ordering starts again from its own first page.
+          setFilter({ queueSort: { column, dir }, queueCursors: [] });
+          selected.clear();
+          void tasks.load({ force: true });
+        },
+      },
     },
   );
 }
@@ -4314,6 +4516,13 @@ function queueDeferDialog(ids, tasks, done) {
 }
 
 /**
+ * The widest gap `POST /queues/restagger` accepts, mirroring the route's
+ * `max(24 * 3600)`. Kept here so the field cannot offer a value the API will
+ * reject.
+ */
+const MAX_GAP_SECONDS = 24 * 3600;
+
+/**
  * Re-space the whole pending queue to a fixed rate.
  *
  * Not a selection action, which is why it is here rather than beside Run
@@ -4323,7 +4532,13 @@ function queueDeferDialog(ids, tasks, done) {
  * consequence is on screen before the button is pressed.
  */
 function queueRestaggerDialog(kind, tasks, done) {
-  const rate = el("input", { id: "restagger-rate", type: "number", min: "1", max: "600", value: "1" });
+  const gap = el("input", {
+    id: "restagger-gap",
+    type: "number",
+    min: "1",
+    max: String(MAX_GAP_SECONDS),
+    value: "60",
+  });
   const keepPacing = el("input", {
     id: "restagger-persist",
     type: "checkbox",
@@ -4335,28 +4550,28 @@ function queueRestaggerDialog(kind, tasks, done) {
   // worth opening, and a stale count would make it a guess.
   let pending = null;
 
-  // Recomputed as the operator types: "1 a minute" means nothing without "and
-  // therefore the last one goes up in ten hours".
+  // Recomputed as the operator types: "one every 120s" means nothing without
+  // "and therefore the last one goes up in three days".
   const describe = () => {
-    const perMinute = Number(rate.value);
-    if (!Number.isFinite(perMinute) || perMinute < 1) {
-      outcome.textContent = "Enter how many to upload each minute.";
+    const gapSeconds = Number(gap.value);
+    // Integer because the route is `z.coerce.number().int()`: a fractional gap
+    // is a 400 rather than a slower queue, so it is caught before the POST.
+    if (!Number.isInteger(gapSeconds) || gapSeconds < 1 || gapSeconds > MAX_GAP_SECONDS) {
+      outcome.textContent = `Enter a whole gap between uploads, 1 to ${MAX_GAP_SECONDS} seconds.`;
       return null;
     }
-    const gapSeconds = Math.max(1, Math.round(60 / perMinute));
     if (pending === null) {
       outcome.textContent = `One every ${gapSeconds}s. Counting the queue…`;
       return gapSeconds;
     }
-    const spanMinutes = Math.round(((pending - 1) * gapSeconds) / 60);
     outcome.textContent =
       pending === 0
         ? "Nothing is queued, so there is nothing to space out."
-        : `${pending} queued, one every ${gapSeconds}s. The last one becomes claimable in ` +
-          `${spanMinutes >= 120 ? `${Math.round(spanMinutes / 60)} hours` : `${spanMinutes} minutes`}.`;
+        : `${pending} queued, one every ${gapSeconds}s. The last one becomes claimable ` +
+          `${duration((pending - 1) * gapSeconds)}.`;
     return gapSeconds;
   };
-  rate.oninput = describe;
+  gap.oninput = describe;
   describe();
 
   // Quiet and best-effort: a failed count costs the estimate, not the action.
@@ -4380,8 +4595,8 @@ function queueRestaggerDialog(kind, tasks, done) {
           "becomes claimable, so a queue that would upload back to back trickles instead.",
       }),
       row(
-        el("label", { class: "inline", for: "restagger-rate", text: "Uploads per minute" }),
-        rate,
+        el("label", { class: "inline", for: "restagger-gap", text: "Gap between uploads (s)" }),
+        gap,
       ),
       outcome,
       // Ticked by default because the surprising outcome is the other one:
@@ -4405,7 +4620,7 @@ function queueRestaggerDialog(kind, tasks, done) {
           onclick: async (event) => {
             const gapSeconds = describe();
             if (gapSeconds === null) {
-              toast("enter how many to upload each minute", false);
+              toast("enter the gap between uploads, in seconds", false);
               return;
             }
             const result = await act(
@@ -5023,6 +5238,10 @@ VIEWS.chapters = (route) => {
     if (f().chapterLanguage) q.set("language", f().chapterLanguage);
     if (f().chapterNumber) q.set("chapterNumber", f().chapterNumber);
     if (f().chapterSearch) q.set("search", f().chapterSearch);
+    if (f().chapterSort.column) {
+      q.set("orderBy", f().chapterSort.column);
+      q.set("dir", f().chapterSort.dir);
+    }
     const walked = cursors();
     if (walked.length) q.set("cursor", walked[walked.length - 1]);
     return q;
@@ -5847,8 +6066,18 @@ function recheckCard(archive, filter, filterHooks = []) {
   const page = {
     offset: 0,
     limit: 25,
+    /** The column the server orders every matching title by; see `table()`. */
+    sort: { column: null, dir: "asc" },
     go: (offset) => {
       page.offset = offset;
+      void series.load({ force: true });
+      redraw();
+    },
+    sortBy: (column, dir) => {
+      // A new ordering renumbers the pages, so the offset walked under the old
+      // one names nothing in it.
+      page.sort = { column, dir };
+      page.offset = 0;
       void series.load({ force: true });
       redraw();
     },
@@ -5871,6 +6100,10 @@ function recheckCard(archive, filter, filterHooks = []) {
     if (active.language) q.set("language", active.language);
     if (active.chapterNumber) q.set("chapterNumber", active.chapterNumber);
     if (active.search) q.set("search", active.search);
+    if (page.sort.column) {
+      q.set("orderBy", page.sort.column);
+      q.set("dir", page.sort.dir);
+    }
     return api(`/chapters/series?${q}`);
   });
 
@@ -6304,6 +6537,18 @@ function chapterTable(rows, archive, selected, reload, onPage) {
           ? "No chapter has been published yet, or none matches this filter."
           : "Nothing in this archive matches.",
       onPage: (shown) => onPage?.(shown.map((at) => rows[at])),
+      sort: {
+        keys: [null, "series", "chapter", "language", "extension", "at", null],
+        value: store.filters.chapterSort,
+        onSort: (column, dir) => {
+          // Every archive's cursors, not this one's: the four tabs share the
+          // ordering, so a cursor minted under the old one is stale in all of
+          // them.
+          setFilter({ chapterSort: { column, dir }, chapterCursors: {} });
+          selected.clear();
+          reload();
+        },
+      },
     },
   );
 }
@@ -10759,6 +11004,10 @@ VIEWS.untracked = (route) => {
     const q = store.filters.untrackedQuery.trim();
     if (q) params.set("q", q);
     if (store.filters.untrackedExtension) params.set("extension", store.filters.untrackedExtension);
+    if (store.filters.untrackedSort.column) {
+      params.set("orderBy", store.filters.untrackedSort.column);
+      params.set("dir", store.filters.untrackedSort.dir);
+    }
     const trail = walked();
     if (trail.length) params.set("cursor", trail[trail.length - 1]);
     return api(`/untracked?${params}`);
@@ -10927,6 +11176,16 @@ VIEWS.untracked = (route) => {
               empty: store.filters.untrackedQuery
                 ? `No ${store.filters.untrackedState} series matches “${store.filters.untrackedQuery}”.`
                 : `Nothing is in the ${store.filters.untrackedState} state. The scrapers add rows here when they find a series MangaDex does not have.`,
+              // Ordered by the server: this is fifty rows of a queue that runs
+              // to thousands, and the operator sorting it is looking for one.
+              sort: {
+                keys: ["series", "extension", "language", "state", "attempts", "result", null],
+                value: store.filters.untrackedSort,
+                onSort: (column, dir) => {
+                  setFilter({ untrackedSort: { column, dir } });
+                  resetPaging();
+                },
+              },
             },
           ),
             untrackedPager(data, walked(), page),
@@ -11827,6 +12086,10 @@ function auditSearch() {
     if (f.auditAction) query.set("action", f.auditAction);
     if (f.auditSince) query.set("since", new Date(f.auditSince).toISOString());
     if (f.auditUntil) query.set("until", new Date(f.auditUntil).toISOString());
+    if (f.auditSort.column) {
+      query.set("orderBy", f.auditSort.column);
+      query.set("dir", f.auditSort.dir);
+    }
     return api(`/audit/search?${query}`);
   });
 
@@ -11974,7 +12237,21 @@ function auditSearch() {
                 event.detail ? truncate(JSON.stringify(event.detail), 160) : "-",
                 [routeLink(routeTo("audit", event.id, null), "Open", { class: "button-link inline" })],
               ]),
-              { empty: "No event matches these filters." },
+              {
+                empty: "No event matches these filters.",
+                // The log is the longest table here and the one least likely
+                // to hold the answer on its first page.
+                sort: {
+                  keys: ["when", "actor", "action", "subject", "detail", null],
+                  value: store.filters.auditSort,
+                  onSort: (column, dir) => {
+                    // A new ordering renumbers every page, so the offset walked
+                    // under the old one means nothing in it.
+                    setFilter({ auditSort: { column, dir }, auditOffset: 0 });
+                    void results.load({ force: true });
+                  },
+                },
+              },
             ),
             data.total > AUDIT_PAGE
               ? pager(data.total, Math.floor(store.filters.auditOffset / AUDIT_PAGE), AUDIT_PAGE, (page) => {
@@ -12235,7 +12512,19 @@ function seriesPickerBlock({ resource, name, selectedId, onPick, page, countNoun
             (entry.extensions ?? []).map((n) => n || "(unattributed)").join(", ") || "-",
             fmtTime(entry.at),
           ]),
-          { empty },
+          {
+            empty,
+            // Paged by the server, so the ordering is asked of it: a picker
+            // showing 25 of 300 titles sorted in the browser would order the
+            // 25 and leave the title being looked for on page eight.
+            sort: page.sortBy
+              ? {
+                  keys: [null, "series", "count", "extension", "at"],
+                  value: page.sort,
+                  onSort: (column, dir) => page.sortBy(column, dir),
+                }
+              : undefined,
+          },
         ),
       );
     },
@@ -12263,8 +12552,15 @@ function unavailableCardsPanel() {
   const seriesPage = {
     offset: 0,
     limit: 25,
+    sort: { column: null, dir: "asc" },
     go: (offset) => {
       seriesPage.offset = offset;
+      void seriesList.load({ force: true });
+      redraw();
+    },
+    sortBy: (column, dir) => {
+      seriesPage.sort = { column, dir };
+      seriesPage.offset = 0;
       void seriesList.load({ force: true });
       redraw();
     },
@@ -12278,6 +12574,10 @@ function unavailableCardsPanel() {
     if (filters.extension) q.set("extension", filters.extension);
     if (filters.language) q.set("language", filters.language);
     if (filters.search) q.set("search", filters.search);
+    if (seriesPage.sort.column) {
+      q.set("orderBy", seriesPage.sort.column);
+      q.set("dir", seriesPage.sort.dir);
+    }
     return api(`/chapters/series?${q}`);
   });
   const listing = new Resource("recard-listing", () => {

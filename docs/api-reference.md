@@ -331,7 +331,7 @@ served to workers, not to admin clients.
 | `POST` | `/runs` | `runs:write` | `{extension, kind?, idempotencyKey?}`. `kind` defaults to `FORCE`. `201` created / `200` already existed → `{runId, created, segments}`. **`409` platform is paused**; `404` no bundle published for that extension |
 | `GET` | `/runs` | `runs:read` | `?limit=1..200` (25), `?extension=`. Each row carries `chaptersFound` (new or changed) and `chaptersSeen` (catalogue snapshot), aggregated over the page in one statement. **Both are `null` when no segment has committed an envelope yet**: which is not the same as a run that found nothing |
 | `GET` | `/runs/:id` | `runs:read` | Run plus all its jobs; `404` unknown |
-| `GET` | `/runs/:id/chapters` | `runs:read` | What the run's extension reported, read back out of the stored envelopes. `?set=updated\|all` (updated), `?q=`, `?mdMangaId=`, `?language=`, `?segmentIndex=`, `?limit=1..500` (100), `?offset=`. Ordered `segmentIndex, position`: the extension's own order. Offset paging is safe here because a committed envelope never changes |
+| `GET` | `/runs/:id/chapters` | `runs:read` | What the run's extension reported, read back out of the stored envelopes. `?set=updated\|all` (updated), `?q=`, `?mdMangaId=`, `?language=`, `?segmentIndex=`, `?limit=1..500` (100), `?offset=`. Ordered `segmentIndex, position`: the extension's own order. Offset paging is safe here because a committed envelope never changes. `?orderBy=position\|series\|chapter\|volume\|title\|language\|released\|segment` + `?dir=` orders every chapter the run found |
 | `GET` | `/runs/:id/chapters/summary` | `runs:read` | Per-segment coverage and a per-series breakdown. A segment with no committed envelope reports `updated: null`, **not `0`**, and `complete` says whether the chapter list can be read as the whole run |
 | `POST` | `/jobs/:id/cancel` | `runs:write` | → `{ok, result: "cancelled"\|"flagged"}`. `PENDING` cancels immediately; a live lease is flagged and the worker aborts on its next renew. **`409`** if the job is in neither state |
 | `POST` | `/jobs/:id/retry` | `runs:write` | Replay a dead letter with a fresh attempt budget. **`409` job is not dead-lettered** |
@@ -512,11 +512,33 @@ is logged even if the publish then fails for another reason).
 `routes/admin.ts:283-337`; rejection rules in `store/bundles.ts:37-46`,
 `172-209`, tested at `test/unit/bundlePublish.test.ts`.
 
+### Ordering a listing
+
+Every paged listing above takes `?orderBy=<column>&dir=asc|desc`, and orders
+**everything matching the filter** by it before paging. Without `orderBy` a
+listing keeps its own default — the claim order, newest-first, the extension's
+own order — and that default is what its `order` field describes.
+
+The accepted columns are per-endpoint and closed; each response echoes them as
+`sortable`, along with `orderedBy` and `dir`. An unknown column is a `400`
+rather than a silently-ignored parameter, because a caller that asked for an
+ordering and got another is owed an error and not a plausible-looking answer.
+
+Ordering is `NULLS LAST` in **both** directions: reversing a column asks for its
+other end, not for the rows that have no value in it. Numbers held as text
+(chapter and volume numbers) order as numbers, and anything unparseable in such
+a column sorts as blank rather than as zero.
+
+On a keyset-paged listing the `cursor` belongs to the ordering that issued it —
+it carries that ordering's key values, not just a row id — so a cursor offered
+to a different `orderBy` or `dir` is a `400`. Change the ordering and start from
+its first page; there is no position in the old one worth keeping.
+
 ### Untracked series
 
 | Method | Path | Scope | Notes |
 | --- | --- | --- | --- |
-| `GET` | `/untracked` | `untracked:read` | `?state=NEW\|CREATING\|CREATED\|TRACKED\|FAILED\|SKIPPED`, `?extension=`, `?q=`, `?limit=1..500` (100), `?cursor=` |
+| `GET` | `/untracked` | `untracked:read` | `?state=NEW\|CREATING\|CREATED\|TRACKED\|FAILED\|SKIPPED`, `?q=`, `?extension=`, `?limit=1..500` (100), `?cursor=`, `?orderBy=series\|extension\|language\|state\|attempts\|result` + `?dir=`. Newest first by default, **keyset** paged |
 | `GET` | `/source/resolve` | `tracked:read` | `?url=` a publisher's page → `{match, candidates, namespaces, reason?}`. Which extension covers that site and which of its series the link is, worked out from our own rows: the untracked queue, the series map, and the published manifests' `allowed_hosts`. Reaches neither the publisher nor MangaDex |
 | `POST` | `/source/map` | `tracked:append` | `{url, mdMangaId, mangaId?, namespace?, extension?, dryRun?}`. Resolves the publisher link, writes the mapping, and closes the queue row it came from. `mdMangaId` takes a title link. **403** on a repoint without `tracked:write`; **409** when the link cannot be pinned to one series (the partial `resolution` comes back so the caller can finish it) or the title does not exist on MangaDex. Closing the queue row additionally needs `untracked:write`; without it the mapping is still written and `untrackedNote` says the row was left alone |
 | `GET` | `/mangadex/search` | `untracked:read` | `?q=`, `?reportedName=`, `?limit=1..25` (10) → `{results}`; live against MangaDex |
@@ -558,7 +580,7 @@ resolve to no match and a `reason`, rather than a guess.
 | `POST` | `/upload-tasks/:id/cancel` | `runs:write` | `PENDING`/`FAILED`/`DEAD_LETTER` → `DONE` with the reason in `lastError`. **`409` for a `LEASED` task**: an uploader owns it mid-flight and forcing it would race into a duplicate upload or a lost result |
 | `POST` | `/upload-tasks/requeue-stale` | `runs:write` | Manual lease sweep → `{ok, requeued}` |
 
-| `GET` | `/queues/chapters` | `runs:read` | The queue read as chapters rather than as rows: series, number, volume, title, language, and an EDIT task's `editPayload`. `?kind=`, `?state=` (**defaults to `PENDING`**), `?q=` (searches the payload's series name, title, number and both MangaDex ids; not the dedupe key), `?extension=` and `?language=` (exact, the same two facets `/queues/tasks` takes), `?dedupeKey=`, `?limit=1..500` (100), `?cursor=`, `?sort=asc\|desc` (`asc`, the claim order; `desc` newest first, echoed back as `sort`). `position` is the place in the claim order across **everything matching the filter**, not within the page, and is never reversed by `sort` |
+| `GET` | `/queues/chapters` | `runs:read` | The queue read as chapters rather than as rows: series, number, volume, title, language, and an EDIT task's `editPayload`. `?kind=`, `?state=` (**defaults to `PENDING`**), `?q=` (searches the payload's series name, title, number and both MangaDex ids; not the dedupe key), `?extension=` and `?language=` (exact, the same two facets `/queues/tasks` takes), `?dedupeKey=`, `?limit=1..500` (100), `?cursor=`, `?sort=asc\|desc` (`asc`, the claim order; `desc` newest first, echoed back as `sort`). `position` is the place in the claim order across **everything matching the filter**, not within the page, and is never reversed by `sort`. `?orderBy=position\|kind\|series\|chapter\|volume\|title\|language\|due\|state` + `?dir=` orders the whole queue by a column instead of by claim order |
 
 `routes/ops.ts:103-217`, tested at `test/integration/ops.test.ts`;
 `/queues/chapters` is `routes/chapters.ts`, tested at
@@ -574,7 +596,7 @@ that has not happened yet.
 
 | Method | Path | Scope | Notes |
 | --- | --- | --- | --- |
-| `GET` | `/chapters` | `chapters:read` | `?archive=uploaded\|unavailable\|deleted\|edited` (default `uploaded`), `?extension=`, `?language=`, `?mdMangaId=`, `?mdChapterId=`, `?chapterId=`, `?chapterNumber=`, `?search=`, `?since=`, `?until=`, `?limit=1..200` (50), `?cursor=` → `{archive, chapters, total, nextCursor, order, totals, archives}`. Newest first, **keyset** paged: the table grows while it is read, so an offset page would repeat rows. `search` covers the series name, the chapter title and all four ids. `totals` is global, so a narrow filter cannot hide an archive that is filling up |
+| `GET` | `/chapters` | `chapters:read` | `?archive=uploaded\|unavailable\|deleted\|edited` (default `uploaded`), `?extension=`, `?language=`, `?mdMangaId=`, `?mdChapterId=`, `?chapterId=`, `?chapterNumber=`, `?search=`, `?since=`, `?until=`, `?limit=1..200` (50), `?cursor=` → `{archive, chapters, total, nextCursor, order, totals, archives}`. Newest first, **keyset** paged: the table grows while it is read, so an offset page would repeat rows. `search` covers the series name, the chapter title and all four ids. `totals` is global, so a narrow filter cannot hide an archive that is filling up. `?orderBy=series\|chapter\|language\|extension\|at` + `?dir=` orders the whole archive |
 | `GET` | `/chapters/extensions` | `chapters:read` | `?archive=` → `{extensions: [{extension, count}]}`: what the filter picker offers |
 | `GET` | `/chapters/:mdChapterId` | `chapters:read` | The row from whichever archives hold it, `archives` (when each recorded it), `edits`, `tasks` (queue rows keyed on this chapter), `links`, and **`mangadex`**: what MangaDex says right now, when this instance has credentials. A MangaDex outage degrades to `mangadex: null` + `mangadexError` and never makes the row unreadable. `actionsBlockedReason` is why a mutating call would be refused, so a UI can disable a control *with the reason* |
 | `GET` | `/chapters/:mdChapterId/card.png` | `chapters:read` | `?footerNote=`, `?unavailableAt=` → **`image/png`**. The unavailable card as it would be posted, rendered by the same function the uploader calls (`md/unavailableCard.ts`). Writes and queues nothing |
@@ -651,7 +673,7 @@ not a fourth flag on the bulk ones:
 | `POST` | `/chapters/unavailable/recard` | `chapters:write` + ADMIN | `{ids?, filter?, footerNote?, dryRun?, confirm?, afterId?, batch?}`. Always the `unavailable` archive and always forced. A chapter with no card refuses as `not_unavailable` rather than being carded for the first time |
 | `POST` | `/chapters/series/:mdMangaId/recheck` | `runs:write` | `{extension?, dryRun?, confirm?, idempotencyKey?}`. Asks the publisher whether one series' chapters are still there, by starting a run **scoped** to it; the processor queues whatever MangaDex still holds that the extension no longer lists, as `UNAVAILABLE` or `DELETE` per the removal mode. `409` when several extensions track the title and none is named, or when the title's external id lives in a named catalogue (a run's manga subset travels as a bare id and cannot name one) |
 | `POST` | `/chapters/extensions/:extension/recheck` | `runs:write` | `{dryRun?, confirm?, idempotencyKey?}`. The same question over a whole extension: an **unscoped** CLEAN run, so the catalogue-wide removal passes a scoped run must skip are back in play. The preview reports `trackedSeries` and `knownChapters` — the ceiling on what a wrong answer from the publisher could mark |
-| `GET` | `/chapters/series` | `chapters:read` | `?archive=&extension=&language=&search=&limit=&offset=`. The titles present in one archive, most-affected first: `{mdMangaId, mangaName, extensions[], count, at}` plus `total` and `hasMore`. Offset-paged, because the ordering is an aggregate over the whole set and there is no row-level key to resume from. Aims the `mdMangaId` filter above; read-only, so unlike the re-card itself it is reachable on a `pa_…` token |
+| `GET` | `/chapters/series` | `chapters:read` | `?archive=&extension=&language=&search=&limit=&offset=`. The titles present in one archive, most-affected first: `{mdMangaId, mangaName, extensions[], count, at}` plus `total` and `hasMore`. Offset-paged, because the ordering is an aggregate over the whole set and there is no row-level key to resume from. Aims the `mdMangaId` filter above; read-only, so unlike the re-card itself it is reachable on a `pa_…` token. `?orderBy=series\|count\|extension\|at` + `?dir=` orders every matching title |
 
 It exists because the bulk route gets two things wrong for a re-render:
 

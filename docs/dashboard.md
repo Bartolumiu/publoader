@@ -256,7 +256,9 @@ so segment counts do not sort `1, 10, 2` and staleness does not sort `9s ago`
 after `10d ago`. Timestamps are read back in whatever field order this browser
 writes them in, so a day-first console sorts them chronologically and not by day
 of the month. Blanks — `-` and `never` — stay at the bottom in both directions;
-they are not values. A column of buttons is never sortable.
+they are not values. A column of buttons is never sortable. The same rules hold
+where the server does the ordering: chapter numbers sort as numbers there too,
+and blanks stay at the bottom whichever way the column is pointed.
 
 The chosen sort and page **survive a redraw**, which matters because most views
 poll: an operator reading page four of a sorted list is not thrown back to the
@@ -271,10 +273,19 @@ page, because the buttons beside it retry, remove and delete. The batch and the
 whole matching total are the two numbers on the server pager below, labelled
 *loaded* and *matching* to keep them distinct from what is on screen.
 
-**What sorting does not do** is reach the server. It orders the rows on screen.
-Where a view also has its own pager — the keyset queues, the audit log, a run's
-chapter list — that one fetches the next batch and this one moves within it, so
-a sort orders the batch, not the whole table. Narrow with the filters first.
+**A sort covers the whole table, not the page.** Where the server pages a
+listing — the two queue tabs, the chapter archives, the untracked queue, the
+audit log, a run's chapters and the series pickers — the header sends the column
+to the server, which orders everything matching the filter and answers with the
+first page of it. Ascending on a queue of two thousand means the smallest of the
+two thousand, not the smallest of the hundred already fetched.
+
+That is the only difference; there is nothing extra to do. A table small enough
+to arrive whole still sorts in the browser, and the two behave identically. What
+does follow from it: a sorted listing starts again at its first page, because a
+cursor names a row in the ordering that issued it, and a column the server has
+no way to order by (a column of buttons, a checkbox) offers no sort button
+rather than one that would come back refused.
 
 Below 620px the header row is hidden (rows become labelled cards), so the same
 sort is offered there as a column picker and a direction toggle above the table.

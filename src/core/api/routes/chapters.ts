@@ -19,15 +19,18 @@ import { botUserIdFromClientId, isCarded } from "../../md/types.js";
 import {
   ARCHIVES,
   CHAPTER_ARCHIVES,
+  CHAPTER_SORTS,
+  SERIES_SORTS,
   chapterOf,
   decodeChapterCursor,
   type ChapterArchive,
   type ChapterFilter,
   type ChapterRow,
 } from "../../store/chapters.js";
-import { CHAPTER_SETS, type ChapterSet } from "../../store/runChapters.js";
+import { CHAPTER_SETS, RUN_CHAPTER_SORTS, type ChapterSet } from "../../store/runChapters.js";
 import {
   decodeTaskCursor,
+  QUEUED_CHAPTER_SORTS,
   taskDedupeKey,
   UPLOAD_TASK_KINDS,
   UPLOAD_TASK_STATES,
@@ -440,6 +443,9 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
             segmentIndex: z.coerce.number().int().min(0).max(10_000).optional(),
             limit: z.coerce.number().int().min(1).max(MAX_PROJECTION_PAGE).default(100),
             offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+            /** One column, over every chapter the run found: see `/chapters`. */
+            orderBy: z.enum(RUN_CHAPTER_SORTS).optional(),
+            dir: z.enum(["asc", "desc"]).default("asc"),
           }),
           req.query ?? {},
         );
@@ -459,7 +465,11 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
             language: query.language,
             segmentIndex: query.segmentIndex,
           },
-          { limit: query.limit, offset: query.offset },
+          {
+            limit: query.limit,
+            offset: query.offset,
+            column: query.orderBy ? { name: query.orderBy, dir: query.dir } : null,
+          },
         );
 
         return {
@@ -469,9 +479,12 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           total: page.total,
           limit: query.limit,
           offset: query.offset,
+          orderedBy: query.orderBy ?? null,
+          dir: query.dir,
+          sortable: RUN_CHAPTER_SORTS,
           // Offset paging is safe here: a committed envelope never changes, so
-          // page 2 is stable.
-          order: "segmentIndex,position",
+          // page 2 is stable whichever column it is ordered by.
+          order: query.orderBy ? `${query.orderBy} ${query.dir}` : "segmentIndex,position",
         };
       },
     );
@@ -506,12 +519,18 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
             limit: z.coerce.number().int().min(1).max(MAX_PROJECTION_PAGE).default(100),
             cursor: z.string().max(512).optional(),
             sort: z.enum(["asc", "desc"]).default("asc"),
+            /** One column, over the whole queue: see `/queues/tasks`. */
+            orderBy: z.enum(QUEUED_CHAPTER_SORTS).optional(),
+            dir: z.enum(["asc", "desc"]).default("asc"),
           }),
           req.query ?? {},
         );
 
-        const cursor = query.cursor ? decodeTaskCursor(query.cursor) : null;
-        if (query.cursor && !cursor) {
+        const column = query.orderBy
+          ? { name: query.orderBy, dir: query.dir, cursor: query.cursor ?? null }
+          : null;
+        const cursor = !column && query.cursor ? decodeTaskCursor(query.cursor) : null;
+        if (!column && query.cursor && !cursor) {
           throw Object.assign(new Error("invalid cursor: not a cursor this endpoint issued"), {
             statusCode: 400,
           });
@@ -526,7 +545,12 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           language: query.language,
         };
         const [page, summary] = await Promise.all([
-          ctx.uploadTasks.listChapters(filter, { limit: query.limit, cursor, sort: query.sort }),
+          ctx.uploadTasks.listChapters(filter, {
+            limit: query.limit,
+            cursor,
+            sort: query.sort,
+            column,
+          }),
           ctx.uploadTasks.depths(),
         ]);
 
@@ -536,8 +560,14 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           limit: query.limit,
           nextCursor: page.nextCursor,
           sort: query.sort,
-          order:
-            query.sort === "desc" ? "notBefore,createdAt,id DESC" : "notBefore,createdAt,id",
+          orderedBy: column?.name ?? null,
+          dir: query.dir,
+          sortable: QUEUED_CHAPTER_SORTS,
+          order: column
+            ? `${column.name},id (${column.dir}ending)`
+            : query.sort === "desc"
+              ? "notBefore,createdAt,id DESC"
+              : "notBefore,createdAt,id",
           states: filter.states,
           summary,
         };
@@ -909,12 +939,25 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           until: z.coerce.date().optional(),
           limit: z.coerce.number().int().min(1).max(MAX_PAGE).default(DEFAULT_PAGE),
           cursor: z.string().max(512).optional(),
+          /**
+           * Order the whole archive by one column, rather than the default
+           * newest-first. The console's header buttons send this: sorting only
+           * the rows already fetched would answer "the oldest of this page",
+           * which is not what clicking a column header asks.
+           */
+          orderBy: z.enum(CHAPTER_SORTS).optional(),
+          dir: z.enum(["asc", "desc"]).default("asc"),
         }),
         req.query ?? {},
       );
 
-      const cursor = query.cursor ? decodeChapterCursor(query.cursor) : null;
-      if (query.cursor && !cursor) {
+      // The cursor belongs to whichever ordering is in force, so only one of
+      // the two decoders can be right; `orderBy` is what says which.
+      const sort = query.orderBy
+        ? { name: query.orderBy, dir: query.dir, cursor: query.cursor ?? null }
+        : null;
+      const cursor = !sort && query.cursor ? decodeChapterCursor(query.cursor) : null;
+      if (!sort && query.cursor && !cursor) {
         throw Object.assign(new Error("invalid cursor: not a cursor this endpoint issued"), {
           statusCode: 400,
         });
@@ -933,7 +976,7 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
       };
 
       const [page, totals] = await Promise.all([
-        ctx.chapters.list(query.archive, filter, { limit: query.limit, cursor }),
+        ctx.chapters.list(query.archive, filter, { limit: query.limit, cursor, sort }),
         ctx.chapters.totals(),
       ]);
 
@@ -943,7 +986,10 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
         total: page.total,
         limit: query.limit,
         nextCursor: page.nextCursor,
-        order: "at,id (descending)",
+        orderedBy: sort?.name ?? null,
+        dir: query.dir,
+        sortable: CHAPTER_SORTS,
+        order: sort ? `${sort.name},id (${sort.dir}ending)` : "at,id (descending)",
         // Global rather than filtered, so a narrow filter cannot hide that an
         // extension has three hundred chapters marked unavailable.
         totals,
@@ -988,6 +1034,9 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
               search: z.string().min(1).max(256).optional(),
               limit: z.coerce.number().int().min(1).max(SERIES_LIMIT).default(100),
               offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+              /** One column, over every title matching: see `/chapters`. */
+              orderBy: z.enum(SERIES_SORTS).optional(),
+              dir: z.enum(["asc", "desc"]).default("asc"),
             })
             .strict(),
           req.query ?? {},
@@ -1000,7 +1049,11 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
             chapterNumber: query.chapterNumber,
             search: query.search,
           },
-          { limit: query.limit, offset: query.offset },
+          {
+            limit: query.limit,
+            offset: query.offset,
+            column: query.orderBy ? { name: query.orderBy, dir: query.dir } : null,
+          },
         );
         return {
           archive: query.archive,
@@ -1013,6 +1066,9 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
           total: page.total,
           limit: query.limit,
           offset: query.offset,
+          orderedBy: query.orderBy ?? null,
+          dir: query.dir,
+          sortable: SERIES_SORTS,
           hasMore: query.offset + page.series.length < page.total,
         };
       },
