@@ -89,12 +89,15 @@ function retryDelaySeconds(attempt: number): number {
 const DEFAULT_DRAIN_BUDGET = 100;
 const DRAIN_BUDGET: Partial<Record<UploadTaskKind, number>> = { UNAVAILABLE: 10 };
 
-async function drain(kind: UploadTaskKind): Promise<{ processed: number; failed: number }> {
+async function drain(
+  kind: UploadTaskKind,
+  pausedExtensions: readonly string[],
+): Promise<{ processed: number; failed: number }> {
   let processed = 0;
   let failed = 0;
   const budget = DRAIN_BUDGET[kind] ?? DEFAULT_DRAIN_BUDGET;
   while (running && processed + failed < budget) {
-    const task = await tasks.claim(kind, LEASE_TTL_SECONDS);
+    const task = await tasks.claim(kind, LEASE_TTL_SECONDS, pausedExtensions);
     if (!task) break;
     const leaseId = task.leaseId ?? "";
 
@@ -166,13 +169,20 @@ while (running) {
     // one batch into two reporting styles.
     await workers.refreshReporting();
 
+    // Read per pass for the same reason, and outside `drain` so every kind in
+    // this pass agrees about who is paused.
+    const pausedExtensions = await settings.getUploadPausedExtensions();
+    if (pausedExtensions.length > 0) {
+      log.debug({ pausedExtensions }, "holding queued work for paused extensions");
+    }
+
     let claimed = 0;
     // Per-kind counts, so the end-of-drain summary can name the queue that did
     // the work the way the Python worker threads did.
     const drained = new Map<string, { processed: number; failed: number }>();
     for (const kind of KIND_ORDER) {
       if (!running) break;
-      const done = await drain(kind);
+      const done = await drain(kind, pausedExtensions);
       claimed += done.processed + done.failed;
       if (done.processed > 0 || done.failed > 0) drained.set(kind, done);
     }

@@ -445,12 +445,30 @@ export class UploadTaskStore {
   }
 
   /** Claim one due task of the given kind (SKIP LOCKED lease). */
-  async claim(kind: UploadTaskKind, leaseTtlSeconds: number): Promise<UploadTask | null> {
+  async claim(
+    kind: UploadTaskKind,
+    leaseTtlSeconds: number,
+    /**
+     * Extensions to skip over. A held task stays PENDING with its date intact,
+     * so this hides work rather than changing it and un-pausing needs no
+     * repair. Empty means claim anything, which is the behaviour this was
+     * added on top of.
+     */
+    pausedExtensions: readonly string[] = [],
+  ): Promise<UploadTask | null> {
     const leaseId = randomUUID();
+    // `<> ALL` rather than `NOT IN`: a NULL extensionName makes `NOT IN` return
+    // NULL and the row vanishes from the queue, which would strand any task
+    // whose payload predates that field.
+    const notPaused =
+      pausedExtensions.length > 0
+        ? Prisma.sql`AND coalesce(chapter ->> 'extensionName', '') <> ALL(${pausedExtensions as string[]}::text[])`
+        : Prisma.empty;
     const rows = await this.prisma.$queryRaw<UploadTask[]>(Prisma.sql`
       WITH candidate AS (
         SELECT id FROM upload_tasks
         WHERE kind = ${kind}::"UploadTaskKind" AND state = 'PENDING' AND not_before <= now()
+        ${notPaused}
         ORDER BY not_before ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1

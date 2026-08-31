@@ -49,6 +49,8 @@ const GITHUB_AUTO_SYNC_KEY = "github_auto_sync";
 const UPLOAD_SCHEDULE_KEY = "upload_schedule";
 const UPLOAD_SCHEDULE_OVERRIDES_KEY = "upload_schedule_overrides";
 const UPLOAD_BUDGET_SCOPE_KEY = "upload_budget_scope";
+const UPLOAD_PRIORITY_KEY = "upload_priority_extensions";
+const UPLOAD_PAUSED_KEY = "upload_paused_extensions";
 
 const FETCH_THROTTLE_KEY = "fetch_throttle";
 const FETCH_THROTTLE_OVERRIDES_KEY = "fetch_throttle_overrides";
@@ -126,6 +128,48 @@ export const DEFAULT_UPLOAD_SCHEDULE: UploadSchedule = {
 export type UploadBudgetScope = "global" | "extension";
 export const UPLOAD_BUDGET_SCOPES = ["global", "extension"] as const;
 export const DEFAULT_UPLOAD_BUDGET_SCOPE: UploadBudgetScope = "global";
+
+/**
+ * Extensions whose routine updates go out NOW, whatever else is waiting.
+ *
+ * `enqueue` normally dates a paced task at `max(not_before) + spacing` over
+ * every pending upload, so one publisher's backlog pushes everybody else behind
+ * it: a comikey clean run dated into next week moves tomorrow's MANGA Plus
+ * chapters to next week too, because they chain onto the same tail. For a daily
+ * publisher that is the wrong answer -- its updates are worth little late, and
+ * they are a handful of chapters, not a flood.
+ *
+ * A listed extension ignores that tail entirely. Its chapters are queued due
+ * immediately, however long the queue is and whether or not the day's budget
+ * has already been spent, which is what puts them in front of a backlog dated
+ * days out. The uploader still drains serially at its own MangaDex rate limit,
+ * so "due now" means "first in line", not "all at once".
+ *
+ * Deliberately NOT applied to clean runs. A clean run IS the backlog -- the
+ * comikey import that started this was 2,000 chapters -- and spreading it over
+ * days is the entire point of the schedule. Letting it claim priority would
+ * turn one catalogue import into a flood of MangaDex's feed and put it in front
+ * of every other extension's routine updates, which is the problem this exists
+ * to fix rather than a new way to cause it.
+ */
+export const DEFAULT_UPLOAD_PRIORITY_EXTENSIONS: string[] = [];
+
+/**
+ * Extensions whose queued work is held, without being cancelled.
+ *
+ * The global pause stops the whole platform, which is the wrong instrument when
+ * one publisher is the problem: a comikey backlog that needs looking at should
+ * not also stop MANGA Plus publishing today's chapters. This holds one
+ * extension's tasks and leaves everybody else draining.
+ *
+ * It is a claim-time filter, not a state change. Tasks stay PENDING with their
+ * dates untouched, so nothing is cancelled, re-queued or re-dated, and removing
+ * the name resumes exactly where the queue was. That also means a paused
+ * extension keeps ACCUMULATING work -- runs still decide and enqueue normally;
+ * only the uploader declines to pick it up. Pausing to stop a runaway backlog
+ * growing is the one thing this does not do.
+ */
+export const DEFAULT_UPLOAD_PAUSED_EXTENSIONS: string[] = [];
 
 /**
  * Bounds, not preferences. `perDay: 0` is meaningful (spread nothing, the
@@ -371,6 +415,55 @@ export class SettingsStore {
 
   async setUploadBudgetScope(scope: UploadBudgetScope): Promise<void> {
     await this.setSetting(UPLOAD_BUDGET_SCOPE_KEY, scope);
+  }
+
+  /**
+   * Extensions that pace behind their own queue instead of the platform's.
+   *
+   * Unknown or malformed content reads as "nobody has priority", which is the
+   * behaviour this setting was added on top of: a bad value must not silently
+   * promote an extension past everything else.
+   */
+  async getUploadPriorityExtensions(): Promise<string[]> {
+    const raw = await this.getSetting(UPLOAD_PRIORITY_KEY);
+    if (!raw) return [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return [...new Set(parsed.filter((v): v is string => typeof v === "string" && v !== ""))].sort();
+    } catch {
+      return [];
+    }
+  }
+
+  async setUploadPriorityExtensions(names: string[]): Promise<string[]> {
+    const clean = [...new Set(names.filter((n) => typeof n === "string" && n !== ""))].sort();
+    await this.setSetting(UPLOAD_PRIORITY_KEY, JSON.stringify(clean));
+    return clean;
+  }
+
+  /**
+   * Extensions the uploader is currently declining to claim work for.
+   *
+   * Malformed content reads as "nothing is paused", the same direction the
+   * priority list fails in: a bad value must not silently stop the queue.
+   */
+  async getUploadPausedExtensions(): Promise<string[]> {
+    const raw = await this.getSetting(UPLOAD_PAUSED_KEY);
+    if (!raw) return [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return [...new Set(parsed.filter((v): v is string => typeof v === "string" && v !== ""))].sort();
+    } catch {
+      return [];
+    }
+  }
+
+  async setUploadPausedExtensions(names: string[]): Promise<string[]> {
+    const clean = [...new Set(names.filter((n) => typeof n === "string" && n !== ""))].sort();
+    await this.setSetting(UPLOAD_PAUSED_KEY, JSON.stringify(clean));
+    return clean;
   }
 
   /** Every per-extension override, for the editor to render. */
