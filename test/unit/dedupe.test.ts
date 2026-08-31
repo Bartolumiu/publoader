@@ -184,6 +184,40 @@ describe("backfillVolumes", () => {
     expect(chapters[0]!.chapterVolume).toBe("2");
   });
 
+  it("matches a split-numbered series, where the aggregate holds no whole numbers", () => {
+    // The comikey shape, and the case this was silently inert for: the aggregate
+    // lists 1.1/1.2/1.3 and never a bare "1", so truncating only our side found
+    // nothing and the whole catalogue uploaded with no volume.
+    const split = {
+      "1": {
+        volume: "1",
+        chapters: {
+          "1.1": { chapter: "1.1", id: "a" },
+          "1.2": { chapter: "1.2", id: "b" },
+        },
+      },
+    };
+    const chapters = [
+      chapter({ chapterNumber: "1.1" }),
+      // Not listed at all, but its integer part is.
+      chapter({ chapterNumber: "1.7" }),
+    ];
+    backfillVolumes(chapters, split);
+    expect(chapters.map((c) => c.chapterVolume)).toEqual(["1", "1"]);
+  });
+
+  it("prefers the exact number over the integer part when volumes straddle one", () => {
+    // Volume 1 ends at 10, volume 2 opens with 10.5. "10" belongs to both by
+    // integer part; only volume 1 actually lists it.
+    const straddle = {
+      "1": { volume: "1", chapters: { "10": { chapter: "10", id: "a" } } },
+      "2": { volume: "2", chapters: { "10.5": { chapter: "10.5", id: "b" } } },
+    };
+    const chapters = [chapter({ chapterNumber: "10" }), chapter({ chapterNumber: "10.5" })];
+    backfillVolumes(chapters, straddle);
+    expect(chapters.map((c) => c.chapterVolume)).toEqual(["1", "2"]);
+  });
+
   it("collects chapter ids and their others for the dupe sweep", () => {
     expect(aggregateChapterIds(dictAggregate).sort()).toEqual(["c-none", "c1", "c1b", "c2"]);
   });

@@ -319,27 +319,45 @@ function aggregateVolumes(
 
 /**
  * Fill in `chapterVolume` for chapters that don't carry one, by finding the
- * aggregate volume that lists the chapter's number. Only the integer part is
- * matched ("12.5" to "12"), the "none" volume is skipped, and leading zeros are
- * stripped ("008" to "8"). Mutates the chapters in place; the last matching
- * volume wins.
+ * aggregate volume that lists the chapter's number. The "none" volume is
+ * skipped and leading zeros are stripped ("008" to "8"). Mutates the chapters
+ * in place.
+ *
+ * Matched twice, exact number first and integer part second, and BOTH sides are
+ * truncated for the second pass. Truncating only ours was a bug that made the
+ * whole function inert for any series numbered with decimals: our "1.5" became
+ * "1" and was compared against an aggregate listing "1.1", "1.2", "1.5", which
+ * contains no "1", so nothing ever matched. Every split-chapter publisher —
+ * comikey numbers most of its catalogue this way — got no volumes at all.
+ *
+ * Exact-first matters where both could hit. If volume 1 ends at chapter 10 and
+ * volume 2 opens with 10.5, the integer part "10" belongs to both; the exact
+ * number belongs to one, and it is the right one.
  */
 export function backfillVolumes(chapters: Chapter[], aggregate: unknown): void {
   const volumes = aggregateVolumes(aggregate);
   if (volumes.length === 0) return;
 
+  /** Volume label by exact chapter number, and by integer part. */
+  const exact = new Map<string, string>();
+  const byInteger = new Map<string, string>();
+  for (const volume of volumes) {
+    if (volume.label === null || volume.label === "none") continue;
+    const label = volume.label.replace(/^0+/, "") || "0";
+    for (const number of volume.chapterNumbers) {
+      // Last matching volume wins, which is the behaviour this has always had.
+      exact.set(number, label);
+      byInteger.set(number.split(".", 1)[0] ?? number, label);
+    }
+  }
+
   for (const chapter of chapters) {
     if (chapter.chapterVolume !== null) continue;
+    const number = chapter.chapterNumber;
+    if (number === null) continue;
 
-    for (const volume of volumes) {
-      if (volume.label === null || volume.label === "none") continue;
-      const chapterNumber = chapter.chapterNumber?.split(".", 1)[0] ?? null;
-      if (chapterNumber === null) continue;
-
-      if (volume.chapterNumbers.includes(chapterNumber)) {
-        chapter.chapterVolume = volume.label.replace(/^0+/, "") || "0";
-      }
-    }
+    const label = exact.get(number) ?? byInteger.get(number.split(".", 1)[0] ?? number);
+    if (label !== undefined) chapter.chapterVolume = label;
   }
 }
 
