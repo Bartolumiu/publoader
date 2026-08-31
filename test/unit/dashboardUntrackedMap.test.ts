@@ -108,6 +108,8 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
     },
     { match: /\/stats$/, body: { paused: false, workers: {}, jobs: {}, uploadTasks: [], quarantined: 0 } },
     { match: /\/mangadex\/search/, body: { results: SEARCH_RESULTS } },
+    // The paste path: one title read back by id rather than searched for.
+    { match: /\/mangadex\/title\//, body: { title: SEARCH_RESULTS[0] } },
     { match: /\/untracked\/automap$/, body: () => AUTOMAP_REPORT },
     { match: /\/extensions$/, body: { extensions: [{ name: "opstest" }, { name: "mangaup_global" }] } },
     { match: /\/untracked\/[^/]+\/map$/, body: { ok: true, mdMangaId: MATCH_ID } },
@@ -220,7 +222,7 @@ describe("mapping an untracked series onto an existing MangaDex title", () => {
 
   it("searches MangaDex and marks the candidate that matches the scraped name", async () => {
     await goto(`#/untracked/${ROW_ID}`);
-    click("Search");
+    click("Find it");
     await settle(15);
 
     const [url] = calls("/mangadex/search")[0];
@@ -236,9 +238,40 @@ describe("mapping an untracked series onto an existing MangaDex title", () => {
     expect(text()).toContain("A Mangled Name");
   });
 
+  it("reads a pasted title link back by id instead of searching for the name again", async () => {
+    await goto(`#/untracked/${ROW_ID}`);
+    const input = doc.getElementById("untracked-md-q");
+    // What an operator has once they have found the series: the tab it is open
+    // in. Retyping the name so the search can find it a second time is the step
+    // this removes.
+    input.value = `https://mangadex.org/title/${MATCH_ID}/mangled-nmae`;
+    click("Find it");
+    await settle(15);
+
+    expect(calls("/mangadex/search")).toHaveLength(0);
+    const [url] = calls("/mangadex/title/")[0];
+    expect(String(url)).toContain(`/mangadex/title/${MATCH_ID}`);
+    // The name is still shown before anything is written: pasting skips the
+    // search, not the check that this is the same series.
+    expect(text()).toContain("Mangled Nmae");
+    expect(text()).toContain("Check the name below");
+  });
+
+  it("says what a chapter link is, rather than searching MangaDex for a URL", async () => {
+    await goto(`#/untracked/${ROW_ID}`);
+    const input = doc.getElementById("untracked-md-q");
+    input.value = `https://mangadex.org/chapter/${MATCH_ID}`;
+    click("Find it");
+    await settle(15);
+
+    expect(calls("/mangadex/search")).toHaveLength(0);
+    expect(calls("/mangadex/title/")).toHaveLength(0);
+    expect(text()).toContain("a chapter");
+  });
+
   it("maps the chosen title after a confirmation, and creates nothing", async () => {
     await goto(`#/untracked/${ROW_ID}`);
-    click("Search");
+    click("Find it");
     await settle(15);
 
     click("Map");
@@ -260,7 +293,7 @@ describe("mapping an untracked series onto an existing MangaDex title", () => {
 
   it("writes nothing if the confirmation is dismissed", async () => {
     await goto(`#/untracked/${ROW_ID}`);
-    click("Search");
+    click("Find it");
     await settle(15);
 
     click("Map");

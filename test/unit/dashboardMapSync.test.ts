@@ -417,6 +417,37 @@ describe("adding a mapping that already exists asks first", () => {
     expect(puts()[0]?.body).toEqual({ mangaId: "100001", mdMangaId: MD_C });
   });
 
+  it("takes the title link, so the id never has to be cut out of a URL by hand", async () => {
+    calls = [];
+    // The address bar of the tab the series was just checked in.
+    fill("100999", `https://mangadex.org/title/${MD_C}/some-series-name`).add.click();
+    await settle();
+
+    expect(puts()).toHaveLength(1);
+    // Only the id is sent: the slug is a display detail that goes stale.
+    expect(puts()[0]?.body).toEqual({ mangaId: "100999", mdMangaId: MD_C });
+  });
+
+  it("sees a pasted link for an id already mapped as the repoint it is", async () => {
+    calls = [];
+    fill("100001", `https://mangadex.org/title/${MD_C}`).add.click();
+    await settle();
+
+    // The link has to be read before the collision check, or a paste would slip
+    // past the dialog that exists to catch exactly this.
+    expect(puts()).toHaveLength(0);
+    expect(doc.getElementById("modal").textContent).toContain("already mapped");
+  });
+
+  it("refuses a chapter link instead of writing a mapping onto nothing", async () => {
+    calls = [];
+    fill("100999", `https://mangadex.org/chapter/${MD_C}`).add.click();
+    await settle();
+
+    expect(puts()).toHaveLength(0);
+    expect(doc.getElementById("modal").hasAttribute("open")).toBe(false);
+  });
+
   it("treats the same id and the same title as nothing to do", async () => {
     calls = [];
     fill("100001", MD_A).add.click();

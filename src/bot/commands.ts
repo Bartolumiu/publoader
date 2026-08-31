@@ -30,13 +30,16 @@ import {
   type ErrorClearedFilter,
   type RemovalMode,
   type RunKind,
+  type TrackedEntry,
+  type UntrackedEntry,
   type UntrackedState,
   type UploadTaskKind,
   type UploadTaskState,
   type WorkerAction,
 } from "./apiClient.js";
 import type { Sensitivity } from "./authz.js";
-import { DEFAULT_COOLDOWN_DAYS, MAX_COOLDOWN_DAYS } from "../core/store/trackedManga.js";
+import { DEFAULT_COOLDOWN_DAYS, MAX_COOLDOWN_DAYS, NAMESPACE_RE } from "../core/store/trackedManga.js";
+import { mdTitleUrl, parseMdTitleId } from "../core/md/titleId.js";
 
 /** Discord's hard cap is 2000 characters; leave room for our own framing. */
 const DISCORD_BODY_LIMIT = 1900;
@@ -97,6 +100,15 @@ function truncate(text: string, limit = DISCORD_BODY_LIMIT): string {
   return `${text.slice(0, limit - 20)}\n… (truncated)`;
 }
 
+/**
+ * Clip one value inside a line. `truncate` is for whole replies and appends a
+ * "(truncated)" note on its own line, which inside a bullet is worse than the
+ * ellipsis it replaces.
+ */
+function short(text: string, limit: number): string {
+  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
+}
+
 function codeBlock(text: string, lang = ""): string {
   const body = truncate(text, DISCORD_BODY_LIMIT - 10);
   return `\`\`\`${lang}\n${body || "(empty)"}\n\`\`\``;
@@ -145,25 +157,54 @@ function requireExtensionName(raw: string | null): string {
 }
 
 /**
- * A MangaDex title id, as the `series` autocomplete supplies.
+ * A MangaDex title id, from the autocomplete, a pasted uuid, or a pasted link.
  *
- * The autocomplete offers titles by name and sends back the id, so a value that
- * is not one means the option was typed past the suggestions. Saying so beats a
- * 404 on a uuid route: the fix is to pick from the list, and nothing about
- * "not found" suggests that.
+ * The link is the form that actually exists in a Discord channel: someone posts
+ * `https://mangadex.org/title/<uuid>/slug`, the next person maps against it,
+ * and asking them to edit the middle out of that URL by hand is how the wrong
+ * id gets typed. `parseMdTitleId` reads either shape and names what is wrong
+ * with anything else, which beats a 404 on a uuid route: when the value came
+ * from a chapter link the fix is not "try again", it is "open the series page".
  */
 function requireSeriesId(raw: string | null): string {
   const value = (raw ?? "").trim();
-  if (!MD_UUID_RE.test(value)) {
+  const parsed = parseMdTitleId(value);
+  if ("error" in parsed) {
+    // The parser's message already quotes what was given and says what is
+    // wrong with it; this adds the two ways to give a right one.
     throw new UserError(
-      `\`${value || "(empty)"}\` is not a MangaDex title id. Start typing the series name and ` +
-        "pick it from the suggestions, or paste the id out of the title's URL.",
+      `Not a MangaDex title id: ${parsed.error}.\n` +
+        "Start typing the series name and pick it from the suggestions, or paste the series' " +
+        "mangadex.org link and the id is read out of it.",
+    );
+  }
+  return parsed.id;
+}
+
+/**
+ * The catalogue an external id belongs to, as `--namespace` names on the CLI.
+ *
+ * Optional everywhere: all but one extension has a single flat id space, and
+ * omitting the option means that space. Where it matters (viz serves
+ * `shonenjump` and `vizmanga`, and `709` is a different series under each) a
+ * mapping made without it lands in a catalogue nothing reads.
+ */
+function optionalCatalogue(options: OptionReader): string | undefined {
+  const value = (options.string("catalogue") ?? "").trim().toLowerCase();
+  if (!value) return undefined;
+  if (!NAMESPACE_RE.test(value)) {
+    throw new UserError(
+      `\`${value}\` is not a catalogue name. They are lowercase letters, digits, \`-\` and \`_\`, ` +
+        "like `shonenjump`. Leave it empty for extensions that have one id space.",
     );
   }
   return value;
 }
 
-const MD_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** `mangaId`, or `catalogue/mangaId` where one is named. For messages only. */
+function qualified(namespace: string | null | undefined, mangaId: string): string {
+  return namespace ? `${namespace}/${mangaId}` : mangaId;
+}
 
 function requireString(options: OptionReader, name: string): string {
   const value = (options.string(name) ?? "").trim();
@@ -277,6 +318,69 @@ function parseWeekdays(raw: string | null): number[] {
 /** Shared so every schedule subcommand names the extension the same way. */
 const extensionOption = (o: SlashCommandStringOption): SlashCommandStringOption =>
   o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true);
+
+/**
+ * The extension's own id for a series.
+ *
+ * Autocompleted, which is the whole reason mapping from Discord is bearable:
+ * the ids are opaque strings a publisher chose (`comikey` uses slugs, `viz`
+ * uses numbers), so without suggestions every mapping starts by going to look
+ * one up somewhere else. See `respondWithMangaIds` in bot.ts for what it offers.
+ */
+const mangaIdOption = (o: SlashCommandStringOption): SlashCommandStringOption =>
+  o
+    .setName("manga-id")
+    .setDescription("The extension's own id for the series; start typing to search.")
+    .setRequired(true)
+    .setAutocomplete(true);
+
+/**
+ * A row in the untracked queue.
+ *
+ * Autocompleted by series name: the value is a uuid nobody can recognise, and
+ * before this the only way to act on a row was to run `/untracked list` and
+ * copy one out of the output. The suggestion carries the extension and the
+ * scraped name, which is what an operator is actually choosing between.
+ */
+const untrackedIdOption = (o: SlashCommandStringOption): SlashCommandStringOption =>
+  o
+    .setName("id")
+    .setDescription("The queued series; start typing its name.")
+    .setAutocomplete(true);
+
+/** The name a queued row goes by. `title` is the older spelling of `mangaName`. */
+function nameOf(row: UntrackedEntry): string {
+  return row.mangaName || row.title || row.mangaId;
+}
+
+/**
+ * The queued row behind an `id` option.
+ *
+ * A miss here is someone typing past the suggestions, and both shapes it takes
+ * — a value that is not a uuid (400) and a uuid for a row that is gone (404) —
+ * have the same fix, so both say it rather than surfacing the status.
+ */
+async function findUntracked(ctx: HandlerContext, id: string): Promise<UntrackedEntry> {
+  try {
+    const { untracked } = await ctx.api.untrackedRow(ctx.actor, id);
+    return untracked;
+  } catch (err) {
+    if (err instanceof AdminApiError && (err.status === 404 || err.status === 400)) {
+      throw new UserError(
+        `\`${id}\` is not a queued series. Start typing the series name and pick it from the ` +
+          "suggestions, or find it with `/untracked list`.",
+      );
+    }
+    throw err;
+  }
+}
+
+/** The catalogue inside an extension, for the few that have more than one. */
+const catalogueOption = (o: SlashCommandStringOption): SlashCommandStringOption =>
+  o
+    .setName("catalogue")
+    .setDescription("The extension's catalogue (viz: shonenjump / vizmanga). Omit for a single id space.")
+    .setAutocomplete(true);
 
 /** Which row a mutating subcommand acts on, as printed by `/schedule show`. */
 const slotNumberOption = (o: SlashCommandIntegerOption): SlashCommandIntegerOption =>
@@ -1340,7 +1444,18 @@ const commands: BotCommand[] = [
   {
     name: "untracked",
     description: "Series reported with no MangaDex title yet.",
-    sensitivity: { list: "read", approve: "destructive", skip: "mutate" },
+    // `map` is a mutate, not a destructive: it writes the series map but
+    // creates nothing on MangaDex and is reversible with /tracked remove.
+    // `approve` stays destructive because it creates a public title that
+    // nothing here can delete.
+    sensitivity: {
+      list: "read",
+      search: "read",
+      map: "mutate",
+      automap: "mutate",
+      approve: "destructive",
+      skip: "mutate",
+    },
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("untracked")
@@ -1362,15 +1477,56 @@ const commands: BotCommand[] = [
                 { name: "SKIPPED", value: "SKIPPED" },
               ),
           )
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Only this extension.").setAutocomplete(true),
+          )
+          .addStringOption((o) =>
+            o.setName("q").setDescription("Match the series name, the source's id, or the extension."),
+          )
           .addIntegerOption((o) =>
             o.setName("limit").setDescription("How many (1-100, default 20).").setMinValue(1).setMaxValue(100),
           ),
       )
       .addSubcommand((s) =>
         s
+          .setName("search")
+          .setDescription("Look for the series on MangaDex before creating a second title for it.")
+          .addStringOption((o) => untrackedIdOption(o).setRequired(false))
+          .addStringOption((o) =>
+            o.setName("title").setDescription("Search this instead of the queued row's own name."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("map")
+          .setDescription("Track this series against a MangaDex title that already exists.")
+          .addStringOption((o) => untrackedIdOption(o).setRequired(true))
+          .addStringOption((o) =>
+            o
+              .setName("mangadex")
+              .setDescription("MangaDex title link (mangadex.org/title/…) or the bare title id.")
+              .setRequired(true),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("automap")
+          .setDescription("Map queued series MangaDex already lists under their own publisher link.")
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Only this extension.").setAutocomplete(true),
+          )
+          .addIntegerOption((o) =>
+            o.setName("limit").setDescription("How many rows to check (1-200, default 25).").setMinValue(1).setMaxValue(200),
+          )
+          .addBooleanOption((o) =>
+            o.setName("commit").setDescription("Write the mappings. Without it this is a dry run."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
           .setName("approve")
           .setDescription("Create the MangaDex title now and start tracking it.")
-          .addStringOption((o) => o.setName("id").setDescription("Untracked row id.").setRequired(true))
+          .addStringOption((o) => untrackedIdOption(o).setRequired(true))
           .addBooleanOption((o) =>
             o.setName("confirm").setDescription("Required: this creates a real MangaDex title and cannot be undone."),
           ),
@@ -1379,43 +1535,131 @@ const commands: BotCommand[] = [
         s
           .setName("skip")
           .setDescription("Never create a title for this series.")
-          .addStringOption((o) => o.setName("id").setDescription("Untracked row id.").setRequired(true)),
+          .addStringOption((o) => untrackedIdOption(o).setRequired(true)),
       ),
     async run(ctx) {
       const sub = ctx.options.subcommand();
       if (sub === "list") {
         const state = ctx.options.string("state");
-        const { untracked } = await ctx.api.untracked(ctx.actor, {
+        const extension = ctx.options.string("extension");
+        const q = ctx.options.string("q");
+        const { untracked, total } = await ctx.api.untracked(ctx.actor, {
           limit: ctx.options.integer("limit") ?? 20,
           ...(state ? { state: state as UntrackedState } : {}),
+          ...(extension ? { extension: requireExtensionName(extension) } : {}),
+          ...(q ? { q } : {}),
         });
-        if (untracked.length === 0) return { text: "Nothing untracked." };
+        if (untracked.length === 0) return { text: "Nothing untracked matches that." };
         const rendered = untracked.map(
           (u) =>
-            `• \`${u.id}\` **${u.extension}** ${u.state}; ${u.title ?? u.mangaId} (${shortTime(u.createdAt)})`,
+            `• \`${u.id}\` **${u.extension}** ${u.state}; ${nameOf(u)} (${shortTime(u.createdAt)})`,
         );
         return {
           text: lines([
-            `**${untracked.length} untracked series**: approve with \`/untracked approve id:<id> confirm:true\``,
+            `**${untracked.length}${total && total > untracked.length ? ` of ${total}` : ""} untracked series**` +
+              "\nMost of these already exist on MangaDex: `/untracked search` first, then " +
+              "`/untracked map`. `/untracked approve` creates a NEW title.",
             ...rendered,
           ]),
         };
       }
+
+      if (sub === "automap") {
+        const extension = ctx.options.string("extension");
+        const commit = ctx.options.boolean("commit") === true;
+        const report = await ctx.api.automapUntracked(ctx.actor, {
+          dryRun: !commit,
+          limit: ctx.options.integer("limit") ?? 25,
+          ...(extension ? { extension: requireExtensionName(extension) } : {}),
+        });
+        const rendered = report.mapped
+          .slice(0, 20)
+          .map((m) => `• **${m.extension}** ${short(m.mangaName, 60)} → <${m.titleUrl}>`);
+        if (report.mapped.length > 20) rendered.push(`…and ${report.mapped.length - 20} more`);
+        return {
+          text: lines([
+            commit
+              ? `:link: **Auto-mapped ${report.mapped.length}** of ${report.considered} checked.`
+              : `**Dry run; nothing was written.** ${report.mapped.length} of ${report.considered} checked would map.`,
+            // The queue depth is the number that decides whether to run it
+            // again: a pass that maps nothing is normal at this hit rate.
+            `ambiguous ${report.ambiguous} · unmatched ${report.unmatched} · still queued ${report.remaining}`,
+            ...rendered,
+            commit ? "" : "Re-issue with `commit: true` to write these.",
+          ].filter(Boolean)),
+        };
+      }
+
+      if (sub === "search") {
+        // Either a row to search for, or a title to search with. With a row and
+        // no title the row's own scraped name is the query, which is the case
+        // this exists for; the title option is the second try when that name is
+        // the reason nothing matched.
+        const id = ctx.options.string("id");
+        const typed = ctx.options.string("title");
+        let reportedName: string | undefined;
+        let query = typed?.trim();
+        if (id) {
+          const row = await findUntracked(ctx, id);
+          reportedName = nameOf(row);
+          query = query || reportedName;
+        }
+        if (!query) {
+          throw new UserError("Give a queued series (`id`) to search for, or a `title` to search with.");
+        }
+        const { results } = await ctx.api.searchMangadex(ctx.actor, {
+          q: query,
+          ...(reportedName ? { reportedName } : {}),
+          limit: 10,
+        });
+        if (results.length === 0) {
+          return {
+            text:
+              `MangaDex returned nothing for **${short(query, 80)}**. A narrower or romanised title often ` +
+              "finds it; if it genuinely is not there, `/untracked approve` creates it.",
+          };
+        }
+        const rendered = results.map(
+          (r) =>
+            `• ${r.likely ? ":dart: " : ""}[${short(r.title, 70)}](${r.url})` +
+            (r.altTitles.length ? `\n  ${short(r.altTitles.join(" · "), 90)}` : ""),
+        );
+        return {
+          text: lines([
+            `**${results.length} candidate(s) for ${short(query, 60)}**` +
+              (id ? `\nMap one with \`/untracked map id:${id} mangadex:<link>\`.` : "") +
+              "\n:dart: marks a match on the scraped name. Nothing is written until you map one.",
+            ...rendered,
+          ]),
+        };
+      }
+
       const id = requireString(ctx.options, "id");
       if (sub === "skip") {
         await ctx.api.skipUntracked(ctx.actor, id);
         return { text: `:no_bell: \`${id}\` marked SKIPPED; no title will be created for it.` };
       }
+      if (sub === "map") {
+        const mdMangaId = requireSeriesId(requireString(ctx.options, "mangadex"));
+        const result = await ctx.api.mapUntracked(ctx.actor, id, mdMangaId);
+        return {
+          text:
+            `:link: \`${id}\` is now tracked against <${mdTitleUrl(result.mdMangaId ?? mdMangaId)}>.\n` +
+            "No title was created; its chapters upload to that one from the next run onwards.",
+        };
+      }
       if (ctx.options.boolean("confirm") !== true) {
         return {
           text:
             `:warning: **\`${id}\` not approved.** Approving creates a real title on MangaDex immediately and ` +
-            "cannot be undone from this API.\nRe-issue with `confirm: true` to proceed.",
+            "cannot be undone from this API.\nRun `/untracked search id:" +
+            `${id}\` first: if it is already there, \`/untracked map\` is the answer instead.` +
+            "\nRe-issue with `confirm: true` to proceed.",
         };
       }
       const result = await ctx.api.approveUntracked(ctx.actor, id);
       return {
-        text: `:white_check_mark: Title created and tracked${result.mdMangaId ? `: MangaDex id \`${result.mdMangaId}\`` : ""}.`,
+        text: `:white_check_mark: Title created and tracked${result.mdMangaId ? `: <${mdTitleUrl(result.mdMangaId)}>` : ""}.`,
       };
     },
   },
@@ -1771,43 +2015,37 @@ const commands: BotCommand[] = [
         s
           .setName("list")
           .setDescription("Every tracked manga for an extension.")
-          .addStringOption((o) =>
-            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
-          ),
+          .addStringOption(extensionOption)
+          .addStringOption((o) => catalogueOption(o)),
       )
       .addSubcommand((s) =>
         s
           .setName("set")
-          .setDescription("Add or repoint a mapping.")
+          .setDescription("Add or repoint a mapping. Paste the MangaDex link; the id is read out of it.")
+          .addStringOption(extensionOption)
+          .addStringOption((o) => mangaIdOption(o))
           .addStringOption((o) =>
-            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
+            o
+              .setName("mangadex")
+              .setDescription("MangaDex title link (mangadex.org/title/…) or the bare title id.")
+              .setRequired(true),
           )
-          .addStringOption((o) =>
-            o.setName("manga-id").setDescription("The extension's own id for the series.").setRequired(true),
-          )
-          .addStringOption((o) => o.setName("md-manga-id").setDescription("MangaDex manga UUID.").setRequired(true)),
+          .addStringOption((o) => catalogueOption(o)),
       )
       .addSubcommand((s) =>
         s
           .setName("remove")
           .setDescription("Stop tracking a manga. Does not touch MangaDex.")
-          .addStringOption((o) =>
-            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
-          )
-          .addStringOption((o) =>
-            o.setName("manga-id").setDescription("The extension's own id for the series.").setRequired(true),
-          ),
+          .addStringOption(extensionOption)
+          .addStringOption((o) => mangaIdOption(o))
+          .addStringOption((o) => catalogueOption(o)),
       )
       .addSubcommand((s) =>
         s
           .setName("pause")
           .setDescription("Leave a series out of runs until its cooldown expires.")
-          .addStringOption((o) =>
-            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
-          )
-          .addStringOption((o) =>
-            o.setName("manga-id").setDescription("The extension's own id for the series.").setRequired(true),
-          )
+          .addStringOption(extensionOption)
+          .addStringOption((o) => mangaIdOption(o))
           .addIntegerOption((o) =>
             o
               .setName("days")
@@ -1818,35 +2056,44 @@ const commands: BotCommand[] = [
           .addBooleanOption((o) =>
             o.setName("once").setDescription("A one-shot hold: it expires for good instead of re-arming."),
           )
-          .addStringOption((o) => o.setName("reason").setDescription("Why, for whoever reads this later.")),
+          .addStringOption((o) => o.setName("reason").setDescription("Why, for whoever reads this later."))
+          .addStringOption((o) => catalogueOption(o)),
       )
       .addSubcommand((s) =>
         s
           .setName("unpause")
           .setDescription("Put a paused series back in runs immediately.")
-          .addStringOption((o) =>
-            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
-          )
-          .addStringOption((o) =>
-            o.setName("manga-id").setDescription("The extension's own id for the series.").setRequired(true),
-          ),
+          .addStringOption(extensionOption)
+          .addStringOption((o) => mangaIdOption(o))
+          .addStringOption((o) => catalogueOption(o)),
       )
       .addSubcommand((s) =>
         s
           .setName("paused")
           .setDescription("Series currently suppressed from runs, soonest to return first.")
-          .addStringOption((o) =>
-            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
-          ),
+          .addStringOption(extensionOption),
       ),
     async run(ctx) {
       const sub = ctx.options.subcommand();
       const extension = requireExtensionName(ctx.options.string("extension"));
+      const catalogue = optionalCatalogue(ctx.options);
       if (sub === "list") {
-        const { tracked } = await ctx.api.tracked(ctx.actor, extension);
-        if (tracked.length === 0) return { text: `\`${extension}\` tracks nothing yet.` };
-        const rendered = tracked.slice(0, 30).map((t) => `• \`${t.mangaId}\` → \`${t.mdMangaId}\``);
+        const { tracked, namespaces } = await ctx.api.tracked(ctx.actor, extension, catalogue);
+        if (tracked.length === 0) {
+          return {
+            text: catalogue
+              ? `\`${extension}\` tracks nothing in \`${catalogue}\`.`
+              : `\`${extension}\` tracks nothing yet. Add one with \`/tracked set\`.`,
+          };
+        }
+        const rendered = tracked
+          .slice(0, 30)
+          .map((t) => `• \`${qualified(t.namespace, t.mangaId)}\` → <${mdTitleUrl(t.mdMangaId)}>`);
         if (tracked.length > 30) rendered.push(`…and ${tracked.length - 30} more`);
+        // Only worth saying where there is more than the flat id space: for
+        // every extension but viz this line would be noise on every call.
+        const others = (namespaces ?? []).filter(Boolean);
+        if (!catalogue && others.length > 0) rendered.push(`catalogues: ${others.join(", ")}`);
         return { text: lines([`**${tracked.length} tracked manga for \`${extension}\`**`, ...rendered]) };
       }
       if (sub === "paused") {
@@ -1856,7 +2103,7 @@ const commands: BotCommand[] = [
           .slice(0, 30)
           .map(
             (p) =>
-              `• \`${p.mangaId}\` returns ${shortTime(p.recheckAfter)}` +
+              `• \`${qualified(p.namespace, p.mangaId)}\` returns ${shortTime(p.recheckAfter)}` +
               (p.cooldownDays ? ` (every ${p.cooldownDays}d)` : " (once)") +
               (p.pauseReason ? ` — ${p.pauseReason}` : ""),
           );
@@ -1864,12 +2111,13 @@ const commands: BotCommand[] = [
         return { text: lines([`**${paused.length} paused series in \`${extension}\`**`, ...rendered]) };
       }
       const mangaId = requireString(ctx.options, "manga-id");
+      const where = `\`${extension}\`/\`${qualified(catalogue, mangaId)}\``;
       if (sub === "remove") {
-        const result = await ctx.api.removeTracked(ctx.actor, extension, mangaId);
+        const result = await ctx.api.removeTracked(ctx.actor, extension, mangaId, catalogue);
         return {
           text: result.removed
-            ? `:wastebasket: \`${extension}\`/\`${mangaId}\` is no longer tracked. Nothing on MangaDex was changed.`
-            : `\`${extension}\`/\`${mangaId}\` was not tracked; nothing changed.`,
+            ? `:wastebasket: ${where} is no longer tracked. Nothing on MangaDex was changed.`
+            : `${where} was not tracked; nothing changed.`,
         };
       }
       if (sub === "pause") {
@@ -1880,14 +2128,15 @@ const commands: BotCommand[] = [
           mangaIds: [mangaId],
           days,
           renew,
+          ...(catalogue ? { namespace: catalogue } : {}),
           ...(reason ? { reason } : {}),
         });
         if (result.changed === 0) {
-          return { text: `\`${extension}\`/\`${mangaId}\` is not tracked; nothing was paused.` };
+          return { text: `${where} is not tracked; nothing was paused.` };
         }
         return {
           text:
-            `:pause_button: \`${extension}\`/\`${mangaId}\` is out of runs until ` +
+            `:pause_button: ${where} is out of runs until ` +
             `${shortTime(result.recheckAfter)}` +
             (renew ? `, then re-arms every ${days} days after each clean run.` : " (one-shot).") +
             "\nIt is neither fetched nor considered for removal while paused; " +
@@ -1895,17 +2144,47 @@ const commands: BotCommand[] = [
         };
       }
       if (sub === "unpause") {
-        const result = await ctx.api.unpauseTracked(ctx.actor, extension, { mangaIds: [mangaId] });
+        const result = await ctx.api.unpauseTracked(ctx.actor, extension, {
+          mangaIds: [mangaId],
+          ...(catalogue ? { namespace: catalogue } : {}),
+        });
         return {
           text:
             result.changed > 0
-              ? `:arrow_forward: \`${extension}\`/\`${mangaId}\` is back in runs from the next one onwards.`
-              : `\`${extension}\`/\`${mangaId}\` is not tracked; nothing changed.`,
+              ? `:arrow_forward: ${where} is back in runs from the next one onwards.`
+              : `${where} is not tracked; nothing changed.`,
         };
       }
-      const mdMangaId = requireString(ctx.options, "md-manga-id");
-      await ctx.api.setTracked(ctx.actor, extension, { mangaId, mdMangaId });
-      return { text: `:link: \`${extension}\`/\`${mangaId}\` → \`${mdMangaId}\`.` };
+      const mdMangaId = requireSeriesId(requireString(ctx.options, "mangadex"));
+      // What was already there decides whether this reads as an add or as a
+      // repoint. A repoint changes where a live series' chapters land and is
+      // invisible afterwards, so the reply has to say which one happened —
+      // this is the only place an operator will see it.
+      let before: TrackedEntry | undefined;
+      try {
+        const { tracked } = await ctx.api.tracked(ctx.actor, extension, catalogue);
+        before = tracked.find((t) => t.mangaId === mangaId && (t.namespace ?? "") === (catalogue ?? ""));
+      } catch {
+        // The mapping is the job; failing to describe it beforehand is not a
+        // reason to refuse to do it.
+      }
+      if (before && before.mdMangaId === mdMangaId) {
+        return { text: `${where} already points at <${mdTitleUrl(mdMangaId)}>; nothing changed.` };
+      }
+      await ctx.api.setTracked(ctx.actor, extension, {
+        mangaId,
+        mdMangaId,
+        ...(catalogue ? { namespace: catalogue } : {}),
+      });
+      if (before) {
+        return {
+          text:
+            `:twisted_rightwards_arrows: **Repointed** ${where}.\n` +
+            `Was <${mdTitleUrl(before.mdMangaId)}>\nNow <${mdTitleUrl(mdMangaId)}>\n` +
+            "Chapters already uploaded stay where they are; new ones land on the new title.",
+        };
+      }
+      return { text: `:link: ${where} → <${mdTitleUrl(mdMangaId)}>` };
     },
   },
   {

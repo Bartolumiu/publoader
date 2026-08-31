@@ -617,6 +617,30 @@ export class TitleService {
   }
 
   /**
+   * One title, in the shape the search returns, for an id an operator pasted.
+   *
+   * Pasting the link of a title you already found is faster than searching for
+   * it again, but it skips the step that makes searching safe: seeing the name
+   * before mapping. This puts that step back. A wrong id is otherwise
+   * indistinguishable from a right one — both are uuids — until chapters start
+   * arriving on someone else's series.
+   *
+   * Null means MangaDex does not have it, which is a typo or a deleted title;
+   * `mapToExisting` refuses that case too, this just says so first.
+   */
+  async titleById(mdMangaId: string, reportedName?: string): Promise<TitleCandidate | null> {
+    const detail = await this.md.mangaById(mdMangaId);
+    if (detail === null) return null;
+    return {
+      id: detail.id,
+      title: primaryTitle(detail),
+      altTitles: altTitleList(detail),
+      url: `https://mangadex.org/title/${detail.id}`,
+      likely: reportedName ? titleMatches(detail, reportedName) : false,
+    };
+  }
+
+  /**
    * Point an untracked row at a MangaDex title that already exists.
    *
    * The counterpart to `approve`: same bookkeeping, no title creation. Both

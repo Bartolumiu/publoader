@@ -390,6 +390,62 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     expect(row.mdMangaId).toBe("9a1b1c1d-0000-4000-8000-000000000000");
   });
 
+  it("maps from the title link an operator has, not the id they would have to cut out of it", async () => {
+    const cookie = await loginAs("ADMIN", "linker@example.com");
+    const id = "7c0ffee0-0000-4000-8000-000000000001";
+
+    const put = await app.inject({
+      method: "PUT",
+      url: "/api/v1/admin/extensions/opstest/tracked",
+      headers: { cookie, ...dash },
+      // The whole URL, slug and all: what the browser's address bar holds after
+      // checking the series is the right one.
+      payload: { mangaId: "ext-link", mdMangaId: `https://mangadex.org/title/${id}/some-series` },
+    });
+    expect(put.statusCode).toBe(200);
+    const row = await prisma.trackedManga.findFirstOrThrow({ where: { mangaId: "ext-link" } });
+    // Only the id is stored: the slug is a display detail that goes stale.
+    expect(row.mdMangaId).toBe(id);
+
+    // A chapter link is the paste that would otherwise look right — a uuid on
+    // mangadex.org — so it is refused by name rather than accepted.
+    const chapter = await app.inject({
+      method: "PUT",
+      url: "/api/v1/admin/extensions/opstest/tracked",
+      headers: { cookie, ...dash },
+      payload: { mangaId: "ext-link", mdMangaId: `https://mangadex.org/chapter/${id}` },
+    });
+    expect(chapter.statusCode).toBe(400);
+    expect(chapter.json().error).toContain("a chapter");
+    // Refused means unchanged, not half-written.
+    expect((await prisma.trackedManga.findFirstOrThrow({ where: { mangaId: "ext-link" } })).mdMangaId).toBe(id);
+  });
+
+  it("takes title links in a pasted batch, and says why a line that is not one failed", async () => {
+    const cookie = await loginAs("ADMIN", "linker2@example.com");
+    const id = "7c0ffee0-0000-4000-8000-000000000002";
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/extensions/opstest/tracked/batch",
+      headers: { cookie, ...dash },
+      payload: {
+        text: [
+          `by-link,https://mangadex.org/title/${id}/slug`,
+          `by-chapter,https://mangadex.org/chapter/${id}`,
+        ].join("\n"),
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.added).toBe(1);
+    expect((await prisma.trackedManga.findFirstOrThrow({ where: { mangaId: "by-link" } })).mdMangaId).toBe(id);
+    // The parse error names the mistake; "no title id on this line" in front of
+    // a visible uuid reads as a bug in the parser rather than in the paste.
+    expect(body.parseErrors).toHaveLength(1);
+    expect(body.parseErrors[0].reason).toContain("a chapter");
+  });
+
   // ---- series-map paste ----
 
   it("reports a pasted series map line by line", async () => {

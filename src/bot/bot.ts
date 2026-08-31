@@ -20,6 +20,7 @@ import {
   AdminApiError,
   describeApiError,
   type AdminApiClient,
+  type TrackedEntry,
 } from "./apiClient.js";
 import { authorize, describeAuthz, type AuthzConfig, type Invoker } from "./authz.js";
 import {
@@ -68,6 +69,17 @@ export class PubloaderBot {
    */
   private readonly inFlight = new Set<string>();
   private extensionCache: { names: string[]; fetchedAt: number } | null = null;
+  /**
+   * One extension's series map, for the `manga-id` and `catalogue`
+   * suggestions.
+   *
+   * Cached because those fire on every keystroke and the endpoint returns the
+   * whole map, which for a large extension is thousands of rows; the filtering
+   * is local anyway, so re-reading it per character buys nothing. A minute
+   * stale is the right trade here: a mapping added seconds ago is one an
+   * operator already knows the id of.
+   */
+  private readonly trackedCache = new Map<string, { rows: TrackedEntry[]; namespaces: string[]; fetchedAt: number }>();
   private shuttingDown = false;
 
   constructor(opts: PubloaderBotOptions) {
@@ -302,8 +314,23 @@ export class PubloaderBot {
       return;
     }
     const focused = interaction.options.getFocused(true);
+    const needle = String(focused.value ?? "");
     if (focused.name === "series") {
-      await this.respondWithSeries(interaction, String(focused.value ?? ""));
+      await this.respondWithSeries(interaction, needle);
+      return;
+    }
+    if (focused.name === "manga-id") {
+      await this.respondWithMangaIds(interaction, needle);
+      return;
+    }
+    if (focused.name === "catalogue") {
+      await this.respondWithCatalogues(interaction, needle);
+      return;
+    }
+    // `id` is a row id on several commands; only the untracked queue can offer
+    // suggestions for one, and answering the others from it would be wrong.
+    if (focused.name === "id" && interaction.commandName === "untracked") {
+      await this.respondWithUntracked(interaction, needle);
       return;
     }
     if (focused.name !== "extension") {
@@ -316,9 +343,9 @@ export class PubloaderBot {
     } catch (err) {
       this.log.debug({ err }, "autocomplete could not list extensions");
     }
-    const needle = String(focused.value ?? "").toLowerCase();
+    const lowered = needle.toLowerCase();
     const choices = names
-      .filter((n) => !needle || n.toLowerCase().includes(needle))
+      .filter((n) => !lowered || n.toLowerCase().includes(lowered))
       .slice(0, 25)
       .map((n) => ({ name: n, value: n }));
     await interaction.respond(choices).catch(() => undefined);
@@ -353,6 +380,124 @@ export class PubloaderBot {
       this.log.debug({ err }, "autocomplete could not list series");
     }
     await interaction.respond(choices).catch(() => undefined);
+  }
+
+  /**
+   * External series ids for the extension already chosen in the same command.
+   *
+   * WHY IT MATTERS. An extension's ids are whatever the publisher chose —
+   * comikey uses slugs, viz uses numbers, mangaplus uses six-digit ids — so
+   * mapping from Discord used to begin somewhere else: open the dashboard,
+   * find the series, copy the id, come back. These suggestions are the whole
+   * difference between "/tracked set" being usable in chat and not.
+   *
+   * Which set is offered depends on the subcommand, because they are asking
+   * different questions. `set` is about a series that is NOT mapped yet, so it
+   * offers the untracked queue, searched server-side by name; everything else
+   * acts on an existing mapping, so it offers the map itself.
+   */
+  private async respondWithMangaIds(interaction: AutocompleteInteraction, needle: string): Promise<void> {
+    const extension = interaction.options.getString("extension");
+    if (!extension) {
+      // Nothing to suggest from yet, and saying so beats an empty dropdown
+      // that reads as "this extension has no series".
+      await interaction
+        .respond([{ name: "Choose the extension first, then come back to this box", value: needle.slice(0, 100) }])
+        .catch(() => undefined);
+      return;
+    }
+    const query = needle.trim().toLowerCase();
+    let choices: { name: string; value: string }[] = [];
+    try {
+      if (interaction.options.getSubcommand(false) === "set") {
+        const { untracked } = await this.api.untracked("discord:autocomplete", {
+          limit: 25,
+          extension,
+          ...(query ? { q: query } : {}),
+        });
+        choices = untracked
+          // A row already mapped is not what `set` is for; it would be a
+          // repoint, and those are typed deliberately, not picked off a list.
+          .filter((row) => row.state !== "TRACKED")
+          .map((row) => ({
+            name: `${row.mangaName ?? row.title ?? row.mangaId} · ${row.mangaId}`.slice(0, 100),
+            value: row.mangaId.slice(0, 100),
+          }));
+      } else {
+        const { rows } = await this.trackedFor(extension);
+        choices = rows
+          .filter((row) => !query || row.mangaId.toLowerCase().includes(query))
+          .slice(0, 25)
+          .map((row) => ({
+            name: `${row.namespace ? `${row.namespace}/` : ""}${row.mangaId} → ${row.mdMangaId}`.slice(0, 100),
+            value: row.mangaId.slice(0, 100),
+          }));
+      }
+    } catch (err) {
+      this.log.debug({ err, extension }, "autocomplete could not list series ids");
+    }
+    // Whatever has been typed stays choosable: an id that is not in either set
+    // is exactly the case a first mapping starts from.
+    if (query && !choices.some((c) => c.value === needle)) {
+      choices.unshift({ name: `Use “${needle}” as typed`.slice(0, 100), value: needle.slice(0, 100) });
+    }
+    await interaction.respond(choices.slice(0, 25)).catch(() => undefined);
+  }
+
+  /** The catalogues one extension actually has. Empty for all but viz. */
+  private async respondWithCatalogues(interaction: AutocompleteInteraction, needle: string): Promise<void> {
+    const extension = interaction.options.getString("extension");
+    let choices: { name: string; value: string }[] = [];
+    if (extension) {
+      try {
+        const { namespaces } = await this.trackedFor(extension);
+        const query = needle.trim().toLowerCase();
+        choices = namespaces
+          .filter((name) => name && (!query || name.toLowerCase().includes(query)))
+          .slice(0, 25)
+          .map((name) => ({ name, value: name }));
+      } catch (err) {
+        this.log.debug({ err, extension }, "autocomplete could not list catalogues");
+      }
+    }
+    await interaction.respond(choices).catch(() => undefined);
+  }
+
+  /**
+   * Rows in the untracked queue, by the name they were reported under.
+   *
+   * The id is a uuid, so before this the only way to act on a row was to run
+   * `/untracked list` and copy one out of its output. The search is done by
+   * the API — the queue runs to thousands of rows — and the label carries the
+   * extension and state, which is what distinguishes two rows with the same
+   * name from two different publishers.
+   */
+  private async respondWithUntracked(interaction: AutocompleteInteraction, needle: string): Promise<void> {
+    let choices: { name: string; value: string }[] = [];
+    try {
+      const query = needle.trim();
+      const { untracked } = await this.api.untracked("discord:autocomplete", {
+        limit: 25,
+        ...(query ? { q: query } : { state: "NEW" }),
+      });
+      choices = untracked.map((row) => ({
+        name: `${row.mangaName ?? row.title ?? row.mangaId} · ${row.extension} · ${row.state}`.slice(0, 100),
+        value: row.id,
+      }));
+    } catch (err) {
+      this.log.debug({ err }, "autocomplete could not list the untracked queue");
+    }
+    await interaction.respond(choices).catch(() => undefined);
+  }
+
+  /** One extension's series map, cached for the length of a few keystrokes. */
+  private async trackedFor(extension: string): Promise<{ rows: TrackedEntry[]; namespaces: string[] }> {
+    const cached = this.trackedCache.get(extension);
+    if (cached && Date.now() - cached.fetchedAt < EXTENSION_CACHE_TTL_MS) return cached;
+    const { tracked, namespaces } = await this.api.tracked("discord:autocomplete", extension);
+    const entry = { rows: tracked, namespaces: namespaces ?? [], fetchedAt: Date.now() };
+    this.trackedCache.set(extension, entry);
+    return entry;
   }
 
   private async extensionNames(): Promise<string[]> {

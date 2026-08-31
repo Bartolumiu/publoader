@@ -1094,6 +1094,67 @@ const mdTitleLink = (id, label) =>
     text: label ?? id,
   });
 
+const MD_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A MangaDex title id out of a uuid or out of a link.
+ *
+ * MIRRORS core/md/titleId.ts. The server accepts both shapes, so this file
+ * could send the link through untouched and be right; it reads it here anyway
+ * so the id is visible in the field before anything is written. Every mapping
+ * control on this page is one click away from repointing a live series onto
+ * another title, and "you are about to write this id" is the last chance to
+ * notice the wrong tab was copied.
+ *
+ * Returns `{id}` or `{error}`; the error is written for an operator to act on,
+ * not for a log.
+ */
+function mdTitleIdFrom(value) {
+  const text = String(value ?? "")
+    .trim()
+    .replace(/^[<"'`([]+/, "")
+    .replace(/[>"'`)\]]+$/, "")
+    .replace(/[.,;]+$/, "")
+    .trim();
+  if (!text) return { error: "A MangaDex title id or link is required." };
+  if (MD_UUID_RE.test(text)) return { id: text.toLowerCase() };
+  // A typo'd uuid is the common bad value here, and `new URL` would happily
+  // read it as a hostname; so anything that is not visibly a URL gets the id
+  // message rather than "abc123 is not MangaDex".
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(text);
+  if (!scheme && !/^[^\s/]+\.[^\s/]+\//.test(text)) {
+    return { error: `“${truncate(text, 60)}” is neither a MangaDex id (a uuid) nor a mangadex.org link.` };
+  }
+  let url;
+  try {
+    url = new URL(scheme ? text : `https://${text}`);
+  } catch {
+    return { error: `“${truncate(text, 60)}” is not a readable URL.` };
+  }
+  const host = url.hostname.toLowerCase();
+  if (!/(^|\.)mangadex\.(org|dev)$/.test(host)) {
+    return { error: `${host} is not MangaDex. Paste the mangadex.org link for the series.` };
+  }
+  const segments = url.pathname.split("/").filter(Boolean);
+  const kind = (segments[0] || "").toLowerCase();
+  const id = segments[1] || "";
+  if (kind !== "title" && kind !== "manga") {
+    // A chapter link is the one that would otherwise look right: it is a uuid
+    // on mangadex.org, and mapping onto it would point the series at nothing.
+    const what = { chapter: "a chapter", group: "a scanlation group", user: "a user", list: "a custom list" }[kind];
+    return {
+      error: what
+        ? `That link points at ${what}, not a series. Open the series page and paste its link.`
+        : "That is a MangaDex link, but not to a series.",
+    };
+  }
+  if (MD_UUID_RE.test(id)) return { id: id.toLowerCase() };
+  if (/^\d+$/.test(id)) {
+    return { error: `${id} is a pre-2021 numeric id. Open the title on mangadex.org and paste the link it lands on.` };
+  }
+  return { error: "No series id in that link." };
+}
+
 const mdChapterLink = (id, label) =>
   el("a", {
     href: `https://mangadex.org/chapter/${encodeURIComponent(id)}`,
@@ -9232,8 +9293,23 @@ function repointDialog(name, item, tracked) {
     id: "repoint-md-id",
     type: "text",
     value: item.mdMangaId,
-    placeholder: "MangaDex UUID",
+    placeholder: "mangadex.org/title/… link, or the bare id",
   });
+  // What the id resolves to, live. A repoint has no visible effect afterwards,
+  // so the id being written is the only thing there is to check it against.
+  const resolved = el("p", { class: "dim small" });
+  const showResolved = () => {
+    const parsed = mdTitleIdFrom(target.value);
+    resolved.replaceChildren(
+      parsed.error
+        ? el("span", { class: "field-error", text: target.value.trim() ? parsed.error : "" })
+        : parsed.id === item.mdMangaId
+          ? el("span", { text: "That is where it already points." })
+          : el("span", {}, "Will point at ", mdTitleLink(parsed.id)),
+    );
+  };
+  target.addEventListener("input", showResolved);
+  showResolved();
 
   openModal(
     `Repoint ${item.mangaId}`,
@@ -9248,11 +9324,14 @@ function repointDialog(name, item, tracked) {
             : "Chapters for this id will be uploaded to whichever title it points at, from the next run onwards.",
       }),
       el("p", { class: "dim small" }, "Currently: ", mdTitleLink(item.mdMangaId)),
-      el("label", { for: "repoint-md-id", text: "New MangaDex id" }),
+      el("label", { for: "repoint-md-id", text: "New MangaDex title" }),
       target,
+      resolved,
       el("p", {
         class: "dim small",
-        text: "Nothing on MangaDex is changed or deleted; only where future chapters are sent.",
+        text:
+          "Paste the title's mangadex.org link; the id is read out of it. Nothing on MangaDex is " +
+          "changed or deleted, only where future chapters are sent.",
       }),
       el(
         "div",
@@ -9262,8 +9341,9 @@ function repointDialog(name, item, tracked) {
           class: "primary",
           text: "Repoint it",
           onclick: async (event) => {
-            const next = target.value.trim();
-            if (!next) return void toast("a MangaDex id is required", false);
+            const parsed = mdTitleIdFrom(target.value);
+            if (parsed.error) return void toast(parsed.error, false);
+            const next = parsed.id;
             if (next === item.mdMangaId) return void toast("that is where it already points", false);
             const ok = await act(
               "tracked_manga.set",
@@ -9382,7 +9462,13 @@ function trackedCard(name, tracked) {
     "aria-label": "Filter tracked mappings",
   });
   const mangaId = el("input", { id: "tracked-manga-id", type: "text", placeholder: "external manga id" });
-  const mdMangaId = el("input", { id: "tracked-md-id", type: "text", placeholder: "MangaDex UUID" });
+  const mdMangaId = el("input", {
+    id: "tracked-md-id",
+    type: "text",
+    // The link, not the id, is what an operator has: they have just checked the
+    // series on MangaDex, and the tab they checked it in is the answer.
+    placeholder: "mangadex.org/title/… link, or the bare id",
+  });
   // Free text rather than a picker: the first row of a new catalogue has to be
   // addable before that catalogue exists in the list.
   const namespaceInput = el("input", {
@@ -9545,11 +9631,11 @@ function trackedCard(name, tracked) {
         text: "Add mapping",
         onclick: (event) => {
           const externalId = mangaId.value.trim();
-          const target = mdMangaId.value.trim();
           const namespace = namespaceInput.value.trim();
-          if (!externalId || !target) {
-            return void toast("both ids are required", false);
-          }
+          if (!externalId) return void toast("an external id is required", false);
+          const parsed = mdTitleIdFrom(mdMangaId.value);
+          if (parsed.error) return void toast(parsed.error, false);
+          const target = parsed.id;
           // Captured now: `currentTarget` is null by the time the confirmation
           // below resolves, and `act` needs the button to show as pending.
           const button = event.currentTarget;
@@ -9668,13 +9754,16 @@ function bulkCurationCard(name, tracked) {
   const mode = el(
     "select",
     { id: "bulk-mode", "aria-label": "Bulk operation" },
-    el("option", { value: "set", text: "Add or repoint (externalId,mdMangaId per line)" }),
+    el("option", { value: "set", text: "Add or repoint (externalId,mdMangaId-or-link per line)" }),
     el("option", { value: "remove", text: "Remove (one external id per line)", disabled: !canWrite }),
   );
   const text = el("textarea", {
     id: "bulk-text",
     spellcheck: "false",
-    placeholder: "abc123,3f1e...-uuid\ndef456,7a2b...-uuid\n# comments and a header row are ignored",
+    placeholder:
+      "abc123,3f1e...-uuid\n" +
+      "def456,https://mangadex.org/title/7a2b...-uuid/some-series\n" +
+      "# ids or title links; comments and a header row are ignored",
     "aria-label": "Mappings to apply",
   });
   const preview = el("div", { id: "bulk-preview" });
@@ -9818,7 +9907,9 @@ function bulkCurationCard(name, tracked) {
     text.placeholder =
       mode.value === "remove"
         ? "abc123\ndef456\n# one external id per line"
-        : "abc123,3f1e...-uuid\ndef456,7a2b...-uuid\n# comments and a header row are ignored";
+        : "abc123,3f1e...-uuid\n" +
+          "def456,https://mangadex.org/title/7a2b...-uuid/some-series\n" +
+          "# ids or title links; comments and a header row are ignored";
   });
 
   return card(
@@ -9826,7 +9917,8 @@ function bulkCurationCard(name, tracked) {
     el("p", {
       class: "dim small",
       text:
-        "Paste lines of externalId,mdMangaId; order-insensitive, with # comments and a header row ignored. " +
+        "Paste lines of externalId,mdMangaId; the MangaDex column may be a mangadex.org/title/… link " +
+        "instead of an id. Order-insensitive, with # comments and a header row ignored. " +
         "Up to 2000 rows. Nothing is written until you apply a preview.",
     }),
     row(el("label", { class: "inline", for: "bulk-mode", text: "Operation" }), mode),
@@ -11101,7 +11193,10 @@ function untrackedMapCard(item, detail) {
     // Seeded with the scraped name, which is the query an operator would type
     // first anyway; widening it is the common second step.
     value: item.mangaName,
-    placeholder: "title to search for on MangaDex",
+    // A link is a first-class answer here, not a fallback: the operator who
+    // already found the series on MangaDex has its tab open, and retyping the
+    // name so the search can find it again is work with a wrong answer in it.
+    placeholder: "title to search for, or paste a mangadex.org/title/… link",
     disabled: !writable,
   });
 
@@ -11178,10 +11273,47 @@ function untrackedMapCard(item, detail) {
     }
   };
 
+  /**
+   * Resolve a pasted link or id to the one title it names.
+   *
+   * Deliberately not a shortcut past the review step: it renders the title as a
+   * candidate exactly like a search hit, so mapping it is the same click
+   * against the same name and alt titles. What it skips is the search, not the
+   * looking.
+   */
+  const lookUp = async (id, button) =>
+    act(
+      "untracked.lookup",
+      async () => {
+        const body = await api(
+          `/mangadex/title/${encodeURIComponent(id)}?reportedName=${encodeURIComponent(item.mangaName)}`,
+        );
+        if (!body.title) {
+          results.replaceChildren();
+          status.textContent = `MangaDex has no title ${id}.`;
+          return;
+        }
+        render([body.title], id);
+        status.textContent =
+          "Read from the link you pasted. Check the name below is the same series before mapping.";
+      },
+      { button },
+    );
+
   const runSearch = async (button) => {
     const query = input.value.trim();
     if (!query) {
-      status.textContent = "Type a title to search for.";
+      status.textContent = "Type a title to search for, or paste its MangaDex link.";
+      results.replaceChildren();
+      return;
+    }
+    // Only when it is unambiguously an id or a link: a series whose NAME is a
+    // bare uuid does not exist, but a name containing a slash might, and
+    // treating that as a failed link would refuse a legitimate search.
+    const parsed = mdTitleIdFrom(query);
+    if (parsed.id) return void (await lookUp(parsed.id, button));
+    if (/mangadex\.(org|dev)/i.test(query)) {
+      status.textContent = parsed.error;
       results.replaceChildren();
       return;
     }
@@ -11210,14 +11342,20 @@ function untrackedMapCard(item, detail) {
       class: "dim small",
       text: alreadyTracked
         ? "This series is already mapped. Searching still works, but repointing an existing mapping belongs in the tracked map."
-        : "Search MangaDex for this series. Mapping it adds the series to the tracked map without creating a new title.",
+        : "Search MangaDex for this series, or paste its link if you have already found it. Mapping adds the " +
+          "series to the tracked map without creating a new title.",
     }),
     row(
-      el("span", { class: "row tight" }, el("label", { class: "inline", for: "untracked-md-q", text: "Title" }), input),
+      el(
+        "span",
+        { class: "row tight" },
+        el("label", { class: "inline", for: "untracked-md-q", text: "Title or link" }),
+        input,
+      ),
       el("button", {
         type: "button",
         class: "primary",
-        text: "Search",
+        text: "Find it",
         disabled: !writable,
         onclick: (event) => runSearch(event.currentTarget),
       }),

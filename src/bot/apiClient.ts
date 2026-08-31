@@ -217,14 +217,43 @@ export interface UntrackedEntry {
   extension: string;
   mangaId: string;
   title?: string | null;
+  /** The scraped series name. `title` is the legacy spelling of the same thing. */
+  mangaName?: string | null;
+  mangaUrl?: string | null;
+  mdMangaId?: string | null;
   state: string;
   createdAt: string;
+}
+
+/**
+ * A MangaDex title the search offers as a candidate for an untracked series.
+ * Mirrors the `results` shape of GET /api/v1/admin/mangadex/search.
+ */
+export interface MdTitleCandidate {
+  id: string;
+  title: string;
+  altTitles: string[];
+  url: string;
+  /** Matches the scraped name by the same rule that refuses a duplicate create. */
+  likely: boolean;
+}
+
+/** Mirrors the report of POST /api/v1/admin/untracked/automap. */
+export interface AutomapReport {
+  dryRun: boolean;
+  considered: number;
+  ambiguous: number;
+  unmatched: number;
+  remaining: number;
+  mapped: { id: string; extension: string; mangaName: string; mdMangaId: string; titleUrl: string }[];
 }
 
 export interface TrackedEntry {
   extension: string;
   mangaId: string;
   mdMangaId: string;
+  /** The extension's catalogue; empty for the flat id space most of them have. */
+  namespace?: string | null;
   source?: string | null;
   createdAt: string;
   /** Set while the series is suppressed from runs; see the recheck cooldown. */
@@ -1230,14 +1259,81 @@ export class AdminApiClient {
 
   untracked(
     actor: string,
-    opts: { state?: UntrackedState; limit: number },
-  ): Promise<{ untracked: UntrackedEntry[] }> {
+    opts: { state?: UntrackedState; limit: number; extension?: string; q?: string },
+  ): Promise<{ untracked: UntrackedEntry[]; total?: number }> {
     return this.request({
       method: "GET",
       path: "/api/v1/admin/untracked",
       scope: "untracked:read",
       actor,
-      query: { state: opts.state, limit: opts.limit },
+      query: { state: opts.state, limit: opts.limit, extension: opts.extension, q: opts.q },
+    });
+  }
+
+  /**
+   * One queued row, so a search can be run with the name the scraper reported
+   * rather than a name retyped from a chat message.
+   */
+  untrackedRow(actor: string, id: string): Promise<{ untracked: UntrackedEntry }> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/admin/untracked/${encodeURIComponent(id)}`,
+      scope: "untracked:read",
+      actor,
+    });
+  }
+
+  /**
+   * Candidate MangaDex titles for a series.
+   *
+   * Live, so it costs a MangaDex round trip; that is the point. This is the
+   * question "is this already on MangaDex", and the only answer worth having
+   * is the current one.
+   */
+  searchMangadex(
+    actor: string,
+    opts: { q: string; reportedName?: string; limit: number },
+  ): Promise<{ results: MdTitleCandidate[] }> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/mangadex/search",
+      scope: "untracked:read",
+      actor,
+      query: { q: opts.q, reportedName: opts.reportedName, limit: opts.limit },
+      // A MangaDex search behind a cold cache is slower than the platform's own
+      // reads; the default 20s occasionally clips it.
+      timeoutMs: 30_000,
+    });
+  }
+
+  /** Map an untracked row onto a title that already exists. Creates nothing. */
+  mapUntracked(actor: string, id: string, mdMangaId: string): Promise<{ ok: boolean; mdMangaId: string }> {
+    return this.request({
+      method: "POST",
+      path: `/api/v1/admin/untracked/${encodeURIComponent(id)}/map`,
+      scope: "untracked:write",
+      actor,
+      json: { mdMangaId },
+    });
+  }
+
+  /** The official-English-link auto-map pass, on demand. `dryRun` writes nothing. */
+  automapUntracked(
+    actor: string,
+    opts: { dryRun: boolean; limit: number; extension?: string },
+  ): Promise<AutomapReport> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/untracked/automap",
+      scope: "untracked:write",
+      actor,
+      json: {
+        dryRun: opts.dryRun,
+        limit: opts.limit,
+        ...(opts.extension ? { extension: opts.extension } : {}),
+      },
+      // Reads MangaDex once per row considered, so it scales with `limit`.
+      timeoutMs: 120_000,
     });
   }
 
@@ -1263,19 +1359,24 @@ export class AdminApiClient {
     });
   }
 
-  tracked(actor: string, extension: string): Promise<{ tracked: TrackedEntry[] }> {
+  tracked(
+    actor: string,
+    extension: string,
+    namespace?: string,
+  ): Promise<{ tracked: TrackedEntry[]; namespaces?: string[] }> {
     return this.request({
       method: "GET",
       path: `/api/v1/admin/extensions/${encodeURIComponent(extension)}/tracked`,
       scope: "extensions:read",
       actor,
+      query: { namespace },
     });
   }
 
   setTracked(
     actor: string,
     extension: string,
-    entry: { mangaId: string; mdMangaId: string },
+    entry: { mangaId: string; mdMangaId: string; namespace?: string },
   ): Promise<{ ok: boolean }> {
     return this.request({
       method: "PUT",
@@ -1286,7 +1387,12 @@ export class AdminApiClient {
     });
   }
 
-  removeTracked(actor: string, extension: string, mangaId: string): Promise<{ ok: boolean; removed: boolean }> {
+  removeTracked(
+    actor: string,
+    extension: string,
+    mangaId: string,
+    namespace?: string,
+  ): Promise<{ ok: boolean; removed: boolean }> {
     return this.request({
       method: "DELETE",
       path:
@@ -1294,6 +1400,9 @@ export class AdminApiClient {
         `/tracked/${encodeURIComponent(mangaId)}`,
       scope: "extensions:write",
       actor,
+      // Identity is (namespace, mangaId): omitting it targets the flat id
+      // space, which for a namespaced extension is a row that does not exist.
+      query: { namespace },
     });
   }
 

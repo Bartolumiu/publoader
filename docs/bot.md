@@ -44,12 +44,29 @@ The bot needs its own control-plane credential:
 
 ```
 publoader-admin tokens create --name discord-bot \
-  --scopes runs:write,workers:read,extensions:read,untracked:write,stats:read,audit:read
+  --scopes discord-bot
 ```
 
-That is the `discord-bot` preset (`publoader-admin tokens scopes` lists all of
-them). The output includes the `pa_…` token; it is shown once and cannot be
-recovered. Put it in `BOT_API_TOKEN`.
+`publoader-admin tokens scopes` lists every preset and what it expands to; this
+one is `runs:write`, `workers:read`, `extensions:read`, `tracked:read`,
+`tracked:append`, `untracked:write`, `settings:write`, `stats:read` and
+`audit:read`. The output includes the `pa_…` token; it is shown once and cannot
+be recovered. Put it in `BOT_API_TOKEN`.
+
+The preset stops at `tracked:append` on purpose: the bot can **add** a mapping
+and work the untracked queue, and it cannot repoint or remove one. That is the
+same append-versus-edit line the API draws everywhere else — a wrong new mapping
+is visible and reversible, a silent repoint of a live series is not. If you want
+`/tracked remove`, `/tracked pause` and `/tracked unpause` to work from chat,
+add `tracked:write` to the token deliberately:
+
+```
+publoader-admin tokens create --name discord-bot --scopes discord-bot,tracked:write
+```
+
+A token minted before this preset gained the two `tracked:*` scopes keeps the
+scopes it was minted with; `/tracked list` and `/tracked set` answer 403 on it
+until it is replaced.
 
 ### Do not give the bot `ADMIN_TOKEN`, and do not give it `*`
 
@@ -271,9 +288,10 @@ as the legacy `force_login` without a chat command that handles a password.
 | `/schedule enable <extension> <slot>` | mutate | `extensions:write` | Switch it back on. |
 | `/schedule remove <extension> <slot>` | mutate | `extensions:write` | Delete one slot. |
 | `/schedule reset <extension>` | mutate | `extensions:write` | Drop every operator slot, falling back to the manifest. |
-| `/tracked list <extension>` | read | `extensions:read` | The external-id → MangaDex-id mapping. |
-| `/tracked set <extension> <manga-id> <md-manga-id>` | mutate | `extensions:write` | Add or repoint a mapping. |
-| `/tracked remove <extension> <manga-id>` | mutate | `extensions:write` | Stop tracking. Does not touch MangaDex. |
+| `/tracked list <extension> [catalogue]` | read | `extensions:read` | The external-id → MangaDex-id mapping. |
+| `/tracked set <extension> <manga-id> <mangadex> [catalogue]` | mutate | `extensions:write` | Add or repoint a mapping. `mangadex` takes the title's **link** as well as its id. Answers "Repointed" with the previous title when the id was already mapped. |
+| `/tracked remove <extension> <manga-id> [catalogue]` | mutate | `extensions:write` | Stop tracking. Does not touch MangaDex. |
+| `/tracked pause`/`unpause`/`paused` | mutate/read | `extensions:write` | The recheck cooldown; see docs/operations.md. |
 | `/reconcile [extension]` | read | `chapters:read` | How many chapters are already marked unavailable on MangaDex, or deleted, that the archives do not know about. **Reports only**; applying is closed to api tokens, so recording them is `padmin chapters reconcile --apply` or the dashboard. |
 | `/duplicates [extension] [manga]` | read | `chapters:read` | Which chapters MangaDex is holding twice, per series, worst first. No extension is run and no publisher is asked, so it answers for a series whose source is gone. **Reports only**; queuing the deletions is closed to api tokens, so that is `padmin chapters duplicates --apply` or the dashboard. Naming a `manga` id scopes it to one title and usually answers first time; unfiltered it walks the whole group and may need asking twice. |
 | `/recheck [series] [extension] [confirm]` | mutate | `runs:write` | Asks the publisher whether chapters are still there, and queues whatever it no longer lists as UNAVAILABLE (or DELETE). Name a `series` for one title; name only an `extension` to re-check all of it, which is a full CLEAN re-scrape and can mark everything it publishes if the listing comes back empty. Reports without starting anything until `confirm: true`. Unlike `/recard` the bot **can** do this one: it creates a run, and run creation is not closed to api tokens. |
@@ -298,9 +316,26 @@ run happens on the wrong day.
 
 | Command | Class | Scope | What it does |
 |---|---|---|---|
-| `/untracked list [state] [limit]` | read | `untracked:read` | Series reported with no MangaDex title yet. |
+| `/untracked list [state] [extension] [q] [limit]` | read | `untracked:read` | Series reported with no MangaDex title yet. |
+| `/untracked search [id] [title]` | read | `untracked:read` | Candidate MangaDex titles for a queued row, searched under the name the scraper reported. Writes nothing. |
+| `/untracked map <id> <mangadex>` | mutate | `untracked:write` + `tracked:append` | Track the series against a title that **already exists**; takes the title's link or its id. Creates nothing on MangaDex. |
+| `/untracked automap [extension] [limit] [commit]` | mutate | `untracked:write` + `tracked:append` | Map the queued series MangaDex already lists under their own publisher link. **Dry run unless `commit: true`.** |
 | `/untracked approve <id> confirm:true` | destructive | `untracked:write` | Create the MangaDex title now and start tracking it. **Creates a real title and cannot be undone from the API.** |
 | `/untracked skip <id>` | mutate | `untracked:write` | Never create a title for this series. |
+
+Most rows in this queue are **not** new series: MangaDex already has the title
+under a name that did not match. Approving one creates a duplicate, and
+un-duplicating a catalogue is other people's work, so the queue commands are
+ordered to make the cheap answers reachable first — `automap` clears the ones
+MangaDex itself links to the publisher, `search` shows what is already there,
+and `map` takes the title's link straight from the browser tab you checked it
+in. `approve` says so before it creates anything.
+
+Both `id` options are **autocompleted by series name**: the values are uuids,
+and before that the only way to act on a row was to copy one out of a
+`/untracked list` message. `manga-id` on `/tracked` is autocompleted too, from
+the untracked queue for `set` and from the map itself for everything else, so
+the extension's own ids never have to be looked up elsewhere.
 
 ### Worker fleet
 

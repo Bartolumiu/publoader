@@ -26,6 +26,7 @@ import {
 import { MANGADEX_LANGUAGES } from "../../../contracts/languages.js";
 import { countOutstandingErrors } from "../../observability/errorFeed.js";
 import { workerNames } from "../../store/workers.js";
+import { parseMdTitleId } from "../../md/titleId.js";
 
 /**
  * The worker image the enrolment snippet tells a new host to run. Set
@@ -84,6 +85,24 @@ function parseOrThrow<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infe
     statusCode: 400,
   });
 }
+
+/**
+ * A MangaDex title id, accepted as either the bare uuid or the link an operator
+ * has open in the tab where they checked the series is the right one.
+ *
+ * Stripping the link here rather than at each caller is what makes "paste the
+ * mangadex.org link" true of the dashboard, the CLI, the bot and any script
+ * against this API at the same time; and the message on a bad value names what
+ * was pasted (a chapter link, a legacy numeric id) instead of "invalid uuid".
+ */
+const MdTitleId = z.string().transform((value, ctx) => {
+  const parsed = parseMdTitleId(value);
+  if ("error" in parsed) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: parsed.error });
+    return z.NEVER;
+  }
+  return parsed.id;
+});
 
 /**
  * The audit subject for one tracked mapping. The default id space keeps the
@@ -872,14 +891,16 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     scope.put("/api/v1/admin/extensions/:name/tracked", { preHandler: requireScope("tracked:append") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
-      const body = z
-        .object({
+      const body = parseOrThrow(
+        z.object({
           mangaId: z.string().min(1).max(512),
-          mdMangaId: z.string().uuid(),
+          // Accepts a mangadex.org/title/… link and stores only the id in it.
+          mdMangaId: MdTitleId,
           /** The extension's catalogue; omit for the single flat id space. */
           namespace: z.string().max(MAX_NAMESPACE_LENGTH).optional(),
-        })
-        .parse(req.body);
+        }),
+        req.body,
+      );
       const namespace = normaliseNamespace(body.namespace);
       if (namespace !== DEFAULT_NAMESPACE && !NAMESPACE_RE.test(namespace)) {
         return reply.code(400).send({ error: `namespace must match ${String(NAMESPACE_RE)}` });
@@ -1284,6 +1305,30 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     });
 
     /**
+     * One MangaDex title, by id or by the link it came in.
+     *
+     * The paste path's counterpart to the search: an operator who already has
+     * the title open pastes its link instead of searching for it again, and
+     * this is what lets the name be shown before the mapping is written. Same
+     * scope and same live-read reasoning as the search above.
+     */
+    scope.get("/api/v1/admin/mangadex/title/:id", { preHandler: requireScope("untracked:read") }, async (req, reply) => {
+      if (!ctx.titleService) {
+        return reply.code(503).send({ error: "title service not available on this instance" });
+      }
+      const { id } = parseOrThrow(z.object({ id: MdTitleId }), req.params);
+      const query = parseOrThrow(
+        z.object({ reportedName: z.string().trim().max(512).optional() }),
+        req.query ?? {},
+      );
+      const title = await ctx.titleService.titleById(id, query.reportedName);
+      if (!title) {
+        return reply.code(404).send({ error: `MangaDex has no title ${id}; it may be deleted, merged, or a typo` });
+      }
+      return { title };
+    });
+
+    /**
      * Run the official-English-link auto-map over the queue on demand.
      *
      * The scheduler already does a batch a tick, but a backlog built up before
@@ -1363,7 +1408,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         if (!ctx.titleService) {
           return reply.code(503).send({ error: "title service not available on this instance" });
         }
-        const body = z.object({ mdMangaId: z.string().uuid() }).strict().parse(req.body ?? {});
+        const body = parseOrThrow(z.object({ mdMangaId: MdTitleId }).strict(), req.body ?? {});
         const result = await ctx.titleService.mapToExisting(id, body.mdMangaId, actor(req));
         if (!result.ok) return reply.code(409).send({ error: result.error });
         return { ok: true, mdMangaId: result.mdMangaId };
