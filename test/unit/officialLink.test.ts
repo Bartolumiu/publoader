@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normaliseOfficialLink } from "../../src/core/md/titleService.js";
+import { normaliseOfficialLink } from "../../src/core/md/officialLink.js";
 
 /**
  * The comparison the auto-map pass rests on.

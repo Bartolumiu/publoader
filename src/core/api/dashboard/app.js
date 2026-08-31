@@ -10108,6 +10108,194 @@ function mapSyncCard(name) {
  * this is an index rather than a merged table: it names each extension, counts
  * what it tracks, and links into the map that can actually be edited.
  */
+/**
+ * Map a series from the two links an operator has, without choosing an
+ * extension first.
+ *
+ * WHY IT IS ON THIS PAGE. Every other mapping control lives inside one
+ * extension's map, which means using it starts with knowing which extension
+ * covers the site — and that, plus what the extension calls the series, are
+ * exactly the two facts somebody arriving with a publisher link does not have.
+ * This card derives both from rows the platform already holds, so the whole act
+ * is: paste the publisher's page, paste the MangaDex title, map.
+ *
+ * It never maps on a guess. The resolution is shown before anything is written,
+ * the series id it worked out stays editable, and a link that lands on a series
+ * already in the map is a repoint behind a confirmation, exactly as it is
+ * everywhere else.
+ */
+function mapFromLinkCard() {
+  const writable = can("tracked:append");
+  /** The last resolution, or null. What the Map button acts on. */
+  let resolved = null;
+
+  const sourceInput = el("input", {
+    id: "map-source",
+    type: "search",
+    placeholder: "https://comikey.com/comics/…",
+    disabled: !writable,
+  });
+  const mangaIdInput = el("input", {
+    id: "map-manga-id",
+    type: "text",
+    placeholder: "found from the link",
+    disabled: !writable,
+  });
+  const mdInput = el("input", {
+    id: "map-md",
+    type: "text",
+    placeholder: "mangadex.org/title/… link, or the bare id",
+    disabled: !writable,
+  });
+  const found = el("div", { class: "dim small" });
+
+  /** What was worked out, in the words the API used. Never a bare code. */
+  const VIA = {
+    queue: "this exact page is in the untracked queue",
+    "known-id": "the id in that link is one already on file",
+    rule: "measured from where this extension puts ids in its own links",
+    host: "the site is this extension's, but not which series",
+  };
+
+  const draw = (resolution) => {
+    resolved = resolution;
+    const match = resolution?.match ?? null;
+    mangaIdInput.value = match?.mangaId ?? "";
+    if (!match) {
+      setChildren(
+        found,
+        el("span", { class: "field-error", text: resolution?.reason ?? "Could not tell what that link is." }),
+        resolution?.candidates?.length
+          ? el("span", { text: ` Extensions serving that site: ${resolution.candidates.join(", ")}.` })
+          : null,
+      );
+      return;
+    }
+    setChildren(
+      found,
+      el("span", {}, "This is ", el("code", { text: match.extension }), " "),
+      match.mangaId ? el("code", { text: match.mangaId }) : el("span", { text: "(series not identified)" }),
+      el("span", { text: ` — ${VIA[match.via] ?? match.via}.` }),
+      match.untracked
+        ? el("span", {}, " Queued as ", el("strong", { text: truncate(match.untracked.mangaName, 60) }),
+            ` (${match.untracked.state}).`)
+        : null,
+      // The one thing that changes what the button does, so it is said in
+      // words rather than left to the confirmation to reveal.
+      match.tracked
+        ? el("span", { class: "chip warn" }, "already mapped")
+        : null,
+      match.tracked ? el("span", {}, " to ", mdTitleLink(match.tracked.mdMangaId), " — mapping again repoints it.") : null,
+    );
+  };
+
+  const lookUp = async (button) => {
+    const url = sourceInput.value.trim();
+    if (!url) {
+      resolved = null;
+      found.textContent = "Paste the publisher's page for the series.";
+      return;
+    }
+    await act(
+      "source.resolve",
+      async () => draw(await api(`/source/resolve?url=${encodeURIComponent(url)}`)),
+      { button },
+    );
+  };
+
+  const mapIt = async (button) => {
+    const url = sourceInput.value.trim();
+    if (!url) return void toast("paste the publisher's link first", false);
+    const target = mdTitleIdFrom(mdInput.value);
+    if (target.error) return void toast(target.error, false);
+    const mangaId = mangaIdInput.value.trim();
+    const match = resolved?.match ?? null;
+    if (!match && !mangaId) {
+      return void toast("look the link up first, or type the series id yourself", false);
+    }
+    if (match && !match.mangaId && !mangaId) {
+      return void toast(`${match.extension} is the extension; type the series id it uses`, false);
+    }
+
+    // A repoint is the one write here with no visible consequence and a large
+    // invisible one, so it is confirmed against the title it currently points
+    // at rather than reported afterwards.
+    const current = match?.tracked?.mdMangaId ?? null;
+    if (current && current !== target.id) {
+      const confirmed = await confirmDialog({
+        title: "That series is already mapped",
+        lead: `${match.extension}/${mangaId || match.mangaId} currently points at ${current}.`,
+        points: [
+          `Mapping it again repoints it to ${target.id}.`,
+          "The series keeps publishing; new chapters just start landing on the other title.",
+          "Chapters already uploaded stay where they are.",
+        ],
+        confirmLabel: "Repoint it",
+      });
+      if (!confirmed) return;
+    }
+
+    const body = {
+      url,
+      mdMangaId: target.id,
+      ...(mangaId && mangaId !== match?.mangaId ? { mangaId } : {}),
+    };
+    const result = await act("source.map", () => api("/source/map", { method: "POST", body }), { button });
+    if (!result) return;
+    setChildren(
+      found,
+      el("span", {}, `${result.outcome}: `, el("code", { text: `${result.extension}/${result.mangaId}` }), " → "),
+      mdTitleLink(result.mdMangaId),
+      result.untrackedRow ? el("span", { text: " The untracked queue row was closed." }) : null,
+      result.untrackedNote ? el("span", { text: ` ${result.untrackedNote}` }) : null,
+    );
+    if (result.changed) {
+      sourceInput.value = "";
+      mdInput.value = "";
+      mangaIdInput.value = "";
+      resolved = null;
+    }
+  };
+
+  sourceInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    void lookUp(null);
+  });
+  // Looking up on the way out of the field is what makes the id appear without
+  // anyone pressing anything; the button stays for a re-check.
+  sourceInput.addEventListener("change", () => void lookUp(null));
+
+  return card(
+    "Map a series from its links",
+    el("p", {
+      class: "dim small",
+      text:
+        "Paste the publisher's page and the MangaDex title. Which extension covers the site, and what it " +
+        "calls the series, are worked out from what this platform already holds; nothing is written until you map.",
+    }),
+    row(
+      el("span", { class: "row tight" }, el("label", { class: "inline", for: "map-source", text: "Publisher link" }), sourceInput),
+      el("button", {
+        type: "button",
+        text: "Look it up",
+        disabled: !writable,
+        onclick: (event) => void lookUp(event.currentTarget),
+      }),
+    ),
+    found,
+    row(
+      el("span", { class: "row tight" }, el("label", { class: "inline", for: "map-manga-id", text: "Series id" }), mangaIdInput),
+      el("span", { class: "row tight" }, el("label", { class: "inline", for: "map-md", text: "MangaDex" }), mdInput),
+      gatedButton("tracked:append", {
+        class: "primary",
+        text: "Map it",
+        onclick: (event) => void mapIt(event.currentTarget),
+      }),
+    ),
+  );
+}
+
 VIEWS.tracked = () => {
   const counts = new Resource("tracked-counts", async () => {
     const list = await api("/extensions");
@@ -10128,6 +10316,7 @@ VIEWS.tracked = () => {
   return el(
     "div",
     {},
+    mapFromLinkCard(),
     card(
       "Series map by extension",
       el("p", {

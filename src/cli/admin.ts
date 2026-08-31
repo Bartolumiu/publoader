@@ -441,6 +441,24 @@ function idsFromArgsOrStdin(args: string[]): string[] {
     .filter(Boolean);
 }
 
+/** Mirrors SourceResolution in core/store/sourceLinks.ts. */
+interface SourceResolution {
+  url: string;
+  normalised: string | null;
+  host: string | null;
+  candidates: string[];
+  namespaces: string[];
+  reason?: string;
+  match: {
+    extension: string;
+    mangaId: string | null;
+    namespace: string | null;
+    via: string;
+    untracked: { id: string; mangaName: string; state: string } | null;
+    tracked: { mdMangaId: string; source: string } | null;
+  } | null;
+}
+
 // ---- tracked manga (the database replacement for manga_id_map.json) ----
 const tracked = program
   .command("tracked")
@@ -1622,6 +1640,80 @@ untracked
   .action(async (id: string) => {
     await api(`/api/v1/admin/untracked/${id}/skip`, { method: "POST" });
     ok(`untracked ${id} skipped`);
+  });
+
+/**
+ * Map a series from the publisher's own link.
+ *
+ * The two facts a mapping takes — which extension covers a site, and what that
+ * extension calls the series — are both derivable from data this platform
+ * already holds, so the operator supplies neither. Without a MangaDex title
+ * this only reports what the link is, which is also how you check a series is
+ * not already mapped before touching it.
+ */
+program
+  .command("map <sourceUrl> [mdMangaIdOrLink]")
+  .description("map a series from its publisher link (and a MangaDex id or link)")
+  .option("--manga-id <id>", "the extension's own id, for a link this cannot read on its own")
+  .option("--namespace <namespace>", "the extension catalogue this series belongs to")
+  .option("--dry-run", "report what it would do and write nothing")
+  .action(async (
+    sourceUrl: string,
+    mdMangaIdOrLink: string | undefined,
+    opts: { mangaId?: string; namespace?: string; dryRun?: boolean },
+  ) => {
+    if (!mdMangaIdOrLink) {
+      const res = await api<SourceResolution>("/api/v1/admin/source/resolve", {
+        query: { url: sourceUrl },
+      });
+      const match = res.match;
+      if (!match) {
+        kv({ url: res.url, host: res.host ?? "-", extensions: res.candidates.join(", ") || "none" });
+        fail(res.reason ?? "could not tell what that link is");
+      }
+      kv({
+        extension: match.extension,
+        mangaId: match.mangaId ?? "(unknown)",
+        namespace: match.namespace || "(default)",
+        via: match.via,
+        queued: match.untracked ? `${match.untracked.mangaName} [${match.untracked.state}]` : "-",
+        mappedTo: match.tracked ? match.tracked.mdMangaId : "-",
+      });
+      return;
+    }
+
+    const res = await api<{
+      changed: boolean;
+      dryRun?: boolean;
+      outcome: string;
+      extension: string;
+      namespace: string;
+      mangaId: string;
+      mdMangaId: string;
+      previousMdMangaId?: string | null;
+      untrackedRow?: string | null;
+      untrackedNote?: string;
+      resolution: SourceResolution;
+    }>("/api/v1/admin/source/map", {
+      method: "POST",
+      json: {
+        url: sourceUrl,
+        mdMangaId: titleIdArg(mdMangaIdOrLink),
+        ...(opts.mangaId ? { mangaId: opts.mangaId } : {}),
+        ...(opts.namespace ? { namespace: opts.namespace } : {}),
+        ...(opts.dryRun ? { dryRun: true } : {}),
+      },
+    });
+    kv({
+      outcome: res.dryRun ? `${res.outcome} (dry run; nothing written)` : res.outcome,
+      extension: res.extension,
+      mangaId: qualify(res.namespace || undefined, res.mangaId),
+      mdMangaId: res.mdMangaId,
+      url: `https://mangadex.org/title/${res.mdMangaId}`,
+      ...(res.previousMdMangaId ? { previously: res.previousMdMangaId } : {}),
+      via: res.resolution.match?.via ?? "given",
+      untrackedRow: res.untrackedRow ? `${res.untrackedRow} (closed)` : (res.untrackedNote ?? "-"),
+    });
   });
 
 // ---- schedules ----

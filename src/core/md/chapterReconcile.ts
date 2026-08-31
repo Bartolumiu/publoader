@@ -8,10 +8,10 @@ import type { MdEntity, MdExtendedApi } from "./client.js";
 import { isCardedAttributes } from "./types.js";
 import { formatTitle } from "../processor/dedupe.js";
 import {
-  chapterIdFromUrl,
-  learnChapterIdRule,
-  type ChapterIdUrlRule,
-} from "./chapterIdFromUrl.js";
+  idFromUrl,
+  learnIdUrlRule,
+  type IdUrlRule,
+} from "./idFromUrl.js";
 import { ReconcilePlan, type ReconcileStep } from "./reconcilePlan.js";
 
 /**
@@ -72,7 +72,7 @@ import { ReconcilePlan, type ReconcileStep } from "./reconcilePlan.js";
  *
  * So adoption writes both: the `uploaded_chapters` row from the MangaDex
  * record, and an `uploaded_ids` row whenever the publisher's own chapter id can
- * be recovered from the URL (chapterIdFromUrl.ts, which measures the
+ * be recovered from the URL (idFromUrl.ts, which measures the
  * URL-to-id relationship off the extension's existing rows rather than
  * assuming one). Where it cannot be recovered the row is still written, with a
  * NULL `chapter_id`: visibility restored, and nothing guessed.
@@ -132,7 +132,7 @@ export interface ReconcileGroup {
    * measured off its existing rows. NULL when its own history does not agree on
    * an answer, in which case adopted rows carry no `chapter_id`.
    */
-  idRule: ChapterIdUrlRule | null;
+  idRule: IdUrlRule | null;
 }
 
 export interface ReconcileReport {
@@ -205,7 +205,7 @@ const WRITE_BATCH = 500;
  *
  * A ceiling rather than the whole table: the relationship is a property of the
  * publisher's URL shape, so a few hundred genuine examples settle it as firmly
- * as a few thousand would, and the disagreement threshold in chapterIdFromUrl
+ * as a few thousand would, and the disagreement threshold in idFromUrl
  * is a share rather than a count.
  */
 const SAMPLE_LIMIT = 500;
@@ -228,7 +228,7 @@ function chunk<T>(items: readonly T[], size: number): T[][] {
 
 export class ChapterReconciler {
   /** Measured once per extension per run; the table it reads does not move under us. */
-  private readonly idRules = new Map<string, ChapterIdUrlRule | null>();
+  private readonly idRules = new Map<string, IdUrlRule | null>();
 
   constructor(private readonly deps: ReconcileDeps) {}
 
@@ -473,7 +473,7 @@ export class ChapterReconciler {
     untracked: number;
     adopted: number;
     adoptedWithId: number;
-    idRule: ChapterIdUrlRule | null;
+    idRule: IdUrlRule | null;
   }> {
     const step = `adopt:${groupId}`;
     this.plan.start(step, live.length);
@@ -519,7 +519,7 @@ export class ChapterReconciler {
       const chapterUrl = str("externalUrl");
       const mdMangaId = entity.relationships?.find((rel) => rel.type === "manga")?.id ?? null;
       const timestamp = str("readableAt") ?? str("publishAt");
-      const chapterId = chapterUrl && idRule ? chapterIdFromUrl(chapterUrl, idRule) : null;
+      const chapterId = chapterUrl && idRule ? idFromUrl(chapterUrl, idRule) : null;
 
       rows.push({
         mdChapterId,
@@ -639,7 +639,7 @@ export class ChapterReconciler {
    * same rule, and feeding it back in would let one early mistake confirm
    * itself forever.
    */
-  private async idRuleFor(extension: string): Promise<ChapterIdUrlRule | null> {
+  private async idRuleFor(extension: string): Promise<IdUrlRule | null> {
     const cached = this.idRules.get(extension);
     if (cached !== undefined) return cached;
 
@@ -651,9 +651,9 @@ export class ChapterReconciler {
     // is all of them — and the rule can never be measured. `->>` with a
     // COALESCE says what was meant: anything that is not an adopted row.
     const samples = await this.deps.prisma.$queryRaw<
-      { chapterId: string; chapterUrl: string }[]
+      { id: string; url: string }[]
     >(Prisma.sql`
-      SELECT chapter_id AS "chapterId", chapter_url AS "chapterUrl"
+      SELECT chapter_id AS "id", chapter_url AS "url"
       FROM uploaded_chapters
       WHERE extension = ${extension}
         AND chapter_id IS NOT NULL
@@ -661,7 +661,7 @@ export class ChapterReconciler {
         AND COALESCE(extra->>'adopted', '') <> ${ADOPTED_MARKER}
       LIMIT ${SAMPLE_LIMIT}
     `);
-    const rule = learnChapterIdRule(samples);
+    const rule = learnIdUrlRule(samples);
     this.idRules.set(extension, rule);
     return rule;
   }

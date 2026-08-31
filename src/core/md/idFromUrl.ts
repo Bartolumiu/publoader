@@ -1,5 +1,12 @@
 /**
- * Recover a publisher-side chapter id from the `externalUrl` MangaDex holds.
+ * Recover a publisher-side id from a publisher URL, by measuring where the ids
+ * this platform already holds sit inside the URLs it already holds.
+ *
+ * Two callers, one rule. `chapterReconcile.ts` recovers a CHAPTER id from the
+ * `externalUrl` MangaDex holds; `store/sourceLinks.ts` recovers a SERIES id
+ * from a source link an operator pastes. The relationship being measured is
+ * identical — "the id is the last N path segments" — and the reasoning below
+ * was written for the chapter case, which is the harder one.
  *
  * WHY THIS EXISTS. `uploaded_chapters` is a log of what this platform uploaded,
  * so on a deployment whose upload history is younger than the catalogue most of
@@ -28,8 +35,8 @@
  * upload, so "no answer" has to be cheaper than "an answer that might be wrong".
  */
 
-/** How an extension's chapter ids sit inside its chapter URLs. */
-export interface ChapterIdUrlRule {
+/** How an extension's ids sit inside its URLs. */
+export interface IdUrlRule {
   /** The id is the last N path segments of the URL, joined by "/". */
   segments: number;
   /** Pairs the rule was measured from. */
@@ -38,9 +45,10 @@ export interface ChapterIdUrlRule {
   agreement: number;
 }
 
-export interface ChapterIdSample {
-  chapterId: string;
-  chapterUrl: string;
+/** One worked example: an id, and a URL known to belong to it. */
+export interface IdUrlSample {
+  id: string;
+  url: string;
 }
 
 /**
@@ -76,17 +84,16 @@ function pathSegments(url: string): string[] | null {
 }
 
 /**
- * How many trailing path segments of `chapterUrl` spell `chapterId`, or null
- * when none do.
+ * How many trailing path segments of `url` spell `id`, or null when none do.
  *
  * At most one answer is possible: the candidates are nested strings of
  * different lengths, so two of them cannot both equal the id.
  */
-function segmentsSpanning(sample: ChapterIdSample): number | null {
-  const segments = pathSegments(sample.chapterUrl);
+function segmentsSpanning(sample: IdUrlSample): number | null {
+  const segments = pathSegments(sample.url);
   if (segments === null) return null;
   for (let take = 1; take <= segments.length; take += 1) {
-    if (segments.slice(-take).join("/") === sample.chapterId) return take;
+    if (segments.slice(-take).join("/") === sample.id) return take;
   }
   return null;
 }
@@ -95,7 +102,7 @@ function segmentsSpanning(sample: ChapterIdSample): number | null {
  * Measure the rule an extension's own chapters demonstrate, or null when they
  * do not agree on one.
  */
-export function learnChapterIdRule(samples: readonly ChapterIdSample[]): ChapterIdUrlRule | null {
+export function learnIdUrlRule(samples: readonly IdUrlSample[]): IdUrlRule | null {
   if (samples.length < MIN_SAMPLES) return null;
 
   const votes = new Map<number, number>();
@@ -120,7 +127,7 @@ export function learnChapterIdRule(samples: readonly ChapterIdSample[]): Chapter
 }
 
 /** Apply a measured rule to a URL. Null when the URL cannot satisfy it. */
-export function chapterIdFromUrl(url: string, rule: ChapterIdUrlRule): string | null {
+export function idFromUrl(url: string, rule: IdUrlRule): string | null {
   const segments = pathSegments(url);
   if (segments === null || segments.length < rule.segments) return null;
   const id = segments.slice(-rule.segments).join("/");

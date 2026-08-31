@@ -238,6 +238,48 @@ export interface MdTitleCandidate {
   likely: boolean;
 }
 
+/**
+ * Mirrors ResolvedSource in core/store/sourceLinks.ts, narrowed to what the
+ * bot renders. `via` is carried because "which extension is this" and "how do
+ * you know" are the same question when the answer decides where uploads go.
+ */
+export interface SourceMatch {
+  extension: string;
+  mangaId: string | null;
+  namespace: string | null;
+  via: "queue" | "known-id" | "rule" | "host";
+  untracked: { id: string; mangaName: string; state: string; mdMangaId: string | null } | null;
+  tracked: { mdMangaId: string; namespace: string; source: string } | null;
+  rule?: { segments: number; samples: number; agreement: number };
+}
+
+/** Mirrors SourceResolution in core/store/sourceLinks.ts. */
+export interface SourceResolution {
+  url: string;
+  normalised: string | null;
+  host: string | null;
+  match: SourceMatch | null;
+  candidates: string[];
+  namespaces: string[];
+  reason?: string;
+}
+
+/** Mirrors the answer of POST /api/v1/admin/source/map. */
+export interface SourceMapResult {
+  ok: boolean;
+  changed: boolean;
+  dryRun?: boolean;
+  outcome: "added" | "repointed" | "unchanged";
+  extension: string;
+  namespace: string;
+  mangaId: string;
+  mdMangaId: string;
+  previousMdMangaId?: string | null;
+  untrackedRow?: string | null;
+  untrackedNote?: string;
+  resolution: SourceResolution;
+}
+
 /** Mirrors the report of POST /api/v1/admin/untracked/automap. */
 export interface AutomapReport {
   dryRun: boolean;
@@ -1302,6 +1344,38 @@ export class AdminApiClient {
       query: { q: opts.q, reportedName: opts.reportedName, limit: opts.limit },
       // A MangaDex search behind a cold cache is slower than the platform's own
       // reads; the default 20s occasionally clips it.
+      timeoutMs: 30_000,
+    });
+  }
+
+  /**
+   * Which extension and series a publisher link is.
+   *
+   * Answered from the platform's own rows, so it is cheap enough to run on a
+   * link somebody just pasted into a channel.
+   */
+  resolveSource(actor: string, url: string): Promise<SourceResolution> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/source/resolve",
+      scope: "extensions:read",
+      actor,
+      query: { url },
+    });
+  }
+
+  /** Map straight from the publisher link and the MangaDex link. */
+  mapFromSource(
+    actor: string,
+    body: { url: string; mdMangaId: string; mangaId?: string; namespace?: string; dryRun?: boolean },
+  ): Promise<SourceMapResult> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/source/map",
+      scope: "extensions:write",
+      actor,
+      json: body,
+      // Reads one title from MangaDex before wiring uploads to it.
       timeoutMs: 30_000,
     });
   }

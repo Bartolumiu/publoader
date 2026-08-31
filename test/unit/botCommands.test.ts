@@ -831,6 +831,154 @@ describe("/untracked and /tracked", () => {
   });
 });
 
+/**
+ * Mapping a series from the two links an operator actually has.
+ *
+ * The publisher link is the one thing someone arriving from a Discord message
+ * holds; which extension covers that site, and what that extension calls the
+ * series, are the two facts they had to go and look up somewhere else. These
+ * tests are about the command never inventing either of them.
+ */
+describe("/map", () => {
+  const TITLE_ID = "9a1b1c1d-0000-4000-8000-000000000abc";
+  const SOURCE = "https://comikey.com/comics/kengan-omega/";
+
+  const resolution = (over: Record<string, unknown> = {}) => ({
+    url: SOURCE,
+    normalised: "comikey.com/comics/kengan-omega",
+    host: "comikey.com",
+    candidates: ["comikey"],
+    namespaces: [],
+    match: {
+      extension: "comikey",
+      mangaId: "kengan-omega",
+      namespace: null,
+      via: "queue",
+      untracked: { id: "u1", mangaName: "Kengan Omega", state: "NEW", mdMangaId: null },
+      tracked: null,
+      ...(over.match as object),
+    },
+    ...over,
+  });
+
+  it("answers what a link is without writing anything when no title is given", async () => {
+    const resolveSource = vi.fn().mockResolvedValue(resolution());
+    const mapFromSource = vi.fn();
+    const reply = await invoke("map", fakeApi({ resolveSource, mapFromSource }), { source: SOURCE });
+
+    expect(resolveSource).toHaveBeenCalledWith("discord:ardax", SOURCE);
+    expect(mapFromSource).not.toHaveBeenCalled();
+    expect(reply.text).toContain("comikey");
+    expect(reply.text).toContain("kengan-omega");
+    // The next step has to be visible, or the answer is trivia.
+    expect(reply.text).toContain("Not mapped yet");
+  });
+
+  it("says a series is already mapped, and that mapping it again is a repoint", async () => {
+    const resolveSource = vi.fn().mockResolvedValue(
+      resolution({ match: { tracked: { mdMangaId: TITLE_ID, namespace: "", source: "operator:ardax" } } }),
+    );
+    const reply = await invoke("map", fakeApi({ resolveSource }), { source: SOURCE });
+    expect(reply.text).toContain("Already mapped");
+    expect(reply.text).toContain("repoint");
+  });
+
+  it("maps from the two links, sending the source url and the id read out of the MangaDex link", async () => {
+    const mapFromSource = vi.fn().mockResolvedValue({
+      ok: true,
+      changed: true,
+      outcome: "added",
+      extension: "comikey",
+      namespace: "",
+      mangaId: "kengan-omega",
+      mdMangaId: TITLE_ID,
+      untrackedRow: "u1",
+      resolution: resolution(),
+    });
+    const reply = await invoke("map", fakeApi({ mapFromSource }), {
+      source: SOURCE,
+      mangadex: `https://mangadex.org/title/${TITLE_ID}/kengan-omega`,
+    });
+
+    expect(mapFromSource).toHaveBeenCalledWith("discord:ardax", {
+      url: SOURCE,
+      // The link is reduced to its id before it leaves the bot.
+      mdMangaId: TITLE_ID,
+    });
+    expect(reply.text).toContain("kengan-omega");
+    // Closing the queue row is the step an operator would otherwise forget.
+    expect(reply.text).toContain("queue row");
+    // How it knows which series this is belongs in the answer, not only in a log.
+    expect(reply.text).toContain("untracked queue");
+  });
+
+  it("passes an operator's id through for a link the resolver cannot read", async () => {
+    const mapFromSource = vi.fn().mockResolvedValue({
+      ok: true,
+      changed: true,
+      outcome: "added",
+      extension: "comikey",
+      namespace: "",
+      mangaId: "typed",
+      mdMangaId: TITLE_ID,
+      resolution: resolution({ match: { via: "host", mangaId: null, untracked: null } }),
+    });
+    await invoke("map", fakeApi({ mapFromSource }), {
+      source: SOURCE,
+      mangadex: TITLE_ID,
+      "manga-id": "typed",
+    });
+    expect(mapFromSource).toHaveBeenCalledWith("discord:ardax", {
+      url: SOURCE,
+      mdMangaId: TITLE_ID,
+      mangaId: "typed",
+    });
+  });
+
+  it("reports a repoint as one, naming the title it moved away from", async () => {
+    const previous = "11111111-2222-4333-8444-555555555555";
+    const mapFromSource = vi.fn().mockResolvedValue({
+      ok: true,
+      changed: true,
+      outcome: "repointed",
+      extension: "comikey",
+      namespace: "",
+      mangaId: "kengan-omega",
+      mdMangaId: TITLE_ID,
+      previousMdMangaId: previous,
+      resolution: resolution(),
+    });
+    const reply = await invoke("map", fakeApi({ mapFromSource }), { source: SOURCE, mangadex: TITLE_ID });
+    expect(reply.text).toContain("Repointed");
+    expect(reply.text).toContain(previous);
+  });
+
+  it("refuses a chapter link as the target instead of mapping onto nothing", async () => {
+    const mapFromSource = vi.fn();
+    const reply = await invoke("map", fakeApi({ mapFromSource }), {
+      source: SOURCE,
+      mangadex: `https://mangadex.org/chapter/${TITLE_ID}`,
+    });
+    expect(mapFromSource).not.toHaveBeenCalled();
+    expect(reply.text).toContain("a chapter");
+  });
+
+  it("says plainly when it cannot tell what the link is", async () => {
+    const resolveSource = vi.fn().mockResolvedValue({
+      url: "https://unknown.example/x",
+      normalised: "unknown.example/x",
+      host: "unknown.example",
+      match: null,
+      candidates: [],
+      namespaces: [],
+      reason: "no published extension declares unknown.example in its allowed_hosts",
+    });
+    const reply = await invoke("map", fakeApi({ resolveSource }), { source: "https://unknown.example/x" });
+    expect(reply.text).toContain("Could not tell");
+    expect(reply.text).toContain("allowed_hosts");
+  });
+});
+
 describe("/whoami", () => {
   it("shows where it points, a masked token, and the audit identity", async () => {
     const api = fakeApi({ tokenSelf: vi.fn().mockResolvedValue(null) });

@@ -312,6 +312,20 @@ than a silent deletion of the wrong row.
 Sunday to anyone who knows JavaScript, and that mistake is invisible until the
 run happens on the wrong day.
 
+### Mapping from links
+
+| Command | Class | Scope | What it does |
+|---|---|---|---|
+| `/map <source> [mangadex] [manga-id]` | mutate | `tracked:append` | Map a series from its two links. `source` is the publisher's page; the extension and the series id are worked out from what the platform already holds. Without `mangadex` it only reports what the link is, including whether the series is already mapped. `manga-id` finishes a link the resolver cannot read on its own. |
+
+This is the short path, and the one to reach for when a link is posted in a
+channel: paste the publisher's page and the MangaDex title, and the mapping,
+including closing the untracked queue row the series came from, is one command.
+Every answer says **how** it identified the series — this exact page is in the
+queue, the id in the link is one already on file, or it was measured from where
+this extension puts ids in its own links — because those are not equally strong
+and a mapping is not a reversible thing to get wrong.
+
 ### Untracked series
 
 | Command | Class | Scope | What it does |

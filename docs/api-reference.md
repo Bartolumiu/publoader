@@ -517,6 +517,8 @@ is logged even if the publish then fails for another reason).
 | Method | Path | Scope | Notes |
 | --- | --- | --- | --- |
 | `GET` | `/untracked` | `untracked:read` | `?state=NEW\|CREATING\|CREATED\|TRACKED\|FAILED\|SKIPPED`, `?extension=`, `?q=`, `?limit=1..500` (100), `?cursor=` |
+| `GET` | `/source/resolve` | `tracked:read` | `?url=` a publisher's page → `{match, candidates, namespaces, reason?}`. Which extension covers that site and which of its series the link is, worked out from our own rows: the untracked queue, the series map, and the published manifests' `allowed_hosts`. Reaches neither the publisher nor MangaDex |
+| `POST` | `/source/map` | `tracked:append` | `{url, mdMangaId, mangaId?, namespace?, extension?, dryRun?}`. Resolves the publisher link, writes the mapping, and closes the queue row it came from. `mdMangaId` takes a title link. **403** on a repoint without `tracked:write`; **409** when the link cannot be pinned to one series (the partial `resolution` comes back so the caller can finish it) or the title does not exist on MangaDex. Closing the queue row additionally needs `untracked:write`; without it the mapping is still written and `untrackedNote` says the row was left alone |
 | `GET` | `/mangadex/search` | `untracked:read` | `?q=`, `?reportedName=`, `?limit=1..25` (10) → `{results}`; live against MangaDex |
 | `GET` | `/mangadex/title/:id` | `untracked:read` | One title in the same candidate shape, for an id or link an operator pasted instead of searching. `?reportedName=` sets what `likely` is measured against. **`404`** when MangaDex does not have it |
 | `POST` | `/untracked/:id/map` | `untracked:write` + `tracked:append` | `{mdMangaId}` — a title id **or a `mangadex.org/title/…` link**. Maps onto a title that already exists and creates nothing. **`409`** when the row or the title is not mappable |
@@ -525,6 +527,27 @@ is logged even if the publish then fails for another reason).
 | `POST` | `/untracked/:id/skip` | `untracked:write` | `NEW`/`FAILED` → `SKIPPED`. **`409` not skippable** |
 
 `routes/admin.ts:395-429`; `md/titleService.ts:66-84`.
+
+#### Resolving a publisher link
+
+`store/sourceLinks.ts`. A mapping takes two facts an operator arriving with a
+URL does not have — which extension covers the site, and what that extension
+calls the series — and neither is guessable: comikey names a series with a slug,
+viz with a number, mangaplus with a six-digit id.
+
+Four answers, reported as `via`, strongest first. Which one it is matters,
+because a wrong answer maps a live series onto someone else's title:
+
+| `via` | Evidence |
+| --- | --- |
+| `queue` | This exact page is a row in the untracked queue. Carries the row, so mapping also closes it |
+| `known-id` | A whole path segment is an id this extension already holds. The segment boundary is what stops `/titles/1000012` matching `100001` |
+| `rule` | The id is where this extension's **own** URLs put ids, measured off its queue rows by `md/idFromUrl.ts` — the same learner the chapter-adoption pass uses. This is the one that reaches a series nothing here has seen |
+| `host` | Only the extension is known. Still an answer: it turns "which of the eleven" into "type the id" |
+
+It fails closed at every step. Two extensions claiming one host, two ids
+matching one URL, or a rule the extension's own history does not agree on all
+resolve to no match and a `reason`, rather than a guess.
 
 ### Upload-task queues
 

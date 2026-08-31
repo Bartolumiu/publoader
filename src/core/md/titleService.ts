@@ -5,6 +5,7 @@ import type { MdApi, MdMangaDetail } from "./types.js";
 import { MdRequestError } from "./client.js";
 import { AuditLog } from "../store/settings.js";
 import { DEFAULT_NAMESPACE } from "../store/trackedManga.js";
+import { normaliseOfficialLink } from "./officialLink.js";
 
 export interface TitleNotifier {
   send(opts: { title: string; description: string; colour?: string }): Promise<void>;
@@ -975,31 +976,6 @@ export class TitleService {
  * punctuation/whitespace. A false positive costs one operator click; a false
  * negative creates a duplicate title on a public catalogue.
  */
-/**
- * A url reduced to what two records of the same page must agree on.
- *
- * Publishers and MangaDex editors write the same page differently: with and
- * without the trailing slash, with and without `www.`, http against https. All
- * of those are the same series, and treating them as different would throw away
- * most real matches. Query strings are kept — for some sources they carry the
- * series identity — and the fragment is dropped, since it never does.
- *
- * Returns null for anything that is not an http(s) url, so a malformed link
- * never compares equal to another malformed one.
- */
-export function normaliseOfficialLink(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  let url: URL;
-  try {
-    url = new URL(String(raw).trim());
-  } catch {
-    return null;
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-  const host = url.hostname.toLowerCase().replace(/^www\./, "");
-  const path = url.pathname.replace(/\/+$/, "");
-  return `${host}${path}${url.search}`;
-}
 
 /**
  * The one title to show for a candidate. English where MangaDex has it, else

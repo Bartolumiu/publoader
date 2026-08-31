@@ -30,6 +30,8 @@ import {
   type ErrorClearedFilter,
   type RemovalMode,
   type RunKind,
+  type SourceMatch,
+  type SourceResolution,
   type TrackedEntry,
   type UntrackedEntry,
   type UntrackedState,
@@ -347,6 +349,57 @@ const untrackedIdOption = (o: SlashCommandStringOption): SlashCommandStringOptio
     .setName("id")
     .setDescription("The queued series; start typing its name.")
     .setAutocomplete(true);
+
+/**
+ * How a link was resolved, in words rather than a code.
+ *
+ * Said on every answer because the four ways differ in strength: a queue row is
+ * this exact page, a measured rule is an inference from where this extension
+ * puts its ids. An operator reading a mapping they did not make should be able
+ * to weigh it without knowing the vocabulary.
+ */
+function viaPhrase(via: SourceMatch["via"] | undefined): string {
+  switch (via) {
+    case "queue":
+      return "this exact page is in the untracked queue";
+    case "known-id":
+      return "the id in that link is one we already hold";
+    case "rule":
+      return "measured from where this extension puts ids in its own links";
+    case "host":
+      return "the site is this extension's; the id was given";
+    default:
+      return "given directly";
+  }
+}
+
+/** What a resolve-only `/map` answers with. */
+function describeResolution(resolution: SourceResolution): string {
+  const match = resolution.match;
+  if (!match) {
+    return lines([
+      `:grey_question: **Could not tell what ${short(resolution.url, 80)} is.**`,
+      resolution.reason ?? "",
+      resolution.candidates.length
+        ? `Extensions serving that site: ${resolution.candidates.map((c) => `\`${c}\``).join(", ")}.`
+        : "",
+    ].filter(Boolean));
+  }
+  const where = match.mangaId
+    ? `\`${match.extension}\`/\`${qualified(match.namespace, match.mangaId)}\``
+    : `\`${match.extension}\` (series unknown)`;
+  return lines([
+    `:mag: **${where}**`,
+    match.untracked ? `Queued as **${short(match.untracked.mangaName, 70)}** (${match.untracked.state}).` : "",
+    match.tracked
+      ? `Already mapped to <${mdTitleUrl(match.tracked.mdMangaId)}> by \`${match.tracked.source}\`. ` +
+        "Mapping it again would repoint it."
+      : match.mangaId
+        ? "Not mapped yet. Add `mangadex:<link>` to map it."
+        : "Add `manga-id:` and `mangadex:<link>` to map it.",
+    `How: ${viaPhrase(match.via)}.`,
+  ].filter(Boolean));
+}
 
 /** The name a queued row goes by. `title` is the older spelling of `mangaName`. */
 function nameOf(row: UntrackedEntry): string {
@@ -1438,6 +1491,80 @@ const commands: BotCommand[] = [
           codeBlock(token.token),
           "If you did not ask for this, tell an admin: someone used the bot's `/enroll` command.",
         ]),
+      };
+    },
+  },
+  {
+    name: "map",
+    description: "Map a series from its two links: the publisher's page and the MangaDex title.",
+    // Mutate rather than read even when only `source` is given. The command
+    // writes the series map in its main form, and splitting the gate by which
+    // options were filled in would mean the same command name is sometimes
+    // allowed and sometimes not, which is worse to reason about than one answer.
+    sensitivity: "mutate",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("map")
+      .setDescription("Map a series from its two links: the publisher's page and the MangaDex title.")
+      .addStringOption((o) =>
+        o
+          .setName("source")
+          .setDescription("The publisher's page for the series, e.g. comikey.com/comics/…")
+          .setRequired(true),
+      )
+      .addStringOption((o) =>
+        o
+          .setName("mangadex")
+          .setDescription("MangaDex title link or id. Leave empty to just see what the link is.")
+          .setRequired(false),
+      )
+      .addStringOption((o) =>
+        o
+          .setName("manga-id")
+          .setDescription("The extension's own id, for a link this cannot read on its own.")
+          .setRequired(false),
+      ),
+    async run(ctx) {
+      const source = requireString(ctx.options, "source");
+      const target = ctx.options.string("mangadex");
+      const override = ctx.options.string("manga-id");
+
+      // Without a MangaDex title this is a question, not an action: "what is
+      // this link". Worth answering on its own — it is how you find out whether
+      // a series is already mapped before touching anything.
+      if (!target) {
+        const resolution = await ctx.api.resolveSource(ctx.actor, source);
+        return { text: describeResolution(resolution) };
+      }
+
+      const result = await ctx.api.mapFromSource(ctx.actor, {
+        url: source,
+        mdMangaId: requireSeriesId(target),
+        ...(override ? { mangaId: override } : {}),
+      });
+      const where = `\`${result.extension}\`/\`${qualified(result.namespace, result.mangaId)}\``;
+      if (result.outcome === "unchanged") {
+        return { text: `${where} already points at <${mdTitleUrl(result.mdMangaId)}>; nothing changed.` };
+      }
+      const how = viaPhrase(result.resolution.match?.via);
+      if (result.outcome === "repointed") {
+        return {
+          text:
+            `:twisted_rightwards_arrows: **Repointed** ${where} (${how}).\n` +
+            `Was <${mdTitleUrl(result.previousMdMangaId ?? "")}>\nNow <${mdTitleUrl(result.mdMangaId)}>\n` +
+            "Chapters already uploaded stay where they are; new ones land on the new title.",
+        };
+      }
+      return {
+        text: lines([
+          `:link: ${where} → <${mdTitleUrl(result.mdMangaId)}>`,
+          `Read from the link you pasted (${how}).`,
+          // The queue row is the part an operator would otherwise forget, and
+          // forgetting it means the series is offered for creation again.
+          result.untrackedRow
+            ? "The untracked queue row for this series is closed."
+            : (result.untrackedNote ?? ""),
+        ].filter(Boolean)),
       };
     },
   },

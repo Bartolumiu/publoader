@@ -27,6 +27,7 @@ import { MANGADEX_LANGUAGES } from "../../../contracts/languages.js";
 import { countOutstandingErrors } from "../../observability/errorFeed.js";
 import { workerNames } from "../../store/workers.js";
 import { parseMdTitleId } from "../../md/titleId.js";
+import { resolveSourceUrl, type SourceLinkDeps } from "../../store/sourceLinks.js";
 
 /**
  * The worker image the enrolment snippet tells a new host to run. Set
@@ -121,6 +122,30 @@ function trackedSubject(extension: string, namespace: string, mangaId: string): 
  * principal.
  */
 export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void {
+  /**
+   * What the source-link resolver reads: our own rows, plus the published
+   * manifests whose `allowed_hosts` say which extension covers a site.
+   *
+   * The manifests are read per call rather than cached. Resolving a link is an
+   * interactive action a person is waiting on, not a hot path, and a cache here
+   * would answer "no extension serves that host" for as long as it lived after
+   * someone published the extension that does.
+   */
+  const sourceLinkDeps = (): SourceLinkDeps => ({
+    prisma: ctx.prisma,
+    manifests: async () => {
+      const bundles = await ctx.bundles.listLatest();
+      const out = new Map<string, Manifest>();
+      for (const bundle of bundles) {
+        const parsed = Manifest.safeParse(bundle.manifest);
+        // A bundle whose manifest no longer parses is not a reason to fail the
+        // whole lookup; it is one extension that cannot claim a host.
+        if (parsed.success) out.set(bundle.extension, parsed.data);
+      }
+      return out;
+    },
+  });
+
   app.register(async (scope) => {
     scope.addHook(
       "preHandler",
@@ -1303,6 +1328,192 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       );
       return { results };
     });
+
+    /**
+     * Which extension, and which of its series, a publisher link is.
+     *
+     * The other half of "paste the link": an operator arriving with a source
+     * page had to know which extension covers that site and what that extension
+     * calls the series, and neither is guessable — comikey names a series with
+     * a slug, viz with a number. Answered entirely from our own rows, so it
+     * costs nothing and can be run before deciding anything.
+     *
+     * `tracked:read` because that is what it reads: the series map, the queue,
+     * and the published manifests' allowed_hosts.
+     */
+    scope.get("/api/v1/admin/source/resolve", { preHandler: requireScope("tracked:read") }, async (req) => {
+      const query = parseOrThrow(z.object({ url: z.string().trim().min(1).max(2048) }), req.query ?? {});
+      return resolveSourceUrl(sourceLinkDeps(), query.url);
+    });
+
+    /**
+     * Map straight from the two links an operator has: the publisher's page and
+     * the MangaDex title.
+     *
+     * This is the whole mapping act in one call — resolve the source link to an
+     * extension and id, write the mapping, and close the queue row it came from
+     * when there is one. Doing it in three separate calls is what made mapping a
+     * job for whoever already knew the catalogue.
+     *
+     * Guarded exactly like the routes it stands in for, and refuses rather than
+     * guesses wherever they would:
+     *
+     *   - `tracked:append` to add a mapping, `tracked:write` to move one. A
+     *     source link resolving onto an already-mapped series is a REPOINT, and
+     *     a silent one, so it needs the same scope it would through any other
+     *     door.
+     *   - closing the queue row additionally needs `untracked:write`. Without
+     *     it the mapping is still written and the answer says the row was left
+     *     alone; that is honest, and the mapping is the part that unblocks
+     *     uploads.
+     *   - a link that resolves to no id at all is a 409 naming what it did
+     *     work out, because "comikey, but I cannot tell which series" is a
+     *     useful answer an operator can finish by hand.
+     */
+    scope.post(
+      "/api/v1/admin/source/map",
+      { preHandler: requireScope("tracked:append") },
+      async (req, reply) => {
+        const body = parseOrThrow(
+          z
+            .object({
+              url: z.string().trim().min(1).max(2048),
+              mdMangaId: MdTitleId,
+              /** Report what it would do and write nothing. */
+              dryRun: z.boolean().default(false),
+              /** Override the resolver, for a link it cannot read on its own. */
+              extension: z.string().max(64).optional(),
+              mangaId: z.string().min(1).max(512).optional(),
+              namespace: z.string().max(MAX_NAMESPACE_LENGTH).optional(),
+            })
+            .strict(),
+          req.body ?? {},
+        );
+
+        const resolution = await resolveSourceUrl(sourceLinkDeps(), body.url);
+        const extension = body.extension ?? resolution.match?.extension ?? null;
+        const mangaId = body.mangaId ?? resolution.match?.mangaId ?? null;
+        if (!extension || !mangaId) {
+          return reply.code(409).send({
+            error:
+              resolution.reason ??
+              (extension
+                ? `that link is ${extension}, but nothing here says which of its series; ` +
+                  "pass mangaId as well"
+                : "could not tell which extension that link belongs to"),
+            resolution,
+          });
+        }
+        if (!EXTENSION_NAME_RE.test(extension)) return reply.code(400).send({ error: "bad extension name" });
+        const namespace = normaliseNamespace(body.namespace ?? resolution.match?.namespace ?? undefined);
+        if (namespace !== DEFAULT_NAMESPACE && !NAMESPACE_RE.test(namespace)) {
+          return reply.code(400).send({ error: `namespace must match ${String(NAMESPACE_RE)}` });
+        }
+
+        const identity = { extension, namespace, mangaId };
+        const existing = await ctx.prisma.trackedManga.findUnique({
+          where: { extension_namespace_mangaId: identity },
+        });
+        if (existing && existing.mdMangaId === body.mdMangaId) {
+          return {
+            ok: true,
+            changed: false,
+            outcome: "unchanged" as const,
+            ...identity,
+            mdMangaId: body.mdMangaId,
+            resolution,
+          };
+        }
+        if (existing && !hasScope(req.principal!, "tracked:write")) {
+          return reply.code(403).send({
+            error:
+              `${mangaId} is already mapped to ${existing.mdMangaId}; changing an existing ` +
+              "mapping needs scope tracked:write",
+            resolution,
+          });
+        }
+
+        // The queue row is what makes this more than a tracked-map write: it
+        // carries the state the untracked pipeline reads, and a row left NEW
+        // behind a mapping is a series that gets offered for creation again.
+        const row = resolution.match?.untracked ?? null;
+        const closable = row !== null && row.state !== "CREATING";
+        const mayCloseRow = hasScope(req.principal!, "untracked:write");
+
+        if (body.dryRun) {
+          return {
+            ok: true,
+            dryRun: true,
+            changed: true,
+            outcome: existing ? ("repointed" as const) : ("added" as const),
+            ...identity,
+            mdMangaId: body.mdMangaId,
+            previousMdMangaId: existing?.mdMangaId ?? null,
+            untrackedRow: closable && mayCloseRow ? row!.id : null,
+            resolution,
+          };
+        }
+
+        // Through the title service where there is a row, because that is the
+        // path that checks the title exists on MangaDex before wiring uploads
+        // to it, and that keeps the row's state and this write in one place.
+        let mangadexChecked = false;
+        if (closable && mayCloseRow && ctx.titleService && namespace === DEFAULT_NAMESPACE && !existing) {
+          const mapped = await ctx.titleService.mapToExisting(row!.id, body.mdMangaId, actor(req));
+          if (!mapped.ok) return reply.code(409).send({ error: mapped.error, resolution });
+          mangadexChecked = true;
+        } else {
+          if (ctx.titleService) {
+            // Same check the row path gets for free: a title id MangaDex does
+            // not know wires uploads to nothing.
+            const title = await ctx.titleService.titleById(body.mdMangaId);
+            if (!title) {
+              return reply.code(409).send({
+                error: `MangaDex has no title ${body.mdMangaId}; it may be deleted, merged, or a typo`,
+                resolution,
+              });
+            }
+            mangadexChecked = true;
+          }
+          await ctx.prisma.trackedManga.upsert({
+            where: { extension_namespace_mangaId: identity },
+            create: { ...identity, mdMangaId: body.mdMangaId, source: actor(req) },
+            update: { mdMangaId: body.mdMangaId, source: actor(req) },
+          });
+          if (closable && mayCloseRow) {
+            await ctx.prisma.untrackedManga.update({
+              where: { id: row!.id },
+              data: { state: "TRACKED", mdMangaId: body.mdMangaId },
+            });
+          }
+        }
+
+        await ctx.audit.record(actor(req), "tracked_manga.set", trackedSubject(extension, namespace, mangaId), {
+          mangaId,
+          mdMangaId: body.mdMangaId,
+          namespace,
+          via: resolution.match?.via ?? "manual",
+          sourceUrl: resolution.normalised,
+          repointedFrom: existing?.mdMangaId ?? null,
+        });
+
+        return {
+          ok: true,
+          changed: true,
+          outcome: existing ? ("repointed" as const) : ("added" as const),
+          ...identity,
+          mdMangaId: body.mdMangaId,
+          previousMdMangaId: existing?.mdMangaId ?? null,
+          mangadexChecked,
+          untrackedRow: closable ? (mayCloseRow ? row!.id : null) : null,
+          untrackedNote:
+            closable && !mayCloseRow
+              ? "the queue row for this series was left as it is: closing it needs untracked:write"
+              : undefined,
+          resolution,
+        };
+      },
+    );
 
     /**
      * One MangaDex title, by id or by the link it came in.
