@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import { parseMdTitleId } from "../md/titleId.js";
 
 /**
  * Bulk curation of the series map.
@@ -70,8 +71,6 @@ export interface BatchSummary {
   results: BatchRowResult[];
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /** Canonical namespace for a value that may be absent, null, or blank. */
 export function normaliseNamespace(value: unknown): string {
   if (typeof value !== "string") return DEFAULT_NAMESPACE;
@@ -93,9 +92,15 @@ function pairKey(namespace: string, mangaId: string): string {
  * Also accepts whitespace/tab/semicolon separators, `#` comments, a header row,
  * and the columns in any order; because someone will paste it that way and
  * guessing correctly is better than rejecting a whole paste over column order.
- * The MangaDex id is identified by being a uuid, and on a three-column line the
- * two remaining values keep their relative order: namespace first, then
- * external id. Returns per-line errors instead of throwing.
+ * The MangaDex column is identified by being a title id, and on a three-column
+ * line the two remaining values keep their relative order: namespace first,
+ * then external id. Returns per-line errors instead of throwing.
+ *
+ * The MangaDex column may be a `mangadex.org/title/…` link rather than a bare
+ * uuid, which is what a paste assembled from browser tabs actually looks like.
+ * A line whose only MangaDex-looking value is a link that is not a title link —
+ * a chapter, a group — reports that specific reason, since "no title id here"
+ * in front of a visible uuid reads as a bug in the parser.
  */
 export function parsePairs(
   text: string,
@@ -125,15 +130,23 @@ export function parsePairs(
       return;
     }
 
-    const uuidAt = parts.findIndex((part) => UUID_RE.test(part));
+    const titleIds = parts.map((part) => parseMdTitleId(part));
+    const uuidAt = titleIds.findIndex((result) => "id" in result);
     if (uuidAt === -1) {
-      // Skip an obvious header row rather than reporting it as an error.
-      if (index === 0) return;
-      errors.push({ line: index + 1, text: line, reason: "no value is a mangadex title id (uuid)" });
+      // A value that was aimed at MangaDex and missed gets its own reason: a
+      // chapter link is the paste this most often is, and it is a uuid on
+      // mangadex.org, so the generic message would look plainly wrong. It also
+      // means the line is NOT a header, which is what lets the first line of a
+      // one-line paste be reported instead of silently skipped.
+      const aimed = parts.findIndex((part) => /mangadex\.[a-z]/i.test(part));
+      if (aimed === -1 && index === 0) return; // an obvious header row
+      const reason =
+        aimed !== -1 ? (titleIds[aimed] as { error: string }).error : "no value is a mangadex title id or title link";
+      errors.push({ line: index + 1, text: line, reason });
       return;
     }
     const rest = parts.filter((_, i) => i !== uuidAt);
-    const mdMangaId = parts[uuidAt]!;
+    const mdMangaId = (titleIds[uuidAt] as { id: string }).id;
     const namespace = rest.length === 2 ? normaliseNamespace(rest[0]) : fallbackNamespace;
     const mangaId = rest.length === 2 ? rest[1]! : rest[0]!;
 
@@ -532,11 +545,16 @@ export class TrackedMangaStore {
     const toUpdate: { namespace: string; mangaId: string; mdMangaId: string }[] = [];
 
     for (const [key, row] of deduped) {
-      const { namespace, mangaId, mdMangaId } = row;
-      if (!UUID_RE.test(mdMangaId)) {
-        report(namespace, { mangaId, mdMangaId, outcome: "invalid", detail: "not a mangadex title id" });
+      const { namespace, mangaId } = row;
+      // A caller passing `set` as JSON gets the same reading as a paste: the
+      // value may be a title link, and an unreadable one says why rather than
+      // "not a mangadex title id".
+      const parsedId = parseMdTitleId(row.mdMangaId);
+      if ("error" in parsedId) {
+        report(namespace, { mangaId, mdMangaId: row.mdMangaId, outcome: "invalid", detail: parsedId.error });
         continue;
       }
+      const mdMangaId = parsedId.id;
       if (namespace !== DEFAULT_NAMESPACE && !NAMESPACE_RE.test(namespace)) {
         report(namespace, {
           mangaId,

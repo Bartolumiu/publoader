@@ -283,10 +283,18 @@ export const SCOPE_PRESETS: Record<string, Scope[]> = {
   // settings:write is deliberate: pausing the platform from chat during an
   // incident is the single most valuable thing the bot does, and /pause,
   // /resume and /removal-mode all live behind that scope.
+  // `tracked:read` and `tracked:append` because the bot has had /tracked list
+  // and /tracked set since it shipped, and this preset did not carry the scopes
+  // either of them needs: a token minted from it answered 403 to both. Append
+  // and not `tracked:write`, per the split below — a bot token that can add a
+  // mapping is a convenience, one that can silently repoint a live series is a
+  // different decision, and stays one an operator makes by hand.
   "discord-bot": [
     "runs:write",
     "workers:read",
     "extensions:read",
+    "tracked:read",
+    "tracked:append",
     "untracked:write",
     "settings:write",
     "stats:read",

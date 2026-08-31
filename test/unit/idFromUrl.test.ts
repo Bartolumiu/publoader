@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  chapterIdFromUrl,
-  learnChapterIdRule,
+  idFromUrl,
+  learnIdUrlRule,
   MIN_SAMPLES,
-} from "../../src/core/md/chapterIdFromUrl.js";
+} from "../../src/core/md/idFromUrl.js";
 
 /**
  * Recovering a publisher chapter id from the URL MangaDex holds.
@@ -17,12 +17,12 @@ import {
  */
 describe("learning an extension's URL-to-chapter-id rule", () => {
   const mangaplus = (id: string) => ({
-    chapterId: id,
-    chapterUrl: `https://mangaplus.shueisha.co.jp/viewer/${id}`,
+    id: id,
+    url: `https://mangaplus.shueisha.co.jp/viewer/${id}`,
   });
 
   it("reads the rule off the extension's own rows", () => {
-    const rule = learnChapterIdRule([
+    const rule = learnIdUrlRule([
       mangaplus("1029798"),
       mangaplus("1029799"),
       mangaplus("700"),
@@ -31,7 +31,7 @@ describe("learning an extension's URL-to-chapter-id rule", () => {
     ]);
 
     expect(rule).toEqual({ segments: 1, samples: 5, agreement: 1 });
-    expect(chapterIdFromUrl("https://mangaplus.shueisha.co.jp/viewer/555", rule!)).toBe("555");
+    expect(idFromUrl("https://mangaplus.shueisha.co.jp/viewer/555", rule!)).toBe("555");
   });
 
   it("learns a multi-segment id where the extension has one", () => {
@@ -39,29 +39,29 @@ describe("learning an extension's URL-to-chapter-id rule", () => {
     // part of the id: dropping it would collapse two different series' chapters
     // onto one id.
     const samples = ["1", "2", "3", "4", "5", "6"].map((n) => ({
-      chapterId: `shonenjump/${n}`,
-      chapterUrl: `https://viz.example/read/shonenjump/${n}`,
+      id: `shonenjump/${n}`,
+      url: `https://viz.example/read/shonenjump/${n}`,
     }));
 
-    const rule = learnChapterIdRule(samples);
+    const rule = learnIdUrlRule(samples);
 
     expect(rule?.segments).toBe(2);
-    expect(chapterIdFromUrl("https://viz.example/read/shonenjump/9", rule!)).toBe("shonenjump/9");
+    expect(idFromUrl("https://viz.example/read/shonenjump/9", rule!)).toBe("shonenjump/9");
   });
 
   it("refuses when the extension has too little history to be sure", () => {
     const samples = Array.from({ length: MIN_SAMPLES - 1 }, (_, i) => mangaplus(String(i)));
-    expect(learnChapterIdRule(samples)).toBeNull();
+    expect(learnIdUrlRule(samples)).toBeNull();
   });
 
   it("refuses when the id is not in the URL at all", () => {
     // An extension whose ids are opaque to its URLs: there is nothing to read,
     // and a last-path-segment guess would produce plausible-looking rubbish.
     const samples = Array.from({ length: 20 }, (_, i) => ({
-      chapterId: `opaque-${i}`,
-      chapterUrl: `https://pub.example/read?chapter=${i}`,
+      id: `opaque-${i}`,
+      url: `https://pub.example/read?chapter=${i}`,
     }));
-    expect(learnChapterIdRule(samples)).toBeNull();
+    expect(learnIdUrlRule(samples)).toBeNull();
   });
 
   it("refuses when the extension's rows disagree about where the id sits", () => {
@@ -69,15 +69,15 @@ describe("learning an extension's URL-to-chapter-id rule", () => {
     // adopting the more popular one would mis-parse every chapter of the other
     // half. Two shapes fighting is exactly the case where guessing is unsafe.
     const flat = Array.from({ length: 10 }, (_, i) => ({
-      chapterId: String(i),
-      chapterUrl: `https://pub.example/read/${i}`,
+      id: String(i),
+      url: `https://pub.example/read/${i}`,
     }));
     const nested = Array.from({ length: 10 }, (_, i) => ({
-      chapterId: `series/${i}`,
-      chapterUrl: `https://pub.example/read/series/${i}`,
+      id: `series/${i}`,
+      url: `https://pub.example/read/series/${i}`,
     }));
 
-    expect(learnChapterIdRule([...flat, ...nested])).toBeNull();
+    expect(learnIdUrlRule([...flat, ...nested])).toBeNull();
   });
 
   it("survives a handful of odd rows without letting them veto the rule", () => {
@@ -85,9 +85,9 @@ describe("learning an extension's URL-to-chapter-id rule", () => {
     // Demanding unanimity would let one of those cost the extension the
     // postedChapterIds skip on several thousand chapters.
     const good = Array.from({ length: 99 }, (_, i) => mangaplus(String(i)));
-    const odd = { chapterId: "1234", chapterUrl: "https://mangaplus.shueisha.co.jp/" };
+    const odd = { id: "1234", url: "https://mangaplus.shueisha.co.jp/" };
 
-    const rule = learnChapterIdRule([...good, odd]);
+    const rule = learnIdUrlRule([...good, odd]);
 
     expect(rule?.segments).toBe(1);
     expect(rule?.agreement).toBeCloseTo(0.99, 5);
@@ -96,34 +96,34 @@ describe("learning an extension's URL-to-chapter-id rule", () => {
   it("refuses once the disagreement is more than an anomaly", () => {
     const good = Array.from({ length: 10 }, (_, i) => mangaplus(String(i)));
     const bad = Array.from({ length: 3 }, (_, i) => ({
-      chapterId: `x${i}`,
-      chapterUrl: "https://mangaplus.shueisha.co.jp/",
+      id: `x${i}`,
+      url: "https://mangaplus.shueisha.co.jp/",
     }));
 
-    expect(learnChapterIdRule([...good, ...bad])).toBeNull();
+    expect(learnIdUrlRule([...good, ...bad])).toBeNull();
   });
 
   it("gives no answer for a URL that cannot satisfy the rule", () => {
     const rule = { segments: 2, samples: 50, agreement: 1 };
 
     // Too few segments to spell a two-segment id, and not a URL at all.
-    expect(chapterIdFromUrl("https://pub.example/only-one", rule)).toBeNull();
-    expect(chapterIdFromUrl("https://pub.example/", rule)).toBeNull();
-    expect(chapterIdFromUrl("not a url", rule)).toBeNull();
+    expect(idFromUrl("https://pub.example/only-one", rule)).toBeNull();
+    expect(idFromUrl("https://pub.example/", rule)).toBeNull();
+    expect(idFromUrl("not a url", rule)).toBeNull();
   });
 
   it("ignores a trailing slash rather than reading an empty id from it", () => {
-    const rule = learnChapterIdRule(
+    const rule = learnIdUrlRule(
       Array.from({ length: 10 }, (_, i) => mangaplus(String(i))),
     );
-    expect(chapterIdFromUrl("https://mangaplus.shueisha.co.jp/viewer/42/", rule!)).toBe("42");
+    expect(idFromUrl("https://mangaplus.shueisha.co.jp/viewer/42/", rule!)).toBe("42");
   });
 
   it("reads the id from the path and never from the query or fragment", () => {
-    const rule = learnChapterIdRule(
+    const rule = learnIdUrlRule(
       Array.from({ length: 10 }, (_, i) => mangaplus(String(i))),
     );
-    expect(chapterIdFromUrl("https://mangaplus.shueisha.co.jp/viewer/42?lang=en", rule!)).toBe("42");
-    expect(chapterIdFromUrl("https://mangaplus.shueisha.co.jp/viewer/42#page3", rule!)).toBe("42");
+    expect(idFromUrl("https://mangaplus.shueisha.co.jp/viewer/42?lang=en", rule!)).toBe("42");
+    expect(idFromUrl("https://mangaplus.shueisha.co.jp/viewer/42#page3", rule!)).toBe("42");
   });
 });

@@ -129,6 +129,28 @@ describe("parsePairs", () => {
     expect(rows).toEqual([{ namespace: "vizmanga", mangaId: "709", mdMangaId: MD_A }]);
   });
 
+  it("takes a title link in the MangaDex column, which is what a paste from browser tabs is", () => {
+    const { rows, errors } = parsePairs(
+      [
+        `ext-1,https://mangadex.org/title/${MD_A}/some-series`,
+        `https://mangadex.org/title/${MD_B} ext-2`,
+        `vizmanga,709,mangadex.org/title/${MD_A}`,
+      ].join("\n"),
+    );
+    expect(errors).toEqual([]);
+    expect(rows).toEqual([
+      { mangaId: "ext-1", mdMangaId: MD_A, namespace: "" },
+      { mangaId: "ext-2", mdMangaId: MD_B, namespace: "" },
+      { mangaId: "709", mdMangaId: MD_A, namespace: "vizmanga" },
+    ]);
+  });
+
+  it("says a chapter link is a chapter link, rather than 'no title id on this line'", () => {
+    const { rows, errors } = parsePairs(`ext-1,https://mangadex.org/chapter/${MD_A}`);
+    expect(rows).toEqual([]);
+    expect(errors[0]!.reason).toContain("a chapter");
+  });
+
   it("treats absent, blank, and whitespace namespaces as the default", () => {
     expect(normaliseNamespace(undefined)).toBe("");
     expect(normaliseNamespace("  ")).toBe("");

@@ -93,4 +93,16 @@ describe("presets", () => {
     expect(hasScope(bot, "bundles:write")).toBe(false);
     expect(hasScope(bot, "workers:write")).toBe(false);
   });
+
+  it("lets the bot curate the series map by adding, and not by repointing", () => {
+    // /tracked list and /tracked set have been bot commands since it shipped;
+    // a preset without these two answered 403 to both. `tracked:write` stays
+    // out: adding a mapping is reversible and visible, moving one is neither.
+    const bot = principal(SCOPE_PRESETS["discord-bot"]!);
+    expect(hasScope(bot, "tracked:read")).toBe(true);
+    expect(hasScope(bot, "tracked:append")).toBe(true);
+    expect(hasScope(bot, "tracked:write")).toBe(false);
+    // /untracked map needs both halves: it writes the map and closes the row.
+    expect(hasScope(bot, "untracked:write")).toBe(true);
+  });
 });

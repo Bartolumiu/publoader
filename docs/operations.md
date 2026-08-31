@@ -2014,8 +2014,21 @@ mapping is missing, not the title), a duplicate the extension emitted under two
 ids, or something the group does not actually translate.
 
 ```bash
+# The short path: the publisher's link and the MangaDex link, nothing else.
+# Which extension covers that site, and what it calls the series, are worked out
+# from the queue and the series map; the queue row is closed with the mapping.
+padmin map https://comikey.com/comics/<series> https://mangadex.org/title/<uuid>
+
+# Ask what a link is without writing anything, including whether it is mapped.
+padmin map https://comikey.com/comics/<series>
+
 # Already on MangaDex under a different id; map it instead of creating one.
-padmin tracked set <extension> <externalMangaId> <mdMangaId>
+# The MangaDex argument takes the title's link as well as its id, so the tab you
+# checked the series in is the answer: no selecting the uuid out of the URL.
+padmin untracked map <id> https://mangadex.org/title/<uuid>/<slug>
+
+# Or map the extension's own id directly, without going through the queue row.
+padmin tracked set <extension> <externalMangaId> <mdMangaIdOrLink>
 padmin untracked skip <id>
 
 # Genuinely new; create it now.
@@ -2196,7 +2209,7 @@ this file on a live deployment changes nothing. Use `ext-config` below.
 
 ```bash
 padmin tracked list <extension>
-padmin tracked set <extension> <externalMangaId> <mdMangaId>
+padmin tracked set <extension> <externalMangaId> <mdMangaIdOrLink>
 padmin tracked remove <extension> <externalMangaId>
 
 padmin ext-config get <extension>                 # prints JSON

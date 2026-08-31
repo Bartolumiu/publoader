@@ -303,7 +303,7 @@ incident is the most valuable thing the bot does:
 
 | Preset | Scopes |
 | --- | --- |
-| `discord-bot` | `runs:write`, `workers:read`, `extensions:read`, `untracked:write`, `settings:write`, `stats:read`, `audit:read` |
+| `discord-bot` | `runs:write`, `workers:read`, `extensions:read`, `tracked:read`, `tracked:append`, `untracked:write`, `settings:write`, `stats:read`, `audit:read`. Stops at `tracked:append`: the bot may add a mapping, not repoint or remove one. Add `tracked:write` by hand for `/tracked remove`/`pause`/`unpause` |
 | `ci-publisher` | `bundles:write` |
 | `monitoring` | `stats:read`, `audit:read` |
 | `worker-enroller` | `enroll:write`, `workers:read` |
@@ -373,7 +373,7 @@ Pausing stops new leases (`routes/worker.ts:110`), scheduled run creation
 | `DELETE` | `/schedules/:name/:id` | `extensions:write` | Drop one slot. **404** on an id not belonging to `:name` |
 | `DELETE` | `/schedules/:name` | `extensions:write` | Drop every slot → `{ok, removed}`; the extension falls back to its manifest |
 | `GET` | `/extensions/:name/tracked` | `tracked:read` | Every publisher-id → MangaDex-title mapping |
-| `PUT` | `/extensions/:name/tracked` | `tracked:append` | `{mangaId, mdMangaId}`; upsert, records the actor as `source`. **403** when the mapping already exists and points somewhere else and the caller lacks `tracked:write`: repointing a series is an edit, and a silent one |
+| `PUT` | `/extensions/:name/tracked` | `tracked:append` | `{mangaId, mdMangaId, namespace?}`; `mdMangaId` is a title id **or a `mangadex.org/title/…` link**, which is read down to the id (`core/md/titleId.ts`) — a chapter link, a group link and a pre-2021 numeric id are each refused **400** by name. Upsert, records the actor as `source`. **403** when the mapping already exists and points somewhere else and the caller lacks `tracked:write`: repointing a series is an edit, and a silent one |
 | `POST` | `/extensions/:name/tracked/batch` | `tracked:append` | Bulk curation; see below |
 | `POST` | `/maps/sync` | `tracked:write` | Write the tracked map back to `manga_id_map.json` in GitHub; see below |
 | `DELETE` | `/extensions/:name/tracked/:mangaId` | `tracked:write` | → `{ok, removed}`. Does **not** touch MangaDex |
@@ -448,8 +448,12 @@ one, which is what makes a duplicated slot harmless
 ```
 
 `text` accepts the pasted `externalId,mdMangaId` form (order-insensitive) so
-nobody has to build JSON by hand. `dryRun: true` reports what would happen without
-writing. At most 2000 rows per batch (`store/trackedManga.ts:17`); more is a
+nobody has to build JSON by hand, and the MangaDex column may be a
+`mangadex.org/title/…` **link** instead of a bare id — which is what a paste
+assembled from browser tabs actually looks like. A line whose MangaDex-looking
+value is not a title link (a chapter link, a legacy numeric id) is reported with
+that reason rather than "no title id on this line". `dryRun: true` reports what
+would happen without writing. At most 2000 rows per batch (`store/trackedManga.ts:17`); more is a
 **413**.
 
 Rows are judged and reported **individually**: a contributor pasting 200 lines
@@ -535,10 +539,37 @@ its first page; there is no position in the old one worth keeping.
 | Method | Path | Scope | Notes |
 | --- | --- | --- | --- |
 | `GET` | `/untracked` | `untracked:read` | `?state=NEW\|CREATING\|CREATED\|TRACKED\|FAILED\|SKIPPED`, `?q=`, `?extension=`, `?limit=1..500` (100), `?cursor=`, `?orderBy=series\|extension\|language\|state\|attempts\|result` + `?dir=`. Newest first by default, **keyset** paged |
+| `GET` | `/source/resolve` | `tracked:read` | `?url=` a publisher's page → `{match, candidates, namespaces, reason?}`. Which extension covers that site and which of its series the link is, worked out from our own rows: the untracked queue, the series map, and the published manifests' `allowed_hosts`. Reaches neither the publisher nor MangaDex |
+| `POST` | `/source/map` | `tracked:append` | `{url, mdMangaId, mangaId?, namespace?, extension?, dryRun?}`. Resolves the publisher link, writes the mapping, and closes the queue row it came from. `mdMangaId` takes a title link. **403** on a repoint without `tracked:write`; **409** when the link cannot be pinned to one series (the partial `resolution` comes back so the caller can finish it) or the title does not exist on MangaDex. Closing the queue row additionally needs `untracked:write`; without it the mapping is still written and `untrackedNote` says the row was left alone |
+| `GET` | `/mangadex/search` | `untracked:read` | `?q=`, `?reportedName=`, `?limit=1..25` (10) → `{results}`; live against MangaDex |
+| `GET` | `/mangadex/title/:id` | `untracked:read` | One title in the same candidate shape, for an id or link an operator pasted instead of searching. `?reportedName=` sets what `likely` is measured against. **`404`** when MangaDex does not have it |
+| `POST` | `/untracked/:id/map` | `untracked:write` + `tracked:append` | `{mdMangaId}` — a title id **or a `mangadex.org/title/…` link**. Maps onto a title that already exists and creates nothing. **`409`** when the row or the title is not mappable |
+| `POST` | `/untracked/automap` | `untracked:write` + `tracked:append` | `{dryRun?, limit?, extension?}`, `dryRun` defaulting to **true**. Maps the queued series MangaDex lists under their own publisher link |
 | `POST` | `/untracked/:id/approve` | `untracked:write` | Creates and commits the MangaDex title now, then tracks it. **`503`** when this instance holds no MangaDex credentials; **`409`** when the row is not approvable in its current state |
 | `POST` | `/untracked/:id/skip` | `untracked:write` | `NEW`/`FAILED` → `SKIPPED`. **`409` not skippable** |
 
 `routes/admin.ts:395-429`; `md/titleService.ts:66-84`.
+
+#### Resolving a publisher link
+
+`store/sourceLinks.ts`. A mapping takes two facts an operator arriving with a
+URL does not have — which extension covers the site, and what that extension
+calls the series — and neither is guessable: comikey names a series with a slug,
+viz with a number, mangaplus with a six-digit id.
+
+Four answers, reported as `via`, strongest first. Which one it is matters,
+because a wrong answer maps a live series onto someone else's title:
+
+| `via` | Evidence |
+| --- | --- |
+| `queue` | This exact page is a row in the untracked queue. Carries the row, so mapping also closes it |
+| `known-id` | A whole path segment is an id this extension already holds. The segment boundary is what stops `/titles/1000012` matching `100001` |
+| `rule` | The id is where this extension's **own** URLs put ids, measured off its queue rows by `md/idFromUrl.ts` — the same learner the chapter-adoption pass uses. This is the one that reaches a series nothing here has seen |
+| `host` | Only the extension is known. Still an answer: it turns "which of the eleven" into "type the id" |
+
+It fails closed at every step. Two extensions claiming one host, two ids
+matching one URL, or a rule the extension's own history does not agree on all
+resolve to no match and a `reason`, rather than a guess.
 
 ### Upload-task queues
 
