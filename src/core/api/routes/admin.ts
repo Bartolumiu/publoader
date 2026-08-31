@@ -799,16 +799,20 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         scopes: UPLOAD_BUDGET_SCOPES,
         priority: await ctx.settings.getUploadPriorityExtensions(),
         paused: await ctx.settings.getUploadPausedExtensions(),
-        // The names the priority picker offers. Read here rather than left to
-        // the client because the picker must not be able to arm an extension
-        // that does not exist, and the client's own extension list is a
-        // different page's resource.
-        extensions: (
-          await ctx.prisma.extensionConfig.findMany({
-            select: { extension: true },
-            orderBy: { extension: "asc" },
-          })
-        ).map((row) => row.extension),
+        // The names the priority and pause pickers offer.
+        //
+        // Published bundles, the same source `GET /extensions` lists, NOT
+        // `extension_configs`: a config row only exists once something has
+        // written one, so two live extensions (alpha_manga and viz, one of them
+        // merely disabled rather than gone) had no row and silently could not
+        // be prioritised or paused. A picker missing an extension is worse than
+        // one showing a stale name -- the operator cannot tell the control is
+        // absent rather than the setting off.
+        //
+        // Read here rather than left to the client because the picker must not
+        // be able to arm a name the platform does not know, and the client's
+        // own extension list belongs to a different page's resource.
+        extensions: [...new Set((await ctx.bundles.listLatest()).map((b) => b.extension))].sort(),
       }),
     );
 
