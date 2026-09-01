@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   authorize,
+  authzFromLists,
+  authzToLists,
+  cleanIdList,
   describeAuthz,
   hasAdminAllowlist,
   isAdmin,
+  isAuthzEmpty,
   loadAuthzConfig,
   parseIdList,
   type AuthzConfig,
@@ -16,11 +20,13 @@ const OTHER_CHANNEL = "800000000000000002";
 const ADMIN_USER = "700000000000000001";
 const PLAIN_USER = "700000000000000002";
 const ADMIN_ROLE = "600000000000000001";
+const OTHER_GUILD = "900000000000000002";
+const THREAD = "800000000000000009";
 
 /** A fully locked-down config: guild pinned, one channel, one admin user. */
 function config(over: Partial<AuthzConfig> = {}): AuthzConfig {
   return {
-    guildId: GUILD,
+    guildIds: new Set([GUILD]),
     adminUserIds: new Set([ADMIN_USER]),
     adminRoleIds: new Set([ADMIN_ROLE]),
     allowedChannelIds: new Set([CHANNEL]),
@@ -62,19 +68,24 @@ describe("loadAuthzConfig", () => {
       DISCORD_ADMIN_ROLES: ADMIN_ROLE,
       DISCORD_ALLOWED_CHANNELS: `${CHANNEL} ${OTHER_CHANNEL}`,
     });
-    expect(loaded.guildId).toBe(GUILD);
+    expect([...loaded.guildIds]).toEqual([GUILD]);
     expect(loaded.adminUserIds.size).toBe(2);
     expect(loaded.adminRoleIds.has(ADMIN_ROLE)).toBe(true);
     expect(loaded.allowedChannelIds.size).toBe(2);
   });
 
   it("treats a non-numeric guild id as unset instead of matching nothing", () => {
-    expect(loadAuthzConfig({ DISCORD_GUILD_ID: "my-guild" }).guildId).toBeNull();
+    expect(loadAuthzConfig({ DISCORD_GUILD_ID: "my-guild" }).guildIds.size).toBe(0);
+  });
+
+  it("accepts several guilds, so one bot can serve two servers", () => {
+    const loaded = loadAuthzConfig({ DISCORD_GUILD_ID: `${GUILD},${OTHER_GUILD}` });
+    expect([...loaded.guildIds]).toEqual([GUILD, OTHER_GUILD]);
   });
 
   it("defaults everything to empty on a bare environment", () => {
     const loaded = loadAuthzConfig({});
-    expect(loaded.guildId).toBeNull();
+    expect(loaded.guildIds.size).toBe(0);
     expect(hasAdminAllowlist(loaded)).toBe(false);
   });
 });
@@ -112,7 +123,7 @@ describe("authorize: guild gate", () => {
   });
 
   it("allows any guild when DISCORD_GUILD_ID is unset", () => {
-    const anyGuild = config({ guildId: null });
+    const anyGuild = config({ guildIds: new Set() });
     expect(authorize(anyGuild, invoker({ guildId: "12345" }), "read").allowed).toBe(true);
   });
 
@@ -200,5 +211,85 @@ describe("describeAuthz", () => {
     const summary = describeAuthz(loadAuthzConfig({}));
     expect(summary).toContain("NONE for writes");
     expect(summary).toContain("admins: NONE configured");
+  });
+
+  it("counts several guilds rather than printing an unreadable list", () => {
+    expect(describeAuthz(config({ guildIds: new Set([GUILD, OTHER_GUILD]) }))).toContain("2 guilds");
+  });
+
+  it("says plainly when no guild is pinned", () => {
+    expect(describeAuthz(config({ guildIds: new Set() }))).toContain("guild: any");
+  });
+});
+
+describe("authorize: threads", () => {
+  it("allows a thread whose parent channel is on the list", () => {
+    // Discord reports the thread's own id as the interaction channel, so
+    // without the parent an operator who allowlisted #ops is refused the moment
+    // they open a thread inside #ops.
+    const inThread = invoker({ channelId: THREAD, parentChannelId: CHANNEL });
+    expect(authorize(config(), inThread, "read").allowed).toBe(true);
+    expect(authorize(config(), { ...inThread, userId: ADMIN_USER }, "mutate").allowed).toBe(true);
+  });
+
+  it("refuses a thread whose parent is not on the list", () => {
+    const decision = authorize(config(), invoker({ channelId: THREAD, parentChannelId: OTHER_CHANNEL }), "read");
+    expect(decision.allowed).toBe(false);
+  });
+
+  it("refuses a thread with no parent, rather than reading absence as a pass", () => {
+    expect(authorize(config(), invoker({ channelId: THREAD, parentChannelId: null }), "read").allowed).toBe(false);
+    expect(authorize(config(), invoker({ channelId: THREAD }), "read").allowed).toBe(false);
+  });
+
+  it("still allows the parent channel itself", () => {
+    expect(authorize(config(), invoker({ channelId: CHANNEL, parentChannelId: null }), "read").allowed).toBe(true);
+  });
+});
+
+describe("authorize: several guilds", () => {
+  const two = () => config({ guildIds: new Set([GUILD, OTHER_GUILD]) });
+
+  it("answers in every pinned guild", () => {
+    expect(authorize(two(), invoker({ guildId: GUILD }), "read").allowed).toBe(true);
+    expect(authorize(two(), invoker({ guildId: OTHER_GUILD }), "read").allowed).toBe(true);
+  });
+
+  it("still refuses an unpinned guild, and DMs", () => {
+    expect(authorize(two(), invoker({ guildId: "999" }), "read").allowed).toBe(false);
+    expect(authorize(two(), invoker({ guildId: null }), "read").allowed).toBe(false);
+  });
+
+  it("applies one admin list across both guilds", () => {
+    const admin = invoker({ userId: ADMIN_USER, guildId: OTHER_GUILD });
+    expect(authorize(two(), admin, "mutate").allowed).toBe(true);
+    expect(authorize(two(), invoker({ guildId: OTHER_GUILD }), "mutate").allowed).toBe(false);
+  });
+});
+
+describe("authzFromLists / authzToLists", () => {
+  it("round-trips a config through the wire shape", () => {
+    const restored = authzFromLists(authzToLists(config()));
+    expect([...restored.guildIds]).toEqual([GUILD]);
+    expect([...restored.adminUserIds]).toEqual([ADMIN_USER]);
+    expect([...restored.adminRoleIds]).toEqual([ADMIN_ROLE]);
+    expect([...restored.allowedChannelIds]).toEqual([CHANNEL]);
+  });
+
+  it("applies the same digits-only filter as the environment path", () => {
+    // Stored config is edited by humans through a dashboard textarea, so it can
+    // carry exactly the junk `.env` did; neither source may widen a gate.
+    const built = authzFromLists({ adminUserIds: ["<@111>", "222", "", "not-an-id"] });
+    expect([...built.adminUserIds]).toEqual(["222"]);
+  });
+
+  it("treats a missing or empty payload as fully empty rather than throwing", () => {
+    expect(isAuthzEmpty(authzFromLists(null))).toBe(true);
+    expect(isAuthzEmpty(authzFromLists({}))).toBe(true);
+    expect(isAuthzEmpty(config())).toBe(false);
+  });
+
+  it("drops non-string entries that a hand-rolled API call could send", () => {
+    expect([...cleanIdList([123, null, "456", undefined])]).toEqual(["456"]);
   });
 });

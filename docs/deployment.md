@@ -940,12 +940,26 @@ bot token, or was regenerated (which permanently revokes the old one). The
 client secret, public key and OAuth token are all different values and none of
 them work. Surrounding quotes are stripped automatically.
 
-**Commands do not appear in Discord.** With `DISCORD_GUILD_ID` set they register
+**Commands do not appear in Discord.** With a guild pinned they register
 instantly, so this means registration failed; check the log for `failed to
 register slash commands`, and that the invite included the
-`applications.commands` scope. Without `DISCORD_GUILD_ID` the commands are
-global and can take up to an hour to propagate; the bot warns about this at
-startup.
+`applications.commands` scope. With no guild pinned the commands are global and
+can take up to an hour to propagate; the bot warns about this at startup.
+
+**Commands do not appear in a *second* server.** Guild-scoped commands exist
+only in the guilds they were published to, so a server that is not pinned gets
+nothing — and would be refused anyway. Pin it too (dashboard → Permissions →
+Discord bot access, or `/access add guilds <id>`), and make sure that server's
+invite carried the `applications.commands` scope; re-inviting over an existing
+membership grants it without kicking the bot.
+
+**Every command appears twice.** Discord keeps a guild's command set and the
+application's global set separately and shows the union. Falling back to global
+registration while a guild still holds an old guild-scoped copy therefore
+duplicates every entry. The bot clears stale guild commands on each
+registration, so this resolves itself on the next start or allowlist change; if
+it persists, that guild's invite is missing `applications.commands`, so the bot
+cannot clear what is there.
 
 **Every command answers with a 403 naming a scope.** Working as intended: the
 token lacks that grant. The reply also lists the scopes it does hold. Mint a

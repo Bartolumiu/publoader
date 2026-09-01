@@ -126,10 +126,15 @@ versions):
 | `DISCORD_BOT_TOKEN` | yes | Bot token from the Developer Portal. Also accepted as `DISCORD_BOT_TOKEN_FILE`. |
 | `BOT_API_TOKEN` | yes | The scoped `pa_…` token from step 2. Also accepted as `BOT_API_TOKEN_FILE`. |
 | `CORE_URL` | no | Admin API base URL. Default `https://publoader.ardax.dev`. |
-| `DISCORD_GUILD_ID` | strongly recommended | The one guild the bot serves. |
+| `DISCORD_GUILD_ID` | strongly recommended | Guild(s) the bot serves. Comma/space-separated; one bot can serve several servers. |
 | `DISCORD_ADMIN_USERS` | yes, in practice | Comma/space-separated user ids allowed to run write commands. |
 | `DISCORD_ADMIN_ROLES` | alternative to the above | Role ids whose holders are admins. |
 | `DISCORD_ALLOWED_CHANNELS` | yes, in practice | Channel ids the bot accepts commands in. |
+
+These four are the **bootstrap**, not the permanent home. Once anything is saved
+from the dashboard, the API, the CLI or `/access`, the stored lists take over
+completely and these variables stop being consulted — see
+[Editing the allowlists](#editing-the-allowlists) below.
 
 Then:
 
@@ -183,12 +188,59 @@ This bot refuses instead, and says which variable to set:
 
 - No admins configured → **every** mutating command is denied.
 - No channel allowlist → reads work anywhere, **writes are denied**.
-- `DISCORD_GUILD_ID` set → commands from other guilds and from DMs are denied.
+- Any guild pinned → commands from other guilds and from DMs are denied.
+
+A command run **inside a thread** is judged by the thread's parent channel, so
+allowlisting `#ops` covers every thread under `#ops`. Only threads inherit;
+a text channel's category does not, because that would silently widen a
+one-channel allowlist to the whole category.
 
 Reads stay permissive on purpose: their worst case is a noisy channel, and
 leaving `/status` working while the allowlists are being filled in makes the bot
 useful during setup. This is deliberate and tested
 (`test/unit/botAuthz.test.ts`).
+
+### Editing the allowlists
+
+The four lists live in the control plane, not in `.env`, so changing who may
+operate the bot does not need a redeploy. All four surfaces write through the
+same endpoint, so there is no surface where the answer differs:
+
+| Surface | How |
+|---|---|
+| Dashboard | **Permissions** page → *Discord bot access* |
+| Discord | `/access show`, `/access add`, `/access remove`, `/access reset` |
+| CLI | `publoader-admin discord-access show \| add \| remove \| reset` |
+| API | `GET`/`PUT`/`DELETE /api/v1/admin/discord/authz` |
+
+The bot re-reads the lists about once a minute, so a change takes effect without
+a restart. Adding a guild also re-registers the slash commands into it, and
+removing one withdraws them.
+
+Every entry carries an optional label (`#ops`, `@staff`). Nothing matches on the
+label — the bot only ever compares ids — but four columns of nineteen-digit
+snowflakes are not auditable, and "is this still the right channel?" should be
+answerable without leaving the page.
+
+**Precedence.** The environment is the bootstrap and the fallback. A deployment
+that has never saved anything keeps running on its `.env` exactly as before; the
+moment anything is stored, the stored lists take over *completely*. There is no
+merge: an allowlist assembled from two sources is one nobody can reason about.
+`/access reset` (or `DELETE`) discards the stored lists and hands control back to
+the environment, which is the way out of a lockout that does not involve `psql`.
+
+**If the API is unreachable**, the bot keeps enforcing the last lists it
+successfully read. It never falls back to `.env` on an error — that would
+silently re-admit someone just removed — and never empties the lists, which
+would lock everyone out of a working bot because of a 503.
+
+**Who may change them.** `users:admin`, and that is all. Unlike the role
+baselines on the same page, these routes are *not* owner-gated, because a scoped
+API token is never OWNER and the bot has to be able to administer itself: an
+operator locked out of the dashboard can still fix the allowlist from the
+channel they are standing in. The trade is real and worth stating plainly — a
+`users:admin` token can grant Discord users everything that token itself holds,
+so scope `BOT_API_TOKEN` accordingly.
 
 ### Where replies go
 
@@ -213,6 +265,10 @@ DMs are closed the bot falls back to the ephemeral reply and says so.
 | `/ping` | read | `stats:read` | Whether the admin API answers, and how fast. |
 | `/stats` | read | `stats:read` | Alias for `/status`, kept from the legacy bot. |
 | `/whoami` | read | none | Which API the bot points at, a masked token fingerprint, the actor string your commands are attributed to, and the token's scopes when they are known. |
+| `/access show` | read | `users:admin` | The four allowlists in force, whether they come from the control plane or from `.env`, and any misconfiguration worth knowing about. |
+| `/access add <list> <id>` | destructive | `users:admin` | Allow a guild, channel, user or role. Takes a snowflake or a `#channel` / `@user` / `@role` mention. Needs `confirm: true`. |
+| `/access remove <list> <id>` | destructive | `users:admin` | Revoke one. Needs `confirm: true`; you can lock yourself out with it. |
+| `/access reset` | destructive | `users:admin` | Discard the stored lists and fall back to the bot's environment. Needs `confirm: true`. |
 
 ### Runs and jobs
 

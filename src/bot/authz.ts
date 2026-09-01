@@ -13,9 +13,16 @@
  *
  * Anything that mutates is denied when its allowlist is unconfigured, and the
  * refusal says so. Failing open would mean a fresh deployment with an
- * incomplete .env let every member of the guild trigger runs and pause the
+ * incomplete config let every member of the guild trigger runs and pause the
  * platform. Read-only commands stay permissive, because their worst case is a
  * noisy channel rather than a changed platform.
+ *
+ * ## Where the lists come from
+ *
+ * Either the environment (`loadAuthzConfig`) or the control plane's own
+ * settings, edited from the dashboard (`authzFromLists`). This module does not
+ * care which; it is handed a resolved config. `src/bot/authzSource.ts` owns the
+ * precedence between the two.
  */
 
 /** How much damage a command can do, which is what decides how it is gated. */
@@ -31,11 +38,28 @@ export type Sensitivity =
   | "destructive";
 
 export interface AuthzConfig {
-  /** When set, commands from any other guild, and all DMs, are refused. */
-  guildId: string | null;
+  /**
+   * Guilds this bot answers in. Empty means "any guild", which is how a
+   * deployment that never pinned one behaves; a non-empty set refuses every
+   * other guild and all DMs.
+   *
+   * A set rather than a single id because one bot installed in two servers is
+   * a real deployment — a staff server and a contributor server, say — and the
+   * alternative was running a second bot process purely to widen this one
+   * field.
+   */
+  guildIds: ReadonlySet<string>;
   adminUserIds: ReadonlySet<string>;
   adminRoleIds: ReadonlySet<string>;
   allowedChannelIds: ReadonlySet<string>;
+}
+
+/** The four allowlists as plain arrays, which is how they cross a wire. */
+export interface AuthzLists {
+  guildIds: string[];
+  adminUserIds: string[];
+  adminRoleIds: string[];
+  allowedChannelIds: string[];
 }
 
 /** Everything about an invocation that the decision depends on. */
@@ -43,6 +67,16 @@ export interface Invoker {
   userId: string;
   roleIds: readonly string[];
   channelId: string;
+  /**
+   * The parent channel when `channelId` is a thread, else null.
+   *
+   * Discord reports a thread's *own* id as the interaction channel, so without
+   * this an allowlisted `#ops` would refuse every command typed in a thread
+   * under `#ops` — and each new thread would need allowlisting by hand.
+   * Allowing the parent is what makes "this channel controls the platform"
+   * mean what an operator thinks it means.
+   */
+  parentChannelId?: string | null;
   /** null in a DM. */
   guildId?: string | null;
 }
@@ -69,14 +103,57 @@ export function parseIdList(raw: string | undefined): Set<string> {
   return out;
 }
 
+/** The same filter for values that already arrived as an array (from the API). */
+export function cleanIdList(raw: readonly unknown[] | undefined | null): Set<string> {
+  const out = new Set<string>();
+  for (const value of raw ?? []) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed && /^\d+$/.test(trimmed)) out.add(trimmed);
+  }
+  return out;
+}
+
 export function loadAuthzConfig(env: Record<string, string | undefined>): AuthzConfig {
-  const guild = (env["DISCORD_GUILD_ID"] ?? "").trim();
   return {
-    guildId: /^\d+$/.test(guild) ? guild : null,
+    // Parsed as a list so `DISCORD_GUILD_ID=111,222` works; a single id is the
+    // one-element case, and the non-numeric junk that used to read as "unset"
+    // still does, because parseIdList drops it.
+    guildIds: parseIdList(env["DISCORD_GUILD_ID"]),
     adminUserIds: parseIdList(env["DISCORD_ADMIN_USERS"]),
     adminRoleIds: parseIdList(env["DISCORD_ADMIN_ROLES"]),
     allowedChannelIds: parseIdList(env["DISCORD_ALLOWED_CHANNELS"]),
   };
+}
+
+/** Build a config from lists that came off the API, applying the same filter. */
+export function authzFromLists(lists: Partial<AuthzLists> | null | undefined): AuthzConfig {
+  return {
+    guildIds: cleanIdList(lists?.guildIds),
+    adminUserIds: cleanIdList(lists?.adminUserIds),
+    adminRoleIds: cleanIdList(lists?.adminRoleIds),
+    allowedChannelIds: cleanIdList(lists?.allowedChannelIds),
+  };
+}
+
+/** The inverse, for handing a config to the API or the dashboard. */
+export function authzToLists(config: AuthzConfig): AuthzLists {
+  return {
+    guildIds: [...config.guildIds],
+    adminUserIds: [...config.adminUserIds],
+    adminRoleIds: [...config.adminRoleIds],
+    allowedChannelIds: [...config.allowedChannelIds],
+  };
+}
+
+/** Is every list empty? Used to decide whether stored config exists at all. */
+export function isAuthzEmpty(config: AuthzConfig): boolean {
+  return (
+    config.guildIds.size === 0 &&
+    config.adminUserIds.size === 0 &&
+    config.adminRoleIds.size === 0 &&
+    config.allowedChannelIds.size === 0
+  );
 }
 
 /** Is this user an admin by explicit id or by holding an admin role? */
@@ -90,6 +167,13 @@ export function hasAdminAllowlist(config: AuthzConfig): boolean {
   return config.adminUserIds.size > 0 || config.adminRoleIds.size > 0;
 }
 
+/** Does this invocation sit in an allowed channel, or in a thread under one? */
+function channelAllowed(config: AuthzConfig, invoker: Invoker): boolean {
+  if (config.allowedChannelIds.has(invoker.channelId)) return true;
+  const parent = invoker.parentChannelId;
+  return parent != null && config.allowedChannelIds.has(parent);
+}
+
 /**
  * The whole decision, in one place.
  *
@@ -100,7 +184,7 @@ export function hasAdminAllowlist(config: AuthzConfig): boolean {
 export function authorize(config: AuthzConfig, invoker: Invoker, sensitivity: Sensitivity): Decision {
   const mutating = sensitivity !== "read";
 
-  if (config.guildId !== null && invoker.guildId !== config.guildId) {
+  if (config.guildIds.size > 0 && (invoker.guildId == null || !config.guildIds.has(invoker.guildId))) {
     return {
       allowed: false,
       reason:
@@ -111,7 +195,7 @@ export function authorize(config: AuthzConfig, invoker: Invoker, sensitivity: Se
   }
 
   if (config.allowedChannelIds.size > 0) {
-    if (!config.allowedChannelIds.has(invoker.channelId)) {
+    if (!channelAllowed(config, invoker)) {
       return { allowed: false, reason: "This channel is not on the bot's allowed-channel list." };
     }
   } else if (mutating) {
@@ -120,8 +204,8 @@ export function authorize(config: AuthzConfig, invoker: Invoker, sensitivity: Se
     return {
       allowed: false,
       reason:
-        "Refusing a state-changing command because `DISCORD_ALLOWED_CHANNELS` is not configured. " +
-        "Set it to the channel(s) that may control the platform, then redeploy the bot.",
+        "Refusing a state-changing command because no allowed channels are configured. " +
+        "Set them on the dashboard's Permissions page, or via `DISCORD_ALLOWED_CHANNELS`.",
     };
   }
 
@@ -131,7 +215,7 @@ export function authorize(config: AuthzConfig, invoker: Invoker, sensitivity: Se
         allowed: false,
         reason:
           "Refusing a state-changing command because no admins are configured. " +
-          "Set `DISCORD_ADMIN_USERS` and/or `DISCORD_ADMIN_ROLES`, then redeploy the bot.",
+          "Set them on the dashboard's Permissions page, or via `DISCORD_ADMIN_USERS` / `DISCORD_ADMIN_ROLES`.",
       };
     }
     if (!isAdmin(config, invoker)) {
@@ -153,11 +237,17 @@ export function authorize(config: AuthzConfig, invoker: Invoker, sensitivity: Se
  * Written so a misconfiguration is visible without reading the environment.
  */
 export function describeAuthz(config: AuthzConfig): string {
+  const guilds =
+    config.guildIds.size === 0
+      ? "guild: any (no guild pinned)"
+      : config.guildIds.size === 1
+        ? `guild ${[...config.guildIds][0]}`
+        : `${config.guildIds.size} guilds`;
   const parts = [
-    config.guildId ? `guild ${config.guildId}` : "guild: any (DISCORD_GUILD_ID unset)",
+    guilds,
     config.allowedChannelIds.size > 0
       ? `${config.allowedChannelIds.size} allowed channel(s)`
-      : "channels: any for reads, NONE for writes (DISCORD_ALLOWED_CHANNELS unset)",
+      : "channels: any for reads, NONE for writes (no allowed channels configured)",
     hasAdminAllowlist(config)
       ? `${config.adminUserIds.size} admin user(s), ${config.adminRoleIds.size} admin role(s)`
       : "admins: NONE configured; all writes denied",

@@ -28,6 +28,7 @@ import {
   type TrackedEntry,
 } from "./apiClient.js";
 import { authorize, describeAuthz, type AuthzConfig, type Invoker } from "./authz.js";
+import type { AuthzSource } from "./authzSource.js";
 import {
   ALL_COMMANDS,
   COMMANDS_BY_NAME,
@@ -68,14 +69,15 @@ export class FatalBotConfigError extends Error {
 export interface PubloaderBotOptions {
   discordToken: string;
   api: AdminApiClient;
-  authz: AuthzConfig;
+  /** Live allowlists; re-read on a timer so dashboard edits take effect. */
+  authz: AuthzSource;
   log: Logger;
 }
 
 export class PubloaderBot {
   private readonly client: Client;
   private readonly api: AdminApiClient;
-  private readonly authz: AuthzConfig;
+  private readonly authzSource: AuthzSource;
   private readonly log: Logger;
   private readonly discordToken: string;
   /**
@@ -98,9 +100,20 @@ export class PubloaderBot {
   private readonly trackedCache = new Map<string, { rows: TrackedEntry[]; namespaces: string[]; fetchedAt: number }>();
   private shuttingDown = false;
 
+  /**
+   * The allowlists in force *right now*.
+   *
+   * A getter rather than a field because the source re-reads them on a timer:
+   * caching the config would mean an operator's dashboard edit did nothing
+   * until the bot was restarted, which is the problem this replaced.
+   */
+  private get authz(): AuthzConfig {
+    return this.authzSource.config;
+  }
+
   constructor(opts: PubloaderBotOptions) {
     this.api = opts.api;
-    this.authz = opts.authz;
+    this.authzSource = opts.authz;
     this.log = opts.log;
     this.discordToken = opts.discordToken;
     // Guilds is the only intent needed: the bot is slash-command driven and
@@ -172,6 +185,13 @@ export class PubloaderBot {
 
   async start(): Promise<void> {
     await this.selfCheck();
+    // Read the stored allowlists before connecting, so the very first
+    // interaction is judged against the current config rather than against the
+    // environment the container happened to be started with.
+    await this.authzSource.refresh();
+    this.authzSource.start(({ guildsChanged }) => {
+      if (guildsChanged) void this.registerCommands();
+    });
     try {
       await this.client.login(this.discordToken);
     } catch (err) {
@@ -187,31 +207,77 @@ export class PubloaderBot {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
     this.log.info({ reason }, "shutting down discord bot");
+    this.authzSource.stop();
     await this.client.destroy();
   }
 
   /**
    * Push the command definitions to Discord.
    *
-   * Guild-scoped when DISCORD_GUILD_ID is set: guild commands appear instantly,
+   * Guild-scoped whenever any guild is pinned: guild commands appear instantly,
    * while global commands can take an hour to propagate; and a control-plane
    * bot has no business exposing its commands in guilds it was not deployed for.
+   *
+   * Called again whenever the pinned guilds change, because a guild added on
+   * the dashboard has no commands in it until this runs — and because a guild
+   * *removed* keeps its copy until they are withdrawn.
    */
   private async registerCommands(): Promise<void> {
     const body = ALL_COMMANDS.map((c) => c.builder.toJSON());
     try {
-      if (this.authz.guildId) {
-        await this.client.application?.commands.set(body, this.authz.guildId);
-        this.log.info({ count: body.length, guildId: this.authz.guildId }, "registered guild slash commands");
+      const guildIds = [...this.authz.guildIds];
+      if (guildIds.length > 0) {
+        for (const guildId of guildIds) {
+          await this.client.application?.commands.set(body, guildId);
+        }
+        this.log.info({ count: body.length, guildIds }, "registered guild slash commands");
       } else {
         await this.client.application?.commands.set(body);
         this.log.warn(
           { count: body.length },
-          "registered GLOBAL slash commands because DISCORD_GUILD_ID is unset; propagation is slow and the commands appear in every guild the bot joins",
+          "registered GLOBAL slash commands because no guild is pinned; propagation is slow and the commands appear in every guild the bot joins. Pin one on the dashboard's Permissions page or with DISCORD_GUILD_ID",
         );
       }
+      await this.withdrawStaleGuildCommands(this.authz.guildIds);
     } catch (err) {
       this.log.error({ err }, "failed to register slash commands");
+    }
+  }
+
+  /**
+   * Clear guild-scoped commands from every joined guild that should not have
+   * them: the ones just de-listed, and *all* of them when the bot has fallen
+   * back to global registration.
+   *
+   * Discord keeps a guild's command set and the application's global set in
+   * separate places and shows the union of the two. So un-pinning a guild
+   * without clearing it does not move the commands, it duplicates them — every
+   * entry appears twice in that guild's picker, one copy guild-scoped and one
+   * global. De-listing a guild without clearing is worse: the full menu stays
+   * on screen in a server where every entry now answers "wrong guild".
+   *
+   * Driven off `client.guilds.cache` rather than a record of what this process
+   * registered, because the interesting case is a bot that was *restarted* with
+   * a changed config, and a field on this instance knows nothing about what the
+   * previous one did.
+   */
+  private async withdrawStaleGuildCommands(keep: ReadonlySet<string>): Promise<void> {
+    const application = this.client.application;
+    if (!application) return;
+    for (const guildId of this.client.guilds.cache.keys()) {
+      if (keep.has(guildId)) continue;
+      try {
+        // Fetch first so the common case — nothing to clear, every restart
+        // after the first — costs a read instead of a pointless write.
+        const existing = await application.commands.fetch({ guildId });
+        if (existing.size === 0) continue;
+        await application.commands.set([], guildId);
+        this.log.info({ guildId, count: existing.size }, "withdrew stale guild slash commands");
+      } catch (err) {
+        // Missing `applications.commands` in this guild's invite is the usual
+        // cause, and it means there is nothing registered there to withdraw.
+        this.log.warn({ err, guildId }, "could not check or withdraw this guild's slash commands");
+      }
     }
   }
 
@@ -242,7 +308,7 @@ export class PubloaderBot {
       return;
     }
 
-    const invoker = invokerOf(interaction);
+    const invoker = await invokerOf(interaction);
     const subcommand = interaction.options.getSubcommand(false);
     const sensitivity = resolveSensitivity(command, subcommand);
     const decision = authorize(this.authz, invoker, sensitivity);
@@ -341,7 +407,7 @@ export class PubloaderBot {
     const command = COMMANDS_BY_NAME.get(name);
     if (!command?.modal) return;
 
-    const invoker = invokerOf(interaction);
+    const invoker = await invokerOf(interaction);
     const sensitivity = resolveSensitivity(command, null);
     const decision = authorize(this.authz, invoker, sensitivity);
     const log = this.log.child({ command: command.name, modal: true, userId: invoker.userId });
@@ -398,7 +464,7 @@ export class PubloaderBot {
    * chapter, and a stale title list is a re-card aimed at the wrong id.
    */
   private async onAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
-    const invoker = invokerOf(interaction);
+    const invoker = await invokerOf(interaction);
     // Gate at the read level: autocomplete in a channel the bot ignores should
     // not enumerate the platform's extensions.
     if (!authorize(this.authz, invoker, "read").allowed) {
@@ -687,15 +753,57 @@ function optionReaderOf(interaction: ChatInputCommandInteraction): OptionReader 
   };
 }
 
-function invokerOf(
+async function invokerOf(
   interaction: ChatInputCommandInteraction | AutocompleteInteraction | ModalSubmitInteraction,
-): Invoker {
+): Promise<Invoker> {
   return {
     userId: interaction.user.id,
     roleIds: roleIdsOf(interaction.member),
     channelId: interaction.channelId ?? "",
+    parentChannelId: await parentChannelIdOf(interaction),
     guildId: interaction.guildId,
   };
+}
+
+/**
+ * The channel a thread hangs off, or null for anything that is not a thread.
+ *
+ * Discord reports a thread's own id as the interaction channel, so an operator
+ * who allowlisted `#ops` and then opened a thread in it would be refused with
+ * "this channel is not on the bot's allowed-channel list" — naming a channel
+ * they had in fact allowed. Reading the parent is what makes the allowlist mean
+ * the thing the operator wrote down.
+ *
+ * `interaction.channel` is **cache-only** in discord.js: it is
+ * `client.channels.cache.get(channelId) ?? null`, and it does not build a
+ * partial from the channel object Discord puts in the interaction payload. A
+ * thread that is not cached — the bot lacks `VIEW_CHANNEL` on the parent, or
+ * the thread was archived when the gateway last synced — would therefore read
+ * as "no parent" and be silently refused, which is the exact bug this exists to
+ * fix. So an uncached channel is fetched once; that also seeds the cache, so it
+ * costs one call per thread per process rather than one per command.
+ */
+async function parentChannelIdOf(
+  interaction: ChatInputCommandInteraction | AutocompleteInteraction | ModalSubmitInteraction,
+): Promise<string | null> {
+  let channel: unknown = interaction.channel;
+  if (!channel && interaction.channelId) {
+    try {
+      channel = await interaction.client.channels.fetch(interaction.channelId);
+    } catch {
+      // Missing access, or a channel that no longer exists. Neither is a
+      // parent, and both are correctly answered by the channel allowlist.
+      return null;
+    }
+  }
+  if (!channel || typeof channel !== "object") return null;
+  const type = (channel as { type?: unknown }).type;
+  // AnnouncementThread(10), PublicThread(11), PrivateThread(12). A text
+  // channel's `parentId` is its *category*, and honouring that would silently
+  // widen a one-channel allowlist to every channel in the category.
+  if (type !== 10 && type !== 11 && type !== 12) return null;
+  const parentId = (channel as { parentId?: unknown }).parentId;
+  return typeof parentId === "string" ? parentId : null;
 }
 
 /**

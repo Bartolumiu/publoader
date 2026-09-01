@@ -2512,6 +2512,119 @@ program
     ], "no audit events");
   });
 
+/**
+ * Who may drive the Discord bot.
+ *
+ * The same four lists the dashboard's Permissions page and the bot's own
+ * `/access` command edit; all three go through one endpoint, so there is no
+ * surface where the answer differs.
+ */
+const discord = program.command("discord-access").description("who may operate the Discord bot");
+
+/** CLI-facing names, mapped to the API's keys. */
+const DISCORD_LISTS: Record<string, "guilds" | "channels" | "adminUsers" | "adminRoles"> = {
+  guilds: "guilds",
+  channels: "channels",
+  "admin-users": "adminUsers",
+  "admin-roles": "adminRoles",
+};
+
+interface DiscordAuthzView {
+  entries: Record<string, { id: string; label: string }[]>;
+  configured: boolean;
+  warnings: string[];
+}
+
+const readAccess = () => api<DiscordAuthzView>("/api/v1/admin/discord/authz");
+
+function showAccess(view: DiscordAuthzView): void {
+  const rows = Object.entries(DISCORD_LISTS).flatMap(([cliName, key]) =>
+    (view.entries[key] ?? []).map((entry) => ({ list: cliName, id: entry.id, label: entry.label })),
+  );
+  table(
+    rows,
+    [
+      { header: "LIST", get: (r) => r.list },
+      { header: "ID", get: (r) => r.id },
+      { header: "LABEL", get: (r) => r.label || "-" },
+    ],
+    "nothing configured; the bot is running on its environment",
+  );
+  if (!view.configured) {
+    ok("no stored config: the bot is still using the DISCORD_* variables it was deployed with");
+  }
+  for (const warning of view.warnings) ok(`warning: ${warning}`);
+}
+
+/** A bare snowflake, or the mention syntax a shell paste usually carries. */
+function snowflake(raw: string): string {
+  const match = /^<(?:#|@[!&]?)(\d+)>$/.exec(raw.trim());
+  const id = match?.[1] ?? raw.trim();
+  if (!/^\d{5,}$/.test(id)) {
+    fail(`"${raw}" is not a Discord id. Enable Developer Mode in Discord and use Copy ID.`);
+  }
+  return id;
+}
+
+function listKey(name: string): "guilds" | "channels" | "adminUsers" | "adminRoles" {
+  const key = DISCORD_LISTS[name];
+  if (key === undefined) {
+    return fail(`unknown list "${name}"; expected one of ${Object.keys(DISCORD_LISTS).join(", ")}`);
+  }
+  return key;
+}
+
+discord
+  .command("show")
+  .description("the allowlists the bot is enforcing")
+  .action(async () => {
+    showAccess(await readAccess());
+  });
+
+discord
+  .command("add <list> <id>")
+  .description("allow a guild, channel, user or role")
+  .option("--label <text>", "what to call it on the dashboard", "")
+  .action(async (list: string, rawId: string, opts: { label: string }) => {
+    const key = listKey(list);
+    const id = snowflake(rawId);
+    const before = await readAccess();
+    const existing = before.entries[key] ?? [];
+    if (existing.some((entry) => entry.id === id)) fail(`${id} is already on the ${list} list`);
+    const view = await api<DiscordAuthzView>("/api/v1/admin/discord/authz", {
+      method: "PUT",
+      json: { [key]: [...existing, { id, label: opts.label }] },
+    });
+    ok(`added ${id} to ${list}`);
+    showAccess(view);
+  });
+
+discord
+  .command("remove <list> <id>")
+  .description("revoke a guild, channel, user or role")
+  .action(async (list: string, rawId: string) => {
+    const key = listKey(list);
+    const id = snowflake(rawId);
+    const before = await readAccess();
+    const existing = before.entries[key] ?? [];
+    if (!existing.some((entry) => entry.id === id)) fail(`${id} is not on the ${list} list`);
+    const view = await api<DiscordAuthzView>("/api/v1/admin/discord/authz", {
+      method: "PUT",
+      json: { [key]: existing.filter((entry) => entry.id !== id) },
+    });
+    ok(`removed ${id} from ${list}`);
+    showAccess(view);
+  });
+
+discord
+  .command("reset")
+  .description("forget the stored lists; the bot falls back to its environment")
+  .action(async () => {
+    const view = await api<DiscordAuthzView>("/api/v1/admin/discord/authz", { method: "DELETE" });
+    ok("stored allowlists cleared");
+    showAccess(view);
+  });
+
 program.parseAsync(process.argv).catch((err: unknown) => {
   fail((err as Error).message ?? String(err));
 });
