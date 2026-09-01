@@ -541,6 +541,7 @@ its first page; there is no position in the old one worth keeping.
 | `GET` | `/untracked` | `untracked:read` | `?state=NEW\|CREATING\|CREATED\|TRACKED\|FAILED\|SKIPPED`, `?q=`, `?extension=`, `?limit=1..500` (100), `?cursor=`, `?orderBy=series\|extension\|language\|state\|attempts\|result` + `?dir=`. Newest first by default, **keyset** paged |
 | `GET` | `/source/resolve` | `tracked:read` | `?url=` a publisher's page → `{match, candidates, namespaces, reason?}`. Which extension covers that site and which of its series the link is, worked out from our own rows: the untracked queue, the series map, and the published manifests' `allowed_hosts`. Reaches neither the publisher nor MangaDex |
 | `POST` | `/source/map` | `tracked:append` | `{url, mdMangaId, mangaId?, namespace?, extension?, dryRun?}`. Resolves the publisher link, writes the mapping, and closes the queue row it came from. `mdMangaId` takes a title link. **403** on a repoint without `tracked:write`; **409** when the link cannot be pinned to one series (the partial `resolution` comes back so the caller can finish it) or the title does not exist on MangaDex. Closing the queue row additionally needs `untracked:write`; without it the mapping is still written and `untrackedNote` says the row was left alone |
+| `POST` | `/source/map/batch` | `tracked:append` | `{text?, pairs?, dryRun?}` — a paste of `<publisher link> <mangadex link>` lines, either order per line, `#` comments and a header row ignored. Every line is resolved separately and reported separately: `added`, `updated`, `unchanged`, `unresolved` (no series could be named), `invalid` (no such MangaDex title), `rejected_needs_write` (would repoint without `tracked:write`). At most 200 lines → **413**. `dryRun` reports the lot without writing. Queue rows for mapped series are closed where the caller holds `untracked:write` |
 | `GET` | `/mangadex/search` | `untracked:read` | `?q=`, `?reportedName=`, `?limit=1..25` (10) → `{results}`; live against MangaDex |
 | `GET` | `/mangadex/title/:id` | `untracked:read` | One title in the same candidate shape, for an id or link an operator pasted instead of searching. `?reportedName=` sets what `likely` is measured against. **`404`** when MangaDex does not have it |
 | `POST` | `/untracked/:id/map` | `untracked:write` + `tracked:append` | `{mdMangaId}` — a title id **or a `mangadex.org/title/…` link**. Maps onto a title that already exists and creates nothing. **`409`** when the row or the title is not mappable |
@@ -570,6 +571,13 @@ because a wrong answer maps a live series onto someone else's title:
 It fails closed at every step. Two extensions claiming one host, two ids
 matching one URL, or a rule the extension's own history does not agree on all
 resolve to no match and a `reason`, rather than a guess.
+
+A batch resolves through one shared resolver: the published manifests and each
+extension's measured id rule cannot change inside one request, and re-deriving
+them per row is most of what a paste would otherwise cost. MangaDex is asked
+once for the whole batch (`existingTitles`) rather than once per row, and the
+write goes through `trackedManga.applyBatch` — the same code, and therefore the
+same per-row verdicts, as the tracked map's own paste box.
 
 ### Upload-task queues
 

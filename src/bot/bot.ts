@@ -7,14 +7,19 @@
  * plane. This file only moves data between discord.js and those three.
  */
 import {
+  ActionRowBuilder,
   Client,
   DiscordjsErrorCodes,
   Events,
   GatewayIntentBits,
   MessageFlags,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   type AutocompleteInteraction,
   type ChatInputCommandInteraction,
   type Interaction,
+  type ModalSubmitInteraction,
 } from "discord.js";
 import {
   AdminApiError,
@@ -28,6 +33,7 @@ import {
   COMMANDS_BY_NAME,
   resolveSensitivity,
   runCommand,
+  type BotCommand,
   type OptionReader,
 } from "./commands.js";
 import type { Logger } from "../logging.js";
@@ -41,6 +47,16 @@ export const EX_CONFIG = 78;
 
 /** Extension-name autocomplete is served from this cache, refreshed lazily. */
 const EXTENSION_CACHE_TTL_MS = 60_000;
+
+/**
+ * Prefix on every modal this bot opens.
+ *
+ * A modal submission arrives as its own interaction carrying only the custom id
+ * it was opened with, so that id is the whole routing table. Namespacing it
+ * means a submission from another application in the same guild can never be
+ * read as one of ours.
+ */
+const MODAL_PREFIX = "publoader:";
 
 export class FatalBotConfigError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -204,6 +220,10 @@ export class PubloaderBot {
       await this.onAutocomplete(interaction);
       return;
     }
+    if (interaction.isModalSubmit()) {
+      await this.onModalSubmit(interaction);
+      return;
+    }
     if (!interaction.isChatInputCommand()) return;
     await this.onCommand(interaction);
   }
@@ -240,6 +260,17 @@ export class PubloaderBot {
       await interaction
         .reply({ content: `:lock: ${decision.reason}`, flags: MessageFlags.Ephemeral })
         .catch(() => undefined);
+      return;
+    }
+
+    // A command that opens a modal answers WITH the modal, which has to be the
+    // first response to the interaction — so this returns before the deferral
+    // below. The work happens on the submission, which is its own interaction.
+    if (command.modal) {
+      log.info({ sensitivity }, "opening modal");
+      await interaction.showModal(buildModal(command)).catch((err: unknown) => {
+        log.error({ err }, "could not open the modal");
+      });
       return;
     }
 
@@ -286,6 +317,67 @@ export class PubloaderBot {
       await interaction.editReply({ content: reply.text });
     } catch (err) {
       log.error({ err }, "interaction handling failed");
+      const message = `:x: \`/${command.name}\` failed.\n${describeApiError(err)}`;
+      await (interaction.deferred || interaction.replied
+        ? interaction.editReply({ content: message })
+        : interaction.reply({ content: message, flags: MessageFlags.Ephemeral })
+      ).catch(() => undefined);
+    } finally {
+      this.inFlight.delete(invoker.userId);
+    }
+  }
+
+  /**
+   * A submitted modal: the same command, run against what was typed into it.
+   *
+   * Authorised again rather than trusting the interaction that opened it. The
+   * two are separate interactions, minutes can pass between them, and a role or
+   * channel decision can change in between; re-checking costs nothing and means
+   * the gate is the same one every other command goes through.
+   */
+  private async onModalSubmit(interaction: ModalSubmitInteraction): Promise<void> {
+    if (!interaction.customId.startsWith(MODAL_PREFIX)) return;
+    const name = interaction.customId.slice(MODAL_PREFIX.length);
+    const command = COMMANDS_BY_NAME.get(name);
+    if (!command?.modal) return;
+
+    const invoker = invokerOf(interaction);
+    const sensitivity = resolveSensitivity(command, null);
+    const decision = authorize(this.authz, invoker, sensitivity);
+    const log = this.log.child({ command: command.name, modal: true, userId: invoker.userId });
+    if (!decision.allowed) {
+      log.warn({ sensitivity, reason: decision.reason }, "modal denied");
+      await interaction
+        .reply({ content: `:lock: ${decision.reason}`, flags: MessageFlags.Ephemeral })
+        .catch(() => undefined);
+      return;
+    }
+
+    if (this.inFlight.has(invoker.userId)) {
+      await interaction
+        .reply({
+          content: ":hourglass: You already have a command running. Wait for it to finish.",
+          flags: MessageFlags.Ephemeral,
+        })
+        .catch(() => undefined);
+      return;
+    }
+    this.inFlight.add(invoker.userId);
+
+    const actor = actorFor(interaction.user.username);
+    try {
+      await interaction.deferReply(command.ephemeral ? { flags: MessageFlags.Ephemeral } : {});
+      log.info({ sensitivity, actor }, "modal accepted");
+      const reply = await runCommand(command, {
+        api: this.api,
+        actor,
+        options: modalOptionReader(interaction),
+        log,
+        interactionId: interaction.id,
+      });
+      await interaction.editReply({ content: reply.text });
+    } catch (err) {
+      log.error({ err }, "modal handling failed");
       const message = `:x: \`/${command.name}\` failed.\n${describeApiError(err)}`;
       await (interaction.deferred || interaction.replied
         ? interaction.editReply({ content: message })
@@ -537,6 +629,54 @@ export function translateLoginError(err: unknown): unknown {
   return err;
 }
 
+/**
+ * The modal a command declares, as discord.js wants it.
+ *
+ * A paragraph field is the only way to paste several lines into Discord: a
+ * slash-command option is a single line, and asking an operator to join twenty
+ * links with commas is not a paste, it is data entry.
+ */
+export function buildModal(command: BotCommand): ModalBuilder {
+  const modal = new ModalBuilder()
+    .setCustomId(`${MODAL_PREFIX}${command.name}`)
+    .setTitle(command.modal!.title);
+  for (const field of command.modal!.fields) {
+    const input = new TextInputBuilder()
+      .setCustomId(field.name)
+      .setLabel(field.label)
+      .setStyle(field.paragraph ? TextInputStyle.Paragraph : TextInputStyle.Short)
+      .setRequired(field.required ?? true);
+    if (field.placeholder) input.setPlaceholder(field.placeholder);
+    modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+  }
+  return modal;
+}
+
+/**
+ * Modal fields, read through the same interface as slash options.
+ *
+ * Handlers stay transport-free: `/map-many` reads `options.string("pairs")`
+ * without knowing whether that came from an option or a text box.
+ */
+export function modalOptionReader(interaction: ModalSubmitInteraction): OptionReader {
+  const read = (name: string): string | null => {
+    try {
+      return interaction.fields.getTextInputValue(name);
+    } catch {
+      // An optional field the operator left empty is absent, not an error.
+      return null;
+    }
+  };
+  return {
+    subcommand: () => null,
+    string: read,
+    // A modal has text inputs and nothing else; a command needing more than
+    // text should take it as a slash option before the modal opens.
+    integer: () => null,
+    boolean: () => null,
+  };
+}
+
 /** Adapt discord.js option access to the transport-free reader handlers use. */
 function optionReaderOf(interaction: ChatInputCommandInteraction): OptionReader {
   return {
@@ -547,7 +687,9 @@ function optionReaderOf(interaction: ChatInputCommandInteraction): OptionReader 
   };
 }
 
-function invokerOf(interaction: ChatInputCommandInteraction | AutocompleteInteraction): Invoker {
+function invokerOf(
+  interaction: ChatInputCommandInteraction | AutocompleteInteraction | ModalSubmitInteraction,
+): Invoker {
   return {
     userId: interaction.user.id,
     roleIds: roleIdsOf(interaction.member),

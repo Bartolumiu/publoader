@@ -10541,6 +10541,203 @@ function mapFromLinkCard() {
   );
 }
 
+/**
+ * Map a whole paste of links at once.
+ *
+ * WHY IT IS SEPARATE FROM THE CARD ABOVE. A backlog is not worked one series at
+ * a time: someone goes through a publisher's new-releases page with twenty tabs
+ * open, and doing that one link at a time is twenty round trips and twenty
+ * chances to lose track of which ones landed. Pasting the lot answers all of it
+ * at once — including which three of the twenty it could not place.
+ *
+ * Preview then apply, exactly like the tracked map's own paste box and for the
+ * same reason: one paste can add, repoint, no-op and fail in the same batch, and
+ * repointing silently redirects a live series. The operator confirms against a
+ * per-row verdict rather than against their own reading of what they pasted.
+ * "Apply" does not exist until a preview has come back.
+ */
+function mapManyCard() {
+  const writable = can("tracked:append");
+
+  const text = el("textarea", {
+    id: "map-many-text",
+    spellcheck: "false",
+    rows: "6",
+    disabled: !writable,
+    placeholder:
+      "https://comikey.com/comics/a-series https://mangadex.org/title/<uuid>\n" +
+      "https://mangaplus.shueisha.co.jp/titles/100001, <uuid>\n" +
+      "# one publisher link and one MangaDex link per line, in either order",
+    "aria-label": "Publisher and MangaDex links to map",
+  });
+  const preview = el("div", { id: "map-many-preview" });
+  const applyRow = el("div", {});
+
+  const OUTCOME_TONE = {
+    added: "ok",
+    updated: "warn",
+    unchanged: "",
+    rejected_needs_write: "bad",
+    invalid: "bad",
+    unresolved: "bad",
+  };
+
+  const clear = () => {
+    preview.replaceChildren();
+    applyRow.replaceChildren();
+  };
+
+  const render = (report, onApply) => {
+    preview.replaceChildren(
+      el(
+        "div",
+        { class: "grid tight" },
+        [
+          ["added", report.added],
+          ["repointed", report.updated],
+          ["unchanged", report.unchanged],
+          ["not placed", report.unresolved],
+          ["rejected", report.failed],
+        ].map(([key, value]) =>
+          el(
+            "div",
+            { class: "stat" },
+            el("div", { class: "n", text: String(value ?? 0) }),
+            el("div", { class: "k", text: key }),
+          ),
+        ),
+      ),
+      report.parseErrors?.length
+        ? el(
+            "div",
+            {},
+            el("h3", { text: `${report.parseErrors.length} line(s) could not be read` }),
+            table(
+              ["Line", "Text", "Why"],
+              report.parseErrors.map((e) => [String(e.line), el("code", { text: truncate(e.text, 60) }), e.reason]),
+            ),
+          )
+        : null,
+      el("h3", { text: "Per-row outcome" }),
+      table(
+        ["Line", "Publisher link", "Series", "MangaDex", "Outcome", "Detail"],
+        (report.results ?? []).map((result) => [
+          String(result.line ?? ""),
+          el("code", { text: truncate(result.sourceUrl ?? "", 48) }),
+          // How it was identified travels with the row: a measured rule and a
+          // queue row are not equally strong, and this is where that shows.
+          result.mangaId
+            ? el(
+                "span",
+                {},
+                el("code", { text: `${result.extension}/${result.mangaId}` }),
+                result.via ? el("span", { class: "dim small", text: ` ${result.via}` }) : null,
+              )
+            : el("span", { class: "dim", text: result.extension || "not placed" }),
+          result.mdMangaId ? mdTitleLink(result.mdMangaId, truncate(result.mdMangaId, 12)) : "-",
+          el("span", { class: `chip ${OUTCOME_TONE[result.outcome] || ""}`.trim(), text: result.outcome }),
+          result.detail || (result.queued ? `queued as ${truncate(result.queued, 40)}` : ""),
+        ]),
+      ),
+    );
+
+    const willChange = (report.added ?? 0) + (report.updated ?? 0);
+    applyRow.replaceChildren(
+      willChange === 0
+        ? el("p", { class: "dim", text: "Nothing would change, so there is nothing to apply." })
+        : row(
+            gatedButton("tracked:append", {
+              class: "primary",
+              text: `Apply; ${report.added} added, ${report.updated} repointed`,
+              onclick: (event) => onApply(event.currentTarget),
+            }),
+            el("button", { type: "button", text: "Discard preview", onclick: clear }),
+          ),
+    );
+  };
+
+  /**
+   * The preview is the server's own dry run, not a guess made here.
+   *
+   * Judging these rows in the browser would mean a second copy of the resolver,
+   * and the two would drift; asking the server means the preview is by
+   * construction the same judgement the apply will make.
+   */
+  const runPreview = async (button) => {
+    clear();
+    if (!text.value.trim()) return void toast("paste some links first", false);
+    button.dataset.pending = "true";
+    button.disabled = true;
+    let dry;
+    try {
+      dry = await api("/source/map/batch", { method: "POST", body: { text: text.value, dryRun: true } });
+    } catch (err) {
+      // Not wrapped in `act`: "ok" toasted over a table saying three rows were
+      // rejected is actively misleading.
+      if (!(err instanceof ApiError && err.status === 401)) {
+        preview.replaceChildren(el("p", { class: "error", text: `Preview failed: ${err.message}` }));
+      }
+      return;
+    } finally {
+      delete button.dataset.pending;
+      button.disabled = false;
+    }
+
+    render(dry, async (applyButton) => {
+      const applied = await act(
+        "source.map.batch",
+        () => api("/source/map/batch", { method: "POST", body: { text: text.value } }),
+        { button: applyButton },
+      );
+      if (!applied) return;
+      render(applied, () => undefined);
+      applyRow.replaceChildren(
+        el("p", {
+          class: "dim",
+          text:
+            `Applied: ${applied.added} added, ${applied.updated} repointed` +
+            (applied.closedQueueRows ? `, ${applied.closedQueueRows} queue row(s) closed` : "") +
+            (applied.untrackedNote ? `. ${applied.untrackedNote}` : "."),
+        }),
+      );
+      text.value = "";
+    });
+  };
+
+  return card(
+    "Map many from links",
+    el("p", {
+      class: "dim small",
+      text:
+        "One publisher link and one MangaDex link per line, in either order. Each line is resolved to an " +
+        `extension and a series the same way as above; up to 200 lines. Nothing is written until you apply a preview.`,
+    }),
+    text,
+    row(
+      gatedButton("tracked:append", {
+        class: "primary",
+        text: "Preview changes",
+        onclick: (event) => void runPreview(event.currentTarget),
+      }),
+      el("button", {
+        type: "button",
+        text: "Paste from clipboard",
+        disabled: !writable,
+        onclick: async () => {
+          try {
+            text.value = await navigator.clipboard.readText();
+            clear();
+          } catch {
+            toast("clipboard blocked; paste into the box directly", false);
+          }
+        },
+      }),
+    ),
+    preview,
+    applyRow,
+  );
+}
+
 VIEWS.tracked = () => {
   const counts = new Resource("tracked-counts", async () => {
     const list = await api("/extensions");
@@ -10562,6 +10759,7 @@ VIEWS.tracked = () => {
     "div",
     {},
     mapFromLinkCard(),
+    mapManyCard(),
     card(
       "Series map by extension",
       el("p", {

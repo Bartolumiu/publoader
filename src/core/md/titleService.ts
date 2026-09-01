@@ -642,6 +642,22 @@ export class TitleService {
   }
 
   /**
+   * Which of these title ids MangaDex actually holds.
+   *
+   * The batch counterpart to `titleById`. Checking a pasted batch one row at a
+   * time would be one MangaDex request per line, which for two hundred lines is
+   * both slow and rude to a service that rate-limits us; `mangaByIds` answers
+   * a hundred at a time. Ids MangaDex does not return are the ones to refuse:
+   * a mapping onto a title that is not there wires uploads to nothing.
+   */
+  async existingTitles(ids: string[]): Promise<Set<string>> {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) return new Set();
+    const found = await this.md.mangaByIds(unique);
+    return new Set(found.map((manga) => manga.id));
+  }
+
+  /**
    * Point an untracked row at a MangaDex title that already exists.
    *
    * The counterpart to `approve`: same bookkeeping, no title creation. Both
