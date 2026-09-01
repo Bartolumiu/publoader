@@ -13885,7 +13885,8 @@ const DISCORD_LISTS = [
     key: "guilds",
     title: "Guilds",
     blurb:
-      "Servers the bot answers in. Empty means every server it has been invited to, which is almost never what you want.",
+      "Servers the bot answers in. Empty means every server it has been invited to, which is almost never what you want. " +
+      "Invite the bot to a server before pinning it here — with both the `bot` and `applications.commands` scopes — or it will have no commands to show there.",
   },
   {
     key: "channels",
