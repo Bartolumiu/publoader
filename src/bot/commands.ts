@@ -40,6 +40,8 @@ import {
   type WorkerAction,
 } from "./apiClient.js";
 import type { Sensitivity } from "./authz.js";
+import type { BotAuthzView } from "./apiClient.js";
+import type { AuthzEntry, AuthzListName } from "../core/store/botAuthz.js";
 import { DEFAULT_COOLDOWN_DAYS, MAX_COOLDOWN_DAYS, NAMESPACE_RE } from "../core/store/trackedManga.js";
 import { mdTitleUrl, parseMdTitleId } from "../core/md/titleId.js";
 
@@ -604,6 +606,61 @@ function stillWorkingText(
       : "") +
     `It keeps going without me. Run \`${opts.command}\` again in a minute for the numbers.`
   );
+}
+
+// ---- /access helpers -------------------------------------------------------
+
+/**
+ * The four allowlists, named the way an operator would say them out loud.
+ * The stored key is the API's; the choice value is what fits in a slash option.
+ */
+const LIST_LABELS: Record<AuthzListName, string> = {
+  guilds: "guilds",
+  channels: "allowed channels",
+  adminUsers: "admin users",
+  adminRoles: "admin roles",
+};
+
+const LIST_CHOICES = [
+  { name: "guilds — servers this bot answers in", value: "guilds" },
+  { name: "channels — where commands may be used", value: "channels" },
+  { name: "admin-users — who may change things", value: "admin-users" },
+  { name: "admin-roles — which roles may change things", value: "admin-roles" },
+] as const;
+
+const LIST_BY_CHOICE: Record<string, AuthzListName | undefined> = {
+  guilds: "guilds",
+  channels: "channels",
+  "admin-users": "adminUsers",
+  "admin-roles": "adminRoles",
+};
+
+/**
+ * Pull a snowflake out of whatever the operator typed.
+ *
+ * Accepting `<#123>`, `<@123>` and `<@&123>` matters because a mention is what
+ * Discord inserts when you type `#` or `@`, so it is what an operator produces
+ * by accident far more often than a bare id. Refusing it would be technically
+ * correct and practically hostile.
+ */
+export function snowflakeFrom(raw: string | null | undefined): string | null {
+  const trimmed = (raw ?? "").trim();
+  const mention = /^<(?:#|@[!&]?)(\d+)>$/.exec(trimmed);
+  const id = mention?.[1] ?? trimmed;
+  return /^\d{5,}$/.test(id) ? id : null;
+}
+
+/** `#ops (800…001)` when labelled, a bare id when not; `none` for an empty list. */
+function renderEntries(entries: readonly AuthzEntry[]): string {
+  if (entries.length === 0) return "_none_";
+  return entries.map((e) => (e.label ? `${e.label} (\`${e.id}\`)` : `\`${e.id}\``)).join(", ");
+}
+
+function describeView(view: BotAuthzView): string {
+  const counts = (Object.keys(LIST_LABELS) as AuthzListName[])
+    .map((name) => `${view.entries[name].length} ${LIST_LABELS[name]}`)
+    .join(", ");
+  return counts;
 }
 
 const commands: BotCommand[] = [
@@ -2603,6 +2660,152 @@ const commands: BotCommand[] = [
           `**Effective**: ${code(res.effective)}`,
         ]),
       };
+    },
+  },
+  {
+    name: "access",
+    description: "Which guilds, channels, users and roles may operate this bot.",
+    /**
+     * Editing is `destructive` rather than `mutate` because it hands out
+     * authority: whoever is added here can run every mutating command the
+     * bot's own token allows. The confirmation is the point.
+     */
+    sensitivity: { show: "read", add: "destructive", remove: "destructive", reset: "destructive" },
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("access")
+      .setDescription("Which guilds, channels, users and roles may operate this bot.")
+      .addSubcommand((s) =>
+        s.setName("show").setDescription("The allowlists in force, and where they are being read from."),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("add")
+          .setDescription("Allow a guild, channel, user or role.")
+          .addStringOption((o) =>
+            o.setName("list").setDescription("Which allowlist to add to.").setRequired(true).addChoices(...LIST_CHOICES),
+          )
+          .addStringOption((o) =>
+            o
+              .setName("id")
+              .setDescription("The snowflake, or a #channel / @user / @role mention.")
+              .setRequired(true),
+          )
+          .addStringOption((o) => o.setName("label").setDescription("What to call it on the dashboard."))
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Required: this grants control of the platform."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("remove")
+          .setDescription("Revoke a guild, channel, user or role.")
+          .addStringOption((o) =>
+            o
+              .setName("list")
+              .setDescription("Which allowlist to remove from.")
+              .setRequired(true)
+              .addChoices(...LIST_CHOICES),
+          )
+          .addStringOption((o) =>
+            o.setName("id").setDescription("The snowflake, or a mention.").setRequired(true),
+          )
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Required: you can lock yourself out with this."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("reset")
+          .setDescription("Forget the stored lists and fall back to the bot's environment.")
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Required: reverts to whatever .env the bot was deployed with."),
+          ),
+      ),
+    async run(ctx) {
+      const sub = ctx.options.subcommand() ?? "show";
+
+      if (sub === "show") {
+        const view = await ctx.api.botAuthz(ctx.actor);
+        const source = view.configured
+          ? "the control plane (edit on the dashboard, or here)"
+          : "the bot's environment — nothing has been saved yet, so `.env` is still in force";
+        const parts = [`**Source**: ${source}`];
+        for (const [name, entries] of Object.entries(view.entries) as [AuthzListName, AuthzEntry[]][]) {
+          parts.push(`**${LIST_LABELS[name]}** (${entries.length}): ${renderEntries(entries)}`);
+        }
+        for (const warning of view.warnings) parts.push(`:warning: ${warning}`);
+        return { text: lines(parts) };
+      }
+
+      if (sub === "reset") {
+        if (ctx.options.boolean("confirm") !== true) {
+          return {
+            text: lines([
+              "This discards every stored allowlist and hands control back to the bot's environment.",
+              "If `.env` is empty, that means **no admins and no channels**, and every write is refused until you set them again.",
+              "Re-issue with `confirm: true` if that is what you want.",
+            ]),
+          };
+        }
+        const view = await ctx.api.resetBotAuthz(ctx.actor);
+        return {
+          text: lines([
+            "Stored allowlists cleared; the bot is back on its environment.",
+            `**Now in force**: ${describeView(view)}`,
+          ]),
+        };
+      }
+
+      const listName = LIST_BY_CHOICE[ctx.options.string("list") ?? ""];
+      if (!listName) return { text: "Pick one of the four lists." };
+      const id = snowflakeFrom(ctx.options.string("id"));
+      if (!id) {
+        return {
+          text: lines([
+            "That is not a Discord id.",
+            "Turn on **Developer Mode** (Settings → Advanced), then right-click the server, channel, user or role and **Copy ID**.",
+            "A `#channel`, `@user` or `@role` mention works too; a plain name does not.",
+          ]),
+        };
+      }
+
+      if (ctx.options.boolean("confirm") !== true) {
+        const effect =
+          sub === "add"
+            ? `\`${id}\` will be able to operate this bot within the ${LIST_LABELS[listName]} list.`
+            : `\`${id}\` will lose access. If that is your own account or your only admin role, you are locking yourself out.`;
+        return { text: lines([effect, "Re-issue with `confirm: true` if that is what you want."]) };
+      }
+
+      // Read-modify-write: the API replaces a list wholesale, which is right for
+      // a dashboard textarea but not for "add one". Two operators editing the
+      // same list in the same second would have one edit win; that is a trade
+      // worth taking over inventing a delta endpoint for a four-row table.
+      const before = await ctx.api.botAuthz(ctx.actor);
+      const existing = before.entries[listName];
+      let next: { id: string; label: string }[];
+      if (sub === "add") {
+        if (existing.some((e) => e.id === id)) {
+          return { text: `\`${id}\` is already on the ${LIST_LABELS[listName]} list.` };
+        }
+        next = [...existing, { id, label: (ctx.options.string("label") ?? "").slice(0, 80) }];
+      } else {
+        if (!existing.some((e) => e.id === id)) {
+          return { text: `\`${id}\` is not on the ${LIST_LABELS[listName]} list; nothing to remove.` };
+        }
+        next = existing.filter((e) => e.id !== id);
+      }
+
+      const after = await ctx.api.setBotAuthz(ctx.actor, { [listName]: next });
+      const verb = sub === "add" ? "Added" : "Removed";
+      const parts = [
+        `${verb} \`${id}\` ${sub === "add" ? "to" : "from"} **${LIST_LABELS[listName]}**.`,
+        `**${LIST_LABELS[listName]}** is now: ${renderEntries(after.entries[listName])}`,
+        "The bot re-reads its allowlists about once a minute, so this takes effect shortly.",
+      ];
+      for (const warning of after.warnings) parts.push(`:warning: ${warning}`);
+      return { text: lines(parts) };
     },
   },
   {

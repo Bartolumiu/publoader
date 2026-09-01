@@ -28,6 +28,7 @@ import {
   type TrackedEntry,
 } from "./apiClient.js";
 import { authorize, describeAuthz, type AuthzConfig, type Invoker } from "./authz.js";
+import type { AuthzSource } from "./authzSource.js";
 import {
   ALL_COMMANDS,
   COMMANDS_BY_NAME,
@@ -68,14 +69,15 @@ export class FatalBotConfigError extends Error {
 export interface PubloaderBotOptions {
   discordToken: string;
   api: AdminApiClient;
-  authz: AuthzConfig;
+  /** Live allowlists; re-read on a timer so dashboard edits take effect. */
+  authz: AuthzSource;
   log: Logger;
 }
 
 export class PubloaderBot {
   private readonly client: Client;
   private readonly api: AdminApiClient;
-  private readonly authz: AuthzConfig;
+  private readonly authzSource: AuthzSource;
   private readonly log: Logger;
   private readonly discordToken: string;
   /**
@@ -84,6 +86,12 @@ export class PubloaderBot {
    * idempotency key only collapses retries of the *same* interaction.
    */
   private readonly inFlight = new Set<string>();
+  /**
+   * Guilds the command set is currently published to, so a guild dropped from
+   * the allowlist can have its commands withdrawn rather than left on screen
+   * to fail. Empty means the commands are registered globally.
+   */
+  private registeredGuildIds: string[] = [];
   private extensionCache: { names: string[]; fetchedAt: number } | null = null;
   /**
    * One extension's series map, for the `manga-id` and `catalogue`
@@ -98,9 +106,20 @@ export class PubloaderBot {
   private readonly trackedCache = new Map<string, { rows: TrackedEntry[]; namespaces: string[]; fetchedAt: number }>();
   private shuttingDown = false;
 
+  /**
+   * The allowlists in force *right now*.
+   *
+   * A getter rather than a field because the source re-reads them on a timer:
+   * caching the config would mean an operator's dashboard edit did nothing
+   * until the bot was restarted, which is the problem this replaced.
+   */
+  private get authz(): AuthzConfig {
+    return this.authzSource.config;
+  }
+
   constructor(opts: PubloaderBotOptions) {
     this.api = opts.api;
-    this.authz = opts.authz;
+    this.authzSource = opts.authz;
     this.log = opts.log;
     this.discordToken = opts.discordToken;
     // Guilds is the only intent needed: the bot is slash-command driven and
@@ -172,6 +191,13 @@ export class PubloaderBot {
 
   async start(): Promise<void> {
     await this.selfCheck();
+    // Read the stored allowlists before connecting, so the very first
+    // interaction is judged against the current config rather than against the
+    // environment the container happened to be started with.
+    await this.authzSource.refresh();
+    this.authzSource.start(({ guildsChanged }) => {
+      if (guildsChanged) void this.registerCommands();
+    });
     try {
       await this.client.login(this.discordToken);
     } catch (err) {
@@ -187,27 +213,49 @@ export class PubloaderBot {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
     this.log.info({ reason }, "shutting down discord bot");
+    this.authzSource.stop();
     await this.client.destroy();
   }
 
   /**
    * Push the command definitions to Discord.
    *
-   * Guild-scoped when DISCORD_GUILD_ID is set: guild commands appear instantly,
+   * Guild-scoped whenever any guild is pinned: guild commands appear instantly,
    * while global commands can take an hour to propagate; and a control-plane
    * bot has no business exposing its commands in guilds it was not deployed for.
+   *
+   * Called again whenever the pinned guilds change, because a guild added on
+   * the dashboard has no commands in it until this runs.
    */
   private async registerCommands(): Promise<void> {
     const body = ALL_COMMANDS.map((c) => c.builder.toJSON());
     try {
-      if (this.authz.guildId) {
-        await this.client.application?.commands.set(body, this.authz.guildId);
-        this.log.info({ count: body.length, guildId: this.authz.guildId }, "registered guild slash commands");
+      const guildIds = [...this.authz.guildIds];
+      if (guildIds.length > 0) {
+        for (const guildId of guildIds) {
+          await this.client.application?.commands.set(body, guildId);
+        }
+        // Withdraw from guilds that were pinned a moment ago and are not any
+        // more. Leaving the commands behind would show an operator a full menu
+        // in a server where every single entry now answers "wrong guild".
+        for (const stale of this.registeredGuildIds.filter((id) => !guildIds.includes(id))) {
+          try {
+            await this.client.application?.commands.set([], stale);
+            this.log.info({ guildId: stale }, "withdrew slash commands from a de-listed guild");
+          } catch (err) {
+            // Being kicked from the guild is the common cause, and it has
+            // already achieved what the withdrawal was for.
+            this.log.warn({ err, guildId: stale }, "could not withdraw slash commands; the bot may have been removed");
+          }
+        }
+        this.registeredGuildIds = guildIds;
+        this.log.info({ count: body.length, guildIds }, "registered guild slash commands");
       } else {
+        this.registeredGuildIds = [];
         await this.client.application?.commands.set(body);
         this.log.warn(
           { count: body.length },
-          "registered GLOBAL slash commands because DISCORD_GUILD_ID is unset; propagation is slow and the commands appear in every guild the bot joins",
+          "registered GLOBAL slash commands because no guild is pinned; propagation is slow and the commands appear in every guild the bot joins. Pin one on the dashboard's Permissions page or with DISCORD_GUILD_ID",
         );
       }
     } catch (err) {
@@ -694,8 +742,31 @@ function invokerOf(
     userId: interaction.user.id,
     roleIds: roleIdsOf(interaction.member),
     channelId: interaction.channelId ?? "",
+    parentChannelId: parentChannelIdOf(interaction.channel),
     guildId: interaction.guildId,
   };
+}
+
+/**
+ * The channel a thread hangs off, or null for anything that is not a thread.
+ *
+ * Discord reports a thread's own id as the interaction channel, so an operator
+ * who allowlisted `#ops` and then opened a thread in it would be refused with
+ * "this channel is not on the bot's allowed-channel list" — naming a channel
+ * they had in fact allowed. Reading the parent is what makes the allowlist mean
+ * the thing the operator wrote down.
+ *
+ * `parentId` is consulted only for the three thread types. A text channel's
+ * `parentId` is its *category*, and honouring that would silently widen a
+ * one-channel allowlist to every channel in the category.
+ */
+function parentChannelIdOf(channel: unknown): string | null {
+  if (!channel || typeof channel !== "object") return null;
+  const type = (channel as { type?: unknown }).type;
+  // AnnouncementThread(10), PublicThread(11), PrivateThread(12).
+  if (type !== 10 && type !== 11 && type !== 12) return null;
+  const parentId = (channel as { parentId?: unknown }).parentId;
+  return typeof parentId === "string" ? parentId : null;
 }
 
 /**

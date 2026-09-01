@@ -12,6 +12,8 @@ import type { Logger } from "../logging.js";
 // scope name the bot invents is a 403 nobody can act on, and scopes.ts is a
 // dependency-free constant module, so importing it costs the bot nothing.
 import type { Scope } from "../core/api/scopes.js";
+import type { BotAuthzView } from "../core/api/routes/botAuthz.js";
+import type { AuthzEntry, AuthzListName } from "../core/store/botAuthz.js";
 
 /**
  * Where the bot looks for the control plane when CORE_URL is unset. Matches
@@ -20,7 +22,10 @@ import type { Scope } from "../core/api/scopes.js";
  */
 export const DEFAULT_CORE_URL = "https://publoader.ardax.dev";
 
-export type { Scope };
+export type { Scope, BotAuthzView };
+
+/** Lists omitted from a patch are left exactly as they are. */
+export type BotAuthzPatch = Partial<Record<AuthzListName, (string | AuthzEntry)[]>>;
 
 /** Any non-2xx answer from the admin API. */
 export class AdminApiError extends Error {
@@ -686,6 +691,43 @@ export class AdminApiClient {
     } catch {
       throw new AdminNetworkError(`${spec.method} ${url.pathname} returned non-JSON: ${text.slice(0, 200)}`);
     }
+  }
+
+  // ---- the bot's own allowlists ----
+
+  /**
+   * Who this bot answers to, as the control plane currently stores it.
+   *
+   * The bot reads its own gating over the same API every other surface uses
+   * rather than owning a private copy, so "who may operate the bot" has exactly
+   * one answer no matter where the question is asked.
+   */
+  botAuthz(actor: string): Promise<BotAuthzView> {
+    return this.request<BotAuthzView>({
+      method: "GET",
+      path: "/api/v1/admin/discord/authz",
+      scope: "users:admin",
+      actor,
+    });
+  }
+
+  setBotAuthz(actor: string, patch: BotAuthzPatch): Promise<BotAuthzView> {
+    return this.request<BotAuthzView>({
+      method: "PUT",
+      path: "/api/v1/admin/discord/authz",
+      scope: "users:admin",
+      actor,
+      json: patch,
+    });
+  }
+
+  resetBotAuthz(actor: string): Promise<BotAuthzView> {
+    return this.request<BotAuthzView>({
+      method: "DELETE",
+      path: "/api/v1/admin/discord/authz",
+      scope: "users:admin",
+      actor,
+    });
   }
 
   // ---- observability ----

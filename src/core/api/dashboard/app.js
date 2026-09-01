@@ -13844,6 +13844,7 @@ VIEWS.permissions = () => {
   return el(
     "div",
     {},
+    discordAccessCard(),
     card(
       "Roles",
       el("p", {
@@ -13869,6 +13870,206 @@ VIEWS.permissions = () => {
     ),
   );
 };
+
+/**
+ * Which guilds, channels, users and roles may drive the Discord bot.
+ *
+ * These four lists were environment variables until they were settings, which
+ * meant "who can operate the platform from Discord?" was a question the
+ * dashboard could not answer and a redeploy was the only way to change the
+ * answer. The bot re-reads them about once a minute, so a save here reaches it
+ * without a restart.
+ */
+const DISCORD_LISTS = [
+  {
+    key: "guilds",
+    title: "Guilds",
+    blurb:
+      "Servers the bot answers in. Empty means every server it has been invited to, which is almost never what you want.",
+  },
+  {
+    key: "channels",
+    title: "Allowed channels",
+    blurb:
+      "Where commands may be used. Empty means reads work anywhere and every write is refused. A thread is covered by its parent channel, so list the channel, not the thread.",
+  },
+  {
+    key: "adminUsers",
+    title: "Admin users",
+    blurb: "Who may run commands that change things. Everyone else still gets the read-only commands.",
+  },
+  {
+    key: "adminRoles",
+    title: "Admin roles",
+    blurb: "Same, by role. A role id only exists in the server that owns it, so add one per guild.",
+  },
+];
+
+function discordAccessCard() {
+  const resource = new Resource("discord-authz", () => api("/discord/authz"));
+
+  const save = async (key, entries) => {
+    try {
+      await api("/discord/authz", { method: "PUT", body: { [key]: entries } });
+      toast("Discord access updated. The bot picks this up within a minute.");
+      void resource.load({ force: true });
+    } catch (err) {
+      toast(err.message || "Could not save", false);
+    }
+  };
+
+  return card(
+    "Discord bot access",
+    el("p", {
+      class: "dim small",
+      text:
+        "Who may operate the platform from Discord. Ids are Discord snowflakes: turn on Developer Mode in Discord " +
+        "(Settings → Advanced), then right-click a server, channel, user or role and Copy ID. Labels are for you; " +
+        "the bot matches on the id alone.",
+    }),
+    live(
+      [resource],
+      (data) =>
+        el(
+          "div",
+          {},
+          el(
+            "div",
+            { class: "row" },
+            chip(data.configured ? "stored here" : "using the bot's .env"),
+            el("span", {
+              class: "dim small",
+              text: data.configured
+                ? "These lists are the ones in force. The bot picks up a change within a minute."
+                : "The lists below are not in force yet.",
+            }),
+          ),
+          data.warnings.map((warning) => el("p", { class: "error small", text: warning })),
+          DISCORD_LISTS.map((spec) => discordListPanel(spec, data.entries[spec.key] || [], save)),
+          row(
+            el("button", {
+              type: "button",
+              class: "danger",
+              text: "Reset to environment",
+              onclick: async () => {
+                const ok = await confirmDialog({
+                  title: "Discard the stored allowlists?",
+                  lead: "The bot falls back to the environment it was deployed with.",
+                  points: [
+                    "If that environment is empty, the bot will have no admins and no allowed channels, and every state-changing command will be refused.",
+                    "Read-only commands keep working.",
+                  ],
+                  confirmLabel: "Reset",
+                });
+                if (!ok) return;
+                try {
+                  await api("/discord/authz", { method: "DELETE" });
+                  toast("Stored allowlists cleared.");
+                  void resource.load({ force: true });
+                } catch (err) {
+                  toast(err.message || "Could not reset", false);
+                }
+              },
+            }),
+          ),
+        ),
+      { reserve: 420, skeleton: () => skeletonGrid(8) },
+    ),
+  );
+}
+
+/**
+ * One list, edited in place.
+ *
+ * The whole list is sent on save rather than a per-row add/remove call, because
+ * that is the shape the API takes and because it lets an operator stage several
+ * changes and commit them together — which is what you want when the change you
+ * are making is "swap the admin role", and doing it in two steps would leave a
+ * window with nobody in it.
+ */
+function discordListPanel(spec, entries, save) {
+  // A working copy: edits are local until Save, so a mistyped id can be
+  // corrected without ever having been the live allowlist.
+  let draft = entries.map((entry) => ({ id: entry.id, label: entry.label || "" }));
+  const body = el("div", {});
+
+  const draw = () => {
+    setChildren(
+      body,
+      draft.length === 0 ? el("p", { class: "dim small", text: "Empty." }) : null,
+      ...draft.map((entry, index) =>
+        row(
+          el("code", { text: entry.id }),
+          el("input", {
+            type: "text",
+            value: entry.label,
+            placeholder: "label (optional)",
+            oninput: (event) => {
+              draft[index].label = event.target.value;
+            },
+          }),
+          el("button", {
+            type: "button",
+            text: "Remove",
+            onclick: () => {
+              draft = draft.filter((_, at) => at !== index);
+              draw();
+            },
+          }),
+        ),
+      ),
+    );
+  };
+  draw();
+
+  const idInput = el("input", { type: "text", placeholder: "id, or a #channel / @user mention" });
+  const labelInput = el("input", { type: "text", placeholder: "label (optional)" });
+
+  const add = () => {
+    // Accept the mention syntax Discord inserts when you type `#` or `@`; it is
+    // what an operator produces by accident far more often than a bare id.
+    const raw = idInput.value.trim();
+    const match = /^<(?:#|@[!&]?)(\d+)>$/.exec(raw);
+    const id = match ? match[1] : raw;
+    if (!/^\d{5,}$/.test(id)) {
+      toast("That is not a Discord id. Copy ID gives you a long number.", false);
+      return;
+    }
+    if (draft.some((entry) => entry.id === id)) {
+      toast("Already on this list.", false);
+      return;
+    }
+    draft.push({ id, label: labelInput.value.trim() });
+    idInput.value = "";
+    labelInput.value = "";
+    draw();
+  };
+
+  return el(
+    "div",
+    { class: "stat" },
+    el("div", { class: "row" }, el("h3", { text: spec.title }), chip(String(entries.length))),
+    el("p", { class: "dim small", text: spec.blurb }),
+    body,
+    row(idInput, labelInput, el("button", { type: "button", text: "Add", onclick: add })),
+    row(
+      el("button", {
+        type: "button",
+        class: "primary",
+        text: "Save",
+        onclick: () => save(spec.key, draft),
+      }),
+      el("button", {
+        type: "button",
+        text: "Revert",
+        onclick: () => {
+          draft = entries.map((entry) => ({ id: entry.id, label: entry.label || "" }));
+          draw();
+        },
+      }),
+    ),
+  );
+}
 
 /** One role's editor, or its read-only statement when it is not tunable. */
 function rolePanel(role, data, catalogue) {

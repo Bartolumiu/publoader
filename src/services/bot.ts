@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { loadConfig } from "../config.js";
 import { createLogger } from "../logging.js";
 import { AdminApiClient, DEFAULT_CORE_URL } from "../bot/apiClient.js";
-import { loadAuthzConfig } from "../bot/authz.js";
+import { AuthzSource } from "../bot/authzSource.js";
 import { EX_CONFIG, FatalBotConfigError, PubloaderBot } from "../bot/bot.js";
 
 const config = loadConfig();
@@ -68,7 +68,9 @@ const api = new AdminApiClient({
 const bot = new PubloaderBot({
   discordToken,
   api,
-  authz: loadAuthzConfig(process.env),
+  // The environment is the bootstrap and the fallback; once anything has been
+  // saved from the dashboard, API, CLI or `/access`, the stored lists win.
+  authz: new AuthzSource({ api, env: process.env, log }),
   log,
 });
 
