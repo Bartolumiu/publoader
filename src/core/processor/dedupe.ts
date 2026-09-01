@@ -847,10 +847,52 @@ function identifiesAChapter(url: string): boolean {
 }
 
 /**
+ * Campaign tracking parameters. They say where a reader came from, never which
+ * chapter they arrived at, so two links that differ only in these are one link.
+ */
+const TRACKING_PARAMS = /^(utm_[a-z0-9_]*)$/i;
+
+/**
+ * A link with its tracking parameters removed, for comparing one link to
+ * another.
+ *
+ * Comikey's own uploads carry `?utm_source=mgd` and ours do not, so 154 pairs
+ * of the same chapter -- byte-identical but for those fifteen characters --
+ * keyed apart and the duplicate scan reported none of them. `urlPath` above
+ * already drops the whole query for the same reason, which is why
+ * `checkChapterUrlSame` matched these pairs while this did not; the two
+ * disagreed about whether a link was the same link.
+ *
+ * Only the tracking parameters go. Dropping the whole query would be the
+ * easier rule and a worse one: a publisher is entitled to put a page or a
+ * language in there, and collapsing two genuinely different chapters into one
+ * bucket ends in deleting one of them.
+ */
+export function linkIdentity(url: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // Not parseable as an absolute url, so there is nothing to normalise and
+    // nothing to gain by guessing. Compare it as it came.
+    return url;
+  }
+
+  for (const name of [...parsed.searchParams.keys()]) {
+    if (TRACKING_PARAMS.test(name)) parsed.searchParams.delete(name);
+  }
+  // An empty query must not leave a bare "?" behind, or the normalised form of
+  // "…/chapter-1/?utm_source=mgd" would still differ from "…/chapter-1/".
+  parsed.hash = "";
+  return parsed.search === "" ? `${parsed.origin}${parsed.pathname}` : parsed.toString();
+}
+
+/**
  * Chapters that duplicate one another. External/link chapters are keyed on
- * their exact externalUrl; image chapters, and link chapters whose url names
- * only the publisher, fall back to volume + number. Language is part of every
- * key, so the same chapter in two languages is never a duplicate of itself.
+ * their externalUrl with tracking parameters removed; image chapters, and link
+ * chapters whose url names only the publisher, fall back to volume + number.
+ * Language is part of every key, so the same chapter in two languages is never
+ * a duplicate of itself.
  *
  * The url key is deliberately kept for real links rather than tightened with
  * the chapter number. `multi_chapters` exists precisely to say which numbers
@@ -861,7 +903,7 @@ function identifiesAChapter(url: string): boolean {
 function dupeKey(mdChapter: MdChapter): string {
   const attrs = mdChapter.attributes;
   if (attrs.externalUrl && identifiesAChapter(attrs.externalUrl)) {
-    return JSON.stringify([attrs.translatedLanguage, "url", attrs.externalUrl]);
+    return JSON.stringify([attrs.translatedLanguage, "url", linkIdentity(attrs.externalUrl)]);
   }
   return JSON.stringify([attrs.translatedLanguage, "image", attrs.volume, attrs.chapter]);
 }
