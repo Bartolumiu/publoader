@@ -5,6 +5,7 @@ import type { WorkerStore } from "../store/workers.js";
 import type { ApiTokenStore } from "../store/apiTokens.js";
 import {
   hasScope,
+  intersectScopes,
   scopesForRole,
   WILDCARD,
   type Principal,
@@ -102,6 +103,36 @@ export interface AdminAuthOptions {
   session?: (req: FastifyRequest) => Promise<AdminPrincipal | null>;
   /** Scoped per-client `pa_…` tokens. */
   apiTokens?: ApiTokenStore;
+  /**
+   * Resolves a Discord user id to the dashboard account linked to it, or null.
+   * Injected for the same reason `session` is: keeps this module acyclic.
+   *
+   * Absent means the deployment does not support acting-on-behalf-of, and any
+   * request asking for it is refused rather than quietly run as the token.
+   */
+  impersonation?: (discordId: string) => Promise<ImpersonatedUser | null>;
+}
+
+/** The dashboard account a request is being made on behalf of. */
+export interface ImpersonatedUser {
+  userId: string;
+  role: AdminRole;
+  email: string;
+  /** That account's effective scopes, already resolved from role and tuning. */
+  scopes: string[];
+}
+
+/**
+ * Names the Discord user a bot command came from, so the request runs with that
+ * person's dashboard permissions rather than the bot's blanket ones.
+ */
+export const ON_BEHALF_OF_HEADER = "x-on-behalf-of-discord";
+
+function onBehalfOf(req: FastifyRequest): string | null {
+  const raw = req.headers[ON_BEHALF_OF_HEADER];
+  const value = (Array.isArray(raw) ? raw[0] : raw)?.trim() ?? "";
+  // A snowflake is always numeric; anything else is a caller error, not an id.
+  return /^\d{5,25}$/.test(value) ? value : null;
 }
 
 export function adminAuthHook(opts: AdminAuthOptions) {
@@ -134,6 +165,41 @@ export function adminAuthHook(opts: AdminAuthOptions) {
         // Scoped tokens are never owner-equivalent, whatever they hold:
         // account administration requires `users:admin`, checked per route.
         req.adminRole = "ADMIN";
+
+        const actingFor = onBehalfOf(req);
+        if (actingFor !== null) {
+          if (!opts.impersonation) {
+            await reply.code(403).send({ error: `${ON_BEHALF_OF_HEADER} is not accepted by this endpoint` });
+            return;
+          }
+          const user = await opts.impersonation(actingFor);
+          if (!user) {
+            // Said plainly, because this reaches a human in Discord: the fix is
+            // to link an account, not to widen a token.
+            await reply.code(403).send({
+              error: "no approved dashboard account is linked to that Discord account",
+              detail:
+                "Sign in to the dashboard and link Discord, or ask an owner to approve the account, then try again.",
+            });
+            return;
+          }
+          // The intersection is the whole security property: acting for someone
+          // can only narrow what this token could already do. A read-only
+          // account stays read-only however broadly the bot is scoped, and a
+          // compromised bot gains nothing by naming an owner.
+          req.principal = {
+            kind: "api-token",
+            name: `${row.name} as ${user.email}`,
+            scopes: intersectScopes(row.scopes, user.scopes),
+            tokenId: row.id,
+          };
+          req.adminUserId = user.userId;
+          // Deliberately capped: OWNER is the role that edits permissions and
+          // accounts, and `requireOwner` exists to keep tokens out of those
+          // routes. Letting impersonation reach it would hand a bot the one
+          // thing no token is allowed to have.
+          req.adminRole = user.role === "OWNER" ? "ADMIN" : user.role;
+        }
         return;
       }
       if (!constantTimeEqual(token, opts.adminToken)) {

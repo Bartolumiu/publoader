@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook, requireOwner, requireScope } from "../auth.js";
-import { sessionAuthenticator } from "../session.js";
+import { sessionAuthenticator, impersonationResolver} from "../session.js";
 import {
   SCOPES,
   SCOPE_DESCRIPTIONS,
@@ -46,6 +46,7 @@ export function registerPermissionRoutes(app: FastifyInstance, ctx: AppContext):
         adminToken: ctx.config.adminToken,
         session: sessionAuthenticator(ctx),
         apiTokens: ctx.apiTokens,
+        impersonation: impersonationResolver(ctx),
       }),
     );
     scope.addHook("preHandler", async (req, reply) => {

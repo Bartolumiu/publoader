@@ -3,7 +3,7 @@ import { Prisma, type UploadTaskKind, type UploadTaskState } from "@prisma/clien
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook, requireScope } from "../auth.js";
-import { sessionAuthenticator } from "../session.js";
+import { sessionAuthenticator, impersonationResolver} from "../session.js";
 import { chapterFromJson, chapterToTaskPayload, CHAPTER_JSON_KEYS } from "../../md/chapterRows.js";
 import {
   BULK_CAP,
@@ -236,6 +236,7 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
         adminToken: ctx.config.adminToken,
         session: sessionAuthenticator(ctx),
         apiTokens: ctx.apiTokens,
+        impersonation: impersonationResolver(ctx),
       }),
     );
     scope.addHook("preHandler", async (req, reply) => {

@@ -5,7 +5,9 @@ import { z } from "zod";
 import type { AppContext } from "./context.js";
 import type { Config } from "../../config.js";
 import type { Logger } from "../../logging.js";
-import { constantTimeEqual } from "./auth.js";
+import { constantTimeEqual,
+  type ImpersonatedUser,
+} from "./auth.js";
 import { verifyPassword } from "../store/adminUsers.js";
 
 /**
@@ -106,6 +108,37 @@ export function sessionAuthenticator(ctx: AppContext) {
         role: resolved.role,
         extraScopes: resolved.extraScopes,
         deniedScopes: resolved.deniedScopes,
+      }),
+    };
+  };
+}
+
+/**
+ * Resolve a Discord user id to the dashboard account linked to it.
+ *
+ * This is what lets the bot run a command with the *person's* permissions
+ * instead of its own: a contributor stays a contributor in Discord, and a
+ * read-only account cannot pause the platform however broadly the bot's token
+ * is scoped.
+ *
+ * Scopes are recomputed per request, exactly as they are for a cookie session,
+ * so revoking someone's access on the dashboard reaches the bot immediately
+ * rather than whenever it next restarts.
+ */
+export function impersonationResolver(ctx: AppContext) {
+  return async (discordId: string): Promise<ImpersonatedUser | null> => {
+    const user = await ctx.adminUsers.byDiscordId(discordId);
+    // An unapproved account is one an owner has not let in yet; it must not
+    // gain authority through a side door the dashboard would refuse.
+    if (!user || !user.approved) return null;
+    return {
+      userId: user.id,
+      role: user.role,
+      email: user.email,
+      scopes: await ctx.permissions.effectiveForUser({
+        role: user.role,
+        extraScopes: user.extraScopes,
+        deniedScopes: user.deniedScopes,
       }),
     };
   };

@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook, requireOwner, requireScope } from "../auth.js";
 import { RateLimiter } from "../ratelimit.js";
-import { sessionAuthenticator } from "../session.js";
+import { sessionAuthenticator, impersonationResolver} from "../session.js";
 import { EXTENSION_NAME_RE } from "../../../contracts/manifest.js";
 import { fetchRepoArchive, RepoArchiveError, type RepoArchiveFetcher } from "../../webhooks/repoArchive.js";
 import {
@@ -232,6 +232,7 @@ export function registerSysopsRoutes(
         adminToken: ctx.config.adminToken,
         session: sessionAuthenticator(ctx),
         apiTokens: ctx.apiTokens,
+        impersonation: impersonationResolver(ctx),
       }),
     );
     scope.addHook("preHandler", async (req, reply) => {

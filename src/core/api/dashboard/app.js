@@ -13946,7 +13946,10 @@ function discordAccessCard() {
             }),
           ),
           data.warnings.map((warning) => el("p", { class: "error small", text: warning })),
-          DISCORD_LISTS.map((spec) => discordListPanel(spec, data.entries[spec.key] || [], save)),
+          discordModePanel(data, resource),
+          DISCORD_LISTS.filter((spec) => !(data.mode === "dashboard" && spec.key === "adminUsers")).map((spec) =>
+            discordListPanel(spec, data.entries[spec.key] || [], save),
+          ),
           row(
             el("button", {
               type: "button",
@@ -13976,6 +13979,81 @@ function discordAccessCard() {
         ),
       { reserve: 420, skeleton: () => skeletonGrid(8) },
     ),
+  );
+}
+
+/**
+ * Which model decides who may run a state-changing command.
+ *
+ * The choice is between two genuinely different things, so it is stated as a
+ * consequence rather than as a setting name: in one, everyone allowed wields the
+ * bot's full authority; in the other, each person gets exactly what their own
+ * account already gives them on this dashboard.
+ */
+function discordModePanel(data, resource) {
+  const MODES = [
+    {
+      value: "allowlist",
+      title: "Discord allowlist",
+      blurb:
+        "The Admin users and Admin roles lists below decide who may run state-changing commands, and everyone on them acts with the bot's own permissions — the same for all of them.",
+    },
+    {
+      value: "dashboard",
+      title: "Operator accounts",
+      blurb:
+        "Anyone with an approved account here who has linked their Discord login may use the bot, and each command runs with that account's own permissions. A read-only account stays read-only in Discord. Removing someone here removes them from the bot at the same moment.",
+    },
+  ];
+
+  const choose = async (mode) => {
+    if (mode === data.mode) return;
+    if (mode === "dashboard") {
+      const ok = await confirmDialog({
+        title: "Derive bot access from operator accounts?",
+        lead: "The Admin users and Admin roles lists stop being consulted.",
+        points: [
+          "Only people with an approved account on this dashboard AND a linked Discord login will be able to run commands.",
+          "If nobody has linked Discord yet, every state-changing command is refused until someone does.",
+          "Each command then runs with that person's own permissions rather than the bot's.",
+        ],
+        confirmLabel: "Switch",
+        danger: false,
+      });
+      if (!ok) return;
+    }
+    try {
+      await api("/discord/authz", { method: "PUT", body: { mode } });
+      toast("Access model updated. The bot picks this up within a minute.");
+      void resource.load({ force: true });
+    } catch (err) {
+      toast(err.message || "Could not change the access model", false);
+    }
+  };
+
+  return el(
+    "div",
+    { class: "stat" },
+    el("div", { class: "row" }, el("h3", { text: "Who may operate the bot" })),
+    ...MODES.map((mode) =>
+      el(
+        "div",
+        { class: "row" },
+        el("button", {
+          type: "button",
+          class: data.mode === mode.value ? "primary" : "",
+          text: data.mode === mode.value ? `✓ ${mode.title}` : mode.title,
+          onclick: () => void choose(mode.value),
+        }),
+        el("span", { class: "dim small", text: mode.blurb }),
+      ),
+    ),
+    data.mode === "dashboard"
+      ? el("p", {
+          class: "dim small",
+          text: `Admin users is derived and not editable here: ${data.effective.adminUserIds.length} account(s) have linked Discord.`,
+        })
+      : null,
   );
 }
 

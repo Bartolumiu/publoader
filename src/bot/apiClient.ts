@@ -587,6 +587,8 @@ export interface AdminApiClientOptions {
   log?: Logger | undefined;
   /** Overridable for tests; defaults to global fetch. */
   fetchImpl?: typeof fetch | undefined;
+  /** Set via `onBehalfOf()`; see the field of the same name. */
+  actingForDiscordId?: string | undefined;
 }
 
 export class AdminApiClient {
@@ -596,12 +598,34 @@ export class AdminApiClient {
   private readonly fetchImpl: typeof fetch;
   /** Learned from a 403's `held` array; see `request()`. */
   private lastKnownScopes: readonly string[] | undefined;
+  /**
+   * Discord user this client acts for, sent as `x-on-behalf-of-discord`.
+   *
+   * When set, the control plane runs each request with that person's dashboard
+   * scopes intersected with this token's — so a command is carried out with the
+   * authority of whoever asked for it rather than the bot's own.
+   */
+  private readonly actingForDiscordId: string | undefined;
+  private readonly opts: AdminApiClientOptions;
 
   constructor(opts: AdminApiClientOptions) {
+    this.opts = opts;
     this.baseUrl = (opts.baseUrl ?? DEFAULT_CORE_URL).replace(/\/+$/, "");
     this.token = opts.token;
     this.log = opts.log;
     this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.actingForDiscordId = opts.actingForDiscordId;
+  }
+
+  /**
+   * A client that makes every call on behalf of one Discord user.
+   *
+   * A new instance rather than a mutable field, because commands run
+   * concurrently: setting "who am I acting for" on a shared client would let
+   * one person's command be authorized as another's.
+   */
+  onBehalfOf(discordUserId: string): AdminApiClient {
+    return new AdminApiClient({ ...this.opts, actingForDiscordId: discordUserId });
   }
 
   /**
@@ -647,6 +671,11 @@ export class AdminApiClient {
       // every action taken through the bot would read as one anonymous robot.
       "x-actor": spec.actor,
     };
+    if (this.actingForDiscordId) {
+      // The control plane resolves this to the linked operator account and runs
+      // the request with that account's scopes, intersected with this token's.
+      headers["x-on-behalf-of-discord"] = this.actingForDiscordId;
+    }
     let body: string | undefined;
     if (spec.json !== undefined) {
       headers["content-type"] = "application/json";

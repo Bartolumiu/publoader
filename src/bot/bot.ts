@@ -488,6 +488,22 @@ export class PubloaderBot {
     }
   }
 
+  /**
+   * The API client a command should run through.
+   *
+   * In `dashboard` mode every call carries the caller's Discord id, and the
+   * control plane runs it with that person's own operator scopes intersected
+   * with the bot token's. So a read-only account is read-only here too, and the
+   * bot stops being a single shared identity that everyone borrows.
+   *
+   * In `allowlist` mode nothing is sent and the bot acts as itself, which is
+   * what a deployment that has not linked its operators to Discord accounts
+   * needs — naming a person there would refuse every command.
+   */
+  private apiFor(discordUserId: string): AdminApiClient {
+    return this.authzSource.mode === "dashboard" ? this.api.onBehalfOf(discordUserId) : this.api;
+  }
+
   private async onInteraction(interaction: Interaction): Promise<void> {
     if (interaction.isAutocomplete()) {
       await this.onAutocomplete(interaction);
@@ -564,7 +580,7 @@ export class PubloaderBot {
       await interaction.deferReply(command.ephemeral ? { flags: MessageFlags.Ephemeral } : {});
       log.info({ sensitivity, actor }, "command accepted");
       const reply = await runCommand(command, {
-        api: this.api,
+        api: this.apiFor(interaction.user.id),
         actor,
         options: optionReaderOf(interaction),
         log,
@@ -642,7 +658,7 @@ export class PubloaderBot {
       await interaction.deferReply(command.ephemeral ? { flags: MessageFlags.Ephemeral } : {});
       log.info({ sensitivity, actor }, "modal accepted");
       const reply = await runCommand(command, {
-        api: this.api,
+        api: this.apiFor(interaction.user.id),
         actor,
         options: modalOptionReader(interaction),
         log,

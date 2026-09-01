@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook, requireScope } from "../auth.js";
-import { sessionAuthenticator } from "../session.js";
+import { sessionAuthenticator, impersonationResolver} from "../session.js";
 import { normaliseMangadexLanguage } from "../../../contracts/languages.js";
 import { EXTENSION_NAME_RE, Manifest, hostAllowed } from "../../../contracts/manifest.js";
 import type { RemovalMode } from "../../store/settings.js";
@@ -174,6 +174,7 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
         adminToken: ctx.config.adminToken,
         session: sessionAuthenticator(ctx),
         apiTokens: ctx.apiTokens,
+        impersonation: impersonationResolver(ctx),
       }),
     );
     scope.addHook("preHandler", async (req, reply) => {

@@ -9,7 +9,7 @@ import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook, requireOwner, requireScope } from "../auth.js";
 import { hasScope } from "../scopes.js";
-import { sessionAuthenticator } from "../session.js";
+import { sessionAuthenticator, impersonationResolver} from "../session.js";
 import { EXTENSION_NAME_RE, Manifest, hostAllowed, manifestSchedule } from "../../../contracts/manifest.js";
 import { normaliseMangadexLanguage } from "../../../contracts/languages.js";
 import { UPLOAD_TASK_KINDS, UPLOAD_TASK_STATES } from "../../store/uploadTasks.js";
@@ -199,6 +199,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
         adminToken: ctx.config.adminToken,
         session: sessionAuthenticator(ctx),
         apiTokens: ctx.apiTokens,
+        impersonation: impersonationResolver(ctx),
       }),
     );
     scope.addHook("preHandler", async (req, reply) => {
