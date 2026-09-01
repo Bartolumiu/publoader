@@ -242,6 +242,30 @@ channel they are standing in. The trade is real and worth stating plainly — a
 `users:admin` token can grant Discord users everything that token itself holds,
 so scope `BOT_API_TOKEN` accordingly.
 
+### Asking the bot why, when nothing works
+
+**@mention the bot** and it answers with the three gates as they apply to you,
+right here: whether this server is pinned, whether this channel is allowed, and
+whether you count as an admin.
+
+This exists for the one failure the bot is otherwise worst at explaining — no
+slash commands at all. When registration has failed there is nothing to type,
+the bot's logs stay on its own host rather than reaching the control plane, and
+the dashboard cannot see which guilds the bot is actually in. A mention needs
+none of that: no command has to be registered, and the only permission it needs
+is Send Messages in that channel.
+
+It is deliberately **not** gated by the allowlists. Gating it would mean the one
+diagnostic that works when the gates are wrong stops working exactly when the
+gates are wrong. The reply is safe to hand to anyone who asks: it names no ids,
+and every fact in it is about the server, channel and account the asker is
+already standing in.
+
+This is why the bot asks for the `GuildMessages` gateway intent. It is *not*
+privileged, and `MessageContent` is deliberately not requested, so every message
+the bot receives has an empty `content`; it can see that a message happened and
+whether it was mentioned, which is all the handler reads.
+
 ### Where replies go
 
 Anything operational or secret is **ephemeral**: visible only to the person who
