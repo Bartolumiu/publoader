@@ -59,6 +59,44 @@ const EXTENSION_CACHE_TTL_MS = 60_000;
  */
 const MODAL_PREFIX = "publoader:";
 
+/** What `publishToGuilds` did, split by outcome so each can be reported. */
+export interface GuildPublishResult {
+  registered: string[];
+  /** Pinned, but the bot is not in the guild — nothing to publish to. */
+  notMember: string[];
+  failed: { guildId: string; err: unknown }[];
+}
+
+/**
+ * Publish the command set to each pinned guild, independently.
+ *
+ * Extracted from the bot so the property that matters is testable without a
+ * gateway connection: **one bad guild must not cost the others their
+ * commands**. Sharing a single try/catch across the loop meant that pinning a
+ * guild the bot had not been invited to — the natural order to do those two
+ * things in — threw on the first call and left every guild without commands,
+ * including the ones that had been working for months.
+ */
+export async function publishToGuilds(
+  guildIds: readonly string[],
+  io: { isMember(guildId: string): boolean; publish(guildId: string): Promise<void> },
+): Promise<GuildPublishResult> {
+  const result: GuildPublishResult = { registered: [], notMember: [], failed: [] };
+  for (const guildId of guildIds) {
+    if (!io.isMember(guildId)) {
+      result.notMember.push(guildId);
+      continue;
+    }
+    try {
+      await io.publish(guildId);
+      result.registered.push(guildId);
+    } catch (err) {
+      result.failed.push({ guildId, err });
+    }
+  }
+  return result;
+}
+
 export class FatalBotConfigError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
@@ -227,10 +265,41 @@ export class PubloaderBot {
     try {
       const guildIds = [...this.authz.guildIds];
       if (guildIds.length > 0) {
-        for (const guildId of guildIds) {
-          await this.client.application?.commands.set(body, guildId);
+        // Each guild is registered on its own. Sharing one try/catch across the
+        // loop meant a single unreachable guild — pinned by id on the dashboard
+        // before the bot was ever invited to it, which is the natural order to
+        // do those two things in — threw on the first call and left *every*
+        // guild without commands, including ones that had been working. One bad
+        // id must not be able to take the bot down everywhere.
+        const { registered, notMember, failed } = await publishToGuilds(guildIds, {
+          isMember: (guildId) => this.client.guilds.cache.has(guildId),
+          publish: async (guildId) => {
+            await this.client.application?.commands.set(body, guildId);
+          },
+        });
+        for (const guildId of notMember) {
+          // Worth naming as its own case: Discord answers an unknown guild with
+          // a bare 404, and "pinned but never invited" is the one cause an
+          // operator can act on without reading a stack trace.
+          this.log.warn(
+            { guildId },
+            "cannot register commands: this guild is pinned but the bot is not a member of it. Invite the bot there with the `bot` and `applications.commands` scopes, or un-pin the guild",
+          );
         }
-        this.log.info({ count: body.length, guildIds }, "registered guild slash commands");
+        for (const { guildId, err } of failed) {
+          this.log.error(
+            { err, guildId },
+            "failed to register slash commands in this guild; the other pinned guilds are unaffected. The usual cause is an invite that omitted the `applications.commands` scope",
+          );
+        }
+        if (registered.length > 0) {
+          this.log.info({ count: body.length, guildIds: registered }, "registered guild slash commands");
+        } else {
+          this.log.error(
+            { guildIds },
+            "no pinned guild accepted the command set; the bot has no slash commands anywhere",
+          );
+        }
       } else {
         await this.client.application?.commands.set(body);
         this.log.warn(
