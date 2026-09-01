@@ -105,13 +105,28 @@ describe("OAuth state intent", () => {
     expect(decodeState(encoded)).toEqual({ intent: { mode: "login" }, nonce: "nonce-1" });
   });
 
-  it("round-trips a link intent with the account it belongs to", () => {
-    const encoded = encodeState({ mode: "link", userId: "u1" }, "nonce-2");
-    expect(decodeState(encoded)).toEqual({ intent: { mode: "link", userId: "u1" }, nonce: "nonce-2" });
+  it("round-trips a link intent with the account and session it belongs to", () => {
+    const encoded = encodeState({ mode: "link", userId: "u1", sessionId: "s1" }, "nonce-2");
+    expect(decodeState(encoded)).toEqual({
+      intent: { mode: "link", userId: "u1", sessionId: "s1" },
+      nonce: "nonce-2",
+    });
   });
 
   it("rejects anything malformed rather than guessing an intent", () => {
-    for (const bad of ["", "login", "link.u1", "login.a.b", "other.nonce", "link..nonce", "link.u1.n.x"]) {
+    for (const bad of [
+      "",
+      "login",
+      "link.u1",
+      "login.a.b",
+      "other.nonce",
+      "link..nonce",
+      // The pre-session-id link shape. It has no session to check, so it must
+      // not decode: otherwise an old signed cookie would skip the liveness
+      // check the session id is there to make possible.
+      "link.u1.nonce",
+      "link.u1.s1.n.x",
+    ]) {
       expect(decodeState(bad)).toBeNull();
     }
   });

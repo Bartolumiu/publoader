@@ -115,7 +115,12 @@ describe.skipIf(!dbReady())("linking a Discord account", () => {
     // Deliberately a different address: the session is the authorisation here.
     stubDiscord({ id: "d-1", username: "ardax", email: "someone-else@example.com", verified: true });
 
-    const res = await callback(state, [cookie, stateCookie]);
+    // Only the state cookie, which is what a real browser sends. The session
+    // cookie is SameSite=Strict and Discord returns the operator with a
+    // cross-site navigation, so it is withheld on exactly this request;
+    // requiring it here is what made linking impossible in a browser while
+    // every test that replayed both cookies still passed.
+    const res = await callback(state, [stateCookie]);
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain("Discord linked");
 
@@ -128,7 +133,7 @@ describe.skipIf(!dbReady())("linking a Discord account", () => {
     const { cookie } = await signedInAccount("ops@example.com");
     const { state, stateCookie } = await beginLink(cookie);
     stubDiscord({ id: "d-1", username: "ardax", email: "someone-else@example.com", verified: true });
-    await callback(state, [cookie, stateCookie]);
+    await callback(state, [stateCookie]);
 
     // 1. Discord, via the login flow; matched on the linked id, not the email.
     const start = await app.inject({ method: "GET", url: "/api/v1/admin/oauth/discord/start" });
@@ -151,11 +156,11 @@ describe.skipIf(!dbReady())("linking a Discord account", () => {
     const first = await signedInAccount("one@example.com");
     const begun = await beginLink(first.cookie);
     stubDiscord({ id: "d-1", username: "ardax", email: "d@example.com", verified: true });
-    expect((await callback(begun.state, [first.cookie, begun.stateCookie])).statusCode).toBe(200);
+    expect((await callback(begun.state, [begun.stateCookie])).statusCode).toBe(200);
 
     const second = await signedInAccount("two@example.com");
     const again = await beginLink(second.cookie);
-    const res = await callback(again.state, [second.cookie, again.stateCookie]);
+    const res = await callback(again.state, [again.stateCookie]);
 
     expect(res.statusCode).toBe(409);
     expect(res.body).toContain("already attached");
@@ -172,10 +177,32 @@ describe.skipIf(!dbReady())("linking a Discord account", () => {
     const { state, stateCookie } = await beginLink(cookie);
     stubDiscord({ id: "d-1", username: "ardax", email: "d@example.com", verified: true });
 
-    // The state cookie is signed and still valid; the session is not present.
+    // Signing out mid-flight revokes the session the state names. The signed
+    // cookie still verifies, so this is precisely the case the session lookup
+    // exists to catch: the proof is intact, the session behind it is not.
+    const out = await app.inject({ method: "DELETE", url: "/api/v1/admin/session", headers: { cookie } });
+    expect(out.statusCode).toBe(200);
+
     const res = await callback(state, [stateCookie]);
     expect(res.statusCode).toBe(401);
     expect((await ctx.adminUsers.byId(id))?.discordId).toBeNull();
+  });
+
+  it("will not finish a link with a state naming somebody else's session", async () => {
+    const victim = await signedInAccount("victim@example.com");
+    const attacker = await signedInAccount("attacker@example.com");
+    // A state whose two halves disagree: the attacker's live session id
+    // against the victim's account. Forging one is already impossible without
+    // the signing key; this pins the check that would catch it anyway.
+    const { stateCookie } = await beginLink(attacker.cookie);
+    const forged = await beginLink(victim.cookie);
+    stubDiscord({ id: "d-1", username: "ardax", email: "d@example.com", verified: true });
+
+    const res = await callback(forged.state, [stateCookie]);
+    // The nonce belongs to the attacker's round-trip, not the victim's.
+    expect(res.statusCode).toBe(400);
+    expect((await ctx.adminUsers.byId(victim.id))?.discordId).toBeNull();
+    expect((await ctx.adminUsers.byId(attacker.id))?.discordId).toBeNull();
   });
 
   it("will not let a login round-trip be finished as a link", async () => {

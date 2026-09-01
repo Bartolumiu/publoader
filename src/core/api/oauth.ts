@@ -112,11 +112,21 @@ export async function matchDiscordIdentity(
  * exists. Encoded into the signed value rather than a second cookie so the
  * HMAC covers the intent too; otherwise a login round-trip could be replayed
  * as a link, or the reverse.
+ *
+ * A link also carries the *session* that started it, not just the account.
+ * The browser returns from discord.com, which is a cross-site navigation, so
+ * the SameSite=Strict session cookie is not sent on it and the callback cannot
+ * simply read the live session. This signed value stands in for it; the
+ * session id is safe to carry because it only counts inside the HMAC.
  */
-export type OAuthIntent = { mode: "login" } | { mode: "link"; userId: string };
+export type OAuthIntent =
+  | { mode: "login" }
+  | { mode: "link"; userId: string; sessionId: string };
 
 export function encodeState(intent: OAuthIntent, nonce: string): string {
-  return intent.mode === "link" ? `link.${intent.userId}.${nonce}` : `login.${nonce}`;
+  return intent.mode === "link"
+    ? `link.${intent.userId}.${intent.sessionId}.${nonce}`
+    : `login.${nonce}`;
 }
 
 export function decodeState(value: string): { intent: OAuthIntent; nonce: string } | null {
@@ -124,8 +134,8 @@ export function decodeState(value: string): { intent: OAuthIntent; nonce: string
   if (parts[0] === "login" && parts.length === 2 && parts[1]) {
     return { intent: { mode: "login" }, nonce: parts[1] };
   }
-  if (parts[0] === "link" && parts.length === 3 && parts[1] && parts[2]) {
-    return { intent: { mode: "link", userId: parts[1] }, nonce: parts[2] };
+  if (parts[0] === "link" && parts.length === 4 && parts[1] && parts[2] && parts[3]) {
+    return { intent: { mode: "link", userId: parts[1], sessionId: parts[2] }, nonce: parts[3] };
   }
   return null;
 }
@@ -208,7 +218,11 @@ export function registerOAuthRoutes(app: FastifyInstance, ctx: AppContext): void
     if (!ctx.sessionLimiter.allow(req.ip)) {
       return html(reply, 429, "Slow down", "Too many attempts from this address. Try again in a minute.");
     }
-    return begin(req, reply, { mode: "link", userId: session.userId });
+    return begin(req, reply, {
+      mode: "link",
+      userId: session.userId,
+      sessionId: session.sessionId,
+    });
   });
 
   app.get("/api/v1/admin/oauth/discord/callback", async (req: FastifyRequest, reply: FastifyReply) => {
@@ -249,10 +263,14 @@ export function registerOAuthRoutes(app: FastifyInstance, ctx: AppContext): void
 
     // ---- linking an identity onto the session that started the round-trip ----
     if (state.intent.mode === "link") {
-      // The signed state says which account asked. The live session says who
-      // is actually here. Both must agree: a signed-out or switched browser
-      // must not be able to finish somebody else's linking round-trip.
-      const session = await authenticate(req);
+      // Discord returns the operator with a cross-site top-level navigation,
+      // so the SameSite=Strict session cookie is withheld and
+      // `authenticate(req)` would see nobody here at all. The signed state is
+      // the authorisation instead: it names the session that began the
+      // round-trip, and that session is looked up so every liveness check
+      // still runs. Signing out, or being signed out, mid-flight still stops
+      // the link; only the carrier of the proof has changed.
+      const session = await ctx.adminUsers.liveSessionById(state.intent.sessionId);
       if (!session || session.userId !== state.intent.userId) {
         return fail(401, "Linking failed", "Your session ended before Discord came back. Sign in and try again.");
       }

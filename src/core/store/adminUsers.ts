@@ -299,6 +299,40 @@ export class AdminUserStore {
     };
   }
 
+  /**
+   * Resolve a session by id alone, without the cookie secret.
+   *
+   * Deliberately narrow: this exists for the Discord link round-trip, where
+   * the browser comes back from discord.com and a SameSite=Strict cookie is
+   * therefore not sent at all. The authorisation there is the signed, HttpOnly
+   * OAuth state cookie, which carries the id of the session that started the
+   * flow; the id is not a credential on its own, so it is only ever trusted
+   * when it arrives inside that signature.
+   *
+   * Every liveness check `resolveSession` makes still applies, which is what
+   * keeps a revoked or expired session from finishing a link it started.
+   */
+  async liveSessionById(id: string): Promise<ResolvedSession | null> {
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+    const session = await this.prisma.adminSession.findUnique({
+      where: { id },
+      include: { user: true },
+    });
+    if (!session || session.revoked) return null;
+    if (session.expiresAt.getTime() <= Date.now()) return null;
+    if (!session.user.approved) return null;
+    return {
+      sessionId: session.id,
+      userId: session.userId,
+      actor: session.actor,
+      role: session.user.role,
+      email: session.user.email,
+      expiresAt: session.expiresAt,
+      extraScopes: session.user.extraScopes,
+      deniedScopes: session.user.deniedScopes,
+    };
+  }
+
   async revokeSession(id: string): Promise<boolean> {
     const res = await this.prisma.adminSession.updateMany({
       where: { id, revoked: false },
