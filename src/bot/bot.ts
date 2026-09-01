@@ -19,6 +19,7 @@ import {
   type AutocompleteInteraction,
   type ChatInputCommandInteraction,
   type Interaction,
+  type Message,
   type ModalSubmitInteraction,
 } from "discord.js";
 import {
@@ -27,7 +28,7 @@ import {
   type AdminApiClient,
   type TrackedEntry,
 } from "./apiClient.js";
-import { authorize, describeAuthz, type AuthzConfig, type Invoker } from "./authz.js";
+import { authorize, describeAuthz, hasAdminAllowlist, isAdmin, type AuthzConfig, type Invoker } from "./authz.js";
 import type { AuthzSource } from "./authzSource.js";
 import {
   ALL_COMMANDS,
@@ -58,6 +59,9 @@ const EXTENSION_CACHE_TTL_MS = 60_000;
  * read as one of ours.
  */
 const MODAL_PREFIX = "publoader:";
+
+/** One @mention answer per person per this long, so a loop cannot flood. */
+const MENTION_COOLDOWN_MS = 10_000;
 
 /** What `publishToGuilds` did, split by outcome so each can be reported. */
 export interface GuildPublishResult {
@@ -97,6 +101,70 @@ export async function publishToGuilds(
   return result;
 }
 
+/** Everything the mention reply reports on, resolved from the live config. */
+export interface MentionFacts {
+  anyGuildPinned: boolean;
+  guildPinned: boolean;
+  anyChannelConfigured: boolean;
+  channelAllowed: boolean;
+  adminsConfigured: boolean;
+  isAdmin: boolean;
+}
+
+/**
+ * The answer to "why isn't this working here?", in plain sentences.
+ *
+ * Exists because the gating is invisible from inside Discord: when a command is
+ * missing there is nothing to run to find out why, the bot's logs do not reach
+ * the control plane, and the dashboard cannot see which guilds the bot is
+ * actually in. An @mention needs no slash command to be registered and no
+ * permission beyond posting, so it still works in exactly the situations where
+ * everything else has failed.
+ *
+ * Deliberately carries no snowflakes. It tells you about the server, channel
+ * and account you are already standing in, so it can be answered to anyone who
+ * asks without handing out the shape of the deployment.
+ */
+export function mentionReport(facts: MentionFacts): string {
+  const lines = ["**publoader bot** — online."];
+
+  if (!facts.anyGuildPinned) {
+    lines.push(
+      "• **Server**: no guild is pinned, so commands are registered globally and can take up to an hour to appear.",
+    );
+  } else if (facts.guildPinned) {
+    lines.push("• **Server**: pinned. Slash commands should be registered here.");
+  } else {
+    lines.push(
+      "• **Server**: :x: this server is **not** on the bot's guild list. It has no slash commands here, and any command would be refused. Add it on the dashboard under Permissions → Discord bot access.",
+    );
+  }
+
+  if (!facts.anyChannelConfigured) {
+    lines.push(
+      "• **Channel**: no allowed channels are configured, so read-only commands work anywhere and every state-changing command is refused.",
+    );
+  } else if (facts.channelAllowed) {
+    lines.push("• **Channel**: allowed.");
+  } else {
+    lines.push(
+      "• **Channel**: :x: not on the allowed-channel list, so commands here are refused. A thread counts as its parent channel.",
+    );
+  }
+
+  if (!facts.adminsConfigured) {
+    lines.push(
+      "• **You**: no admins are configured at all, so every state-changing command is refused for everyone.",
+    );
+  } else if (facts.isAdmin) {
+    lines.push("• **You**: a platform admin. You can run every command.");
+  } else {
+    lines.push("• **You**: not an admin, so you can run the read-only commands only.");
+  }
+
+  return lines.join("\n");
+}
+
 export class FatalBotConfigError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
@@ -124,6 +192,8 @@ export class PubloaderBot {
    * idempotency key only collapses retries of the *same* interaction.
    */
   private readonly inFlight = new Set<string>();
+  /** Last @mention answered per user id; see `onMention`. */
+  private readonly mentionCooldown = new Map<string, number>();
   private extensionCache: { names: string[]; fetchedAt: number } | null = null;
   /**
    * One extension's series map, for the `manga-id` and `catalogue`
@@ -154,10 +224,15 @@ export class PubloaderBot {
     this.authzSource = opts.authz;
     this.log = opts.log;
     this.discordToken = opts.discordToken;
-    // Guilds is the only intent needed: the bot is slash-command driven and
-    // never reads message content, so it needs no privileged intent and cannot
-    // see what people type in channels.
-    this.client = new Client({ intents: [GatewayIntentBits.Guilds] });
+    // GuildMessages is here only so an @mention can be answered; see
+    // `onMention`. It is NOT privileged, and MessageContent deliberately is not
+    // requested, so every message this bot receives has an empty `content` and
+    // it still cannot see what people type. What it can see is that a message
+    // happened and whether it was mentioned in it, which is all the mention
+    // handler reads.
+    this.client = new Client({
+      intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+    });
 
     this.client.once(Events.ClientReady, (client) => {
       this.log.info(
@@ -168,6 +243,9 @@ export class PubloaderBot {
     });
     this.client.on(Events.InteractionCreate, (interaction) => {
       void this.onInteraction(interaction);
+    });
+    this.client.on(Events.MessageCreate, (message) => {
+      void this.onMention(message);
     });
     this.client.on(Events.Error, (err) => {
       this.log.error({ err }, "discord client error");
@@ -347,6 +425,66 @@ export class PubloaderBot {
         // cause, and it means there is nothing registered there to withdraw.
         this.log.warn({ err, guildId }, "could not check or withdraw this guild's slash commands");
       }
+    }
+  }
+
+  /**
+   * Answer an @mention with why the bot is, or is not, usable right here.
+   *
+   * The escape hatch for the failure this bot is worst at explaining: no slash
+   * commands. When registration has failed there is nothing to type, the bot's
+   * logs stay on its own host, and the dashboard cannot tell which guilds the
+   * bot is actually in. A mention needs none of that machinery.
+   *
+   * It is deliberately *not* gated by `authorize`. Gating it would mean the one
+   * diagnostic that works when the gates are misconfigured stops working
+   * exactly when the gates are misconfigured. The reply is safe to hand to
+   * anyone: it names no ids, and every fact in it is about the server, channel
+   * and account the asker is already in.
+   */
+  private async onMention(message: Message): Promise<void> {
+    if (!this.client.user || message.author.bot) return;
+    // Only a direct mention of this bot. `mentions.users` excludes @everyone
+    // and @here, so the bot cannot be made to reply to a mass ping.
+    if (!message.mentions.users.has(this.client.user.id)) return;
+
+    // One reply per user per ten seconds, so a mention loop cannot turn the bot
+    // into a flood. Keyed by user rather than channel: two people asking at
+    // once are both entitled to an answer.
+    const now = Date.now();
+    const last = this.mentionCooldown.get(message.author.id) ?? 0;
+    if (now - last < MENTION_COOLDOWN_MS) return;
+    this.mentionCooldown.set(message.author.id, now);
+
+    const config = this.authz;
+    const parentChannelId = parentIdOfChannel(message.channel);
+    const channelAllowed =
+      config.allowedChannelIds.has(message.channelId) ||
+      (parentChannelId !== null && config.allowedChannelIds.has(parentChannelId));
+
+    const report = mentionReport({
+      anyGuildPinned: config.guildIds.size > 0,
+      guildPinned: message.guildId !== null && config.guildIds.has(message.guildId),
+      anyChannelConfigured: config.allowedChannelIds.size > 0,
+      channelAllowed,
+      adminsConfigured: hasAdminAllowlist(config),
+      isAdmin: isAdmin(config, {
+        userId: message.author.id,
+        roleIds: roleIdsOf(message.member),
+        channelId: message.channelId,
+      }),
+    });
+
+    try {
+      await message.reply(report);
+    } catch (err) {
+      // Almost always "Missing Permissions": unlike an interaction reply, this
+      // is an ordinary message and needs Send Messages in this channel. Nothing
+      // to do about it from here, but it should not be silent.
+      this.log.warn(
+        { err, guildId: message.guildId, channelId: message.channelId },
+        "could not answer an @mention; the bot likely lacks Send Messages in that channel",
+      );
     }
   }
 
@@ -865,6 +1003,17 @@ async function parentChannelIdOf(
       return null;
     }
   }
+  return parentIdOfChannel(channel);
+}
+
+/**
+ * The parent of a channel object, if that channel is a thread.
+ *
+ * Split from the interaction path because a received message already carries
+ * its channel — the gateway delivered it — so the mention handler needs the
+ * type check without the fetch.
+ */
+export function parentIdOfChannel(channel: unknown): string | null {
   if (!channel || typeof channel !== "object") return null;
   const type = (channel as { type?: unknown }).type;
   // AnnouncementThread(10), PublicThread(11), PrivateThread(12). A text
