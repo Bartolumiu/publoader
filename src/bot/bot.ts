@@ -86,12 +86,6 @@ export class PubloaderBot {
    * idempotency key only collapses retries of the *same* interaction.
    */
   private readonly inFlight = new Set<string>();
-  /**
-   * Guilds the command set is currently published to, so a guild dropped from
-   * the allowlist can have its commands withdrawn rather than left on screen
-   * to fail. Empty means the commands are registered globally.
-   */
-  private registeredGuildIds: string[] = [];
   private extensionCache: { names: string[]; fetchedAt: number } | null = null;
   /**
    * One extension's series map, for the `manga-id` and `catalogue`
@@ -225,7 +219,8 @@ export class PubloaderBot {
    * bot has no business exposing its commands in guilds it was not deployed for.
    *
    * Called again whenever the pinned guilds change, because a guild added on
-   * the dashboard has no commands in it until this runs.
+   * the dashboard has no commands in it until this runs — and because a guild
+   * *removed* keeps its copy until they are withdrawn.
    */
   private async registerCommands(): Promise<void> {
     const body = ALL_COMMANDS.map((c) => c.builder.toJSON());
@@ -235,31 +230,54 @@ export class PubloaderBot {
         for (const guildId of guildIds) {
           await this.client.application?.commands.set(body, guildId);
         }
-        // Withdraw from guilds that were pinned a moment ago and are not any
-        // more. Leaving the commands behind would show an operator a full menu
-        // in a server where every single entry now answers "wrong guild".
-        for (const stale of this.registeredGuildIds.filter((id) => !guildIds.includes(id))) {
-          try {
-            await this.client.application?.commands.set([], stale);
-            this.log.info({ guildId: stale }, "withdrew slash commands from a de-listed guild");
-          } catch (err) {
-            // Being kicked from the guild is the common cause, and it has
-            // already achieved what the withdrawal was for.
-            this.log.warn({ err, guildId: stale }, "could not withdraw slash commands; the bot may have been removed");
-          }
-        }
-        this.registeredGuildIds = guildIds;
         this.log.info({ count: body.length, guildIds }, "registered guild slash commands");
       } else {
-        this.registeredGuildIds = [];
         await this.client.application?.commands.set(body);
         this.log.warn(
           { count: body.length },
           "registered GLOBAL slash commands because no guild is pinned; propagation is slow and the commands appear in every guild the bot joins. Pin one on the dashboard's Permissions page or with DISCORD_GUILD_ID",
         );
       }
+      await this.withdrawStaleGuildCommands(this.authz.guildIds);
     } catch (err) {
       this.log.error({ err }, "failed to register slash commands");
+    }
+  }
+
+  /**
+   * Clear guild-scoped commands from every joined guild that should not have
+   * them: the ones just de-listed, and *all* of them when the bot has fallen
+   * back to global registration.
+   *
+   * Discord keeps a guild's command set and the application's global set in
+   * separate places and shows the union of the two. So un-pinning a guild
+   * without clearing it does not move the commands, it duplicates them — every
+   * entry appears twice in that guild's picker, one copy guild-scoped and one
+   * global. De-listing a guild without clearing is worse: the full menu stays
+   * on screen in a server where every entry now answers "wrong guild".
+   *
+   * Driven off `client.guilds.cache` rather than a record of what this process
+   * registered, because the interesting case is a bot that was *restarted* with
+   * a changed config, and a field on this instance knows nothing about what the
+   * previous one did.
+   */
+  private async withdrawStaleGuildCommands(keep: ReadonlySet<string>): Promise<void> {
+    const application = this.client.application;
+    if (!application) return;
+    for (const guildId of this.client.guilds.cache.keys()) {
+      if (keep.has(guildId)) continue;
+      try {
+        // Fetch first so the common case — nothing to clear, every restart
+        // after the first — costs a read instead of a pointless write.
+        const existing = await application.commands.fetch({ guildId });
+        if (existing.size === 0) continue;
+        await application.commands.set([], guildId);
+        this.log.info({ guildId, count: existing.size }, "withdrew stale guild slash commands");
+      } catch (err) {
+        // Missing `applications.commands` in this guild's invite is the usual
+        // cause, and it means there is nothing registered there to withdraw.
+        this.log.warn({ err, guildId }, "could not check or withdraw this guild's slash commands");
+      }
     }
   }
 
