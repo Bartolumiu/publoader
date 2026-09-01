@@ -72,6 +72,97 @@ describe("slash command shape", () => {
     expect(offenders).toEqual([]);
   });
 
+  it("gives every command and option a name Discord will accept", () => {
+    // CHAT_INPUT names must be lowercase and match Discord's character class;
+    // a capital letter or a space is a 400 for the entire batch.
+    const NAME = /^[-_\p{L}\p{N}]{1,32}$/u;
+    const offenders: string[] = [];
+    const checkName = (path: string, name: string): void => {
+      if (!NAME.test(name)) offenders.push(`${path}: "${name}" is not a valid name`);
+      if (name !== name.toLowerCase()) offenders.push(`${path}: "${name}" is not lowercase`);
+    };
+    for (const command of ALL_COMMANDS) {
+      const json = command.builder.toJSON() as { name: string; options?: Option[] };
+      checkName("command", json.name);
+      const walk = (path: string, options: Option[] | undefined): void => {
+        for (const option of options ?? []) {
+          checkName(path, option.name);
+          walk(`${path} ${option.name}`, option.options);
+        }
+      };
+      walk(`/${json.name}`, json.options);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("keeps every description within Discord's 100-character limit", () => {
+    const offenders: string[] = [];
+    const check = (path: string, description: unknown): void => {
+      const text = typeof description === "string" ? description : "";
+      if (text.length === 0) offenders.push(`${path}: empty description`);
+      if (text.length > 100) offenders.push(`${path}: description is ${text.length} chars`);
+    };
+    for (const command of ALL_COMMANDS) {
+      const json = command.builder.toJSON() as { name: string; description?: string; options?: Option[] };
+      check(`/${json.name}`, json.description);
+      const walk = (path: string, options: Option[] | undefined): void => {
+        for (const option of options ?? []) {
+          check(`${path} ${option.name}`, (option as { description?: string }).description);
+          walk(`${path} ${option.name}`, option.options);
+        }
+      };
+      walk(`/${json.name}`, json.options);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("keeps choice lists legal, and never pairs choices with autocomplete", () => {
+    // Discord rejects an option that offers both a fixed choice list and
+    // autocomplete; they are alternative ways to fill the same box.
+    const offenders: string[] = [];
+    const walk = (path: string, options: Option[] | undefined): void => {
+      for (const option of options ?? []) {
+        const withExtras = option as { choices?: { name: string; value: unknown }[]; autocomplete?: boolean };
+        const choices = withExtras.choices;
+        if (choices) {
+          if (choices.length > 25) offenders.push(`${path} ${option.name}: ${choices.length} choices`);
+          if (withExtras.autocomplete) offenders.push(`${path} ${option.name}: choices AND autocomplete`);
+          for (const choice of choices) {
+            if (choice.name.length < 1 || choice.name.length > 100) {
+              offenders.push(`${path} ${option.name}: choice name "${choice.name}" is out of range`);
+            }
+            if (typeof choice.value === "string" && choice.value.length > 100) {
+              offenders.push(`${path} ${option.name}: choice value is over 100 chars`);
+            }
+          }
+        }
+        walk(`${path} ${option.name}`, option.options);
+      }
+    };
+    for (const command of ALL_COMMANDS) {
+      const json = command.builder.toJSON() as { name: string; options?: Option[] };
+      walk(`/${json.name}`, json.options);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("nests no deeper than group → subcommand → option", () => {
+    const offenders: string[] = [];
+    for (const command of ALL_COMMANDS) {
+      const json = command.builder.toJSON() as { name: string; options?: Option[] };
+      const walk = (path: string, options: Option[] | undefined, depth: number): void => {
+        for (const option of options ?? []) {
+          if (isContainer(option) && depth >= 2) {
+            offenders.push(`${path} ${option.name}: nested too deep`);
+          }
+          walk(`${path} ${option.name}`, option.options, depth + 1);
+        }
+      };
+      walk(`/${json.name}`, json.options, 0);
+    }
+    expect(offenders).toEqual([]);
+  });
+
   it("registers at most 100 commands, which is the per-guild cap", () => {
     expect(ALL_COMMANDS.length).toBeLessThanOrEqual(100);
   });
