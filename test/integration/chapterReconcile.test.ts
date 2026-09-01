@@ -266,6 +266,30 @@ describe.skipIf(!dbReady())("chapter reconciliation", () => {
     expect(await prisma.uploadedChapter.findUnique({ where: { mdChapterId: gone } })).toBeNull();
   });
 
+  it("archives every deletion, not just the first page of them", async () => {
+    // The sweep pages uploaded_chapters while DELETING from it: archiving a
+    // row moves it out of the table. Paged with a Prisma cursor, the moment
+    // the last row of a batch was one it had just archived, the next query had
+    // no cursor row to page from, returned nothing, and the loop read that as
+    // "no rows left" and stopped -- silently, and reporting success.
+    //
+    // 250 rows is enough to cross the 100-row batch boundary twice, and every
+    // one of them is a 404, which guarantees the last row of each batch is
+    // archived. Before the fix this recorded 100 and reported done.
+    const gone = Array.from({ length: 250 }, (_, i) => chapterId(1000 + i));
+    for (const id of gone) await seedUploaded(id);
+    const md = fakeMd({ all: [], served: [], gone });
+
+    const report = await new ChapterReconciler({ prisma, md, log, audit }).run({
+      dryRun: false,
+      actor: "tester",
+    });
+
+    expect(report.deletedRecorded).toBe(250);
+    expect(await prisma.uploadedChapter.count()).toBe(0);
+    expect(await prisma.deletedChapter.count()).toBe(250);
+  });
+
   it("keeps the instant it first recorded when run again", async () => {
     await seedUploaded(chapterId(1));
     const orphan = chapterId(96);
