@@ -280,6 +280,34 @@ export interface SourceMapResult {
   resolution: SourceResolution;
 }
 
+/** One line of a pasted batch, as POST /api/v1/admin/source/map/batch judged it. */
+export interface SourceBatchRow {
+  line?: number;
+  sourceUrl: string;
+  extension?: string | null;
+  namespace?: string;
+  mangaId?: string;
+  mdMangaId?: string;
+  via?: string;
+  queued?: string | null;
+  outcome: string;
+  detail?: string;
+}
+
+/** Mirrors the report of POST /api/v1/admin/source/map/batch. */
+export interface SourceBatchReport {
+  dryRun: boolean;
+  parseErrors: { line: number; text: string; reason: string }[];
+  added: number;
+  updated: number;
+  unchanged: number;
+  failed: number;
+  unresolved: number;
+  closedQueueRows: number;
+  untrackedNote?: string;
+  results: SourceBatchRow[];
+}
+
 /** Mirrors the report of POST /api/v1/admin/untracked/automap. */
 export interface AutomapReport {
   dryRun: boolean;
@@ -1377,6 +1405,29 @@ export class AdminApiClient {
       json: body,
       // Reads one title from MangaDex before wiring uploads to it.
       timeoutMs: 30_000,
+    });
+  }
+
+  /**
+   * Map a whole paste of `<publisher link> <mangadex link>` lines.
+   *
+   * Every line is resolved separately, so the answer is per row rather than one
+   * verdict for the batch: a paste of twenty can add, repoint, no-op and fail
+   * at the same time.
+   */
+  mapSourceBatch(
+    actor: string,
+    body: { text: string; dryRun?: boolean },
+  ): Promise<SourceBatchReport> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/source/map/batch",
+      scope: "extensions:write",
+      actor,
+      json: body,
+      // Up to 200 links, each resolved against our own rows, plus one MangaDex
+      // round trip for the whole batch.
+      timeoutMs: 120_000,
     });
   }
 

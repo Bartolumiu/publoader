@@ -65,6 +65,9 @@ let MAP_RESULT: any = {
   resolution: { match: queueMatch },
 };
 
+/** The batch answer, swapped per test. Dry run and apply return the same shape. */
+let BATCH: any = null;
+
 let calls: { path: string; method: string; body: any }[] = [];
 
 function apiRoutes(): { match: RegExp; body: unknown }[] {
@@ -84,6 +87,7 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
     { match: /\/stats$/, body: { paused: false, workers: {}, jobs: {}, uploadTasks: [], quarantined: 0 } },
     { match: /\/runs\?limit=1/, body: { runs: [] } },
     { match: /\/source\/resolve/, body: () => RESOLUTION },
+    { match: /\/source\/map\/batch$/, body: () => BATCH },
     { match: /\/source\/map$/, body: () => MAP_RESULT },
     { match: /\/extensions\/[^/]+\/tracked$/, body: { tracked: [] } },
     { match: /\/extensions$/, body: { extensions: [{ name: "comikey" }] } },
@@ -176,6 +180,138 @@ function fields(): any {
   };
 }
 
+/** A two-line paste that adds one series and cannot place the other. */
+const batchReport = (over: Record<string, unknown> = {}) => ({
+  dryRun: true,
+  parseErrors: [],
+  added: 1,
+  updated: 0,
+  unchanged: 0,
+  failed: 0,
+  unresolved: 1,
+  closedQueueRows: 0,
+  results: [
+    {
+      line: 1,
+      sourceUrl: SOURCE,
+      extension: "comikey",
+      namespace: "",
+      mangaId: "kengan-omega",
+      mdMangaId: TITLE_ID,
+      via: "queue",
+      queued: "Kengan Omega",
+      outcome: "added",
+    },
+    {
+      line: 2,
+      sourceUrl: "https://nobody-covers-this.example/series/1",
+      extension: null,
+      mdMangaId: OTHER_ID,
+      outcome: "unresolved",
+      detail: "no published extension declares nobody-covers-this.example in its allowed_hosts",
+    },
+  ],
+  ...over,
+});
+
+describe("mapping many series from a pasted batch of links", () => {
+  const batchCalls = () => calls.filter((c) => c.path.includes("/source/map/batch"));
+  const bulk = () => {
+    const card = cardByTitle("Map many from links");
+    expect(card, "the map-many card is not rendered").toBeTruthy();
+    return { card, text: card.querySelector("#map-many-text") };
+  };
+
+  beforeEach(async () => {
+    calls = [];
+    BATCH = batchReport();
+    mount();
+    await settle();
+    await goto("#/tracked");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllTimers();
+  });
+
+  it("previews the whole paste as a dry run, and writes nothing", async () => {
+    const b = bulk();
+    b.text.value = `${SOURCE} ${TITLE_ID}\nhttps://nobody-covers-this.example/series/1 ${OTHER_ID}`;
+    buttonLabelled(b.card, "Preview changes").click();
+    await settle();
+
+    expect(batchCalls()).toHaveLength(1);
+    expect(batchCalls()[0]!.body.dryRun).toBe(true);
+    // Every line's verdict is visible before anything is applied, including the
+    // one that could not be placed — that is the whole point of pasting a batch.
+    expect(b.card.textContent).toContain("kengan-omega");
+    expect(b.card.textContent).toContain("added");
+    expect(b.card.textContent).toContain("unresolved");
+    expect(b.card.textContent).toContain("allowed_hosts");
+  });
+
+  it("only offers Apply once a preview has come back", async () => {
+    const b = bulk();
+    expect(buttonLabelled(b.card, "Apply; 1 added, 0 repointed")).toBeFalsy();
+
+    b.text.value = `${SOURCE} ${TITLE_ID}`;
+    buttonLabelled(b.card, "Preview changes").click();
+    await settle();
+    expect(buttonLabelled(b.card, "Apply; 1 added, 0 repointed")).toBeTruthy();
+  });
+
+  it("applies the same paste it previewed, without the dry run", async () => {
+    const b = bulk();
+    b.text.value = `${SOURCE} ${TITLE_ID}`;
+    buttonLabelled(b.card, "Preview changes").click();
+    await settle();
+
+    BATCH = batchReport({ dryRun: false, closedQueueRows: 1 });
+    buttonLabelled(b.card, "Apply; 1 added, 0 repointed").click();
+    await settle();
+
+    expect(batchCalls()).toHaveLength(2);
+    expect(batchCalls()[1]!.body.dryRun).toBeUndefined();
+    expect(batchCalls()[1]!.body.text).toContain(SOURCE);
+    // What actually happened, including the queue rows that were closed.
+    expect(b.card.textContent).toContain("queue row(s) closed");
+    // The box is emptied so the same paste cannot be applied twice by accident.
+    expect(b.text.value).toBe("");
+  });
+
+  it("says a paste that would change nothing has nothing to apply", async () => {
+    BATCH = batchReport({ added: 0, unchanged: 1, unresolved: 0, results: [] });
+    const b = bulk();
+    b.text.value = `${SOURCE} ${TITLE_ID}`;
+    buttonLabelled(b.card, "Preview changes").click();
+    await settle();
+
+    expect(b.card.textContent).toContain("nothing to apply");
+    expect(buttonLabelled(b.card, "Apply; 0 added, 0 repointed")).toBeFalsy();
+  });
+
+  it("shows the lines it could not read at all, with their line numbers", async () => {
+    BATCH = batchReport({
+      parseErrors: [{ line: 2, text: "just-one-value", reason: "no publisher link on this line" }],
+    });
+    const b = bulk();
+    b.text.value = `${SOURCE} ${TITLE_ID}\njust-one-value`;
+    buttonLabelled(b.card, "Preview changes").click();
+    await settle();
+
+    expect(b.card.textContent).toContain("could not be read");
+    expect(b.card.textContent).toContain("no publisher link on this line");
+  });
+
+  it("asks for something to paste rather than sending an empty batch", async () => {
+    const b = bulk();
+    buttonLabelled(b.card, "Preview changes").click();
+    await settle();
+    expect(batchCalls()).toHaveLength(0);
+  });
+});
+
 describe("mapping a series from its publisher link", () => {
   beforeEach(async () => {
     calls = [];
@@ -198,6 +334,7 @@ describe("mapping a series from its publisher link", () => {
       untrackedRow: "u1",
       resolution: { match: queueMatch },
     };
+    BATCH = batchReport();
     mount();
     await settle();
     await goto("#/tracked");

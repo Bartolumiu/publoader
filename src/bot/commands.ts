@@ -74,6 +74,28 @@ export interface HandlerContext {
   interactionId: string;
 }
 
+/**
+ * One text box in a command's modal.
+ *
+ * `paragraph` is the reason modals exist here at all: a slash-command option is
+ * a single line, so pasting twenty links into one is not possible. Discord caps
+ * a paragraph field at 4000 characters, which is roughly forty link pairs.
+ */
+export interface BotModalField {
+  /** Read back with `options.string(name)`, exactly like a slash option. */
+  name: string;
+  label: string;
+  placeholder?: string;
+  paragraph?: boolean;
+  required?: boolean;
+}
+
+/** A command that collects its input in a modal rather than in options. */
+export interface BotModalSpec {
+  title: string;
+  fields: BotModalField[];
+}
+
 export interface BotCommand {
   name: string;
   description: string;
@@ -86,6 +108,14 @@ export interface BotCommand {
   /** Reply visible only to the invoker. Default for anything operational. */
   ephemeral: boolean;
   builder: SlashCommandBuilder | SlashCommandOptionsOnlyBuilder | SlashCommandSubcommandsOnlyBuilder;
+  /**
+   * Collect this command's input in a modal instead of in slash options.
+   *
+   * The modal IS the reply to the slash command, so such a command cannot also
+   * defer and answer inline; the work happens when the modal is submitted, and
+   * `run` is called then with the fields readable as options.
+   */
+  modal?: BotModalSpec;
   run(ctx: HandlerContext): Promise<BotReply>;
 }
 
@@ -1566,6 +1596,85 @@ const commands: BotCommand[] = [
             : (result.untrackedNote ?? ""),
         ].filter(Boolean)),
       };
+    },
+  },
+  {
+    name: "map-many",
+    description: "Map several series at once from pasted publisher and MangaDex links.",
+    // Same gate as /map: this writes the series map, in bulk.
+    sensitivity: "mutate",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("map-many")
+      .setDescription("Map several series at once from pasted publisher and MangaDex links."),
+    /**
+     * A paste box, because that is what a backlog looks like.
+     *
+     * Twenty tabs open on a publisher's new-releases page is the case this
+     * exists for, and a slash option is one line. Discord's paragraph field
+     * holds roughly forty pairs, which is a session's worth.
+     *
+     * It applies rather than previewing: the modal shows the operator exactly
+     * what they pasted before they submit it, every row's outcome comes back
+     * afterwards, and a repoint still needs `tracked:write` — which the bot's
+     * own token preset deliberately lacks, so a paste through here cannot move
+     * a live series without someone having widened that token on purpose.
+     * Previewing a large paste belongs on the dashboard, which can show a table.
+     */
+    modal: {
+      title: "Map series from links",
+      fields: [
+        {
+          name: "pairs",
+          label: "Publisher link + MangaDex link per line",
+          paragraph: true,
+          placeholder: "https://comikey.com/comics/a-series https://mangadex.org/title/<uuid>",
+        },
+      ],
+    },
+    async run(ctx) {
+      const report = await ctx.api.mapSourceBatch(ctx.actor, {
+        text: requireString(ctx.options, "pairs"),
+      });
+
+      const changed = report.added + report.updated;
+      const head =
+        changed === 0 && report.unresolved === 0 && report.failed === 0
+          ? ":ok_hand: Nothing to do; every line already pointed where you asked."
+          : `:link: **${report.added} added, ${report.updated} repointed**` +
+            (report.unchanged ? `, ${report.unchanged} already there` : "") +
+            (report.unresolved ? `, ${report.unresolved} not placed` : "") +
+            (report.failed ? `, ${report.failed} refused` : "") +
+            (report.closedQueueRows ? `\n${report.closedQueueRows} untracked queue row(s) closed.` : "");
+
+      // The rows worth reading are the ones that did NOT simply work: a paste of
+      // twenty wants the three that need a decision, not twenty confirmations.
+      const problems = report.results.filter(
+        (row) => row.outcome !== "added" && row.outcome !== "updated" && row.outcome !== "unchanged",
+      );
+      const rendered = problems
+        .slice(0, 15)
+        .map(
+          (row) =>
+            `• \`${short(row.sourceUrl, 60)}\` — **${row.outcome}**` +
+            (row.detail ? `: ${short(row.detail, 90)}` : ""),
+        );
+      if (problems.length > 15) rendered.push(`…and ${problems.length - 15} more`);
+      for (const parse of report.parseErrors.slice(0, 5)) {
+        rendered.push(`• line ${parse.line}: ${short(parse.reason, 90)}`);
+      }
+      if (report.parseErrors.length > 5) {
+        rendered.push(`…and ${report.parseErrors.length - 5} more unreadable line(s)`);
+      }
+      if (report.results.some((row) => row.outcome === "rejected_needs_write")) {
+        rendered.push(
+          "Rows marked `rejected_needs_write` would repoint a series that is already mapped, " +
+            "which this token may not do. Repoint them on the dashboard, or with a token holding `tracked:write`.",
+        );
+      }
+      if (report.untrackedNote) rendered.push(report.untrackedNote);
+
+      return { text: lines([head, ...rendered]) };
     },
   },
   {

@@ -1,6 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
 import { Manifest, hostAllowed } from "../../contracts/manifest.js";
 import { normaliseOfficialLink } from "../md/officialLink.js";
+import { parseMdTitleId } from "../md/titleId.js";
 import { idFromUrl, learnIdUrlRule, type IdUrlRule } from "../md/idFromUrl.js";
 import { DEFAULT_NAMESPACE } from "./trackedManga.js";
 
@@ -95,6 +96,41 @@ export interface SourceLinkDeps {
 }
 
 /**
+ * What a run of resolutions shares.
+ *
+ * One link costs one manifest read and, at worst, one rule measurement per
+ * candidate extension. A pasted batch of two hundred would pay both two hundred
+ * times over for answers that cannot differ within a single request — the
+ * published manifests do not change mid-paste, and neither does where an
+ * extension puts its ids. So a batch resolves through one of these and the
+ * repeated work happens once.
+ */
+interface ResolverCache {
+  deps: SourceLinkDeps;
+  manifests(): Promise<Map<string, Manifest>>;
+  ruleFor(extension: string): Promise<IdUrlRule | null>;
+}
+
+export interface SourceResolver {
+  resolve(url: string): Promise<SourceResolution>;
+}
+
+/** A resolver for one batch. Cheap to make; make one per request, not per row. */
+export function createSourceResolver(deps: SourceLinkDeps): SourceResolver {
+  let manifests: Promise<Map<string, Manifest>> | null = null;
+  const rules = new Map<string, IdUrlRule | null>();
+  const cache: ResolverCache = {
+    deps,
+    manifests: () => (manifests ??= deps.manifests()),
+    async ruleFor(extension: string) {
+      if (!rules.has(extension)) rules.set(extension, await learnRuleFor(deps, extension));
+      return rules.get(extension) ?? null;
+    },
+  };
+  return { resolve: (url: string) => resolveWith(cache, url) };
+}
+
+/**
  * The url forms one page is written in, for an exact lookup against stored rows.
  *
  * `manga_url` is stored verbatim as the extension reported it, so a paste that
@@ -132,10 +168,13 @@ function segmentsOf(raw: string): string[] {
   }
 }
 
-export async function resolveSourceUrl(
-  deps: SourceLinkDeps,
-  raw: string,
-): Promise<SourceResolution> {
+/** One link, on its own. A batch should use `createSourceResolver` instead. */
+export function resolveSourceUrl(deps: SourceLinkDeps, raw: string): Promise<SourceResolution> {
+  return createSourceResolver(deps).resolve(raw);
+}
+
+async function resolveWith(cache: ResolverCache, raw: string): Promise<SourceResolution> {
+  const deps = cache.deps;
   const url = String(raw ?? "").trim();
   const normalised = normaliseOfficialLink(url);
   if (normalised === null) {
@@ -151,7 +190,7 @@ export async function resolveSourceUrl(
   }
   const host = normalised.split("/")[0]!;
 
-  const manifests = await deps.manifests();
+  const manifests = await cache.manifests();
   const candidates = [...manifests]
     .filter(([, manifest]) => hostAllowed(url, manifest.allowed_hosts))
     .map(([name]) => name)
@@ -256,7 +295,7 @@ export async function resolveSourceUrl(
   // ---- the id is where this extension's own urls put ids ----
   const learned: { extension: string; mangaId: string; rule: IdUrlRule }[] = [];
   for (const extension of candidates) {
-    const rule = await learnRuleFor(deps, extension);
+    const rule = await cache.ruleFor(extension);
     if (!rule) continue;
     const mangaId = idFromUrl(url, rule);
     if (mangaId) learned.push({ extension, mangaId, rule });
@@ -370,4 +409,83 @@ async function learnRuleFor(deps: SourceLinkDeps, extension: string): Promise<Id
     take: RULE_SAMPLE_LIMIT,
   });
   return learnIdUrlRule(rows.map((row) => ({ id: row.mangaId, url: row.mangaUrl })));
+}
+
+/** One pasted line: the publisher's page, and the MangaDex title to map it to. */
+export interface SourceMapLine {
+  /** 1-based, so a reported error points at the line the operator can see. */
+  line: number;
+  sourceUrl: string;
+  mdMangaId: string;
+}
+
+/**
+ * Read pasted `<publisher link> <mangadex link>` lines.
+ *
+ * The two values are told apart by what they ARE rather than by column order:
+ * exactly one of them is a MangaDex title id or title link, and the other is
+ * the publisher's page. So a paste assembled by copying tabs in whatever order
+ * they were opened works, which is the order they actually get opened in.
+ *
+ * Comments, blank lines and a header row are ignored, matching the tracked-map
+ * paste box an operator may already know. Everything else is reported per line,
+ * because a batch that fails whole is a batch nobody can correct.
+ */
+export function parseSourceMapLines(text: string): {
+  rows: SourceMapLine[];
+  errors: { line: number; text: string; reason: string }[];
+} {
+  const rows: SourceMapLine[] = [];
+  const errors: { line: number; text: string; reason: string }[] = [];
+
+  String(text ?? "").split(/\r?\n/).forEach((raw, index) => {
+    // A `#` inside a url is a fragment, and no url here needs one; splitting on
+    // it keeps the comment convention the other paste boxes use.
+    const line = raw.split("#")[0]!.trim();
+    if (line.length === 0) return;
+    const parts = line.split(/[\s,;|]+/).filter(Boolean);
+
+    const titles = parts.map((part) => parseMdTitleId(part));
+    const titleAt = titles.findIndex((result) => "id" in result);
+    if (titleAt === -1) {
+      // A header row is the one line with no MangaDex value that is not a
+      // mistake; anything aimed at mangadex.org and missed says why.
+      const aimed = parts.findIndex((part) => /mangadex\.[a-z]/i.test(part));
+      if (aimed === -1 && index === 0) return;
+      errors.push({
+        line: index + 1,
+        text: line,
+        reason:
+          aimed !== -1
+            ? (titles[aimed] as { error: string }).error
+            : "no value on this line is a MangaDex title id or title link",
+      });
+      return;
+    }
+    const rest = parts.filter((_, at) => at !== titleAt);
+    if (rest.length === 0) {
+      errors.push({ line: index + 1, text: line, reason: "no publisher link on this line" });
+      return;
+    }
+    if (rest.length > 1) {
+      errors.push({
+        line: index + 1,
+        text: line,
+        reason: "expected two values: the publisher's link and the MangaDex title",
+      });
+      return;
+    }
+    const sourceUrl = rest[0]!;
+    if (normaliseOfficialLink(sourceUrl) === null) {
+      errors.push({
+        line: index + 1,
+        text: line,
+        reason: `${sourceUrl} is not an http(s) link to a publisher's page`,
+      });
+      return;
+    }
+    rows.push({ line: index + 1, sourceUrl, mdMangaId: (titles[titleAt] as { id: string }).id });
+  });
+
+  return { rows, errors };
 }

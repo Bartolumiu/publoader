@@ -35,7 +35,13 @@ import {
   type SortColumns,
 } from "../../store/ordering.js";
 import { parseMdTitleId } from "../../md/titleId.js";
-import { resolveSourceUrl, type SourceLinkDeps } from "../../store/sourceLinks.js";
+import {
+  createSourceResolver,
+  parseSourceMapLines,
+  resolveSourceUrl,
+  type SourceLinkDeps,
+  type SourceMapLine,
+} from "../../store/sourceLinks.js";
 
 /**
  * The untracked queue's columns, aliased to the names the API answers with.
@@ -136,6 +142,16 @@ function parseOrThrow<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infe
     statusCode: 400,
   });
 }
+
+/**
+ * How many links one paste may carry.
+ *
+ * Far below the tracked map's 2000-row cap, and deliberately: those rows are a
+ * pure write, while each of these is resolved against the queue, the map and a
+ * measured rule first. Two hundred is a publisher's whole front page and still
+ * answers inside one interactive request.
+ */
+const MAX_SOURCE_BATCH = 200;
 
 /**
  * A MangaDex title id, accepted as either the bare uuid or the link an operator
@@ -1670,6 +1686,224 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
               ? "the queue row for this series was left as it is: closing it needs untracked:write"
               : undefined,
           resolution,
+        };
+      },
+    );
+
+    /**
+     * Map a whole paste of them at once.
+     *
+     * WHY IT IS ITS OWN ROUTE. A backlog is not mapped one series at a time.
+     * Someone works through a publisher's new-releases page with twenty tabs
+     * open, and doing that through the single-link route means twenty requests,
+     * twenty confirmations, and no way to see what the twenty would do before
+     * any of them happens. The single route stays for the one-off; this one is
+     * for the backlog, and it is a preview-then-apply exactly like the tracked
+     * map's own paste box, for the same reason: a paste of twenty can add,
+     * repoint, no-op and fail in the same batch.
+     *
+     * Reuses the pieces that already decide these things rather than deciding
+     * them again: `parseSourceMapLines` for the paste, one shared resolver for
+     * the links, `existingTitles` for one MangaDex round trip instead of N, and
+     * `trackedManga.applyBatch` for the write and the per-row outcomes — so a
+     * row's verdict here means exactly what the same verdict means there.
+     */
+    scope.post(
+      "/api/v1/admin/source/map/batch",
+      { preHandler: requireScope("tracked:append") },
+      async (req, reply) => {
+        const body = parseOrThrow(
+          z
+            .object({
+              /** Pasted `<publisher link> <mangadex link>` lines. */
+              text: z.string().max(512 * 1024).optional(),
+              /** The same thing pre-split, for a caller that has structure already. */
+              pairs: z
+                .array(
+                  z.object({
+                    sourceUrl: z.string().min(1).max(2048),
+                    mdMangaId: z.string().min(1).max(2048),
+                  }),
+                )
+                .max(MAX_SOURCE_BATCH)
+                .optional(),
+              dryRun: z.boolean().default(false),
+            })
+            .strict(),
+          req.body ?? {},
+        );
+
+        const parsed = body.text ? parseSourceMapLines(body.text) : { rows: [], errors: [] };
+        const fromPairs: SourceMapLine[] = [];
+        const parseErrors = [...parsed.errors];
+        (body.pairs ?? []).forEach((pair, index) => {
+          const title = parseMdTitleId(pair.mdMangaId);
+          if ("error" in title) {
+            parseErrors.push({ line: index + 1, text: pair.mdMangaId, reason: title.error });
+            return;
+          }
+          fromPairs.push({ line: index + 1, sourceUrl: pair.sourceUrl, mdMangaId: title.id });
+        });
+        const rows = [...parsed.rows, ...fromPairs];
+        if (rows.length === 0 && parseErrors.length === 0) {
+          return reply.code(400).send({ error: "nothing to do: provide text or pairs" });
+        }
+        if (rows.length > MAX_SOURCE_BATCH) {
+          return reply
+            .code(413)
+            .send({ error: `at most ${MAX_SOURCE_BATCH} links per batch; each one is resolved separately` });
+        }
+
+        // One resolver for the whole paste: the manifests and each extension's
+        // id rule are the same for every row, and re-deriving them per row is
+        // most of what a batch would otherwise cost.
+        const resolver = createSourceResolver(sourceLinkDeps());
+        const resolved = [];
+        for (const row of rows) {
+          resolved.push({ row, resolution: await resolver.resolve(row.sourceUrl) });
+        }
+
+        /** Rows that named a series, and rows that could not. */
+        const placed = resolved.filter((r) => r.resolution.match?.mangaId);
+        const results: Record<string, unknown>[] = resolved
+          .filter((r) => !r.resolution.match?.mangaId)
+          .map((r) => ({
+            line: r.row.line,
+            sourceUrl: r.row.sourceUrl,
+            mdMangaId: r.row.mdMangaId,
+            extension: r.resolution.match?.extension ?? null,
+            outcome: "unresolved" as const,
+            detail:
+              r.resolution.reason ??
+              (r.resolution.match
+                ? `${r.resolution.match.extension} is the extension, but nothing here says which series`
+                : "could not tell which extension that link belongs to"),
+          }));
+
+        // One MangaDex round trip for the whole paste rather than one per row.
+        // Skipped entirely where the instance holds no credential: refusing a
+        // batch because we cannot check is worse than mapping it unchecked, and
+        // the single-link route makes the same call.
+        let missingTitles = new Set<string>();
+        if (ctx.titleService && placed.length > 0) {
+          const known = await ctx.titleService.existingTitles(placed.map((r) => r.row.mdMangaId));
+          missingTitles = new Set(placed.map((r) => r.row.mdMangaId).filter((id) => !known.has(id)));
+        }
+
+        const writable = placed.filter((r) => !missingTitles.has(r.row.mdMangaId));
+        for (const r of placed) {
+          if (!missingTitles.has(r.row.mdMangaId)) continue;
+          results.push({
+            line: r.row.line,
+            sourceUrl: r.row.sourceUrl,
+            mdMangaId: r.row.mdMangaId,
+            extension: r.resolution.match!.extension,
+            mangaId: r.resolution.match!.mangaId,
+            outcome: "invalid" as const,
+            detail: `MangaDex has no title ${r.row.mdMangaId}; it may be deleted, merged, or a typo`,
+          });
+        }
+
+        // Grouped because the store's batch is per-extension, and a paste off a
+        // publisher's page can still span two of them (a site one extension
+        // covers in English and another in Spanish).
+        const byExtension = new Map<string, typeof writable>();
+        for (const r of writable) {
+          const list = byExtension.get(r.resolution.match!.extension) ?? [];
+          list.push(r);
+          byExtension.set(r.resolution.match!.extension, list);
+        }
+
+        const canWrite = hasScope(req.principal!, "tracked:write");
+        const mayCloseRows = hasScope(req.principal!, "untracked:write");
+        const summary = { added: 0, updated: 0, unchanged: 0, failed: 0 };
+        /** Queue rows to close, collected while merging outcomes back. */
+        const closable: string[] = [];
+
+        for (const [extension, group] of byExtension) {
+          const batch = await ctx.trackedManga.applyBatch(
+            extension,
+            {
+              set: group.map((r) => ({
+                mangaId: r.resolution.match!.mangaId!,
+                mdMangaId: r.row.mdMangaId,
+                namespace: r.resolution.match!.namespace ?? undefined,
+              })),
+            },
+            { canWrite, source: actor(req), dryRun: body.dryRun },
+          );
+          summary.added += batch.added;
+          summary.updated += batch.updated;
+          summary.unchanged += batch.unchanged;
+          summary.failed += batch.failed;
+
+          // Outcomes come back per (namespace, mangaId), which is what a row
+          // resolved to; matching on that is what lets two pasted lines for the
+          // same series both be told what happened.
+          for (const r of group) {
+            const match = r.resolution.match!;
+            const outcome = batch.results.find(
+              (result) =>
+                result.mangaId === match.mangaId && (result.namespace ?? "") === (match.namespace ?? ""),
+            );
+            if (
+              !body.dryRun &&
+              mayCloseRows &&
+              match.untracked &&
+              match.untracked.state !== "CREATING" &&
+              (outcome?.outcome === "added" || outcome?.outcome === "updated")
+            ) {
+              closable.push(match.untracked.id);
+            }
+            results.push({
+              line: r.row.line,
+              sourceUrl: r.row.sourceUrl,
+              extension,
+              namespace: match.namespace ?? "",
+              mangaId: match.mangaId,
+              mdMangaId: r.row.mdMangaId,
+              via: match.via,
+              queued: match.untracked ? match.untracked.mangaName : null,
+              outcome: outcome?.outcome ?? "invalid",
+              detail: outcome?.detail,
+            });
+          }
+        }
+
+        // A row left NEW behind a mapping is a series that gets offered for
+        // creation again, so closing them is part of the write, not a nicety.
+        if (closable.length > 0) {
+          await ctx.prisma.untrackedManga.updateMany({
+            where: { id: { in: closable } },
+            data: { state: "TRACKED" },
+          });
+        }
+
+        if (!body.dryRun && summary.added + summary.updated > 0) {
+          await ctx.audit.record(actor(req), "tracked_manga.batch", "source-links", {
+            added: summary.added,
+            updated: summary.updated,
+            unchanged: summary.unchanged,
+            failed: summary.failed,
+            rows: rows.length,
+            closedQueueRows: closable.length,
+          });
+        }
+
+        results.sort((a, b) => Number(a.line ?? 0) - Number(b.line ?? 0));
+        return {
+          dryRun: body.dryRun,
+          parseErrors,
+          ...summary,
+          // Counted apart from `failed`, which is the store's word for a row it
+          // refused; these never reached it.
+          unresolved: results.filter((r) => r.outcome === "unresolved").length,
+          closedQueueRows: closable.length,
+          untrackedNote:
+            !body.dryRun && !mayCloseRows && writable.some((r) => r.resolution.match?.untracked)
+              ? "queue rows for these series were left as they are: closing them needs untracked:write"
+              : undefined,
+          results,
         };
       },
     );

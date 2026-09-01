@@ -316,7 +316,17 @@ run happens on the wrong day.
 
 | Command | Class | Scope | What it does |
 |---|---|---|---|
+| `/map-many` | mutate | `tracked:append` | Map a batch. Opens a **paste box**: one publisher link and one MangaDex link per line, in either order, up to 200 lines. Applies straight away and reports per row; the lines that simply worked are not repeated back. |
 | `/map <source> [mangadex] [manga-id]` | mutate | `tracked:append` | Map a series from its two links. `source` is the publisher's page; the extension and the series id are worked out from what the platform already holds. Without `mangadex` it only reports what the link is, including whether the series is already mapped. `manga-id` finishes a link the resolver cannot read on its own. |
+
+`/map-many` opens a modal because a slash-command option is a single line, and a
+backlog is twenty tabs on a publisher's new-releases page. It applies rather
+than previewing: the modal shows the operator exactly what they pasted before
+they submit it, every row's outcome comes back afterwards, and a repoint still
+needs `tracked:write` — which the bot's own token preset deliberately lacks, so
+a paste through Discord cannot move a live series unless someone widened that
+token on purpose. Previewing a large paste belongs on the dashboard, which can
+show it as a table.
 
 This is the short path, and the one to reach for when a link is posted in a
 channel: paste the publisher's page and the MangaDex title, and the mapping,

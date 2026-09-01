@@ -10,7 +10,13 @@ import {
   type BotCommand,
   type OptionReader,
 } from "../../src/bot/commands.js";
-import { actorFor, FatalBotConfigError, translateLoginError } from "../../src/bot/bot.js";
+import {
+  actorFor,
+  buildModal,
+  FatalBotConfigError,
+  modalOptionReader,
+  translateLoginError,
+} from "../../src/bot/bot.js";
 
 const log = pino({ level: "silent" });
 
@@ -976,6 +982,160 @@ describe("/map", () => {
     const reply = await invoke("map", fakeApi({ resolveSource }), { source: "https://unknown.example/x" });
     expect(reply.text).toContain("Could not tell");
     expect(reply.text).toContain("allowed_hosts");
+  });
+});
+
+/**
+ * Mapping a backlog in one go.
+ *
+ * A backlog is not worked one series at a time: it is twenty tabs open on a
+ * publisher's new-releases page. A slash option is a single line, so the paste
+ * arrives through a modal, and the reply has to be about the rows that need a
+ * decision rather than a receipt for the seventeen that simply worked.
+ */
+describe("/map-many", () => {
+  const TITLE_ID = "9a1b1c1d-0000-4000-8000-000000000abc";
+  const SOURCE = "https://comikey.com/comics/kengan-omega";
+
+  const report = (over: Record<string, unknown> = {}) => ({
+    dryRun: false,
+    parseErrors: [],
+    added: 2,
+    updated: 0,
+    unchanged: 0,
+    failed: 0,
+    unresolved: 0,
+    closedQueueRows: 2,
+    results: [
+      { line: 1, sourceUrl: SOURCE, extension: "comikey", mangaId: "kengan-omega", outcome: "added" },
+      { line: 2, sourceUrl: `${SOURCE}-2`, extension: "comikey", mangaId: "other", outcome: "added" },
+    ],
+    ...over,
+  });
+
+  it("collects the paste in a modal, because a slash option is one line", () => {
+    const command = COMMANDS_BY_NAME.get("map-many")!;
+    expect(command.modal).toBeTruthy();
+    expect(command.modal!.fields[0]!.paragraph).toBe(true);
+    // The modal replaces the reply, so such a command must not also expect
+    // options to have been filled in before it opens.
+    expect(command.builder.toJSON().options ?? []).toHaveLength(0);
+  });
+
+  it("sends what was pasted, and says what happened to the batch", async () => {
+    const mapSourceBatch = vi.fn().mockResolvedValue(report());
+    const reply = await invoke("map-many", fakeApi({ mapSourceBatch }), {
+      pairs: `${SOURCE} ${TITLE_ID}\n${SOURCE}-2 ${TITLE_ID}`,
+    });
+
+    expect(mapSourceBatch).toHaveBeenCalledWith("discord:ardax", {
+      text: `${SOURCE} ${TITLE_ID}\n${SOURCE}-2 ${TITLE_ID}`,
+    });
+    expect(reply.text).toContain("2 added");
+    // Closing the queue rows is the part that would otherwise be forgotten.
+    expect(reply.text).toContain("queue row(s) closed");
+  });
+
+  it("reports only the rows that need a decision, not a receipt for every line", async () => {
+    const mapSourceBatch = vi.fn().mockResolvedValue(
+      report({
+        added: 1,
+        unresolved: 1,
+        results: [
+          { line: 1, sourceUrl: SOURCE, extension: "comikey", mangaId: "kengan-omega", outcome: "added" },
+          {
+            line: 2,
+            sourceUrl: "https://nobody.example/x",
+            outcome: "unresolved",
+            detail: "no published extension declares nobody.example in its allowed_hosts",
+          },
+        ],
+      }),
+    );
+    const reply = await invoke("map-many", fakeApi({ mapSourceBatch }), { pairs: "two lines" });
+
+    expect(reply.text).toContain("not placed");
+    expect(reply.text).toContain("nobody.example");
+    // The line that simply worked is not repeated back.
+    expect(reply.text).not.toContain("kengan-omega");
+  });
+
+  it("says why a repoint in a paste was refused, and where to do it instead", async () => {
+    const mapSourceBatch = vi.fn().mockResolvedValue(
+      report({
+        added: 0,
+        failed: 1,
+        results: [
+          {
+            line: 1,
+            sourceUrl: SOURCE,
+            extension: "comikey",
+            mangaId: "kengan-omega",
+            outcome: "rejected_needs_write",
+            detail: "already mapped to another title; changing it needs scope tracked:write",
+          },
+        ],
+      }),
+    );
+    const reply = await invoke("map-many", fakeApi({ mapSourceBatch }), { pairs: "one line" });
+    expect(reply.text).toContain("rejected_needs_write");
+    expect(reply.text).toContain("tracked:write");
+  });
+
+  it("surfaces the lines it could not read at all", async () => {
+    const mapSourceBatch = vi.fn().mockResolvedValue(
+      report({ parseErrors: [{ line: 3, text: "junk", reason: "no publisher link on this line" }] }),
+    );
+    const reply = await invoke("map-many", fakeApi({ mapSourceBatch }), { pairs: "..." });
+    expect(reply.text).toContain("line 3");
+    expect(reply.text).toContain("no publisher link");
+  });
+
+  it("says plainly when a paste changed nothing", async () => {
+    const mapSourceBatch = vi.fn().mockResolvedValue(
+      report({ added: 0, unchanged: 2, closedQueueRows: 0, results: [] }),
+    );
+    const reply = await invoke("map-many", fakeApi({ mapSourceBatch }), { pairs: "..." });
+    expect(reply.text).toContain("Nothing to do");
+  });
+});
+
+describe("modals as a way in", () => {
+  it("namespaces the custom id, so another app's modal is never read as ours", () => {
+    const modal = buildModal(COMMANDS_BY_NAME.get("map-many")!).toJSON();
+    // The submission carries only this id, so it IS the routing table.
+    expect(modal.custom_id).toBe("publoader:map-many");
+    expect(modal.title).toBeTruthy();
+  });
+
+  it("builds one paragraph input per declared field, keyed by the option name", () => {
+    const modal = buildModal(COMMANDS_BY_NAME.get("map-many")!).toJSON();
+    // discord.js types the row's children as a union of every component kind;
+    // a modal only ever holds text inputs, so narrow to what one is.
+    const row = modal.components[0] as unknown as {
+      components: { custom_id: string; style: number }[];
+    };
+    const input = row.components[0]!;
+    expect(input.custom_id).toBe("pairs");
+    // Style 2 is Paragraph; a Short field could not hold a paste.
+    expect(input.style).toBe(2);
+  });
+
+  it("reads modal fields through the same interface as slash options", () => {
+    const reader = modalOptionReader({
+      fields: {
+        getTextInputValue: (name: string) => {
+          if (name === "pairs") return "a line";
+          throw new Error("no such field");
+        },
+      },
+    } as never);
+    expect(reader.string("pairs")).toBe("a line");
+    // A field that is not there is absent, not a crash: handlers decide whether
+    // a missing value is an error, exactly as they do for an option.
+    expect(reader.string("nope")).toBeNull();
+    expect(reader.subcommand()).toBeNull();
+    expect(reader.integer("anything")).toBeNull();
   });
 });
 

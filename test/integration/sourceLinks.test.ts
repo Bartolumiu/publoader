@@ -59,6 +59,9 @@ describe.skipIf(!dbReady())("resolving a publisher link to a tracked series", ()
     titles.set(OTHER_TITLE, detail(OTHER_TITLE));
     const md: Partial<MdApi> = {
       mangaById: async (id: string) => titles.get(id) ?? null,
+      // The batch route checks a whole paste in one call rather than one
+      // request per row, so the stub has to answer that shape too.
+      mangaByIds: async (ids: string[]) => ids.map((id) => titles.get(id)).filter((t) => t !== undefined),
       searchManga: async () => [],
     };
     ctx.titleService = new TitleService(prisma, md as MdApi, { send: async () => undefined }, log);
@@ -330,6 +333,158 @@ describe.skipIf(!dbReady())("resolving a publisher link to a tracked series", ()
       previousMdMangaId: TITLE_ID,
       mdMangaId: OTHER_TITLE,
     });
+  });
+
+  // ---- a whole paste at once ----
+
+  const mapBatch = (payload: Record<string, unknown>) =>
+    app.inject({ method: "POST", url: "/api/v1/admin/source/map/batch", headers: root, payload });
+
+  it("maps a pasted batch, resolving each link and closing every queue row", async () => {
+    await publish("comikey", ["comikey.com"]);
+    const first = await queued({ mangaId: "kengan-omega", mangaUrl: "https://comikey.com/comics/kengan-omega" });
+    const second = await queued({ mangaId: "a-second-series", mangaUrl: "https://comikey.com/comics/a-second-series" });
+
+    const res = await mapBatch({
+      text: [
+        `https://comikey.com/comics/kengan-omega/ https://mangadex.org/title/${TITLE_ID}/slug`,
+        // Reversed, because a paste is assembled tab by tab in no fixed order.
+        `${OTHER_TITLE},https://comikey.com/comics/a-second-series`,
+      ].join("\n"),
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body).toMatchObject({ added: 2, updated: 0, failed: 0, unresolved: 0, closedQueueRows: 2 });
+    expect(body.parseErrors).toEqual([]);
+
+    const mappings = await prisma.trackedManga.findMany({ orderBy: { mangaId: "asc" } });
+    expect(mappings.map((m) => [m.mangaId, m.mdMangaId])).toEqual([
+      ["a-second-series", OTHER_TITLE],
+      ["kengan-omega", TITLE_ID],
+    ]);
+    for (const row of [first, second]) {
+      expect((await prisma.untrackedManga.findUniqueOrThrow({ where: { id: row.id } })).state).toBe("TRACKED");
+    }
+    // Every row says how its series was identified, the same as the single route.
+    expect(body.results.every((r: { via: string }) => r.via === "queue")).toBe(true);
+  });
+
+  it("previews the whole paste without writing any of it", async () => {
+    await publish("comikey", ["comikey.com"]);
+    await queued({ mangaId: "kengan-omega", mangaUrl: "https://comikey.com/comics/kengan-omega" });
+
+    const res = await mapBatch({
+      text: `https://comikey.com/comics/kengan-omega ${TITLE_ID}`,
+      dryRun: true,
+    });
+    expect(res.json()).toMatchObject({ dryRun: true, added: 1 });
+    expect(await prisma.trackedManga.count()).toBe(0);
+    expect((await prisma.untrackedManga.findFirstOrThrow()).state).toBe("NEW");
+  });
+
+  it("applies the rows it understood and reports the ones it did not, per line", async () => {
+    await publish("comikey", ["comikey.com"]);
+    await queued({ mangaId: "kengan-omega", mangaUrl: "https://comikey.com/comics/kengan-omega" });
+
+    const res = await mapBatch({
+      text: [
+        `https://comikey.com/comics/kengan-omega ${TITLE_ID}`,
+        // A site no published extension claims: one bad line must not cost the
+        // other nineteen in a twenty-line paste.
+        `https://nobody-covers-this.example/series/1 ${OTHER_TITLE}`,
+        "this line is not a pair at all",
+      ].join("\n"),
+    });
+    const body = res.json();
+    expect(body).toMatchObject({ added: 1, unresolved: 1 });
+    expect(body.parseErrors).toHaveLength(1);
+    expect(body.parseErrors[0].line).toBe(3);
+
+    const unresolved = body.results.find((r: { outcome: string }) => r.outcome === "unresolved");
+    expect(unresolved.line).toBe(2);
+    expect(unresolved.detail).toContain("allowed_hosts");
+    expect(await prisma.trackedManga.count()).toBe(1);
+  });
+
+  it("refuses only the rows whose MangaDex title does not exist", async () => {
+    await publish("comikey", ["comikey.com"]);
+    await queued({ mangaId: "kengan-omega", mangaUrl: "https://comikey.com/comics/kengan-omega" });
+    await queued({ mangaId: "a-second-series", mangaUrl: "https://comikey.com/comics/a-second-series" });
+
+    const res = await mapBatch({
+      text: [
+        `https://comikey.com/comics/kengan-omega ${TITLE_ID}`,
+        `https://comikey.com/comics/a-second-series 5f5f5f5f-0000-4000-8000-00000000dead`,
+      ].join("\n"),
+    });
+    const body = res.json();
+    expect(body.added).toBe(1);
+    const invalid = body.results.find((r: { outcome: string }) => r.outcome === "invalid");
+    expect(invalid.detail).toContain("MangaDex has no title");
+    expect(await prisma.trackedManga.count()).toBe(1);
+  });
+
+  it("spans two extensions in one paste, because a backlog does", async () => {
+    await publish("comikey", ["comikey.com"]);
+    await publish("mangaplus", ["mangaplus.shueisha.co.jp"]);
+    await queued({ mangaId: "kengan-omega", mangaUrl: "https://comikey.com/comics/kengan-omega" });
+    await queued({
+      extension: "mangaplus",
+      mangaId: "100001",
+      mangaUrl: "https://mangaplus.shueisha.co.jp/titles/100001",
+    });
+
+    const res = await mapBatch({
+      text: [
+        `https://comikey.com/comics/kengan-omega ${TITLE_ID}`,
+        `https://mangaplus.shueisha.co.jp/titles/100001 ${OTHER_TITLE}`,
+      ].join("\n"),
+    });
+    expect(res.json()).toMatchObject({ added: 2, failed: 0 });
+    expect((await prisma.trackedManga.findMany()).map((m) => m.extension).sort()).toEqual([
+      "comikey",
+      "mangaplus",
+    ]);
+  });
+
+  it("reports a repoint in a paste as a repoint, not as an add", async () => {
+    await publish("mangaplus", ["mangaplus.shueisha.co.jp"]);
+    await prisma.trackedManga.create({
+      data: { extension: "mangaplus", mangaId: "100001", mdMangaId: TITLE_ID },
+    });
+
+    const res = await mapBatch({
+      text: `https://mangaplus.shueisha.co.jp/titles/100001 ${OTHER_TITLE}`,
+    });
+    const body = res.json();
+    expect(body).toMatchObject({ added: 0, updated: 1 });
+    expect(body.results[0].outcome).toBe("updated");
+    expect(body.results[0].detail).toContain(TITLE_ID);
+  });
+
+  it("takes pre-split pairs as well as a paste", async () => {
+    await publish("comikey", ["comikey.com"]);
+    await queued({ mangaId: "kengan-omega", mangaUrl: "https://comikey.com/comics/kengan-omega" });
+
+    const res = await mapBatch({
+      pairs: [
+        {
+          sourceUrl: "https://comikey.com/comics/kengan-omega",
+          mdMangaId: `https://mangadex.org/title/${TITLE_ID}`,
+        },
+      ],
+    });
+    expect(res.json()).toMatchObject({ added: 1 });
+  });
+
+  it("refuses a paste larger than one interactive request should carry", async () => {
+    await publish("comikey", ["comikey.com"]);
+    const lines = Array.from(
+      { length: 201 },
+      (_, i) => `https://comikey.com/comics/series-${i} ${TITLE_ID}`,
+    );
+    const res = await mapBatch({ text: lines.join("\n") });
+    expect(res.statusCode).toBe(413);
   });
 
   it("reports the same mapping twice as nothing to do", async () => {
