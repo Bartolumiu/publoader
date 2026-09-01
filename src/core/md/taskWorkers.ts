@@ -53,6 +53,61 @@ export class TaskError extends Error {
 }
 
 /**
+ * The full body a `PUT /chapter` needs: what MangaDex currently holds, with
+ * the edit's payload laid over it.
+ *
+ * MangaDex's ChapterEdit is a replace, not a patch -- every mutable attribute
+ * it is given is the new truth, and every one it is NOT given is cleared. So
+ * the base has to restate the fields the edit does not mean to touch, and
+ * `externalUrl` is one of them. Leaving it out of the base was not cosmetic:
+ * the chapters this platform publishes carry no pages, only the link out to
+ * the publisher, so an edit that meant to correct a title also emptied the
+ * chapter -- `pages: 0` and nowhere to go. Nothing downstream noticed, because
+ * the mirror still held the url that MangaDex no longer did. 52 K MANGA
+ * chapters were in that state when this was found.
+ *
+ * A url is laid down only when it is non-empty, on both sides. ChapterEdit
+ * rejects a null `externalUrl` exactly as ChapterDraft does (see
+ * `commitUploadSession`), so "this chapter has no link" is expressed by
+ * omitting the key. That also means a payload asking to CLEAR the link cannot
+ * be honoured; sending the null would have MangaDex reject the whole edit and
+ * lose the title or number change riding along with it, so the key is dropped
+ * and the link is left standing -- the survivable half of an impossible ask.
+ */
+export function chapterEditBody(
+  current: {
+    attributes: {
+      volume: string | null;
+      chapter: string | null;
+      title: string | null;
+      translatedLanguage: string;
+      externalUrl: string | null;
+      version: number;
+    };
+    relationships: readonly { type: string; id: string }[];
+  },
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  const groups = current.relationships
+    .filter((rel) => rel.type === "scanlation_group")
+    .map((rel) => rel.id);
+
+  const requested = { ...payload };
+  if ("externalUrl" in requested && !requested.externalUrl) delete requested.externalUrl;
+
+  return {
+    volume: current.attributes.volume,
+    chapter: current.attributes.chapter,
+    title: current.attributes.title,
+    translatedLanguage: current.attributes.translatedLanguage,
+    groups,
+    ...(current.attributes.externalUrl ? { externalUrl: current.attributes.externalUrl } : {}),
+    ...requested,
+    version: current.attributes.version,
+  };
+}
+
+/**
  * The chapter as MangaDex holds it after an edit: the extension's chapter with
  * the fields the edit actually sent laid over it.
  *
@@ -470,20 +525,7 @@ export class UploadTaskWorkers {
     const [current] = await md.chaptersByIds([mdChapterId]);
     if (!current) throw new TaskError(`chapter ${mdChapterId} not found on MangaDex`);
 
-    // ChapterEdit requires the whole body, not just the changed keys, so start
-    // from what MangaDex currently holds and lay the payload over it.
-    const groups = current.relationships
-      .filter((rel) => rel.type === "scanlation_group")
-      .map((rel) => rel.id);
-    const body: Record<string, unknown> = {
-      volume: current.attributes.volume,
-      chapter: current.attributes.chapter,
-      title: current.attributes.title,
-      translatedLanguage: current.attributes.translatedLanguage,
-      groups,
-      ...payload,
-      version: current.attributes.version,
-    };
+    const body = chapterEditBody(current, payload);
 
     try {
       const edited = await md.editChapter(mdChapterId, body);
