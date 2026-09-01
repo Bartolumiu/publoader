@@ -753,11 +753,29 @@ export class ChapterReconciler {
     );
 
     for (;;) {
+      // `id > cursor` rather than Prisma's `cursor: { id }`, because this loop
+      // DELETES from the table it is paging: archiving a row moves it out of
+      // uploaded_chapters. A Prisma cursor has to locate its row to page from
+      // it, so the moment the last row of a batch was one we archived, the
+      // next query found no cursor, returned nothing, and the loop below read
+      // that as "no rows left" and stopped -- silently, and reporting `done`.
+      //
+      // It was not rare. A pass archived about a hundred rows and then ended,
+      // whatever remained; three passes over the same 373 deleted chapters
+      // moved 100, then 98, then the rest. The dry run scanned all 11,253
+      // rows every time, because a dry run deletes nothing and the cursor
+      // therefore always still existed -- which is the worst shape for a bug
+      // like this, since the pass that reports is not the pass that breaks.
+      //
+      // A `>` on a sorted key needs no such row: it is a value, not a
+      // reference, and it survives the row being deleted a moment later.
       const rows = await this.deps.prisma.uploadedChapter.findMany({
-        where: options.extensions?.length ? { extension: { in: options.extensions } } : {},
+        where: {
+          ...(options.extensions?.length ? { extension: { in: options.extensions } } : {}),
+          ...(cursor === undefined ? {} : { id: { gt: cursor } }),
+        },
         orderBy: { id: "asc" },
         take: ROW_BATCH,
-        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       });
       if (rows.length === 0) break;
       cursor = rows[rows.length - 1]?.id;
