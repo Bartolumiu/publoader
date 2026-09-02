@@ -90,6 +90,8 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
     { match: /\/source\/map\/batch$/, body: () => BATCH },
     { match: /\/source\/map$/, body: () => MAP_RESULT },
     { match: /\/extensions\/[^/]+\/tracked$/, body: { tracked: [] } },
+    { match: /\/tracked\/extensions$/, body: { extensions: [], namespaces: [] } },
+    { match: /\/tracked\?/, body: { tracked: [], total: 0, limit: 50, nextCursor: null } },
     { match: /\/extensions$/, body: { extensions: [{ name: "comikey" }] } },
   ];
 }
@@ -357,8 +359,8 @@ describe("mapping a series from its publisher link", () => {
 
   it("sits on the series-map index, where no extension has been chosen yet", () => {
     expect(cardByTitle("Map a series from its links")).toBeTruthy();
-    // An addition, not a replacement.
-    expect(cardByTitle("Series map by extension")).toBeTruthy();
+    // An addition, not a replacement: the map listing is still the page.
+    expect(doc.getElementById("tracked-all-q")).toBeTruthy();
   });
 
   it("works out the extension and the series, and says how it knows", async () => {

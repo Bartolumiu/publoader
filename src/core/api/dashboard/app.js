@@ -119,6 +119,16 @@ const store = {
      */
     chapterCursors: {},
     chapterSort: { column: null, dir: "asc" },
+    /** The series map, across every extension. */
+    trackedQuery: "",
+    trackedExtension: "",
+    /** "" is a real catalogue, so "any" is the absent value here, not "". */
+    trackedNamespace: "any",
+    trackedMdMangaId: "",
+    trackedShared: "all",
+    trackedPaused: "all",
+    trackedCursors: [],
+    trackedSort: { column: null, dir: "asc" },
     untrackedState: "NEW",
     untrackedExtension: "",
     untrackedQuery: "",
@@ -1351,6 +1361,16 @@ const mdChapterLink = (id, label) =>
 
 /** An internal link. A real anchor, so middle-click and "copy link" work. */
 const routeLink = (hash, label, attrs = {}) => el("a", { href: hash, text: label, ...attrs });
+
+/**
+ * Was this mapping made by a pass rather than chosen by a person?
+ *
+ * Mirrors `isAutomaticSource` in core/md/titleService.ts, and is a prefix test
+ * for the same reason: a mapping nothing human chose is the one an operator
+ * most needs to spot, and matching one exact string means every source added
+ * later silently reads as hand-curated.
+ */
+const isAutomaticSource = (source) => typeof source === "string" && source.startsWith("auto:");
 
 function emptyState(message, ...extra) {
   return el(
@@ -11253,22 +11273,154 @@ function mapManyCard({ seed = "", heading = "Map many from links", onDone } = {}
   );
 }
 
+/**
+ * The series map itself, across every extension.
+ *
+ * WHAT THIS REPLACED. An index: six extension names, a count each, and a link
+ * into the per-extension map. That is the platform's own view of the map — "what
+ * does comikey track" — and it cannot answer the operator's questions at all,
+ * because those are not about an extension:
+ *
+ *   - which publishers feed this MangaDex title? Two extensions mapping to one
+ *     title is legitimate — a series two catalogues both carry — and also how a
+ *     mis-mapping looks. Telling those apart needs both rows on one screen, and
+ *     the map is keyed by (extension, catalogue, series), so nothing could put
+ *     them there.
+ *   - what did nobody review? `auto:official-link` is a source string, and the
+ *     search covers sources.
+ *
+ * Server-paged and server-sorted, like the queue and for the same reason: three
+ * and a half thousand mappings is more than a browser should hold, and ordering
+ * by a column means the whole map rather than the page in hand.
+ */
 VIEWS.tracked = () => {
-  const counts = new Resource("tracked-counts", async () => {
-    const list = await api("/extensions");
-    const rows = await Promise.all(
-      list.extensions.map(async (ext) => {
-        try {
-          const { tracked } = await api(`/extensions/${encodeURIComponent(ext.name)}/tracked`, { quiet: true });
-          return { name: ext.name, count: tracked.length, newest: tracked[tracked.length - 1] ?? null };
-        } catch {
-          // One unreadable extension must not empty the whole index.
-          return { name: ext.name, count: null, newest: null };
-        }
-      }),
-    );
-    return rows;
+  const walked = () => store.filters.trackedCursors ?? [];
+
+  const rows = new Resource("tracked-all", () => {
+    const params = new URLSearchParams({ limit: "50" });
+    const f = store.filters;
+    if (f.trackedQuery.trim()) params.set("q", f.trackedQuery.trim());
+    if (f.trackedExtension) params.set("extension", f.trackedExtension);
+    if (f.trackedNamespace !== "any") params.set("namespace", f.trackedNamespace);
+    if (f.trackedMdMangaId) params.set("mdMangaId", f.trackedMdMangaId);
+    if (f.trackedShared !== "all") params.set("shared", f.trackedShared);
+    if (f.trackedPaused !== "all") params.set("paused", f.trackedPaused);
+    if (f.trackedSort.column) {
+      params.set("orderBy", f.trackedSort.column);
+      params.set("dir", f.trackedSort.dir);
+    }
+    const trail = walked();
+    if (trail.length) params.set("cursor", trail[trail.length - 1]);
+    return api(`/tracked?${params}`);
   });
+
+  /** The pickers' options, and the counts that make them worth reading. */
+  const facets = new Resource("tracked-facets", () => api("/tracked/extensions"));
+
+  const resetPaging = () => {
+    setFilter({ trackedCursors: [] });
+    void rows.load({ force: true });
+  };
+  const page = (trail) => {
+    setFilter({ trackedCursors: trail });
+    void rows.load({ force: true });
+  };
+
+  /** Show one title's sources, which is this listing's whole reason to exist. */
+  const showTitle = (mdMangaId) => {
+    setFilter({
+      trackedMdMangaId: mdMangaId,
+      trackedQuery: "",
+      trackedExtension: "",
+      trackedNamespace: "any",
+      trackedShared: "all",
+      trackedCursors: [],
+    });
+    void rows.load({ force: true });
+  };
+
+  const search = el("input", {
+    id: "tracked-all-q",
+    type: "search",
+    value: store.filters.trackedQuery,
+    placeholder: "external id, MangaDex id, or source",
+    onchange: (event) => {
+      setFilter({ trackedQuery: event.target.value.trim() });
+      resetPaging();
+    },
+  });
+
+  /**
+   * The MangaDex title to look at, on its own rather than folded into the
+   * search box: `q` matches a title id as a SUBSTRING and among other columns,
+   * which is not the same question as "this exact title, and every publisher
+   * that feeds it". Takes a link, because that is what an operator has.
+   */
+  const titleInput = el("input", {
+    id: "tracked-all-md",
+    type: "search",
+    value: store.filters.trackedMdMangaId,
+    placeholder: "mangadex.org/title/… link, or the bare id",
+    onchange: (event) => {
+      const raw = event.target.value.trim();
+      if (!raw) {
+        setFilter({ trackedMdMangaId: "" });
+        return resetPaging();
+      }
+      const parsed = mdTitleIdFrom(raw);
+      if (parsed.error) return void toast(parsed.error, false);
+      event.target.value = parsed.id;
+      setFilter({ trackedMdMangaId: parsed.id });
+      resetPaging();
+    },
+  });
+
+  const picker = (id, label, key, options) =>
+    el(
+      "span",
+      { class: "row tight" },
+      el("label", { class: "inline", for: id, text: label }),
+      el(
+        "select",
+        {
+          id,
+          onchange: (event) => {
+            setFilter({ [key]: event.target.value });
+            resetPaging();
+          },
+        },
+        options.map(([value, text]) =>
+          el("option", { value, text, selected: value === store.filters[key] }),
+        ),
+      ),
+    );
+
+  const filters = live(
+    [facets],
+    (data) =>
+      row(
+        picker("tracked-all-extension", "Extension", "trackedExtension", [
+          ["", "all extensions"],
+          ...(data.extensions ?? []).map((e) => [e.extension, `${e.extension} · ${e.count}`]),
+        ]),
+        // "" is the flat id space, a real catalogue rather than a missing
+        // value, so it is offered by name instead of reading as "any".
+        picker("tracked-all-namespace", "Catalogue", "trackedNamespace", [
+          ["any", "any"],
+          ...(data.namespaces ?? []).map((n) => [n.namespace, `${n.namespace || "default"} · ${n.count}`]),
+        ]),
+        picker("tracked-all-shared", "Sources", "trackedShared", [
+          ["all", "any number"],
+          ["only", "more than one"],
+        ]),
+        picker("tracked-all-paused", "Runs", "trackedPaused", [
+          ["all", "paused and active"],
+          ["none", "active only"],
+          ["only", "paused only"],
+        ]),
+      ),
+    { reserve: 40, skeleton: () => el("span", { class: "dim small", text: "filters…" }) },
+  );
 
   return el(
     "div",
@@ -11276,25 +11428,166 @@ VIEWS.tracked = () => {
     mapFromLinkCard(),
     mapManyCard(),
     card(
-      "Series map by extension",
-      el("p", {
-        class: "dim small",
-        text: "Open an extension to search, export, edit and bulk-paste its mappings.",
-      }),
+      "Filter",
+      filters,
+      row(
+        el("span", { class: "row tight" }, el("label", { class: "inline", for: "tracked-all-q", text: "Search" }), search),
+        el(
+          "span",
+          { class: "row tight" },
+          el("label", { class: "inline", for: "tracked-all-md", text: "MangaDex title" }),
+          titleInput,
+        ),
+        el("button", {
+          type: "button",
+          text: "Clear",
+          onclick: () => {
+            setFilter({
+              trackedQuery: "",
+              trackedExtension: "",
+              trackedNamespace: "any",
+              trackedMdMangaId: "",
+              trackedShared: "all",
+              trackedPaused: "all",
+            });
+            search.value = "";
+            titleInput.value = "";
+            resetPaging();
+          },
+        }),
+      ),
+    ),
+    card(
+      null,
       live(
-        [counts],
-        (rows) =>
-          table(
-            ["Extension", "Mappings", "Most recent", ""],
-            rows.map((r) => [
-              r.name,
-              r.count === null ? "unreadable" : String(r.count),
-              r.newest ? `${r.newest.mangaId} · ${fmtTime(r.newest.createdAt)}` : "-",
-              [routeLink(routeTo("extensions", r.name, "series-map"), "Open map", { class: "button-link inline" })],
-            ]),
-            { empty: "No extension is published, so there is no map to curate yet." },
+        [rows],
+        (data) =>
+          el(
+            "div",
+            {},
+            table(
+              ["Extension", "Catalogue", "External id", "MangaDex", "Sources", "Source", "Added", "Runs", ""],
+              data.tracked.map((item) => [
+                routeLink(routeTo("extensions", item.extension, "series-map"), item.extension),
+                item.namespace ? el("code", { text: item.namespace }) : el("span", { class: "dim", text: "default" }),
+                el("code", { text: truncate(item.mangaId, 40) }),
+                mdTitleLink(item.mdMangaId),
+                // The answer to "which publishers feed this title", one click
+                // away: the count is only interesting as a way into the rows.
+                item.sources > 1
+                  ? el("button", {
+                      type: "button",
+                      class: "button-link inline",
+                      text: `${item.sources} sources`,
+                      title: "Show every mapping that points at this title",
+                      onclick: () => showTitle(item.mdMangaId),
+                    })
+                  : el("span", { class: "dim", text: "1" }),
+                // Any `auto:` source, not one specific string: the passes match
+                // on several kinds of evidence now, and a mapping nobody
+                // reviewed must not read as hand-curated because a new source
+                // string was added later.
+                el("span", {
+                  text: item.source,
+                  class: isAutomaticSource(item.source) ? "chip warn" : null,
+                  title: isAutomaticSource(item.source)
+                    ? "Matched automatically; nobody reviewed it"
+                    : null,
+                }),
+                fmtTime(item.createdAt),
+                isPaused(item)
+                  ? el("span", {
+                      class: "dim",
+                      text: `paused until ${fmtTime(item.recheckAfter)}${item.cooldownDays ? ` (every ${item.cooldownDays}d)` : ""}`,
+                      title: item.pauseReason
+                        ? `${item.pauseReason}${item.pausedBy ? ` — ${item.pausedBy}` : ""}`
+                        : "No reason recorded",
+                    })
+                  : el("span", { text: "active" }),
+                [
+                  gatedButton("tracked:write", {
+                    text: "Repoint",
+                    title: "Point this external id at a different MangaDex title",
+                    onclick: () => repointDialog(item.extension, item, rows),
+                  }),
+                  isPaused(item)
+                    ? gatedButton("tracked:write", {
+                        text: "Unpause",
+                        onclick: (event) =>
+                          act(
+                            "tracked_manga.unpause",
+                            () =>
+                              api(`/extensions/${encodeURIComponent(item.extension)}/tracked/unpause`, {
+                                method: "POST",
+                                body: {
+                                  mangaIds: [item.mangaId],
+                                  ...(item.namespace ? { namespace: item.namespace } : {}),
+                                },
+                              }),
+                            { button: event.currentTarget, refresh: [rows] },
+                          ),
+                      })
+                    : gatedButton("tracked:write", {
+                        text: "Pause",
+                        title: "Leave this series out of runs until its cooldown expires",
+                        onclick: () => pauseDialog(item.extension, item, rows),
+                      }),
+                  gatedButton("tracked:write", {
+                    class: "danger",
+                    text: "Remove",
+                    title:
+                      item.sources > 1
+                        ? "Stop this publisher feeding the title; the other mapping is untouched"
+                        : "Stop tracking this series",
+                    onclick: async (event) => {
+                      const button = event.currentTarget;
+                      if (
+                        !(await confirmDialog({
+                          title: `Stop tracking ${item.mangaId}`,
+                          lead: "Its chapters stop being uploaded from the next run onwards.",
+                          points: [
+                            `${item.extension}${item.namespace ? ` · ${item.namespace}` : ""} → ${item.mdMangaId}`,
+                            "This does not touch MangaDex; the title and its existing chapters stay.",
+                            item.sources > 1
+                              ? `${item.sources - 1} other mapping(s) point at that title and are left alone — it keeps being fed by them.`
+                              : "Nothing else feeds that title once this is gone.",
+                          ],
+                          confirmLabel: "Stop tracking it",
+                        }))
+                      ) {
+                        return;
+                      }
+                      await act(
+                        "tracked_manga.remove",
+                        () =>
+                          api(
+                            `/extensions/${encodeURIComponent(item.extension)}/tracked/${encodeURIComponent(item.mangaId)}` +
+                              (item.namespace ? `?namespace=${encodeURIComponent(item.namespace)}` : ""),
+                            { method: "DELETE" },
+                          ),
+                        { button, refresh: [rows] },
+                      );
+                    },
+                  }),
+                ],
+              ]),
+              {
+                empty: store.filters.trackedMdMangaId
+                  ? "Nothing is mapped to that MangaDex title."
+                  : "Nothing matches this filter.",
+                sort: {
+                  keys: ["extension", "catalogue", "series", "mangadex", null, "source", "added", null, null],
+                  value: store.filters.trackedSort,
+                  onSort: (column, dir) => {
+                    setFilter({ trackedSort: { column, dir } });
+                    resetPaging();
+                  },
+                },
+              },
+            ),
+            trackedPager(data, walked(), page),
           ),
-        { reserve: 200, skeleton: () => skeletonTable(4, 4) },
+        { reserve: 300, skeleton: () => skeletonTable(9, 8) },
       ),
     ),
     // The all-extensions run belongs here rather than on one extension's page:
@@ -11302,6 +11595,36 @@ VIEWS.tracked = () => {
     mapSyncCard(null),
   );
 };
+
+/** Walk the map a page at a time; the count is what makes the paging honest. */
+function trackedPager(data, trail, go) {
+  const shown = data.tracked?.length ?? 0;
+  const total = data.total ?? shown;
+  if (total <= shown && trail.length === 0) {
+    return el("p", { class: "dim small", text: `${total} mapping(s).` });
+  }
+  return el(
+    "div",
+    { class: "row pager" },
+    el("span", {
+      class: "dim small",
+      text: `${shown} loaded of ${total} matching` + (trail.length ? ` · page ${trail.length + 1}` : ""),
+    }),
+    el("span", { class: "grow" }),
+    el("button", {
+      type: "button",
+      text: "← Back",
+      disabled: trail.length === 0,
+      onclick: () => go(trail.slice(0, -1)),
+    }),
+    el("button", {
+      type: "button",
+      text: "Next →",
+      disabled: !data.nextCursor,
+      onclick: () => go([...trail, data.nextCursor]),
+    }),
+  );
+}
 
 // -------------------------------------------------------------------- workers
 
@@ -12243,8 +12566,11 @@ function untrackedBulkBar(selected, rows, queue, note) {
       "None of the ticked rows can have a title created: they are not NEW or FAILED, or are already mapped",
       true,
     ),
+    // "Map many", not "Map": the per-row button beside every series says Map,
+    // and two controls a click apart sharing one label is how the wrong one
+    // gets pressed.
     gatedButton("tracked:append", {
-      text: "Map…",
+      text: "Map many…",
       disabled: count === 0,
       title: count === 0 ? "Tick the series to map" : `Map ${count} series from their links`,
       onclick: mapMany,
@@ -12609,6 +12935,25 @@ function untrackedDetail(id) {
  * second, in that order and never the other way round: this writes the series
  * map, and the map decides where chapters get uploaded.
  */
+/** How an automatic match was made, in words. Never a bare code. */
+const AUTO_MAP_VIA = {
+  engtl: ["official link", "MangaDex records this exact page as the title's official English release"],
+  links: ["a link field", "The title lists this exact page among its external links"],
+  description: [
+    "its description",
+    "The title's description contains this exact page — a note rather than a field, so the weakest of the three",
+  ],
+  title: ["an exact name", "No link was involved: the scraped name matches this title exactly"],
+};
+
+function autoMapVia(via) {
+  const known = AUTO_MAP_VIA[via];
+  if (!known) return el("span", { class: "dim", text: via ?? "-" });
+  // The description case is marked, because it is the one an operator might
+  // reasonably want to look at before trusting.
+  return el("span", { class: via === "description" ? "chip warn" : "chip", text: known[0], title: known[1] });
+}
+
 function autoMapCard(queue) {
   const writable = can("untracked:write") && can("tracked:append");
   const results = el("div", {});
@@ -12686,13 +13031,14 @@ function autoMapCard(queue) {
     const ambiguousReason = byTitle
       ? "two titles answer to one name; left for you"
       : "two titles share one link; left for you";
-    const unmatchedReason = byTitle ? "with no title of that exact name" : "with no matching official link";
-    const provenance = byTitle ? "auto:title-match" : "auto:official-link";
+    const unmatchedReason = byTitle
+      ? "with no title of that exact name"
+      : "where no MangaDex entry names this page";
     setChildren(
       results,
       mapped.length
         ? table(
-            ["Extension", "Series", "MangaDex title"],
+            ["Extension", "Series", "MangaDex title", "Matched by"],
             mapped.map((m) => [
               m.extension,
               el(
@@ -12708,6 +13054,11 @@ function autoMapCard(queue) {
                 }),
               ),
               mdTitleLink(m.mdMangaId, m.mdMangaId),
+              // The link pass has three kinds of evidence now, and they are not
+              // equally strong: a link field is the catalogue saying so on
+              // purpose, a description is somebody's note. An operator reading
+              // a preview is deciding exactly that, so it is a column.
+              autoMapVia(m.via),
             ]),
             { empty: "" },
           )
@@ -12737,8 +13088,11 @@ function autoMapCard(queue) {
       !report.dryRun && mapped.length
         ? el("p", {
             text:
-              `Mapped, and marked ${provenance} in the tracked map. ` +
-              `These series have left the queue.`,
+              (byTitle
+                ? "Mapped, and marked auto:title-match in the tracked map. "
+                : "Mapped, and marked in the tracked map with the evidence each rested on — " +
+                  "auto:official-link, auto:link or auto:description. ") +
+              "These series have left the queue.",
           })
         : null,
     );
@@ -12771,9 +13125,13 @@ function autoMapCard(queue) {
         points: [
           byTitle
             ? "Only series MangaDex holds under exactly this name, on exactly one title, are mapped."
-            : "Only series whose url is MangaDex's own official English link are mapped.",
+            : "Only series whose page a MangaDex entry itself names — in its official-English link, another " +
+              "link field, or its description — are mapped.",
           "No MangaDex titles are created.",
-          `Each mapping is recorded as ${byTitle ? "auto:title-match" : "auto:official-link"}, so they can be found later.`,
+          byTitle
+            ? "Each mapping is recorded as auto:title-match, so they can be found later."
+            : "Each mapping records which evidence it rested on (auto:official-link, auto:link, " +
+              "auto:description), so they can be found later and audited by strength.",
           "Preview with Find matches first if you have not; a wrong mapping uploads chapters onto someone else's title.",
         ],
         confirmLabel: "Add the mappings",
@@ -12793,9 +13151,9 @@ function autoMapCard(queue) {
     el("p", {
       class: "dim small",
       text:
-        "Most series here are already on MangaDex and need mapping, not creating. Match on the official " +
-        "MangaDex link — the entry records this publisher's page as its official English release — which is " +
-        "close to certain but matches roughly one row in twenty. Or match on the exact title, which reaches " +
+        "Most series here are already on MangaDex and need mapping, not creating. Match on the link — the " +
+        "entry names this publisher's page, in its official-English link, another link field, or its own " +
+        "description — which is close to certain. Or match on the exact title, which reaches " +
         "most of the queue on weaker evidence: only names MangaDex holds verbatim, on exactly one entry, " +
         "and never where that entry's own link points at a different series on the same site. The yield is " +
         "very uneven by source, so it is worth running one extension at a time.",
@@ -12847,7 +13205,7 @@ function mappingProvenance(mapping) {
     "span",
     {},
     el("span", { class: "chip warn", text: "automatic" }),
-    " matched MangaDex's own official English link for this series — nobody reviewed it. ",
+    " matched a MangaDex entry that names this series' own page — nobody reviewed it. ",
     el("span", { class: "dim", text: fmtTime(mapping.at) }),
   );
 }

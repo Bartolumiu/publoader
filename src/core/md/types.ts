@@ -162,6 +162,17 @@ export interface MdManga {
      */
     originalLanguage?: string | null;
     /**
+     * The entry's description, by language. Carried for the same reason `links`
+     * is: the auto-map reads it.
+     *
+     * Publishers' pages are recorded inconsistently on MangaDex — an entry may
+     * put the official page in `links.engtl`, in some other `links` slot, or in
+     * prose ("Official English release: <url>") and nowhere else. All three say
+     * the same thing about which series this is, and only the first was being
+     * read, so the pass missed matches it already had the evidence for.
+     */
+    description?: Record<string, string> | null;
+    /**
      * MangaDex's external links, keyed by site (`engtl` is the official English
      * release, `raw` the original). Carried on the search result and not just
      * the detail read because the auto-map pass matches on `engtl`, and

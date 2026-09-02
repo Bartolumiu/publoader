@@ -24,6 +24,47 @@ const MAX_CREATE_ATTEMPTS = 3;
 export const OFFICIAL_LINK_SOURCE = "auto:official-link";
 
 /**
+ * How an automatic match found its title, as the `source` written to the map.
+ *
+ * Three source strings rather than one because they are not equally strong
+ * evidence, and the difference is exactly what an operator auditing a mapping
+ * needs. `engtl` is MangaDex's own "this is the official English release" field:
+ * a claim the catalogue makes on purpose. `links` is the same url in some other
+ * slot — still a deliberate entry, just a less specific one. `description` is
+ * the url written in prose, which is how a good many entries record it and is
+ * the weakest of the three: it is someone's note, not a field.
+ *
+ * All three are the same MATCH — the publisher's own page, compared on host and
+ * path — so all three are trustworthy enough to write. Which one it was is
+ * recorded rather than flattened, so "show me everything matched only from a
+ * description" stays an answerable question.
+ */
+export type AutoMapVia = "engtl" | "links" | "description" | "title";
+
+/** Which evidence a link match rested on; the name pass is not one of these. */
+export type LinkEvidence = Exclude<AutoMapVia, "title">;
+
+export const AUTO_MAP_SOURCES: Record<AutoMapVia, string> = {
+  engtl: OFFICIAL_LINK_SOURCE,
+  links: "auto:link",
+  description: "auto:description",
+  // The other pass entirely: an exact name, with no link involved. Named here
+  // so one report can say how every row in it was matched.
+  title: "auto:title-match",
+};
+
+/**
+ * Was this mapping made by the pass rather than chosen by a person?
+ *
+ * A prefix test, not a list, deliberately: a mapping nothing human chose is the
+ * one an operator most needs to spot, and a new automatic source added later
+ * must not quietly start reading as hand-curated because this was not updated.
+ */
+export function isAutomaticSource(source: string | null | undefined): boolean {
+  return typeof source === "string" && source.startsWith("auto:");
+}
+
+/**
  * `tracked_manga.source` for a mapping the title pass made.
  *
  * Distinct from `auto:official-link` because the evidence is weaker -- a name
@@ -49,7 +90,7 @@ const RECHECK_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
 /** What one auto-map pass did, for the scheduler, the API and the CLI alike. */
 export interface AutoMapReport {
   considered: number;
-  mapped: { row: UntrackedManga; mdMangaId: string }[];
+  mapped: { row: UntrackedManga; mdMangaId: string; via: AutoMapVia }[];
   /** More than one candidate carried the link; left for a human. */
   ambiguous: number;
   unmatched: number;
@@ -352,13 +393,13 @@ export class TitleService {
       if (dryRun) {
         // Deliberately NOT marked. A match nobody has acted on yet has to
         // still be here when they press the button that acts on it.
-        report.mapped.push({ row, mdMangaId: match });
+        report.mapped.push({ row, mdMangaId: match.id, via: match.via });
         continue;
       }
 
-      const written = await this.writeMapping(row, match, OFFICIAL_LINK_SOURCE);
+      const written = await this.writeMapping(row, match.id, AUTO_MAP_SOURCES[match.via]);
       if (written) {
-        report.mapped.push({ row, mdMangaId: match });
+        report.mapped.push({ row, mdMangaId: match.id, via: match.via });
       } else {
         // Already mapped elsewhere: not ours to repoint, and not worth
         // re-searching every pass either.
@@ -395,10 +436,20 @@ export class TitleService {
   }
 
   /**
-   * The one MangaDex title whose official English link is this series' url.
+   * The one MangaDex title that names this series' own page.
    *
-   * `null` for no match, `"ambiguous"` when more than one candidate carries the
-   * link — which is a catalogue problem for a human, not something to guess at.
+   * `null` for no match, `"ambiguous"` when more than one candidate names it —
+   * which is a catalogue problem for a human, not something to guess at.
+   *
+   * WHERE IT LOOKS, and why it is not just `links.engtl`. Publishers' pages are
+   * recorded inconsistently: an entry may put the page in the official-English
+   * field, in another `links` slot, or only in prose ("Official English release:
+   * <url>"). All three are the catalogue saying "this series is that page", and
+   * reading only the first missed matches whose evidence was already in the
+   * response we had paid for. The comparison is identical in all three cases —
+   * host and path via `normaliseOfficialLink`, with `sameSeriesLink` so a deep
+   * link into the series counts as the series — so widening where it looks does
+   * not weaken what counts as a match.
    *
    * Scoped to what a title search returns, and honestly so: MangaDex has no way
    * to query by link, so "no other series has this link" can only mean "none of
@@ -408,21 +459,30 @@ export class TitleService {
    * name nothing like the scraped one is simply not found, and the row waits
    * for an operator as it did before.
    */
-  private async officialLinkMatch(row: UntrackedManga): Promise<string | "ambiguous" | null> {
+  private async officialLinkMatch(
+    row: UntrackedManga,
+  ): Promise<{ id: string; via: LinkEvidence } | "ambiguous" | null> {
     const want = normaliseOfficialLink(row.mangaUrl);
     if (want === null) return null;
 
     const candidates = await this.md.searchManga(row.mangaName, 25);
-    const matches = candidates.filter(
-      (candidate) => normaliseOfficialLink(candidate.attributes.links?.["engtl"] ?? null) === want,
-    );
+    const matches: { id: string; via: LinkEvidence }[] = [];
+    for (const candidate of candidates) {
+      const via = linkEvidence(candidate, row.mangaUrl);
+      if (via) matches.push({ id: candidate.id, via });
+    }
     if (matches.length === 0) return null;
 
     // Distinct ids only: the same title coming back twice is a paging artefact,
     // not two series sharing a link.
     const ids = [...new Set(matches.map((m) => m.id))];
     if (ids.length > 1) return "ambiguous";
-    return ids[0] ?? null;
+    // The strongest evidence this candidate offered, where it offered several:
+    // an entry with the page in `links.engtl` AND in its description is an
+    // official-link match, and recording it as a description match would
+    // understate what is actually known about it.
+    const best = matches.find((m) => m.via === "engtl") ?? matches.find((m) => m.via === "links") ?? matches[0]!;
+    return { id: best.id, via: best.via };
   }
 
   /**
@@ -501,13 +561,13 @@ export class TitleService {
       if (dryRun) {
         // Deliberately NOT marked: a match nobody has acted on yet has to still
         // be here when they press the button that acts on it.
-        report.mapped.push({ row, mdMangaId: match });
+        report.mapped.push({ row, mdMangaId: match, via: "title" });
         continue;
       }
 
       const written = await this.writeMapping(row, match, TITLE_MATCH_SOURCE);
       if (written) {
-        report.mapped.push({ row, mdMangaId: match });
+        report.mapped.push({ row, mdMangaId: match, via: "title" });
       } else {
         await this.markTitleChecked(row.id);
         report.unmatched++;
@@ -1116,6 +1176,58 @@ export function isVariantEdition(candidate: {
  */
 function sameSeriesLink(a: string, b: string): boolean {
   return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
+/**
+ * Every url-ish token in a blob of free text.
+ *
+ * Descriptions are markdown, so a url routinely arrives wrapped — `[read
+ * here](https://…)`, in angle brackets, or ending a sentence — and the trailing
+ * punctuation has to come off or the comparison fails on a full stop. Closing
+ * brackets are stripped only from the end, since a path may legitimately
+ * contain one.
+ */
+function urlsIn(text: string): string[] {
+  const found = String(text ?? "").match(/https?:\/\/[^\s<>"'`\\]+/gi);
+  return (found ?? []).map((url) => url.replace(/[).,;:\]}!?'"]+$/, ""));
+}
+
+/**
+ * Does this candidate name the series' own page, and how?
+ *
+ * The three places a publisher's page turns up on a MangaDex entry, strongest
+ * first: the official-English link field, any other `links` slot, and the
+ * description's prose. Returns which one it was, or null.
+ *
+ * The comparison is the same in all three — host and path via
+ * `normaliseOfficialLink`, then `sameSeriesLink`, so `www.`, a trailing slash
+ * and a deep link into the series all read as the series, and `/title/1002`
+ * still does not match `/title/10028`. Widening WHERE it looks therefore does
+ * not widen WHAT counts: a description mentioning some other series on the same
+ * host is not a match, exactly as it is not one in `links`.
+ */
+export function linkEvidence(
+  candidate: { attributes: { links?: Record<string, string> | null; description?: Record<string, string> | null } },
+  seriesUrl: string,
+): LinkEvidence | null {
+  const want = normaliseOfficialLink(seriesUrl);
+  if (want === null) return null;
+
+  const names = (value: string | null | undefined): boolean => {
+    const other = normaliseOfficialLink(value ?? null);
+    return other !== null && sameSeriesLink(other, want);
+  };
+
+  const links = candidate.attributes.links ?? {};
+  if (names(links["engtl"])) return "engtl";
+  for (const [key, value] of Object.entries(links)) {
+    if (key === "engtl") continue;
+    if (names(value)) return "links";
+  }
+  for (const text of Object.values(candidate.attributes.description ?? {})) {
+    if (urlsIn(text).some((url) => names(url))) return "description";
+  }
+  return null;
 }
 
 /**

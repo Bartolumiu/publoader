@@ -366,7 +366,10 @@ describe.skipIf(!dbReady())("sorted listings", () => {
         headers: root,
       });
       // The listing moved from Prisma's object language to SQL; the contract
-      // the console reads is the camel-cased row, and it has to be unchanged.
+      // the console reads is the camel-cased row, and nothing in it may be
+      // dropped or renamed. `tracked` is an ADDITION: the series map's answer
+      // for this row's own series, joined on, or null. It is listed here so
+      // that adding it stays a decision rather than a diff nobody looked at.
       expect(Object.keys(res.json().untracked[0]).sort()).toEqual(
         [
           "attempts",
@@ -384,6 +387,7 @@ describe.skipIf(!dbReady())("sorted listings", () => {
           "officialLinkCheckedAt",
           "state",
           "titleCheckedAt",
+          "tracked",
           "updatedAt",
         ].sort(),
       );

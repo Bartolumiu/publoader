@@ -116,6 +116,8 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
         ],
       },
     },
+    { match: /\/tracked\/extensions$/, body: { extensions: [], namespaces: [] } },
+    { match: /\/tracked\?/, body: { tracked: [], total: 0, limit: 50, nextCursor: null } },
     { match: /\/extensions$/, body: { extensions: [{ name: "mangaplus" }, { name: "viz" }] } },
   ];
 }
@@ -229,8 +231,8 @@ describe("the series map can be pushed to GitHub from the dashboard", () => {
     expect(card).toBeTruthy();
     expect(buttonLabelled(card, "Preview")).toBeTruthy();
     expect(buttonLabelled(card, "Sync now")).toBeTruthy();
-    // The index still renders: the new card is an addition, not a replacement.
-    expect(cardByTitle("Series map by extension")).toBeTruthy();
+    // The listing still renders: the new card is an addition, not a replacement.
+    expect(doc.getElementById("tracked-all-q")).toBeTruthy();
   });
 
   it("previews without writing anything", async () => {

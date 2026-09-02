@@ -14,7 +14,7 @@ import { EXTENSION_NAME_RE, Manifest, hostAllowed, manifestSchedule } from "../.
 import { normaliseMangadexLanguage } from "../../../contracts/languages.js";
 import { UPLOAD_TASK_KINDS, UPLOAD_TASK_STATES } from "../../store/uploadTasks.js";
 import { DEFAULT_NAMESPACE } from "../../store/trackedManga.js";
-import { OFFICIAL_LINK_SOURCE } from "../../md/titleService.js";
+import { isAutomaticSource } from "../../md/titleService.js";
 import { workerLabel, workerNames } from "../../store/workers.js";
 import {
   ordering,
@@ -1471,7 +1471,11 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
                 mdMangaId: mappingRow.mdMangaId,
                 source: mappingRow.source,
                 at: mappingRow.createdAt,
-                automatic: mappingRow.source === OFFICIAL_LINK_SOURCE,
+                // Any automatic source, not just the official-link one: the
+                // pass now also matches on other link fields and on the
+                // description, and a mapping nobody reviewed must not start
+                // reading as hand-curated because a new source string was added.
+                automatic: isAutomaticSource(mappingRow.source),
               }
             : null,
           languageValidation: LANGUAGE_VALIDATION,

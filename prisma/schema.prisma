@@ -538,6 +538,12 @@ model TrackedManga {
   @@unique([extension, namespace, mangaId])
   @@index([extension])
   @@index([extension, namespace])
+  /// The map read backwards: which publishers feed one MangaDex title.
+  ///
+  /// Not unique. Two extensions mapping to one title is a series two
+  /// catalogues both carry, which is normal and deliberate; a unique index
+  /// here would forbid the very case this index exists to make findable.
+  @@index([mdMangaId])
   @@map("tracked_manga")
 }
 

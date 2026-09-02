@@ -819,6 +819,7 @@ export class MdClient implements MdExtendedApi {
     const altTitles = attrs.altTitles;
     const originalLanguage = attrs.originalLanguage;
     const links = attrs.links;
+    const description = attrs.description;
     return {
       id: entity.id,
       attributes: {
@@ -827,6 +828,12 @@ export class MdClient implements MdExtendedApi {
         altTitles: Array.isArray(altTitles) ? (altTitles as Record<string, string>[]) : [],
         originalLanguage: typeof originalLanguage === "string" ? originalLanguage : null,
         links: links !== null && typeof links === "object" ? (links as Record<string, string>) : null,
+        // Free with the search response; the auto-map reads publishers' links
+        // out of the prose, which is where a good many of them live.
+        description:
+          description !== null && typeof description === "object" && !Array.isArray(description)
+            ? (description as Record<string, string>)
+            : null,
       },
     };
   }

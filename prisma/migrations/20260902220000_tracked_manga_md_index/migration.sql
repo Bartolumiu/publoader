@@ -1,0 +1,18 @@
+-- Index the MangaDex id the map points AT, not just the source it points from.
+--
+-- Every existing index on this table serves the platform's own question: given
+-- an extension (and a catalogue), what does it track? The operator's question
+-- runs the other way -- given a MangaDex title, WHICH publishers feed it -- and
+-- had no answer at all, because the map was only ever addressable per
+-- extension. Answering it meant listing all six catalogues and joining them by
+-- hand.
+--
+-- It matters because both answers are legitimate. Two publishers carrying one
+-- series is normal: the same title is licensed twice, and both extensions map
+-- to one MangaDex id on purpose. Whether a given title is in that state -- and
+-- which of the two mappings to repoint or drop when it should not be -- is
+-- exactly what cannot be seen without this.
+--
+-- Not unique, emphatically. A unique index here would forbid the second
+-- publisher, which is the case this exists to make visible.
+CREATE INDEX "tracked_manga_md_manga_id_idx" ON "tracked_manga" ("md_manga_id");
