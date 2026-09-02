@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildErrorEmbed, buildReplyEmbed, inferTone } from "../../src/bot/bot.js";
+import { buildErrorEmbed, buildReplyEmbed, inferTone, listAppendChoices } from "../../src/bot/bot.js";
 import { scopeChecker } from "../../src/bot/commands.js";
 
 /**
@@ -107,5 +107,69 @@ describe("scopeChecker", () => {
 
   it("treats the wildcard as everything", () => {
     expect(scopeChecker(["*"])("workers:read")).toBe(true);
+  });
+});
+
+describe("listAppendChoices", () => {
+  const names = ["comikey", "omoi", "k_manga", "mangaup_global"];
+
+  it("offers every candidate on an empty field, plus a way to clear it", () => {
+    // Clearing is a real instruction on these options and an empty box is hard
+    // to discover as one.
+    const choices = listAppendChoices("", names, { emptyLabel: "(none)" });
+    expect(choices[0]).toEqual({ name: "(none)", value: "" });
+    expect(choices.map((c) => c.value)).toContain("comikey");
+  });
+
+  it("appends to what is already there rather than replacing it", () => {
+    // Discord returns one value per option, so a list is built a pick at a
+    // time: the value is the whole field, not the one name chosen.
+    const choices = listAppendChoices("comikey,", names);
+    expect(choices.map((c) => c.value)).toContain("comikey, omoi");
+    expect(choices.map((c) => c.value)).not.toContain("omoi");
+  });
+
+  it("filters on the fragment after the last comma, not the whole field", () => {
+    const choices = listAppendChoices("comikey, k_", names);
+    expect(choices).toHaveLength(1);
+    expect(choices[0]!.value).toBe("comikey, k_manga");
+  });
+
+  it("does not re-offer something already in the list", () => {
+    const choices = listAppendChoices("comikey, omoi,", names);
+    const values = choices.map((c) => c.value);
+    expect(values.some((v) => v.endsWith("comikey"))).toBe(false);
+    expect(values.some((v) => v.endsWith("omoi"))).toBe(false);
+    expect(values.some((v) => v.endsWith("k_manga"))).toBe(true);
+  });
+
+  it("ignores whitespace and case when deciding what is already there", () => {
+    const choices = listAppendChoices("  COMIKEY , ", names);
+    expect(choices.map((c) => c.value).some((v) => v.toLowerCase().endsWith("comikey"))).toBe(false);
+  });
+
+  it("drops a choice that would exceed Discord's 100-character value cap", () => {
+    // Over the cap Discord rejects the whole response, not the one entry, so a
+    // long field must lose suggestions rather than all of them.
+    const long = "x".repeat(95);
+    const choices = listAppendChoices(`${long},`, names);
+    expect(choices).toEqual([]);
+  });
+
+  it("shortens a long label while keeping the value exact", () => {
+    const prefix = "comikey, omoi, k_manga,";
+    const choices = listAppendChoices(prefix, names);
+    const choice = choices[0]!;
+    expect(choice.value).toBe(`${prefix} mangaup_global`);
+    expect(choice.name.length).toBeLessThanOrEqual(90);
+  });
+
+  it("stops at Discord's 25-choice limit", () => {
+    const many = Array.from({ length: 60 }, (_, i) => `ext${i}`);
+    expect(listAppendChoices("", many)).toHaveLength(25);
+  });
+
+  it("offers nothing rather than everything when the fragment matches nothing", () => {
+    expect(listAppendChoices("zzz", names)).toEqual([]);
   });
 });

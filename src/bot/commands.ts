@@ -1226,19 +1226,19 @@ const commands: BotCommand[] = [
         s
           .setName("show")
           .setDescription("One run with every job, attempt count and error.")
-          .addStringOption((o) => o.setName("id").setDescription("Run id.").setRequired(true)),
+          .addStringOption((o) => o.setName("id").setDescription("Run id.").setRequired(true).setAutocomplete(true)),
       )
       .addSubcommand((s) =>
         s
           .setName("chapters")
           .setDescription("What one run found, counted by outcome.")
-          .addStringOption((o) => o.setName("id").setDescription("Run id.").setRequired(true)),
+          .addStringOption((o) => o.setName("id").setDescription("Run id.").setRequired(true).setAutocomplete(true)),
       )
       .addSubcommand((s) =>
         s
           .setName("cancel")
           .setDescription("Stop one run and its queued jobs.")
-          .addStringOption((o) => o.setName("id").setDescription("Run id.").setRequired(true))
+          .addStringOption((o) => o.setName("id").setDescription("Run id.").setRequired(true).setAutocomplete(true))
           .addBooleanOption((o) =>
             o.setName("confirm").setDescription("Required: in-flight jobs are abandoned."),
           ),
@@ -1528,13 +1528,13 @@ const commands: BotCommand[] = [
         s
           .setName("retry")
           .setDescription("Requeue a FAILED or DEAD_LETTER task with a fresh attempt budget.")
-          .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true)),
+          .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true).setAutocomplete(true)),
       )
       .addSubcommand((s) =>
         s
           .setName("cancel")
           .setDescription("Abandon a task without ever sending it to MangaDex.")
-          .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true))
+          .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true).setAutocomplete(true))
           .addBooleanOption((o) =>
             o.setName("confirm").setDescription("Required: the chapter will never be uploaded."),
           ),
@@ -1543,13 +1543,13 @@ const commands: BotCommand[] = [
         s
           .setName("show")
           .setDescription("One upload task in full: state, attempts, and the chapter behind it.")
-          .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true)),
+          .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true).setAutocomplete(true)),
       )
       .addSubcommand((s) =>
         s
           .setName("reorder")
           .setDescription("Move a task to the front, the back, or later.")
-          .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true))
+          .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true).setAutocomplete(true))
           .addStringOption((o) =>
             o
               .setName("mode")
@@ -1888,7 +1888,7 @@ const commands: BotCommand[] = [
           .setName("clear")
           .setDescription("Mark failures as read and dealt with, so they leave the list.")
           .addStringOption((o) =>
-            o.setName("id").setDescription("Entry id, or the first few characters of one."),
+            o.setName("id").setDescription("Entry id, or the first few characters of one.").setAutocomplete(true),
           )
           .addBooleanOption((o) => o.setName("all").setDescription("Clear every outstanding failure."))
           .addStringOption((o) =>
@@ -1900,7 +1900,7 @@ const commands: BotCommand[] = [
           .setName("restore")
           .setDescription("Put cleared entries back in the list.")
           .addStringOption((o) =>
-            o.setName("id").setDescription("Entry id, or the first few characters of one."),
+            o.setName("id").setDescription("Entry id, or the first few characters of one.").setAutocomplete(true),
           )
           .addBooleanOption((o) => o.setName("all").setDescription("Restore everything that was cleared.")),
       ),
@@ -1990,19 +1990,19 @@ const commands: BotCommand[] = [
         s
           .setName("drain")
           .setDescription("Stop giving a worker new jobs; in-flight work finishes.")
-          .addStringOption((o) => o.setName("id").setDescription("Worker id.").setRequired(true)),
+          .addStringOption((o) => o.setName("id").setDescription("Worker id.").setRequired(true).setAutocomplete(true)),
       )
       .addSubcommand((s) =>
         s
           .setName("activate")
           .setDescription("Return a drained worker to service.")
-          .addStringOption((o) => o.setName("id").setDescription("Worker id.").setRequired(true)),
+          .addStringOption((o) => o.setName("id").setDescription("Worker id.").setRequired(true).setAutocomplete(true)),
       )
       .addSubcommand((s) =>
         s
           .setName("revoke")
           .setDescription("Permanently kill a worker's credential.")
-          .addStringOption((o) => o.setName("id").setDescription("Worker id.").setRequired(true))
+          .addStringOption((o) => o.setName("id").setDescription("Worker id.").setRequired(true).setAutocomplete(true))
           .addBooleanOption((o) =>
             o.setName("confirm").setDescription("Required: revoking cannot be undone; the host must re-enroll."),
           ),
@@ -2011,12 +2011,13 @@ const commands: BotCommand[] = [
         s
           .setName("extensions")
           .setDescription("Retarget which extensions a worker accepts jobs for.")
-          .addStringOption((o) => o.setName("id").setDescription("Worker id.").setRequired(true))
+          .addStringOption((o) => o.setName("id").setDescription("Worker id.").setRequired(true).setAutocomplete(true))
           .addStringOption((o) =>
             o
               .setName("extensions")
               .setDescription("Comma-separated names. Empty means it takes none.")
-              .setRequired(true),
+              .setRequired(true)
+              .setAutocomplete(true),
           ),
       ),
     async run(ctx) {
@@ -3136,7 +3137,7 @@ const commands: BotCommand[] = [
               .addChoices({ name: "ADMIN", value: "ADMIN" }, { name: "CONTRIBUTOR", value: "CONTRIBUTOR" }),
           )
           .addStringOption((o) =>
-            o.setName("scopes").setDescription("Comma-separated scopes.").setRequired(true),
+            o.setName("scopes").setDescription("Comma-separated scopes.").setRequired(true).setAutocomplete(true),
           )
           .addBooleanOption((o) =>
             o.setName("confirm").setDescription("Yes, change what this role may do.").setRequired(true),
@@ -3170,8 +3171,8 @@ const commands: BotCommand[] = [
           .addBooleanOption((o) =>
             o.setName("confirm").setDescription("Yes, change what this account may do.").setRequired(true),
           )
-          .addStringOption((o) => o.setName("grant").setDescription("Comma-separated scopes to add."))
-          .addStringOption((o) => o.setName("deny").setDescription("Comma-separated scopes to refuse.")),
+          .addStringOption((o) => o.setName("grant").setDescription("Comma-separated scopes to add.").setAutocomplete(true))
+          .addStringOption((o) => o.setName("deny").setDescription("Comma-separated scopes to refuse.").setAutocomplete(true)),
       ),
     async run(ctx) {
       const sub = ctx.options.subcommand();
@@ -3537,7 +3538,7 @@ const commands: BotCommand[] = [
             o.setName("extension").setDescription("Only this extension.").setAutocomplete(true),
           )
           .addStringOption((o) => o.setName("series").setDescription("Only this MangaDex title id."))
-          .addStringOption((o) => o.setName("language").setDescription("Only this language code."))
+          .addStringOption((o) => o.setName("language").setDescription("Only this language code.").setAutocomplete(true))
           .addStringOption((o) => o.setName("q").setDescription("Substring of title, number or id."))
           .addIntegerOption((o) =>
             o.setName("limit").setDescription("How many (1-25, default 10).").setMinValue(1).setMaxValue(25),
@@ -3694,7 +3695,7 @@ const commands: BotCommand[] = [
           .setName("revoke")
           .setDescription("Kill an unredeemed enrollment token.")
           .addStringOption((o) =>
-            o.setName("id").setDescription("Token id, or its first few characters.").setRequired(true),
+            o.setName("id").setDescription("Token id, or its first few characters.").setRequired(true).setAutocomplete(true),
           )
           .addBooleanOption((o) =>
             o.setName("confirm").setDescription("Required: whoever was sent it can no longer enrol."),
@@ -3854,7 +3855,10 @@ const commands: BotCommand[] = [
           .setName("priority")
           .setDescription("Which extensions jump the upload queue. Replaces the whole list.")
           .addStringOption((o) =>
-            o.setName("extensions").setDescription("Comma-separated names. Empty clears the list."),
+            o
+              .setName("extensions")
+              .setDescription("Comma-separated names. Empty clears the list.")
+              .setAutocomplete(true),
           ),
       )
       .addSubcommand((s) =>
@@ -3862,7 +3866,10 @@ const commands: BotCommand[] = [
           .setName("paused")
           .setDescription("Which extensions upload nothing at all. Replaces the whole list.")
           .addStringOption((o) =>
-            o.setName("extensions").setDescription("Comma-separated names. Empty resumes all of them."),
+            o
+              .setName("extensions")
+              .setDescription("Comma-separated names. Empty resumes all of them.")
+              .setAutocomplete(true),
           ),
       )
       .addSubcommand((s) =>
