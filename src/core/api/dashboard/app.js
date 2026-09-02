@@ -1659,6 +1659,15 @@ function live(resources, render, { reserve = 0, skeleton } = {}) {
     const loading = resources.some((r) => r.status === "loading" || r.status === "idle");
     const failed = resources.find((r) => r.status === "error");
     host.dataset.refreshing = String(resources.some((r) => r.status === "refreshing"));
+    /*
+     * The reserved height is scaffolding for the wait, not a floor for the
+     * result. It was neither: `--reserve` was a permanent min-height, so a
+     * region that reserved 150px for a table kept 150px after answering with
+     * one line, and every page carried a column of dead deck under its short
+     * cards. Released once there is something real to measure; a redraw from
+     * a refresh keeps the content up, so there is nothing left to jump.
+     */
+    host.dataset.loaded = String(!loading && !failed);
     if (failed) return setChildren(host, errorState(failed));
     if (loading) return setChildren(host, skeleton ? skeleton() : skeletonTable());
     // setChildren, not replaceChildren: a view whose render returns nothing for
