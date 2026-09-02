@@ -59,7 +59,6 @@ x-dev-env: &dev-env
   # Short lease and fast sweeps so lease expiry and reassignment are
   # observable within a test's patience rather than after five minutes.
   LEASE_TTL_SECONDS: "30"
-  SWEEP_INTERVAL_SECONDS: "5"
   SCHEDULER_INTERVAL_SECONDS: "5"
   RETRY_BASE_SECONDS: "5"
   RETRY_MAX_SECONDS: "60"

@@ -14,7 +14,11 @@ import { EXTENSION_NAME_RE, Manifest, hostAllowed, manifestSchedule } from "../.
 import { normaliseMangadexLanguage } from "../../../contracts/languages.js";
 import { UPLOAD_TASK_KINDS, UPLOAD_TASK_STATES } from "../../store/uploadTasks.js";
 import { DEFAULT_NAMESPACE } from "../../store/trackedManga.js";
-import { OFFICIAL_LINK_SOURCE } from "../../md/titleService.js";
+import {
+  AUTO_MAP_BATCH,
+  RECHECK_AFTER_MS,
+  isAutomaticSource,
+} from "../../md/titleService.js";
 import { workerLabel, workerNames } from "../../store/workers.js";
 import {
   ordering,
@@ -245,6 +249,196 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
      * recorded but never finished (`finished_at` null) or rolled back is
      * reported as failed: that is what makes a container crash-loop on boot.
      */
+    /**
+     * The work this platform does to itself, on a clock.
+     *
+     * WHY IT EXISTS. Everything periodic here is either a `while (running)` loop
+     * that sleeps at the bottom or a `setInterval`; there is no cron and no job
+     * table, so "what runs on its own, how often, and did it" was answerable
+     * only by reading source. That is fine until something quietly stops — and
+     * the ones that matter most are the least visible, because a pass that maps
+     * nothing and a pass that never ran look identical from outside.
+     *
+     * Three honesty rules, because a status page that guesses is worse than
+     * none:
+     *
+     *   - `lastRun` is null unless something actually records it. Three jobs
+     *     write a settings row; the rest write nothing, and `lastRunKnown: false`
+     *     says so rather than implying "never ran".
+     *   - the interval is reported with where it comes from, so "why is this
+     *     every 15 minutes" has an answer and "can I change it" is not a guess.
+     *   - `enabled` reflects the runtime toggles that really gate the work: the
+     *     platform pause, and each job's own switch where it has one.
+     */
+    scope.get("/api/v1/admin/system/tasks", { preHandler: requireScope("settings:read") }, async () => {
+      const paused = await ctx.settings.isPaused();
+
+      const stamp = async (key: string): Promise<string | null> => {
+        const raw = await ctx.settings.getSetting(key);
+        if (!raw) return null;
+        const at = new Date(raw);
+        return Number.isNaN(at.getTime()) ? null : at.toISOString();
+      };
+
+      const [schedulerTick, githubSync, mapSync, autoMap, titleMap] = await Promise.all([
+        stamp("scheduler_last_tick"),
+        stamp("github_auto_sync_last"),
+        stamp("map_sync_last_run"),
+        // The auto-map records itself per ROW, not per pass, so the closest
+        // honest answers are "the newest row it looked at" and "how many are
+        // still due". Both are what an operator actually wants: whether the
+        // pass is moving, and how much queue is left in front of it.
+        ctx.prisma.untrackedManga.aggregate({
+          where: { state: "NEW" },
+          _max: { officialLinkCheckedAt: true },
+          _count: { _all: true },
+        }),
+        ctx.prisma.untrackedManga.aggregate({
+          where: { state: "NEW" },
+          _max: { titleCheckedAt: true },
+        }),
+      ]);
+
+      const dueBefore = new Date(Date.now() - RECHECK_AFTER_MS);
+      const [linkDue, githubEnabled] = await Promise.all([
+        ctx.prisma.untrackedManga.count({
+          where: {
+            state: "NEW",
+            OR: [{ officialLinkCheckedAt: null }, { officialLinkCheckedAt: { lt: dueBefore } }],
+          },
+        }),
+        ctx.settings.getGithubAutoSync(),
+      ]);
+
+      return {
+        paused,
+        tasks: [
+          {
+            id: "scheduler-tick",
+            name: "Scheduler tick",
+            what: "Creates due extension runs, sweeps expired job and upload leases, advances run state, and publishes queue-depth metrics.",
+            service: "core-scheduler",
+            everySeconds: ctx.config.schedulerIntervalSeconds,
+            configuredBy: "env SCHEDULER_INTERVAL_SECONDS (at boot)",
+            enabled: !paused,
+            lastRun: schedulerTick,
+            lastRunKnown: true,
+            // Written inside run creation, so a paused platform stops updating
+            // it: an old timestamp here means "not creating runs", which is not
+            // the same as "the loop is dead".
+            note: "Recorded only when the tick got as far as creating runs, so it stops moving while the platform is paused.",
+          },
+          {
+            id: "auto-map",
+            name: "Auto-map untracked series",
+            what: "Looks for a MangaDex title that names an untracked series' own publisher page — in the official-English link, another link field, or the description — and maps it where exactly one does.",
+            service: "core-uploader",
+            // Not a fixed interval: it rides the drain loop, which sleeps only
+            // when it claimed nothing. Saying "every 5s" would be wrong
+            // whenever the queue is busy, which is when it matters.
+            everySeconds: null,
+            cadence: "Once per upload-queue pass: about every 5s while the queue is idle, and only as often as a drain finishes when it is busy.",
+            configuredBy: "hardcoded (AUTO_MAP_BATCH, RECHECK_AFTER_MS in core/md/titleService.ts)",
+            enabled: !paused,
+            batch: AUTO_MAP_BATCH,
+            recheckDays: RECHECK_AFTER_MS / 86_400_000,
+            lastRun: null,
+            lastRunKnown: false,
+            // The two numbers that stand in for it, and what they mean.
+            progress: {
+              newestRowChecked: autoMap._max.officialLinkCheckedAt?.toISOString() ?? null,
+              rowsDue: linkDue,
+              newRows: autoMap._count._all,
+            },
+            note: "Nothing records the pass itself; these are the newest row it has looked at and how many are still due.",
+          },
+          {
+            id: "auto-map-title",
+            name: "Auto-map by exact name",
+            what: "The companion pass that matches an untracked series against a MangaDex title of exactly the same name.",
+            service: "none",
+            everySeconds: null,
+            cadence: "Not scheduled at all: it runs only when someone triggers it, and previews by default.",
+            configuredBy: "manual only (dashboard, CLI or bot)",
+            enabled: true,
+            lastRun: null,
+            lastRunKnown: false,
+            progress: { newestRowChecked: titleMap._max.titleCheckedAt?.toISOString() ?? null },
+          },
+          {
+            id: "title-create",
+            name: "Create approved MangaDex titles",
+            what: "Creates titles for untracked rows whose extension has auto_create_titles set, and retries failures up to three times.",
+            service: "core-uploader",
+            everySeconds: null,
+            cadence: "Once per upload-queue pass, alongside the auto-map.",
+            configuredBy: "hardcoded; per-extension via the manifest's auto_create_titles",
+            enabled: !paused,
+            lastRun: null,
+            lastRunKnown: false,
+          },
+          {
+            id: "upload-drain",
+            name: "Upload queue drain",
+            what: "Claims and runs upload, edit, delete, unavailable and restore tasks against MangaDex.",
+            service: "core-uploader",
+            everySeconds: null,
+            cadence: "Continuous; sleeps 5s only when it claimed nothing.",
+            configuredBy: "hardcoded (IDLE_SLEEP_MS in services/uploader.ts)",
+            enabled: !paused,
+            lastRun: null,
+            lastRunKnown: false,
+          },
+          {
+            id: "processor-tick",
+            name: "Run processing",
+            what: "Turns finished scrape results into chapter rows and upload tasks.",
+            service: "core-processor",
+            everySeconds: 15,
+            configuredBy: "hardcoded (INTERVAL_SECONDS in services/processor.ts)",
+            enabled: !paused,
+            lastRun: null,
+            lastRunKnown: false,
+          },
+          {
+            id: "github-sync",
+            name: "Extension auto-sync from GitHub",
+            what: "Polls the configured extension repositories and publishes anything new.",
+            service: "core-scheduler",
+            everySeconds: 15 * 60,
+            configuredBy: "hardcoded interval; on/off in settings (github_auto_sync)",
+            enabled: githubEnabled,
+            lastRun: githubSync,
+            lastRunKnown: true,
+            note: "Recorded before the work, so it means last attempted rather than last succeeded.",
+          },
+          {
+            id: "map-sync",
+            name: "Publish the series map to GitHub",
+            what: "Writes the tracked map out to the repository contributors read.",
+            service: "core-api",
+            everySeconds: ctx.config.mapSyncIntervalHours * 3600,
+            configuredBy: "env MAP_SYNC_INTERVAL_HOURS (at boot); checked hourly",
+            enabled: !paused,
+            lastRun: mapSync,
+            lastRunKnown: true,
+          },
+          {
+            id: "log-prune",
+            name: "Log retention",
+            what: "Deletes log events past the retention window and caps the table's row count.",
+            service: "core-scheduler",
+            everySeconds: 3600,
+            configuredBy: "hardcoded interval; env LOG_RETENTION_DAYS and LOG_MAX_ROWS for what it keeps",
+            enabled: true,
+            lastRun: null,
+            lastRunKnown: false,
+            note: "Tracked in memory, so a restart makes it due again immediately.",
+          },
+        ],
+      };
+    });
+
     scope.get("/api/v1/admin/schema", { preHandler: requireScope("settings:read") }, async () => {
       const onDisk = migrationsOnDisk(migrationsDir);
 
@@ -1471,7 +1665,11 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
                 mdMangaId: mappingRow.mdMangaId,
                 source: mappingRow.source,
                 at: mappingRow.createdAt,
-                automatic: mappingRow.source === OFFICIAL_LINK_SOURCE,
+                // Any automatic source, not just the official-link one: the
+                // pass now also matches on other link fields and on the
+                // description, and a mapping nobody reviewed must not start
+                // reading as hand-curated because a new source string was added.
+                automatic: isAutomaticSource(mappingRow.source),
               }
             : null,
           languageValidation: LANGUAGE_VALIDATION,

@@ -62,11 +62,45 @@ const UNTRACKED_COLUMNS = Prisma.sql`u.id, u.extension, u.manga_id AS "mangaId",
   u.md_applied_by AS "mdAppliedBy",
   u.official_link_checked_at AS "officialLinkCheckedAt",
   u.title_checked_at AS "titleCheckedAt", u.created_at AS "createdAt",
-  u.updated_at AS "updatedAt"`;
+  u.updated_at AS "updatedAt",
+  t.md_manga_id AS "trackedMdMangaId", t.source AS "trackedSource",
+  t.created_at AS "trackedAt"`;
+
+/**
+ * The series map, joined onto the queue by the identity the map is keyed on.
+ *
+ * A queue row and a mapping are about the same series when the extension and
+ * the extension's own id agree; the default catalogue only, because that is the
+ * one the untracked pipeline writes into. Note this says nothing about other
+ * publishers: two extensions covering one series are two identities and two
+ * rows, and both may point at the same MangaDex title quite legitimately.
+ */
+const UNTRACKED_TRACKED_JOIN = Prisma.sql`
+  LEFT JOIN tracked_manga t
+    ON t.extension = u.extension AND t.manga_id = u.manga_id AND t.namespace = ''`;
 
 interface UntrackedRow {
   id: string;
   [key: string]: unknown;
+}
+
+/**
+ * Fold the joined map columns into one `tracked` object, or null.
+ *
+ * A nested object rather than three loose fields because callers ask one
+ * question of it — "is this series already mapped, and to what?" — and three
+ * nullable siblings is three chances to check the wrong one. Null means the
+ * series is not in the map: the honest answer, and the one that makes
+ * `row.tracked` safe to use as the condition it reads as.
+ */
+function withTrackedMapping(row: Record<string, unknown>): Record<string, unknown> {
+  const { trackedMdMangaId, trackedSource, trackedAt, ...rest } = row;
+  return {
+    ...rest,
+    tracked: trackedMdMangaId
+      ? { mdMangaId: trackedMdMangaId, source: trackedSource ?? null, at: trackedAt ?? null }
+      : null,
+  };
 }
 
 /** What the untracked listing may be ordered by, as the console's columns. */
@@ -88,6 +122,45 @@ const UNTRACKED_SORT_COLUMNS: SortColumns = {
 };
 
 const UNTRACKED_ID: OrderKey = { sql: Prisma.sql`u.id`, cast: "text", dir: "follow" };
+
+/**
+ * The series map across every extension, as one listing.
+ *
+ * The map was only ever addressable per extension, which answers the
+ * platform's question ("what does comikey track?") and not the operator's
+ * ("which publishers feed this MangaDex title, and are any of them wrong?").
+ * The second one could only be answered by listing all six catalogues and
+ * joining them by hand, which is why nobody did.
+ */
+const TRACKED_COLUMNS = Prisma.sql`t.id, t.extension, t.namespace, t.manga_id AS "mangaId",
+  t.md_manga_id AS "mdMangaId", t.source, t.created_at AS "createdAt",
+  t.recheck_after AS "recheckAfter", t.cooldown_days AS "cooldownDays",
+  t.paused_at AS "pausedAt", t.paused_by AS "pausedBy", t.pause_reason AS "pauseReason"`;
+
+const TRACKED_SORTS = ["extension", "catalogue", "series", "mangadex", "source", "added"] as const;
+
+const TRACKED_SORT_COLUMNS: SortColumns = {
+  extension: textKeys(Prisma.sql`t.extension`),
+  catalogue: textKeys(Prisma.sql`t.namespace`),
+  series: textKeys(Prisma.sql`t.manga_id`),
+  mangadex: textKeys(Prisma.sql`t.md_manga_id`),
+  source: textKeys(Prisma.sql`t.source`),
+  added: [{ sql: Prisma.sql`t.created_at`, cast: "timestamp", dir: "follow" }],
+};
+
+const TRACKED_ID: OrderKey = { sql: Prisma.sql`t.id`, cast: "text", dir: "follow" };
+
+/**
+ * MangaDex ids that more than one mapping points at.
+ *
+ * A subquery rather than a window function over the page: a window would count
+ * only the rows that survived the filter, so filtering to one extension would
+ * report every title as having a single source — which is the exact opposite of
+ * the answer being asked for.
+ */
+const SHARED_TITLES = Prisma.sql`(
+  SELECT md_manga_id FROM tracked_manga GROUP BY md_manga_id HAVING count(*) > 1
+)`;
 
 /**
  * The worker image the enrolment snippet tells a new host to run. Set
@@ -1038,6 +1111,178 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
     );
 
     // ---- tracked manga & extension config (DB is the config authority) ----
+    /**
+     * Every mapping, across every extension: searchable, paged and sortable.
+     *
+     * The per-extension listing below stays, and stays the one you edit in. This
+     * one exists for the questions that are not about an extension at all:
+     *
+     *   - "which publishers feed this MangaDex title?" — `mdMangaId`, or paste
+     *     the link into `q`. Two extensions on one title is legitimate and
+     *     common (a series two catalogues both carry), so this reports it
+     *     rather than flagging it: `sources` counts the mappings sharing a
+     *     title, and `shared=only` lists just those.
+     *   - "where did this mapping come from?" — `source` is searched by `q`
+     *     too, so `auto:official-link` gathers everything nobody reviewed.
+     *
+     * Server-paged for the same reason the queue is: three and a half thousand
+     * mappings is more than a browser should be sorting, and an operator
+     * ordering by one column means the whole map, not the page in hand.
+     */
+    scope.get("/api/v1/admin/tracked", { preHandler: requireScope("tracked:read") }, async (req, reply) => {
+      const query = parseOrThrow(
+        z.object({
+          /** Free text over the external id, the MangaDex id and the source. */
+          q: z.string().trim().max(200).optional(),
+          extension: z.string().trim().max(64).optional(),
+          /** "" is a real catalogue (the flat id space), so this is not blank-checked. */
+          namespace: z.string().trim().max(MAX_NAMESPACE_LENGTH).optional(),
+          /** Exact, and the reason this endpoint exists. Also accepts a title link. */
+          mdMangaId: z.string().trim().max(2048).optional(),
+          shared: z.enum(["all", "only"]).default("all"),
+          /**
+           * Who made the mapping.
+           *
+           * `automatic` is the one worth asking for: a mapping nothing human
+           * looked at is the first thing to check when a series turns out to be
+           * wired to the wrong title, and until now the only way to gather them
+           * was to guess the source string into the search box.
+           */
+          madeBy: z.enum(["all", "automatic", "person"]).default("all"),
+          paused: z.enum(["all", "only", "none"]).default("all"),
+          limit: z.coerce.number().int().min(1).max(500).default(100),
+          cursor: z.string().max(512).optional(),
+          orderBy: z.enum(TRACKED_SORTS).optional(),
+          dir: z.enum(["asc", "desc"]).default("asc"),
+        }),
+        req.query ?? {},
+      );
+
+      const filter: Prisma.Sql[] = [];
+      if (query.extension) filter.push(Prisma.sql`t.extension = ${query.extension}`);
+      if (query.namespace !== undefined) filter.push(Prisma.sql`t.namespace = ${query.namespace}`);
+      if (query.mdMangaId) {
+        // A pasted title link is the form this id arrives in; refusing it and
+        // asking for "just the uuid" is asking the operator to do a parse the
+        // server already knows how to do.
+        const title = parseMdTitleId(query.mdMangaId);
+        if ("error" in title) return reply.code(400).send({ error: title.error });
+        filter.push(Prisma.sql`t.md_manga_id = ${title.id}`);
+      }
+      if (query.q) {
+        const like = `%${query.q}%`;
+        filter.push(
+          Prisma.sql`(t.manga_id ILIKE ${like} OR t.md_manga_id ILIKE ${like} OR t.source ILIKE ${like} OR t.extension ILIKE ${like})`,
+        );
+      }
+      if (query.shared === "only") filter.push(Prisma.sql`t.md_manga_id IN ${SHARED_TITLES}`);
+      // The `auto:` prefix, not every source beginning with "auto": a title this
+      // service created after somebody pressed Approve is recorded as plain
+      // `auto`, and a person did choose that one.
+      if (query.madeBy === "automatic") filter.push(Prisma.sql`t.source LIKE 'auto:%'`);
+      if (query.madeBy === "person") filter.push(Prisma.sql`t.source NOT LIKE 'auto:%'`);
+      // Paused is a moment in time, not a flag: a cooldown expires by itself.
+      if (query.paused === "only") filter.push(Prisma.sql`t.recheck_after > now()`);
+      if (query.paused === "none") filter.push(Prisma.sql`(t.recheck_after IS NULL OR t.recheck_after <= now())`);
+
+      const page = [...filter];
+      const sorted = sortedBy(
+        TRACKED_SORT_COLUMNS,
+        query.orderBy ? { name: query.orderBy, dir: query.dir, cursor: query.cursor ?? null } : null,
+        TRACKED_ID,
+      );
+      if (sorted) {
+        const after = sorted.order.after(sorted.after);
+        if (after) page.push(after);
+      } else if (query.cursor) {
+        const at = await ctx.prisma.trackedManga.findUnique({
+          where: { id: query.cursor },
+          select: { id: true, createdAt: true },
+        });
+        if (!at) return reply.code(400).send({ error: `unknown cursor: ${query.cursor}` });
+        page.push(Prisma.sql`(t.created_at, t.id) < (${at.createdAt}, ${at.id})`);
+      }
+
+      const predicate = (parts: Prisma.Sql[]) =>
+        parts.length > 0 ? Prisma.sql`WHERE ${Prisma.join(parts, " AND ")}` : Prisma.empty;
+
+      const [rows, counted] = await Promise.all([
+        ctx.prisma.$queryRaw<(UntrackedRow & Record<string, unknown>)[]>(Prisma.sql`
+          SELECT ${TRACKED_COLUMNS}${sorted ? Prisma.sql`, ${sorted.order.select}` : Prisma.empty}
+          FROM tracked_manga t
+          ${predicate(page)}
+          ORDER BY ${sorted ? sorted.order.orderBy : Prisma.sql`t.created_at DESC, t.id DESC`}
+          LIMIT ${query.limit}
+        `),
+        ctx.prisma.$queryRaw<{ total: bigint }[]>(
+          Prisma.sql`SELECT count(*) AS total FROM tracked_manga t ${predicate(filter)}`,
+        ),
+      ]);
+
+      const stripped = sorted ? rows.map((row) => sorted.order.strip(row)) : rows;
+
+      /*
+       * How many mappings share each title on this page.
+       *
+       * One grouped query over the page's ids rather than a per-row subquery in
+       * the listing: the count has to be of the WHOLE map, not of the rows that
+       * survived the filter, and this is the cheap way to say that. Titles
+       * absent from the answer have exactly one mapping — their own.
+       */
+      const ids = [...new Set(stripped.map((row) => String(row["mdMangaId"])))];
+      const shared = ids.length
+        ? await ctx.prisma.trackedManga.groupBy({
+            by: ["mdMangaId"],
+            where: { mdMangaId: { in: ids } },
+            _count: { _all: true },
+          })
+        : [];
+      const sourcesFor = new Map(shared.map((group) => [group.mdMangaId, group._count._all]));
+
+      const last = rows[rows.length - 1];
+      return {
+        nextCursor:
+          rows.length === query.limit && last
+            ? sorted
+              ? encodeSortCursor(sorted.name, sorted.dir, sorted.order.cursorOf(last))
+              : String(last["id"])
+            : null,
+        tracked: stripped.map((row) => ({
+          ...row,
+          sources: sourcesFor.get(String(row["mdMangaId"])) ?? 1,
+        })),
+        total: Number(counted[0]?.total ?? 0),
+        limit: query.limit,
+        orderedBy: query.orderBy ?? null,
+        dir: query.dir,
+        sortable: TRACKED_SORTS,
+      };
+    });
+
+    /**
+     * Which extensions have mappings at all, with their counts.
+     *
+     * The listing above pages, so it cannot be counted per extension from the
+     * client, and the console needs the picker filled in before the first page
+     * comes back.
+     */
+    scope.get("/api/v1/admin/tracked/extensions", { preHandler: requireScope("tracked:read") }, async () => {
+      const groups = await ctx.prisma.trackedManga.groupBy({
+        by: ["extension"],
+        _count: { _all: true },
+        orderBy: { extension: "asc" },
+      });
+      const namespaces = await ctx.prisma.trackedManga.groupBy({
+        by: ["namespace"],
+        _count: { _all: true },
+        orderBy: { namespace: "asc" },
+      });
+      return {
+        extensions: groups.map((group) => ({ extension: group.extension, count: group._count._all })),
+        namespaces: namespaces.map((group) => ({ namespace: group.namespace, count: group._count._all })),
+      };
+    });
+
     scope.get("/api/v1/admin/extensions/:name/tracked", { preHandler: requireScope("tracked:read") }, async (req, reply) => {
       const { name } = req.params as { name: string };
       if (!EXTENSION_NAME_RE.test(name)) return reply.code(400).send({ error: "bad name" });
@@ -1392,6 +1637,18 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
            */
           orderBy: z.enum(UNTRACKED_SORTS).optional(),
           dir: z.enum(["asc", "desc"]).default("asc"),
+          /**
+           * What to do with rows whose series is ALREADY in the series map
+           * while the row itself still says otherwise.
+           *
+           * These are stale, and dangerously so: the row reads NEW, so the
+           * pipeline offers it for title creation, and approving it creates a
+           * SECOND MangaDex title for a series that already has one. That has
+           * happened here, and cleaning it up meant deleting chapters off a
+           * live title. So they are out of the listing by default, `show`
+           * puts them back, and `only` is the cleanup view.
+           */
+          mapped: z.enum(["hide", "show", "only"]).default("hide"),
         })
         .parse(req.query ?? {});
 
@@ -1408,6 +1665,12 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           Prisma.sql`(u.manga_name ILIKE ${like} OR u.manga_id ILIKE ${like} OR u.extension ILIKE ${like})`,
         );
       }
+      // A row that IS state TRACKED and has a mapping is not stale, it is
+      // finished, and the TRACKED filter exists to look at exactly those; only
+      // the rows whose state disagrees with the map are hidden.
+      const stale = Prisma.sql`(t.md_manga_id IS NOT NULL AND u.state <> 'TRACKED')`;
+      if (query.mapped === "hide") filter.push(Prisma.sql`NOT ${stale}`);
+      if (query.mapped === "only") filter.push(stale);
 
       const page = [...filter];
       const sorted = sortedBy(
@@ -1437,6 +1700,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         ctx.prisma.$queryRaw<(UntrackedRow & Record<string, unknown>)[]>(Prisma.sql`
           SELECT ${UNTRACKED_COLUMNS}${sorted ? Prisma.sql`, ${sorted.order.select}` : Prisma.empty}
           FROM untracked_manga u
+          ${UNTRACKED_TRACKED_JOIN}
           ${predicate(page)}
           -- Tie-broken by id: created_at alone is not unique here — a run
           -- reports a whole catalogue at once, so hundreds of rows can share a
@@ -1449,7 +1713,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         // tell "that is all of them" from "here is the first page of two
         // thousand", which is exactly what the old fixed cap looked like.
         ctx.prisma.$queryRaw<{ total: bigint }[]>(
-          Prisma.sql`SELECT count(*) AS total FROM untracked_manga u ${predicate(filter)}`,
+          Prisma.sql`SELECT count(*) AS total FROM untracked_manga u ${UNTRACKED_TRACKED_JOIN} ${predicate(filter)}`,
         ),
       ]);
 
@@ -1463,7 +1727,9 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
               ? encodeSortCursor(sorted.name, sorted.dir, sorted.order.cursorOf(last))
               : last.id
             : null,
-        untracked: sorted ? rows.map((row) => sorted.order.strip(row)) : rows,
+        untracked: (sorted ? rows.map((row) => sorted.order.strip(row)) : rows).map((row) =>
+          withTrackedMapping(row),
+        ),
         total: Number(counted[0]?.total ?? 0),
         limit: query.limit,
         orderedBy: query.orderBy ?? null,
@@ -1608,7 +1874,15 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         // The queue row is what makes this more than a tracked-map write: it
         // carries the state the untracked pipeline reads, and a row left NEW
         // behind a mapping is a series that gets offered for creation again.
-        const row = resolution.match?.untracked ?? null;
+        //
+        // Only the row for the series actually being mapped, though. An
+        // override says the resolver got it wrong, and the row it found belongs
+        // to whatever it resolved: closing that one would mark some OTHER
+        // series TRACKED against a title nothing mapped it to, and leave it out
+        // of the queue for good.
+        const resolvedIdentity =
+          resolution.match?.extension === extension && resolution.match?.mangaId === mangaId;
+        const row = resolvedIdentity ? (resolution.match?.untracked ?? null) : null;
         const closable = row !== null && row.state !== "CREATING";
         const mayCloseRow = hasScope(req.principal!, "untracked:write");
 
@@ -1982,12 +2256,16 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           ambiguous: report.ambiguous,
           unmatched: report.unmatched,
           remaining: report.remaining,
-          mapped: report.mapped.map(({ row, mdMangaId }) => ({
+          mapped: report.mapped.map(({ row, mdMangaId, via }) => ({
             id: row.id,
             extension: row.extension,
             mangaName: row.mangaName,
             mangaUrl: row.mangaUrl,
             mdMangaId,
+            // Which evidence this rested on. The three link places and the name
+            // pass are not equally strong, and an operator reviewing a preview
+            // is deciding exactly that.
+            via,
             titleUrl: `https://mangadex.org/title/${mdMangaId}`,
           })),
         };
@@ -2021,6 +2299,47 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       if (!ctx.titleService) {
         return reply.code(503).send({ error: "title service not available on this instance" });
       }
+
+      /*
+       * A stale queue row is how a duplicate title gets made.
+       *
+       * The row says NEW because nothing updated it when the series was mapped
+       * by another route — a hand-written map entry, a batch paste, the
+       * auto-map. Approving it then creates a second MangaDex title for a
+       * series that already has one, and un-duplicating a catalogue afterwards
+       * means deleting chapters off a live title. The map is the authority, so
+       * it is asked here rather than trusted to have kept the row in step.
+       *
+       * The check is on this extension's own identity: another publisher's
+       * mapping onto the same MangaDex title is a legitimate second source, not
+       * a duplicate, and must not block anything.
+       */
+      const row = await ctx.prisma.untrackedManga.findUnique({
+        where: { id },
+        select: { extension: true, mangaId: true },
+      });
+      if (row) {
+        const mapped = await ctx.prisma.trackedManga.findUnique({
+          where: {
+            extension_namespace_mangaId: {
+              extension: row.extension,
+              namespace: DEFAULT_NAMESPACE,
+              mangaId: row.mangaId,
+            },
+          },
+          select: { mdMangaId: true },
+        });
+        if (mapped) {
+          return reply.code(409).send({
+            error:
+              `${row.extension}:${row.mangaId} is already mapped to ${mapped.mdMangaId}; ` +
+              "creating a title for it would make a duplicate. This queue row is out of date " +
+              "with the series map — skip it, or map it onto that same title to close it.",
+            mdMangaId: mapped.mdMangaId,
+          });
+        }
+      }
+
       const result = await ctx.titleService.approve(id, actor(req));
       if ("error" in result) return reply.code(409).send(result);
       return { ok: true, ...result };
@@ -2035,6 +2354,59 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       if (res.count !== 1) return reply.code(409).send({ error: "not skippable" });
       await ctx.audit.record(actor(req), "untracked.skip", id);
       return { ok: true };
+    });
+
+    /**
+     * Skip a batch of them.
+     *
+     * The single-row route is what the queue offered, and the queue is
+     * thousands of rows deep: parking a publisher's back catalogue meant one
+     * request per series, each with its own confirmation, and a 409 in the
+     * middle left the operator to work out which half had gone through.
+     *
+     * Reports rather than refuses. A batch of fifty picked off a listing will
+     * routinely contain a row somebody else already skipped, or one that has
+     * since been mapped, and failing the whole batch over it would make the
+     * button useless exactly when it is worth having; so the answer names what
+     * it left alone and why, and the skippable rows are skipped either way.
+     */
+    scope.post("/api/v1/admin/untracked/skip", { preHandler: requireScope("untracked:write") }, async (req) => {
+      const body = parseOrThrow(
+        z.object({ ids: z.array(z.string().uuid()).min(1).max(500) }).strict(),
+        req.body ?? {},
+      );
+
+      const rows = await ctx.prisma.untrackedManga.findMany({
+        where: { id: { in: body.ids } },
+        select: { id: true, state: true, mangaName: true },
+      });
+      const found = new Set(rows.map((row) => row.id));
+      const skippable = rows.filter((row) => row.state === "NEW" || row.state === "FAILED");
+
+      const skipped = skippable.length
+        ? await ctx.prisma.untrackedManga.updateMany({
+            where: { id: { in: skippable.map((row) => row.id) }, state: { in: ["NEW", "FAILED"] } },
+            data: { state: "SKIPPED" },
+          })
+        : { count: 0 };
+
+      if (skipped.count > 0) {
+        await ctx.audit.record(actor(req), "untracked.skip", `${skipped.count} series`, {
+          ids: skippable.map((row) => row.id),
+        });
+      }
+
+      return {
+        ok: true,
+        skipped: skipped.count,
+        // Both kinds of "not this one", kept apart: a row in the wrong state is
+        // a fact about the queue, an id that matched nothing is a fact about
+        // the request, and rolling them into one number hides which happened.
+        unchanged: rows
+          .filter((row) => row.state !== "NEW" && row.state !== "FAILED")
+          .map((row) => ({ id: row.id, mangaName: row.mangaName, state: row.state })),
+        missing: body.ids.filter((id) => !found.has(id)),
+      };
     });
 
     /**

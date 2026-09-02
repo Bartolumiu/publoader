@@ -90,6 +90,8 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
     { match: /\/source\/map\/batch$/, body: () => BATCH },
     { match: /\/source\/map$/, body: () => MAP_RESULT },
     { match: /\/extensions\/[^/]+\/tracked$/, body: { tracked: [] } },
+    { match: /\/tracked\/extensions$/, body: { extensions: [], namespaces: [] } },
+    { match: /\/tracked\?/, body: { tracked: [], total: 0, limit: 50, nextCursor: null } },
     { match: /\/extensions$/, body: { extensions: [{ name: "comikey" }] } },
   ];
 }
@@ -167,6 +169,15 @@ const buttonLabelled = (root: any, text: string): any =>
   [...root.querySelectorAll("button")].find((b: any) => b.textContent === text);
 
 const mapCalls = () => calls.filter((c) => c.path.includes("/source/map"));
+/**
+ * The write, and the dry run that precedes it, counted apart.
+ *
+ * Mapping asks the server what it would do before doing it, so "did this map
+ * anything" is a question about the calls WITHOUT `dryRun`; counting both
+ * together would have a declined confirmation look like a write.
+ */
+const mapWrites = () => mapCalls().filter((c) => c.body?.dryRun !== true);
+const mapPreviews = () => mapCalls().filter((c) => c.body?.dryRun === true);
 
 /** The card's three inputs, from the last-rendered copy of it. */
 function fields(): any {
@@ -175,6 +186,7 @@ function fields(): any {
   return {
     card,
     source: card.querySelector("#map-source"),
+    extension: card.querySelector("#map-extension"),
     mangaId: card.querySelector("#map-manga-id"),
     md: card.querySelector("#map-md"),
   };
@@ -347,8 +359,8 @@ describe("mapping a series from its publisher link", () => {
 
   it("sits on the series-map index, where no extension has been chosen yet", () => {
     expect(cardByTitle("Map a series from its links")).toBeTruthy();
-    // An addition, not a replacement.
-    expect(cardByTitle("Series map by extension")).toBeTruthy();
+    // An addition, not a replacement: the map listing is still the page.
+    expect(doc.getElementById("tracked-all-q")).toBeTruthy();
   });
 
   it("works out the extension and the series, and says how it knows", async () => {
@@ -379,9 +391,12 @@ describe("mapping a series from its publisher link", () => {
     buttonLabelled(f.card, "Map it").click();
     await settle();
 
-    expect(mapCalls()).toHaveLength(1);
-    expect(mapCalls()[0]!.method).toBe("POST");
-    expect(mapCalls()[0]!.body).toEqual({ url: SOURCE, mdMangaId: TITLE_ID });
+    // Asked first, written second, and the two carry the same identity.
+    expect(mapPreviews()).toHaveLength(1);
+    expect(mapPreviews()[0]!.body).toEqual({ url: SOURCE, mdMangaId: TITLE_ID, dryRun: true });
+    expect(mapWrites()).toHaveLength(1);
+    expect(mapWrites()[0]!.method).toBe("POST");
+    expect(mapWrites()[0]!.body).toEqual({ url: SOURCE, mdMangaId: TITLE_ID });
     // Closing the queue row is the step that would otherwise be forgotten.
     expect(cardByTitle("Map a series from its links").textContent).toContain("queue row was closed");
   });
@@ -391,6 +406,10 @@ describe("mapping a series from its publisher link", () => {
       ...RESOLUTION,
       match: { ...queueMatch, tracked: { mdMangaId: OTHER_ID, namespace: "", source: "operator:ardax" } },
     };
+    // The verdict the confirmation is built from is the server's, not the
+    // resolution's: the identity being mapped can have been corrected by hand
+    // since the link was looked up.
+    MAP_RESULT = { ...MAP_RESULT, outcome: "repointed", previousMdMangaId: OTHER_ID };
     const f = fields();
     f.source.value = SOURCE;
     buttonLabelled(f.card, "Look it up").click();
@@ -401,14 +420,16 @@ describe("mapping a series from its publisher link", () => {
     f.md.value = TITLE_ID;
     buttonLabelled(f.card, "Map it").click();
     await settle();
-    expect(mapCalls()).toHaveLength(0);
+    // The dry run has been asked; nothing has been written.
+    expect(mapPreviews()).toHaveLength(1);
+    expect(mapWrites()).toHaveLength(0);
 
     const modal = doc.getElementById("modal");
     expect(modal.textContent).toContain("already mapped");
     expect(modal.textContent).toContain(OTHER_ID);
     buttonLabelled(modal, "Repoint it").click();
     await settle();
-    expect(mapCalls()).toHaveLength(1);
+    expect(mapWrites()).toHaveLength(1);
   });
 
   it("writes nothing when the repoint is declined", async () => {
@@ -416,6 +437,7 @@ describe("mapping a series from its publisher link", () => {
       ...RESOLUTION,
       match: { ...queueMatch, tracked: { mdMangaId: OTHER_ID, namespace: "", source: "operator:ardax" } },
     };
+    MAP_RESULT = { ...MAP_RESULT, outcome: "repointed", previousMdMangaId: OTHER_ID };
     const f = fields();
     f.source.value = SOURCE;
     buttonLabelled(f.card, "Look it up").click();
@@ -426,7 +448,45 @@ describe("mapping a series from its publisher link", () => {
     buttonLabelled(doc.getElementById("modal"), "Cancel").click();
     await settle();
 
-    expect(mapCalls()).toHaveLength(0);
+    expect(mapWrites()).toHaveLength(0);
+  });
+
+  it("lets a wrong extension be corrected, and sends it as an override", async () => {
+    // The resolver reads the extension off the link's host, and a host serving
+    // two catalogues is exactly when it is wrong. Correcting it used to be
+    // impossible: the field did not exist.
+    const f = fields();
+    f.source.value = SOURCE;
+    buttonLabelled(f.card, "Look it up").click();
+    await settle();
+    expect(f.extension.value).toBe("comikey");
+
+    f.extension.value = "omoi";
+    f.md.value = TITLE_ID;
+    buttonLabelled(f.card, "Map it").click();
+    await settle();
+
+    expect(mapWrites()).toHaveLength(1);
+    expect(mapWrites()[0]!.body).toEqual({
+      url: SOURCE,
+      mdMangaId: TITLE_ID,
+      extension: "omoi",
+    });
+  });
+
+  it("does not send an extension it was not asked to override", async () => {
+    const f = fields();
+    f.source.value = SOURCE;
+    buttonLabelled(f.card, "Look it up").click();
+    await settle();
+    f.md.value = TITLE_ID;
+    buttonLabelled(f.card, "Map it").click();
+    await settle();
+
+    // An override tells the server to stop believing its own resolver, which
+    // also stops it closing the queue row that resolver found; claiming one
+    // needlessly costs a correct row its close.
+    expect(mapWrites()[0]!.body).not.toHaveProperty("extension");
   });
 
   it("reports a link it cannot place, and refuses to map on it", async () => {
@@ -472,8 +532,8 @@ describe("mapping a series from its publisher link", () => {
     f.mangaId.value = "typed-by-hand";
     buttonLabelled(f.card, "Map it").click();
     await settle();
-    expect(mapCalls()).toHaveLength(1);
-    expect(mapCalls()[0]!.body).toEqual({
+    expect(mapWrites()).toHaveLength(1);
+    expect(mapWrites()[0]!.body).toEqual({
       url: SOURCE,
       mdMangaId: TITLE_ID,
       mangaId: "typed-by-hand",

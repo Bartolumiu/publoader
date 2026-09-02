@@ -24,6 +24,47 @@ const MAX_CREATE_ATTEMPTS = 3;
 export const OFFICIAL_LINK_SOURCE = "auto:official-link";
 
 /**
+ * How an automatic match found its title, as the `source` written to the map.
+ *
+ * Three source strings rather than one because they are not equally strong
+ * evidence, and the difference is exactly what an operator auditing a mapping
+ * needs. `engtl` is MangaDex's own "this is the official English release" field:
+ * a claim the catalogue makes on purpose. `links` is the same url in some other
+ * slot — still a deliberate entry, just a less specific one. `description` is
+ * the url written in prose, which is how a good many entries record it and is
+ * the weakest of the three: it is someone's note, not a field.
+ *
+ * All three are the same MATCH — the publisher's own page, compared on host and
+ * path — so all three are trustworthy enough to write. Which one it was is
+ * recorded rather than flattened, so "show me everything matched only from a
+ * description" stays an answerable question.
+ */
+export type AutoMapVia = "engtl" | "links" | "description" | "title";
+
+/** Which evidence a link match rested on; the name pass is not one of these. */
+export type LinkEvidence = Exclude<AutoMapVia, "title">;
+
+export const AUTO_MAP_SOURCES: Record<AutoMapVia, string> = {
+  engtl: OFFICIAL_LINK_SOURCE,
+  links: "auto:link",
+  description: "auto:description",
+  // The other pass entirely: an exact name, with no link involved. Named here
+  // so one report can say how every row in it was matched.
+  title: "auto:title-match",
+};
+
+/**
+ * Was this mapping made by the pass rather than chosen by a person?
+ *
+ * A prefix test, not a list, deliberately: a mapping nothing human chose is the
+ * one an operator most needs to spot, and a new automatic source added later
+ * must not quietly start reading as hand-curated because this was not updated.
+ */
+export function isAutomaticSource(source: string | null | undefined): boolean {
+  return typeof source === "string" && source.startsWith("auto:");
+}
+
+/**
  * `tracked_manga.source` for a mapping the title pass made.
  *
  * Distinct from `auto:official-link` because the evidence is weaker -- a name
@@ -34,7 +75,7 @@ export const OFFICIAL_LINK_SOURCE = "auto:official-link";
 export const TITLE_MATCH_SOURCE = "auto:title-match";
 
 /** How many rows one auto-map pass searches MangaDex for. */
-const AUTO_MAP_BATCH = 20;
+export const AUTO_MAP_BATCH = 20;
 
 /**
  * How long a checked row waits before being checked again.
@@ -44,12 +85,40 @@ const AUTO_MAP_BATCH = 20;
  * so the cost of being wrong here is small; never re-checking means a series
  * stays in the queue forever after one early miss.
  */
-const RECHECK_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
+export const RECHECK_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
+
+/**
+ * How long automatic mappings are held before they are announced.
+ *
+ * The pass runs once per upload-queue pass — about every five seconds while the
+ * queue is idle — so announcing each pass that mapped something is, while a
+ * backlog drains, a message every few minutes for hours; and that buries the
+ * announcements the channel exists for. Announcing nothing was the previous
+ * answer, and it made a pass that silently wires uploads to titles the least
+ * visible thing the platform does.
+ *
+ * So: coalesce. Mappings accumulate and go out as one embed at most this often,
+ * which turns a drip into a digest without losing a row. The buffer is
+ * in-process — a restart drops pending lines rather than delaying a deploy —
+ * and the audit trail is what survives regardless.
+ */
+export const AUTO_MAP_ANNOUNCE_MS = 15 * 60 * 1000;
+
+/** The actor recorded for a mapping no person chose. */
+export const AUTO_MAP_ACTOR = "system:auto-map";
+
+/** How a match was made, for a person reading it in Discord. */
+const AUTO_MAP_EVIDENCE: Record<AutoMapVia, string> = {
+  engtl: "its official English link",
+  links: "one of its links",
+  description: "its description",
+  title: "an exact name match",
+};
 
 /** What one auto-map pass did, for the scheduler, the API and the CLI alike. */
 export interface AutoMapReport {
   considered: number;
-  mapped: { row: UntrackedManga; mdMangaId: string }[];
+  mapped: { row: UntrackedManga; mdMangaId: string; via: AutoMapVia }[];
   /** More than one candidate carried the link; left for a human. */
   ambiguous: number;
   unmatched: number;
@@ -213,6 +282,17 @@ export type ApplyResult =
 export class TitleService {
   private readonly audit: AuditLog;
 
+  /**
+   * Automatic mappings waiting to be announced, and when the last digest went.
+   *
+   * Deliberately not persisted: this is a convenience for the announcement
+   * channel, and a mapping's durable records — the map row, the audit entry —
+   * are written the moment it is made. Losing a buffered line to a restart
+   * costs a Discord message, not a fact.
+   */
+  private pendingAnnouncements: { row: UntrackedManga; mdMangaId: string; via: AutoMapVia }[] = [];
+  private lastAnnouncedAt = 0;
+
   constructor(
     private readonly prisma: PrismaClient,
     private readonly md: MdApi,
@@ -352,13 +432,14 @@ export class TitleService {
       if (dryRun) {
         // Deliberately NOT marked. A match nobody has acted on yet has to
         // still be here when they press the button that acts on it.
-        report.mapped.push({ row, mdMangaId: match });
+        report.mapped.push({ row, mdMangaId: match.id, via: match.via });
         continue;
       }
 
-      const written = await this.writeMapping(row, match, OFFICIAL_LINK_SOURCE);
+      const written = await this.writeMapping(row, match.id, AUTO_MAP_SOURCES[match.via]);
       if (written) {
-        report.mapped.push({ row, mdMangaId: match });
+        report.mapped.push({ row, mdMangaId: match.id, via: match.via });
+        await this.recordAutoMap(row, match.id, match.via);
       } else {
         // Already mapped elsewhere: not ours to repoint, and not worth
         // re-searching every pass either.
@@ -366,6 +447,8 @@ export class TitleService {
         report.unmatched++;
       }
     }
+
+    await this.flushAnnouncements();
 
     report.remaining = await this.prisma.untrackedManga.count({
       where: {
@@ -377,12 +460,12 @@ export class TitleService {
 
     // Deliberately not announced to Discord.
     //
-    // This drains a backlog thousands of rows deep, a batch per scheduler
-    // tick, so "one embed per pass that mapped something" is a message every
-    // few minutes for hours -- and it buries the announcements that do need
-    // reading, which is the announcement channel's whole job. The mappings are
-    // not lost: each is `auto:official-link` in the tracked map, on the
-    // series' own page, and in the audit log.
+    // Announced as a digest rather than per pass. This drains a backlog
+    // thousands of rows deep a batch at a time, so "one embed per pass that
+    // mapped something" is a message every few minutes for hours, and it buries
+    // the announcements the channel exists for; announcing nothing, which is
+    // what this did before, made the pass that silently wires uploads to titles
+    // the least visible thing here. See `flushAnnouncements`.
     return report;
   }
 
@@ -395,10 +478,20 @@ export class TitleService {
   }
 
   /**
-   * The one MangaDex title whose official English link is this series' url.
+   * The one MangaDex title that names this series' own page.
    *
-   * `null` for no match, `"ambiguous"` when more than one candidate carries the
-   * link — which is a catalogue problem for a human, not something to guess at.
+   * `null` for no match, `"ambiguous"` when more than one candidate names it —
+   * which is a catalogue problem for a human, not something to guess at.
+   *
+   * WHERE IT LOOKS, and why it is not just `links.engtl`. Publishers' pages are
+   * recorded inconsistently: an entry may put the page in the official-English
+   * field, in another `links` slot, or only in prose ("Official English release:
+   * <url>"). All three are the catalogue saying "this series is that page", and
+   * reading only the first missed matches whose evidence was already in the
+   * response we had paid for. The comparison is identical in all three cases —
+   * host and path via `normaliseOfficialLink`, with `sameSeriesLink` so a deep
+   * link into the series counts as the series — so widening where it looks does
+   * not weaken what counts as a match.
    *
    * Scoped to what a title search returns, and honestly so: MangaDex has no way
    * to query by link, so "no other series has this link" can only mean "none of
@@ -408,21 +501,30 @@ export class TitleService {
    * name nothing like the scraped one is simply not found, and the row waits
    * for an operator as it did before.
    */
-  private async officialLinkMatch(row: UntrackedManga): Promise<string | "ambiguous" | null> {
+  private async officialLinkMatch(
+    row: UntrackedManga,
+  ): Promise<{ id: string; via: LinkEvidence } | "ambiguous" | null> {
     const want = normaliseOfficialLink(row.mangaUrl);
     if (want === null) return null;
 
     const candidates = await this.md.searchManga(row.mangaName, 25);
-    const matches = candidates.filter(
-      (candidate) => normaliseOfficialLink(candidate.attributes.links?.["engtl"] ?? null) === want,
-    );
+    const matches: { id: string; via: LinkEvidence }[] = [];
+    for (const candidate of candidates) {
+      const via = linkEvidence(candidate, row.mangaUrl);
+      if (via) matches.push({ id: candidate.id, via });
+    }
     if (matches.length === 0) return null;
 
     // Distinct ids only: the same title coming back twice is a paging artefact,
     // not two series sharing a link.
     const ids = [...new Set(matches.map((m) => m.id))];
     if (ids.length > 1) return "ambiguous";
-    return ids[0] ?? null;
+    // The strongest evidence this candidate offered, where it offered several:
+    // an entry with the page in `links.engtl` AND in its description is an
+    // official-link match, and recording it as a description match would
+    // understate what is actually known about it.
+    const best = matches.find((m) => m.via === "engtl") ?? matches.find((m) => m.via === "links") ?? matches[0]!;
+    return { id: best.id, via: best.via };
   }
 
   /**
@@ -501,24 +603,25 @@ export class TitleService {
       if (dryRun) {
         // Deliberately NOT marked: a match nobody has acted on yet has to still
         // be here when they press the button that acts on it.
-        report.mapped.push({ row, mdMangaId: match });
+        report.mapped.push({ row, mdMangaId: match, via: "title" });
         continue;
       }
 
       const written = await this.writeMapping(row, match, TITLE_MATCH_SOURCE);
       if (written) {
-        report.mapped.push({ row, mdMangaId: match });
+        report.mapped.push({ row, mdMangaId: match, via: "title" });
+        await this.recordAutoMap(row, match, "title");
       } else {
         await this.markTitleChecked(row.id);
         report.unmatched++;
       }
     }
 
+    await this.flushAnnouncements();
     report.remaining = await this.prisma.untrackedManga.count({ where: due });
-    // Not announced to Discord, for the reason the link pass is not: this
-    // drains a queue thousands deep a batch at a time, and an embed per pass
-    // would bury the announcements that need reading. Each mapping is
-    // `auto:title-match` in the tracked map and in the audit log.
+    // Announced through the same digest as the link pass, and recorded the same
+    // way: `auto:title-match` in the tracked map, and an `untracked.automap.mapped`
+    // audit entry per mapping under the actor `system:auto-map`.
     return report;
   }
 
@@ -951,6 +1054,77 @@ export class TitleService {
     }
   }
 
+  /**
+   * Write down that a mapping was made by a machine, and queue it to be said.
+   *
+   * The audit entry is the part that matters and the part that was missing: the
+   * pass wired uploads to titles and left no record beyond a `source` string on
+   * the map row, which is current state and not history — it cannot answer WHEN
+   * a series was mapped, or which pass did it, and it is overwritten by the
+   * next repoint. (A comment here claimed these were "in the audit log". They
+   * were not.)
+   *
+   * The actor is `system:auto-map` rather than a person, because the whole
+   * point of finding one of these later is knowing that nobody looked at it.
+   */
+  private async recordAutoMap(row: UntrackedManga, mdMangaId: string, via: AutoMapVia): Promise<void> {
+    await this.audit.record(AUTO_MAP_ACTOR, "untracked.automap.mapped", `${row.extension}:${row.mangaId}`, {
+      mdMangaId,
+      mangaName: row.mangaName,
+      mangaUrl: row.mangaUrl,
+      mangaLanguage: row.mangaLanguage,
+      extension: row.extension,
+      // Which evidence it rested on. The three link places and the name pass
+      // are not equally strong, and this is the field somebody re-auditing a
+      // batch of automatic mappings will filter on.
+      via,
+      source: AUTO_MAP_SOURCES[via],
+    });
+    this.pendingAnnouncements.push({ row, mdMangaId, via });
+  }
+
+  /**
+   * Send the digest, if it is due and there is anything in it.
+   *
+   * Called at the end of a pass rather than per mapping, so a pass that maps
+   * twelve series produces one message rather than twelve. The clock starts at
+   * the first send, not at boot: a quiet platform announces its first mapping
+   * immediately, and only a busy one is throttled.
+   */
+  private async flushAnnouncements(): Promise<void> {
+    if (this.pendingAnnouncements.length === 0) return;
+    const now = Date.now();
+    if (this.lastAnnouncedAt !== 0 && now - this.lastAnnouncedAt < AUTO_MAP_ANNOUNCE_MS) return;
+
+    const pending = this.pendingAnnouncements;
+    this.pendingAnnouncements = [];
+    this.lastAnnouncedAt = now;
+
+    // Same 20-line batching as the creation announcement, for the same Discord
+    // limits — but the count in the heading is the whole digest, not the batch,
+    // so a hundred mappings do not read as five unrelated events.
+    for (let i = 0; i < pending.length; i += 20) {
+      const batch = pending.slice(i, i + 20);
+      const lines = batch.map(
+        ({ row, mdMangaId, via }) =>
+          `**[${row.mangaName}](https://mangadex.org/title/${mdMangaId})** ` +
+          `(${row.mangaLanguage}): [source](${row.mangaUrl}) · \`${row.extension}\` · ${AUTO_MAP_EVIDENCE[via]}`,
+      );
+      await this.notifier.send({
+        title:
+          `Auto-mapped ${pending.length} series onto existing MangaDex title` +
+          `${pending.length === 1 ? "" : "s"}` +
+          (pending.length > 20 ? ` (${i + 1}–${Math.min(i + 20, pending.length)})` : ""),
+        // Amber, not the green the creation announcement uses: nothing was
+        // published, and nobody reviewed these.
+        colour: "D9A12C",
+        description:
+          `${lines.join("\n")}\n\n_No titles were created. Nobody reviewed these; ` +
+          `they are recorded in the series map and the audit log._`,
+      });
+    }
+  }
+
   private async announce(created: { row: UntrackedManga; mdMangaId: string }[]): Promise<void> {
     // Batch into embeds of 20 lines to stay under Discord limits.
     for (let i = 0; i < created.length; i += 20) {
@@ -1116,6 +1290,58 @@ export function isVariantEdition(candidate: {
  */
 function sameSeriesLink(a: string, b: string): boolean {
   return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
+/**
+ * Every url-ish token in a blob of free text.
+ *
+ * Descriptions are markdown, so a url routinely arrives wrapped — `[read
+ * here](https://…)`, in angle brackets, or ending a sentence — and the trailing
+ * punctuation has to come off or the comparison fails on a full stop. Closing
+ * brackets are stripped only from the end, since a path may legitimately
+ * contain one.
+ */
+function urlsIn(text: string): string[] {
+  const found = String(text ?? "").match(/https?:\/\/[^\s<>"'`\\]+/gi);
+  return (found ?? []).map((url) => url.replace(/[).,;:\]}!?'"]+$/, ""));
+}
+
+/**
+ * Does this candidate name the series' own page, and how?
+ *
+ * The three places a publisher's page turns up on a MangaDex entry, strongest
+ * first: the official-English link field, any other `links` slot, and the
+ * description's prose. Returns which one it was, or null.
+ *
+ * The comparison is the same in all three — host and path via
+ * `normaliseOfficialLink`, then `sameSeriesLink`, so `www.`, a trailing slash
+ * and a deep link into the series all read as the series, and `/title/1002`
+ * still does not match `/title/10028`. Widening WHERE it looks therefore does
+ * not widen WHAT counts: a description mentioning some other series on the same
+ * host is not a match, exactly as it is not one in `links`.
+ */
+export function linkEvidence(
+  candidate: { attributes: { links?: Record<string, string> | null; description?: Record<string, string> | null } },
+  seriesUrl: string,
+): LinkEvidence | null {
+  const want = normaliseOfficialLink(seriesUrl);
+  if (want === null) return null;
+
+  const names = (value: string | null | undefined): boolean => {
+    const other = normaliseOfficialLink(value ?? null);
+    return other !== null && sameSeriesLink(other, want);
+  };
+
+  const links = candidate.attributes.links ?? {};
+  if (names(links["engtl"])) return "engtl";
+  for (const [key, value] of Object.entries(links)) {
+    if (key === "engtl") continue;
+    if (names(value)) return "links";
+  }
+  for (const text of Object.values(candidate.attributes.description ?? {})) {
+    if (urlsIn(text).some((url) => names(url))) return "description";
+  }
+  return null;
 }
 
 /**

@@ -202,6 +202,93 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     await closeDb();
   });
 
+  /**
+   * The platform's own periodic work, reported honestly.
+   *
+   * The failure this guards is a status page that guesses: most of these jobs
+   * record nothing when they run, and showing a blank "last run" for one of
+   * those reads as "it has never run", which is a different and alarming claim.
+   */
+  describe("the scheduled-work listing", () => {
+    it("names each periodic task with where its interval comes from", async () => {
+      const res = await app.inject({ method: "GET", url: "/api/v1/admin/system/tasks", headers: root });
+      expect(res.statusCode).toBe(200);
+      const { tasks } = res.json();
+      const ids = tasks.map((t: { id: string }) => t.id);
+      expect(ids).toContain("auto-map");
+      expect(ids).toContain("scheduler-tick");
+      for (const task of tasks) {
+        expect(task.configuredBy, `${task.id} does not say what sets its interval`).toBeTruthy();
+        expect(task.what, `${task.id} does not say what it does`).toBeTruthy();
+      }
+    });
+
+    it("says a job records nothing rather than reporting it as never run", async () => {
+      const res = await app.inject({ method: "GET", url: "/api/v1/admin/system/tasks", headers: root });
+      const autoMap = res.json().tasks.find((t: { id: string }) => t.id === "auto-map");
+      // The auto-map keeps no pass-level record at all; claiming otherwise, in
+      // either direction, is the thing to avoid.
+      expect(autoMap.lastRunKnown).toBe(false);
+      expect(autoMap.lastRun).toBeNull();
+      // What it does have: per-row progress, which is the useful answer.
+      expect(autoMap.progress).toBeTruthy();
+      expect(autoMap.batch).toBeGreaterThan(0);
+      expect(autoMap.recheckDays).toBeGreaterThan(0);
+    });
+
+    it("counts the rows the auto-map still has in front of it", async () => {
+      await prisma.untrackedManga.createMany({
+        data: [
+          {
+            extension: "opstest",
+            mangaId: "due-1",
+            mangaName: "Never checked",
+            mangaLanguage: "en",
+            mangaUrl: "https://example.com/series/1",
+            state: "NEW",
+          },
+          {
+            extension: "opstest",
+            mangaId: "fresh-1",
+            mangaName: "Checked just now",
+            mangaLanguage: "en",
+            mangaUrl: "https://example.com/series/2",
+            state: "NEW",
+            officialLinkCheckedAt: new Date(),
+          },
+        ],
+      });
+
+      const res = await app.inject({ method: "GET", url: "/api/v1/admin/system/tasks", headers: root });
+      const autoMap = res.json().tasks.find((t: { id: string }) => t.id === "auto-map");
+      // The freshly-checked row is not due again for a fortnight, so exactly
+      // one of the two is waiting.
+      expect(autoMap.progress.rowsDue).toBe(1);
+      expect(autoMap.progress.newRows).toBe(2);
+      expect(autoMap.progress.newestRowChecked).not.toBeNull();
+    });
+
+    it("reads a last-run stamp where one is actually written", async () => {
+      const at = new Date("2026-09-01T12:00:00.000Z");
+      await ctx.settings.setSetting("scheduler_last_tick", at.toISOString());
+
+      const res = await app.inject({ method: "GET", url: "/api/v1/admin/system/tasks", headers: root });
+      const tick = res.json().tasks.find((t: { id: string }) => t.id === "scheduler-tick");
+      expect(tick.lastRunKnown).toBe(true);
+      expect(tick.lastRun).toBe(at.toISOString());
+    });
+
+    it("is confined to settings:read", async () => {
+      const wrong = await mint(["runs:read"]);
+      const refused = await app.inject({
+        method: "GET",
+        url: "/api/v1/admin/system/tasks",
+        headers: wrong,
+      });
+      expect(refused.statusCode).toBe(403);
+    });
+  });
+
   /** A scoped `pa_…` credential carrying exactly `scopes`. */
   async function mint(scopes: string[]): Promise<Record<string, string>> {
     const res = await app.inject({

@@ -696,7 +696,7 @@ docker compose kill worker-a
 docker compose logs -f core-scheduler worker-b
 ```
 
-Expected: within `LEASE_TTL_SECONDS + SWEEP_INTERVAL_SECONDS` (~35s here), the
+Expected: within `LEASE_TTL_SECONDS + SCHEDULER_INTERVAL_SECONDS` (~35s here), the
 scheduler logs the expired lease, the job returns to `PENDING`, and `worker-b`
 leases it on its next poll. The job's `attempt` counter increments; it
 dead-letters only after `maxAttempts`.
