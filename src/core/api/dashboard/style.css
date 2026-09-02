@@ -1543,6 +1543,15 @@ ul.errors li {
   min-height: 0;
 }
 
+/* `--reserve` is a custom property, so it inherits. A region nested inside
+   another — the pause controls inside the platform card — picked up its
+   parent's reservation and applied it again as its own floor, which is the
+   gap that sat under those buttons. A nested region reserves nothing unless
+   it sets its own, and an inline `--reserve` still beats this. */
+.live .live {
+  --reserve: 0px;
+}
+
 /* No shimmer: a sweeping gradient is motion, and motion on a console means
    something is happening. A placeholder is the absence of a reading, so it is
    drawn as one; flat, hatched, and still. */

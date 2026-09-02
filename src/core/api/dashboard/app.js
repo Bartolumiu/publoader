@@ -2870,7 +2870,7 @@ function outstandingJobsCard(jobs) {
   const settledTotal = settled.reduce((sum, [, count]) => sum + count, 0);
 
   return card(
-    "Jobs outstanding",
+    "Work still to do",
     entries.length
       ? el(
           "div",
@@ -2888,12 +2888,12 @@ function outstandingJobsCard(jobs) {
                   ),
                 ),
               )
-            : emptyState("Nothing outstanding; every job has finished."),
+            : emptyState("Nothing left to do; every job has finished."),
           settled.length
             ? el(
                 "details",
                 {},
-                el("summary", { text: `Settled (${settledTotal.toLocaleString()})` }),
+                el("summary", { text: `Finished (${settledTotal.toLocaleString()})` }),
                 table(
                   ["State", "Count"],
                   settled
@@ -2998,7 +2998,7 @@ VIEWS.overview = (route) => {
     "div",
     {},
     card(
-      "Platform",
+      "Scheduling",
       live(
         [stats],
         (data) =>
@@ -3020,9 +3020,9 @@ VIEWS.overview = (route) => {
           "div",
           {},
           outstandingJobsCard(data.jobs || {}),
-          counts("Workers by status", Object.entries(data.workers || {}), "No worker has ever enrolled."),
+          counts("Workers right now", Object.entries(data.workers || {}), "No worker has ever enrolled."),
           card(
-            "Upload queue: outstanding",
+            "Waiting to go to MangaDex",
             (data.uploadTasks || []).length
               ? outstandingTasks(data.uploadTasks, {
                   emptyText: "Nothing outstanding; every queued upload has been published.",
@@ -3030,15 +3030,18 @@ VIEWS.overview = (route) => {
               : emptyState("Nothing has ever been queued for upload."),
           ),
           card(
-            "Quarantine",
+            "Held back",
             data.quarantined
               ? el(
                   "div",
                   {},
-                  el("p", { class: "error", text: `${data.quarantined} quarantined result submission(s).` }),
-                  row(routeLink(routeTo("errors", null, "quarantine"), "Open the quarantine →")),
+                  el("p", {
+                    class: "error",
+                    text: `${data.quarantined} set(s) of results were held back and not used.`,
+                  }),
+                  row(routeLink(routeTo("errors", null, "quarantine"), "See what was held back →")),
                 )
-              : el("p", { class: "dim", text: "Nothing is quarantined." }),
+              : el("p", { class: "dim", text: "Nothing has been held back." }),
           ),
         ),
       { reserve: 320, skeleton: () => el("div", {}, skeletonGrid(4), skeletonTable(3, 3)) },
@@ -7877,7 +7880,7 @@ VIEWS.errors = (route) => {
 function quarantinePanel() {
   const quarantine = new Resource("quarantine", () => api("/quarantine"));
   return card(
-    "Quarantined result submissions",
+    "Results we held back",
     el("p", {
       class: "dim small",
       text:
@@ -7895,7 +7898,7 @@ function quarantinePanel() {
             truncate(item.rejectReason, 240),
             fmtTime(item.createdAt),
           ]),
-          { empty: "Nothing is quarantined." },
+          { empty: "Nothing has been held back." },
         ),
       { reserve: 260, skeleton: () => skeletonTable(6, 4) },
     ),
@@ -7954,39 +7957,54 @@ VIEWS.extensions = (route) => {
               "them on its own Config tab, field by field, and follows the value here for every " +
               "field it leaves alone.",
           }),
-          el("h3", { text: "Chapter removal mode" }),
-          live([removal], (data) => (data ? removalModeControls(data, removal) : el("span", {})), {
-            reserve: 40,
-            skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
-          }),
-          el("h3", { text: "Publisher fetch pacing" }),
-          el("p", {
-            class: "dim small",
-            text:
-              "How fast a worker may talk to one publisher, and how regular it looks. A fixed " +
-              "interval is recognisable on its own, and workers given segments of the same run " +
-              "would otherwise start in step.",
-          }),
-          live([throttle], (data) => (data ? fetchThrottleControls(data, throttle) : el("span", {})), {
-            reserve: 40,
-            skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
-          }),
-          el("h3", { text: "Release pacing" }),
-          el("p", {
-            class: "dim small",
-            text:
-              "How many chapters may go up per day. A run still queues everything it decided in " +
-              "one pass; whatever is over a day's budget is dated forward instead of going up at " +
-              "once, so this changes when a chapter is released, never whether it is. 0 is no " +
-              "limit, not a stop.",
-          }),
-          live(
-            [uploadSchedule],
-            (data) => (data ? uploadScheduleControls(data, uploadSchedule) : el("span", {})),
-            {
+          // Each default is its own block with a stable id: three settings in
+          // one card, and "the release pacing fields" has to name something
+          // narrower than the card to be reachable at all.
+          el(
+            "div",
+            { class: "setting", id: "setting-removal-mode" },
+            el("h3", { text: "Chapter removal mode" }),
+            live([removal], (data) => (data ? removalModeControls(data, removal) : el("span", {})), {
               reserve: 40,
               skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
-            },
+            }),
+          ),
+          el(
+            "div",
+            { class: "setting", id: "setting-fetch-pacing" },
+            el("h3", { text: "Publisher fetch pacing" }),
+            el("p", {
+              class: "dim small",
+              text:
+                "How fast a worker may talk to one publisher, and how regular it looks. A fixed " +
+                "interval is recognisable on its own, and workers given segments of the same run " +
+                "would otherwise start in step.",
+            }),
+            live([throttle], (data) => (data ? fetchThrottleControls(data, throttle) : el("span", {})), {
+              reserve: 40,
+              skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
+            }),
+          ),
+          el(
+            "div",
+            { class: "setting", id: "setting-release-pacing" },
+            el("h3", { text: "Release pacing" }),
+            el("p", {
+              class: "dim small",
+              text:
+                "How many chapters may go up per day. A run still queues everything it decided in " +
+                "one pass; whatever is over a day's budget is dated forward instead of going up at " +
+                "once, so this changes when a chapter is released, never whether it is. 0 is no " +
+                "limit, not a stop.",
+            }),
+            live(
+              [uploadSchedule],
+              (data) => (data ? uploadScheduleControls(data, uploadSchedule) : el("span", {})),
+              {
+                reserve: 40,
+                skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
+              },
+            ),
           ),
         )
       : null,

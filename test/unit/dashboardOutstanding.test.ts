@@ -139,7 +139,7 @@ describe("dashboard shows what is left, not what is done", () => {
 
   it("gives the overview's upload card tiles for outstanding work only", async () => {
     await goto("#/overview");
-    const card = cardByTitle("Upload queue: outstanding");
+    const card = cardByTitle("Waiting to go to MangaDex");
     expect(card).toBeTruthy();
 
     // Worst first, and DONE is not among them.
@@ -149,7 +149,7 @@ describe("dashboard shows what is left, not what is done", () => {
 
   it("folds the completed upload total into a disclosure, summed across kinds", async () => {
     await goto("#/overview");
-    const details = cardByTitle("Upload queue: outstanding")?.querySelector("details");
+    const details = cardByTitle("Waiting to go to MangaDex")?.querySelector("details");
     expect(details).toBeTruthy();
     // Closed by default: the operator opens it, it does not open on them.
     expect(details.hasAttribute("open")).toBe(false);
@@ -158,21 +158,21 @@ describe("dashboard shows what is left, not what is done", () => {
 
   it("drops a kind whose only counts are zero", async () => {
     await goto("#/overview");
-    const details = cardByTitle("Upload queue: outstanding")?.querySelector("details");
+    const details = cardByTitle("Waiting to go to MangaDex")?.querySelector("details");
     // DELETE is DONE=0; neither a tile nor a completed row.
     expect(details.textContent).not.toContain("DELETE");
-    expect(cardByTitle("Upload queue: outstanding").querySelector(".grid.tight").textContent).not.toContain("DELETE");
+    expect(cardByTitle("Waiting to go to MangaDex").querySelector(".grid.tight").textContent).not.toContain("DELETE");
   });
 
-  it("shows jobs the same way: open states as tiles, SUCCEEDED behind Settled", async () => {
+  it("shows jobs the same way: open states as tiles, SUCCEEDED behind Finished", async () => {
     await goto("#/overview");
-    const card = cardByTitle("Jobs outstanding");
+    const card = cardByTitle("Work still to do");
     expect(card).toBeTruthy();
     expect(tileStates(card)).toEqual(["DEAD_LETTER", "PENDING"]);
 
     const summary = card.querySelector("details > summary");
     // SUCCEEDED 4021 + CANCELLED 2; both settled, neither actionable.
-    expect(summary.textContent).toBe(`Settled (${(4023).toLocaleString()})`);
+    expect(summary.textContent).toBe(`Finished (${(4023).toLocaleString()})`);
   });
 
   it("makes each depth tile a link into the rows it counts", async () => {
