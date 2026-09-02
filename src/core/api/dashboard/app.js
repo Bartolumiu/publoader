@@ -3752,6 +3752,48 @@ const UPLOAD_TASK_KINDS = ["UPLOAD", "EDIT", "DELETE", "UNAVAILABLE"];
 const UPLOAD_TASK_STATES = ["PENDING", "LEASED", "DONE", "FAILED", "DEAD_LETTER"];
 
 /**
+ * The queue filter card's state, in the names every `/queues/*` endpoint takes.
+ *
+ * One function rather than one per dialog: the filter card is what an operator
+ * points at when they say "these", and a dialog that rebuilds a subset of it is
+ * a dialog that acts on a different set than the one on screen. Purge did that
+ * with extension, language and search — a queue narrowed to one publisher, then
+ * purged, deleted every kind-matching row in the queue.
+ */
+function queueActiveFilter() {
+  const f = store.filters;
+  const filter = {};
+  if (f.queueKind) filter.kind = f.queueKind;
+  if (f.queueState) filter.state = f.queueState;
+  if (f.queueDedupeKey) filter.dedupeKey = f.queueDedupeKey;
+  if (f.queueAttemptMin !== "") filter.attemptMin = Number(f.queueAttemptMin);
+  if (f.queueAttemptMax !== "") filter.attemptMax = Number(f.queueAttemptMax);
+  if (f.queueExtension) filter.extension = f.queueExtension;
+  if (f.queueLanguage) filter.language = f.queueLanguage;
+  if (f.queueQ) filter.q = f.queueQ;
+  return filter;
+}
+
+/** Whether the filter card narrows anything beyond the Kind picker. */
+function queueFilterIsNarrowed() {
+  return Object.keys(queueActiveFilter()).some((key) => key !== "kind");
+}
+
+/** The filter card's state as a phrase, for a dialog naming what it will touch. */
+function queueFilterSummary() {
+  const filter = queueActiveFilter();
+  const parts = [];
+  if (filter.state) parts.push(`state ${filter.state}`);
+  if (filter.extension) parts.push(`extension ${filter.extension}`);
+  if (filter.language) parts.push(`language ${filter.language}`);
+  if (filter.dedupeKey) parts.push(`dedupe key like “${filter.dedupeKey}”`);
+  if (filter.q) parts.push(`matching “${filter.q}”`);
+  if (filter.attemptMin !== undefined) parts.push(`attempts ≥ ${filter.attemptMin}`);
+  if (filter.attemptMax !== undefined) parts.push(`attempts ≤ ${filter.attemptMax}`);
+  return parts.join(", ");
+}
+
+/**
  * The MangaDex upload queues; the replacement for the legacy `queue_peek` and
  * `queue_clear` IPC commands, and for `restart_workers`: nothing here restarts a
  * process, because every unit of work is a durable row that can be requeued.
@@ -3796,18 +3838,7 @@ VIEWS.queues = (route) => {
   };
 
   /** The filter as the bulk endpoints take it; same names, no paging keys. */
-  const activeFilter = () => {
-    const filter = {};
-    if (f().queueKind) filter.kind = f().queueKind;
-    if (f().queueState) filter.state = f().queueState;
-    if (f().queueDedupeKey) filter.dedupeKey = f().queueDedupeKey;
-    if (f().queueAttemptMin !== "") filter.attemptMin = Number(f().queueAttemptMin);
-    if (f().queueAttemptMax !== "") filter.attemptMax = Number(f().queueAttemptMax);
-    if (f().queueExtension) filter.extension = f().queueExtension;
-    if (f().queueLanguage) filter.language = f().queueLanguage;
-    if (f().queueQ) filter.q = f().queueQ;
-    return filter;
-  };
+  const activeFilter = () => queueActiveFilter();
 
   const cursorNow = () => {
     const walked = f().queueCursors;
@@ -4335,9 +4366,11 @@ function queueFilterCard(onChange) {
         title: "Give every pending row its own time so the queue stops uploading back to back",
         // Follows the Kind filter, so an operator looking at the EDIT queue
         // paces that one; UPLOAD when no kind is picked, because that is the
-        // queue that reaches MangaDex and the only one pacing protects.
+        // queue that reaches MangaDex and the only one pacing protects. The
+        // dialog offers the rest of the filter as a narrower scope; ticked rows
+        // are the bulk bar's copy of this button, not this one.
         onclick: () =>
-          queueRestaggerDialog(store.filters.queueKind || "UPLOAD", summary, onChange),
+          queueRestaggerDialog({ kind: store.filters.queueKind || "UPLOAD" }, summary, onChange),
       }),
       gatedButton("runs:write", {
         class: "danger",
@@ -4443,6 +4476,21 @@ function queueBulkBar(selected, activeFilter, rows, tasks, reload) {
         selected.clear();
         reload();
       }),
+    }),
+    // Here as well as above the filter card, because the two mean different
+    // sets and only this one can mean the ticks. The copy above acts on the
+    // whole kind, which is what an operator with nothing selected wants; with
+    // rows ticked, that button silently doing the same thing is the bug this
+    // pair exists to close.
+    gatedButton("runs:write", {
+      text: "Space out…",
+      disabled: count === 0,
+      title: "Give each selected pending row its own time, evenly spaced from now",
+      onclick: () =>
+        queueRestaggerDialog({ ids: ids(), kind: store.filters.queueKind || "UPLOAD" }, tasks, () => {
+          selected.clear();
+          reload();
+        }),
     }),
     el("span", { class: "grow" }),
     el("button", {
@@ -4750,15 +4798,54 @@ function queueDeferDialog(ids, tasks, done) {
 const MAX_GAP_SECONDS = 24 * 3600;
 
 /**
- * Re-space the whole pending queue to a fixed rate.
+ * Count the pending rows a scope covers, using the same endpoint the list does.
  *
- * Not a selection action, which is why it is here rather than beside Run
- * next/last: it acts on every pending row of the kind, because pacing half a
- * queue leaves the other half bunched and the two interleave into the same
- * burst. The dialog names the queue size and the resulting finish time so the
- * consequence is on screen before the button is pressed.
+ * `/queues` is the depth summary and takes no query at all, so the `kind` and
+ * `state` this used to send were dropped on the floor and `total` came back as
+ * every row on record, completed ones included. That is how a queue with 32k
+ * rows left to upload announced itself as 45k in the dialog that was about to
+ * re-space it. `/queues/tasks` applies the filter and returns the total for it.
  */
-function queueRestaggerDialog(kind, tasks, done) {
+function queuePendingCount(scope) {
+  const q = new URLSearchParams({ limit: "1", state: "PENDING" });
+  const filter = scope.filter ?? {};
+  if (filter.kind || scope.kind) q.set("kind", filter.kind || scope.kind);
+  for (const key of ["dedupeKey", "extension", "language", "q", "attemptMin", "attemptMax"]) {
+    if (filter[key] !== undefined && filter[key] !== "") q.set(key, String(filter[key]));
+  }
+  // Quiet and best-effort: a failed count costs the estimate, not the action.
+  return api(`/queues/tasks?${q}`, { quiet: true })
+    .then((res) => res?.total ?? null)
+    .catch(() => null);
+}
+
+/**
+ * Re-space pending rows to a fixed rate.
+ *
+ * Three scopes, and `scope` says which: `{ids}` from the bulk bar's selection,
+ * `{filter}` for everything the filter card matches, or a bare `{kind}` for the
+ * whole queue. It began as the last of those alone, sitting above the filter
+ * card — and an operator who ticked one row, pressed it, and watched all 32,000
+ * move read that as the button ignoring the selection, which it was. The other
+ * two scopes are the fix; the whole-queue one stays the default because pacing
+ * half a queue leaves the rest bunched and the two interleave into one burst.
+ *
+ * The dialog names the set size and the resulting finish time either way, so
+ * the consequence is on screen before the button is pressed.
+ */
+function queueRestaggerDialog(scope, tasks, done) {
+  const ids = scope.ids ?? null;
+  const kind = scope.kind || "UPLOAD";
+  // Only offered when the filter card actually narrows something: a checkbox
+  // whose two positions mean the same set is a checkbox that teaches nothing.
+  const narrowable = !ids && queueFilterIsNarrowed();
+  const scoped = el("input", {
+    id: "restagger-scoped",
+    type: "checkbox",
+    // Ticked by default because the operator narrowed the view deliberately and
+    // is looking at the result of it. Unticking widens back to the whole kind.
+    checked: narrowable,
+  });
   const gap = el("input", {
     id: "restagger-gap",
     type: "number",
@@ -4769,13 +4856,19 @@ function queueRestaggerDialog(kind, tasks, done) {
   const keepPacing = el("input", {
     id: "restagger-persist",
     type: "checkbox",
-    checked: true,
+    // Only the whole-queue scope is about the pace of the queue as such. Making
+    // a five-row selection rewrite the standing setting for every future
+    // chapter is a much bigger action than the button appears to be.
+    checked: !ids && !narrowable,
     disabled: !can("settings:write"),
   });
   const outcome = el("p", { class: "dim small" });
   // Asked for rather than passed in: the estimate is the reason the dialog is
-  // worth opening, and a stale count would make it a guess.
-  let pending = null;
+  // worth opening, and a stale count would make it a guess. Keyed by scope
+  // because the checkbox above can change which one is being described.
+  const counts = { filtered: null, all: null };
+  const useFilter = () => narrowable && scoped.checked;
+  const current = () => (ids ? ids.length : useFilter() ? counts.filtered : counts.all);
 
   // Recomputed as the operator types: "one every 120s" means nothing without
   // "and therefore the last one goes up in three days".
@@ -4787,48 +4880,92 @@ function queueRestaggerDialog(kind, tasks, done) {
       outcome.textContent = `Enter a whole gap between uploads, 1 to ${MAX_GAP_SECONDS} seconds.`;
       return null;
     }
+    const pending = current();
     if (pending === null) {
       outcome.textContent = `One every ${gapSeconds}s. Counting the queue…`;
       return gapSeconds;
     }
+    if (pending === 0) {
+      outcome.textContent = "Nothing pending here, so there is nothing to space out.";
+      return gapSeconds;
+    }
+    // "up to" for a selection: the ticks can include a DONE or LEASED row, and
+    // the server moves neither. The toast afterwards reports what actually did.
+    const noun = ids ? `up to ${pending} selected row(s)` : `${pending} queued`;
     outcome.textContent =
-      pending === 0
-        ? "Nothing is queued, so there is nothing to space out."
-        : `${pending} queued, one every ${gapSeconds}s. The last one becomes claimable ` +
-          `${duration((pending - 1) * gapSeconds)}.`;
+      `${noun}, one every ${gapSeconds}s. The last one becomes claimable ` +
+      `${duration((pending - 1) * gapSeconds)}.`;
     return gapSeconds;
   };
   gap.oninput = describe;
+  scoped.onchange = () => {
+    // The standing pace follows the whole queue, so widening back to it makes
+    // the "keep this pace" offer meaningful again.
+    if (can("settings:write")) keepPacing.checked = !scoped.checked;
+    describe();
+  };
   describe();
 
-  // Quiet and best-effort: a failed count costs the estimate, not the action.
-  void api(`/queues?kind=${encodeURIComponent(kind)}&state=PENDING&limit=1`, { quiet: true })
-    .then((res) => {
-      pending = res?.total ?? null;
+  if (!ids) {
+    void queuePendingCount({ kind }).then((total) => {
+      counts.all = total;
       describe();
-    })
-    .catch(() => {});
+    });
+    if (narrowable) {
+      void queuePendingCount({ kind, filter: queueActiveFilter() }).then((total) => {
+        counts.filtered = total;
+        describe();
+      });
+    }
+  }
+
+  const title = ids
+    ? `Space out ${ids.length} selected row(s)`
+    : `Space out the ${kind.toLowerCase()} queue`;
 
   openModal(
-    `Space out the ${kind.toLowerCase()} queue`,
+    title,
     el(
       "div",
       {},
       el("p", {
         class: "dim small",
         text:
-          "Every pending row is given its own time, evenly spaced from now, in the order the queue is " +
+          (ids
+            ? "Each selected pending row is given its own time, evenly spaced from now, in the order the queue is "
+            : "Every pending row is given its own time, evenly spaced from now, in the order the queue is ") +
           "already in. Nothing is dropped or deferred indefinitely — this only changes when each row " +
-          "becomes claimable, so a queue that would upload back to back trickles instead.",
+          "becomes claimable, so work that would upload back to back trickles instead.",
       }),
+      // Said plainly rather than left to be discovered: a subset re-spaced from
+      // now lands on top of rows outside it that were already paced, and the
+      // result is two streams interleaving rather than one trickle.
+      ids || narrowable
+        ? el("p", {
+            class: "dim small",
+            text:
+              "Rows outside this set keep the times they have, so they can end up sharing a slot with " +
+              "these. Space out the whole queue if you want one single pace across all of it.",
+          })
+        : null,
+      narrowable
+        ? row(
+            el(
+              "label",
+              { class: "inline", for: "restagger-scoped" },
+              scoped,
+              ` Only the rows matching the current filter (${queueFilterSummary()})`,
+            ),
+          )
+        : null,
       row(
         el("label", { class: "inline", for: "restagger-gap", text: "Gap between uploads (s)" }),
         gap,
       ),
       outcome,
-      // Ticked by default because the surprising outcome is the other one:
-      // spacing today's queue and then watching the next run pile back on top
-      // of it looks like the button did not work.
+      // Offered because the surprising outcome is the other one: spacing today's
+      // queue and then watching the next run pile back on top of it looks like
+      // the button did not work.
       row(
         el(
           "label",
@@ -4850,13 +4987,15 @@ function queueRestaggerDialog(kind, tasks, done) {
               toast("enter the gap between uploads, in seconds", false);
               return;
             }
+            const body = ids
+              ? { ids, gapSeconds }
+              : useFilter()
+                ? { kind, gapSeconds, filter: queueActiveFilter() }
+                : { kind, gapSeconds };
             const result = await act(
               "queue.restagger",
               async () => {
-                const res = await api("/queues/restagger", {
-                  method: "POST",
-                  body: { kind, gapSeconds },
-                });
+                const res = await api("/queues/restagger", { method: "POST", body });
                 // After the re-space, not before: if the rewrite fails there is
                 // no reason to have changed the standing setting.
                 if (keepPacing.checked && can("settings:write")) {
@@ -5145,16 +5284,15 @@ function queuePurgeDialog(afterPurge) {
   const preview = el("div", {});
   let previewed = null;
 
-  const body = (dryRun) => {
-    const out = { dryRun, includeCompleted: includeCompleted.checked };
-    const filter = {};
-    if (store.filters.queueKind) filter.kind = store.filters.queueKind;
-    if (store.filters.queueState) filter.state = store.filters.queueState;
-    if (store.filters.queueDedupeKey) filter.dedupeKey = store.filters.queueDedupeKey;
-    if (store.filters.queueAttemptMin !== "") filter.attemptMin = Number(store.filters.queueAttemptMin);
-    if (store.filters.queueAttemptMax !== "") filter.attemptMax = Number(store.filters.queueAttemptMax);
-    return { ...out, ...filter };
-  };
+  // The whole filter card, not the half of it this used to copy. Extension,
+  // language and search were missing, so a queue narrowed to one publisher and
+  // then purged deleted every kind-matching row in it — the dry run said so,
+  // but only to a reader who noticed the count was far too big.
+  const body = (dryRun) => ({
+    dryRun,
+    includeCompleted: includeCompleted.checked,
+    ...queueActiveFilter(),
+  });
 
   const applyButton = gatedButton("runs:write", {
     class: "danger",

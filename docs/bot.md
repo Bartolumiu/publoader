@@ -365,7 +365,7 @@ DMs are closed the bot falls back to the ephemeral reply and says so.
 | `/extension-config <extension>` | read | `extensions:read` | Stored overrides for one extension. Read-only: an extension reads its overrides from its published bundle, so editing these rows changes nothing — republish instead. |
 | `/audit [actor] [action] [subject] [q] [limit]` | read | `audit:read` | The audit trail. With no filter it is the recent feed; any filter switches it to a search over the whole log. |
 | `/queue purge [kind] [state] [extension] [q] [confirm]` | destructive | `runs:write` | Delete queued tasks matching a filter. Always counts first, even when confirmed; an unfiltered purge says so in the confirmation. |
-| `/queue restagger <gap-seconds> [kind]` | mutate | `runs:write` | Re-space pending tasks so they go out a fixed gap apart. |
+| `/queue restagger <gap-seconds> [kind] [extension] [q]` | mutate | `runs:write` | Re-space pending tasks so they go out a fixed gap apart. Without `extension`/`q` it paces the whole kind; with them, only the matching rows, and the rest of the queue keeps its times. |
 | `/runs cancel <id> [confirm]` | destructive | `runs:write` | Stop one run and its queued jobs. |
 | `/runs cancel-all [extension] [confirm]` | destructive | `runs:write` | Stop every active run, or every one for a single extension. |
 | `/logs [level] [service] [q] [limit]` | read | `runs:read` | Recent lines from the core services' log table. Defaults to warnings and errors. Covers core-api, scheduler, processor and uploader; extension runs are not there, because workers keep no database. |
