@@ -152,6 +152,12 @@ function cardByTitle(title: string): any {
 const buttonLabelled = (root: any, text: string): any =>
   [...root.querySelectorAll("button")].find((b: any) => b.textContent === text);
 
+/** The global release-pacing block inside the Platform defaults card. */
+const releasePacing = (): any => doc.querySelector("#setting-release-pacing");
+
+/** The extension index, where Priority and Paused now live, one row each. */
+const extensionIndex = (): any => cardByTitle("Extensions");
+
 /** The card's three number inputs, in the order they are drawn. */
 const numbers = (card: any): string[] =>
   [...card.querySelectorAll('input[type="number"]')].map((i: any) => i.value);
@@ -174,17 +180,17 @@ describe("release pacing is editable from the dashboard", () => {
 
   it("shows the global schedule beside the fetch pacing it is not", async () => {
     await goto("#/extensions");
-    const card = cardByTitle("Release pacing");
+    const card = releasePacing();
     expect(card).toBeTruthy();
     expect(numbers(card)).toEqual(["60", "2", "12", "0"]);
     // An addition, not a replacement: the two pacing settings are different
     // things and the operator needs both on the page.
-    expect(cardByTitle("Publisher fetch pacing")).toBeTruthy();
+    expect(doc.querySelector("#setting-fetch-pacing")).toBeTruthy();
   });
 
   it("says what 0 does and that spreading never drops a chapter", async () => {
     await goto("#/extensions");
-    const text = cardByTitle("Release pacing").textContent;
+    const text = releasePacing().textContent;
     // The two readings that would cost an operator real chapters if they took
     // the opposite one.
     expect(text).toContain("0 is no limit");
@@ -193,12 +199,12 @@ describe("release pacing is editable from the dashboard", () => {
 
   it("names the extensions that will ignore the global", async () => {
     await goto("#/extensions");
-    expect(cardByTitle("Release pacing").textContent).toContain("Overridden for: viz");
+    expect(extensionIndex().textContent).toContain("overridden");
   });
 
   it("saves all four fields together", async () => {
     await goto("#/extensions");
-    const card = cardByTitle("Release pacing");
+    const card = releasePacing();
     const [perDay, perManga, interval] = [...card.querySelectorAll('input[type="number"]')];
     perDay.value = "80";
     perManga.value = "0";
@@ -254,12 +260,12 @@ describe("release pacing is editable from the dashboard", () => {
     mount();
     await settle(10);
     await goto("#/extensions");
-    expect(cardByTitle("Release pacing")).toBeUndefined();
+    expect(releasePacing()).toBeNull();
   });
 
   it("offers the budget as two radios naming what the number applies to", async () => {
     await goto("#/extensions");
-    const card = cardByTitle("Release pacing");
+    const card = releasePacing();
     const radios = [...card.querySelectorAll('input[type="radio"]')];
 
     expect(radios).toHaveLength(2);
@@ -274,7 +280,7 @@ describe("release pacing is editable from the dashboard", () => {
 
   it("saves the scope the moment a radio is picked", async () => {
     await goto("#/extensions");
-    const card = cardByTitle("Release pacing");
+    const card = releasePacing();
     const perExtension = [...card.querySelectorAll('input[type="radio"]')][1] as any;
 
     calls = [];
@@ -292,7 +298,7 @@ describe("release pacing is editable from the dashboard", () => {
     mount();
     await settle(10);
     await goto("#/extensions");
-    const radios = [...cardByTitle("Release pacing").querySelectorAll('input[type="radio"]')];
+    const radios = [...releasePacing().querySelectorAll('input[type="radio"]')];
 
     expect(radios).toHaveLength(2);
     expect(radios.every((r: any) => r.disabled)).toBe(true);
@@ -305,21 +311,21 @@ describe("release pacing is editable from the dashboard", () => {
    */
   it("offers a box per extension, ticked for the prioritised ones", async () => {
     await goto("#/extensions");
-    const card = cardByTitle("Release pacing");
-    // Scoped to the priority boxes: the pause row below has one per extension too.
-    const boxes = [...card.querySelectorAll('input[id^="schedule-priority-"]')];
+    const card = extensionIndex();
+    // One per row: the pause column has one per row too.
+    const boxes = [...card.querySelectorAll('input[id^="ext-priority-"]')];
 
     expect(boxes.map((b: any) => b.id)).toEqual([
-      "schedule-priority-comikey",
-      "schedule-priority-mangaplus",
-      "schedule-priority-viz",
+      "ext-priority-comikey",
+      "ext-priority-mangaplus",
+      "ext-priority-viz",
     ]);
     expect(boxes.map((b: any) => b.checked)).toEqual([false, true, false]);
   });
 
   it("says that priority ignores the queue and the budget, and spares clean runs", async () => {
     await goto("#/extensions");
-    const text = cardByTitle("Release pacing").textContent;
+    const text = releasePacing().textContent;
 
     expect(text).toContain("ignore the queue however long it is");
     expect(text).toContain("whether or not the day's budget is spent");
@@ -330,8 +336,8 @@ describe("release pacing is editable from the dashboard", () => {
 
   it("sends the whole list when a box is ticked, not just the change", async () => {
     await goto("#/extensions");
-    const card = cardByTitle("Release pacing");
-    const comikey = card.querySelector("#schedule-priority-comikey") as any;
+    const card = extensionIndex();
+    const comikey = card.querySelector("#ext-priority-comikey") as any;
 
     calls = [];
     comikey.checked = true;
@@ -345,8 +351,8 @@ describe("release pacing is editable from the dashboard", () => {
 
   it("removes an extension by unticking it", async () => {
     await goto("#/extensions");
-    const card = cardByTitle("Release pacing");
-    const mangaplus = card.querySelector("#schedule-priority-mangaplus") as any;
+    const card = extensionIndex();
+    const mangaplus = card.querySelector("#ext-priority-mangaplus") as any;
 
     calls = [];
     mangaplus.checked = false;
@@ -361,7 +367,7 @@ describe("release pacing is editable from the dashboard", () => {
     mount();
     await settle(10);
     await goto("#/extensions");
-    const boxes = [...cardByTitle("Release pacing").querySelectorAll('input[type="checkbox"]')];
+    const boxes = [...extensionIndex().querySelectorAll('input[type="checkbox"]')];
 
     expect(boxes.length).toBeGreaterThan(0);
     expect(boxes.every((b: any) => b.disabled)).toBe(true);
@@ -373,18 +379,18 @@ describe("release pacing is editable from the dashboard", () => {
    */
   it("keeps the paused boxes separate from the priority ones", async () => {
     await goto("#/extensions");
-    const card = cardByTitle("Release pacing");
+    const card = extensionIndex();
 
-    expect((card.querySelector("#schedule-paused-comikey") as any).checked).toBe(true);
-    expect((card.querySelector("#schedule-paused-mangaplus") as any).checked).toBe(false);
+    expect((card.querySelector("#ext-paused-comikey") as any).checked).toBe(true);
+    expect((card.querySelector("#ext-paused-mangaplus") as any).checked).toBe(false);
     // ...and the priority boxes are the other way round.
-    expect((card.querySelector("#schedule-priority-comikey") as any).checked).toBe(false);
-    expect((card.querySelector("#schedule-priority-mangaplus") as any).checked).toBe(true);
+    expect((card.querySelector("#ext-priority-comikey") as any).checked).toBe(false);
+    expect((card.querySelector("#ext-priority-mangaplus") as any).checked).toBe(true);
   });
 
   it("says a pause holds work rather than cancelling it, and does not stop the queue growing", async () => {
     await goto("#/extensions");
-    const text = cardByTitle("Release pacing").textContent;
+    const text = releasePacing().textContent;
 
     expect(text).toContain("Nothing is cancelled or re-dated");
     // The limitation is the part an operator will otherwise assume the other
@@ -394,7 +400,7 @@ describe("release pacing is editable from the dashboard", () => {
 
   it("posts the paused list to its own route, not the priority one", async () => {
     await goto("#/extensions");
-    const viz = cardByTitle("Release pacing").querySelector("#schedule-paused-viz") as any;
+    const viz = extensionIndex().querySelector("#ext-paused-viz") as any;
 
     calls = [];
     viz.checked = true;
@@ -408,7 +414,7 @@ describe("release pacing is editable from the dashboard", () => {
 
   it("un-pauses by unticking", async () => {
     await goto("#/extensions");
-    const comikey = cardByTitle("Release pacing").querySelector("#schedule-paused-comikey") as any;
+    const comikey = extensionIndex().querySelector("#ext-paused-comikey") as any;
 
     calls = [];
     comikey.checked = false;

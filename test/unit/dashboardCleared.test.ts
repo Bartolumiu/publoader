@@ -135,27 +135,27 @@ describe("a cleared failure stops counting everywhere", () => {
 
   it("keeps cleared dead-letters out of the overview's outstanding tiles", async () => {
     await goto("#/overview");
-    const card = cardByTitle("Jobs outstanding");
+    const card = cardByTitle("Work still to do");
     expect(card).toBeTruthy();
     // Thirteen on record, none outstanding: no tile, and no red chip.
     expect(tileStates(card)).not.toContain("DEAD_LETTER");
-    expect(card.textContent).toContain("Nothing outstanding");
+    expect(card.textContent).toContain("Nothing left to do");
   });
 
   it("still accounts for them, as settled work rather than as a silence", async () => {
     await goto("#/overview");
-    const details = cardByTitle("Jobs outstanding").querySelector("details");
+    const details = cardByTitle("Work still to do").querySelector("details");
     expect(details.textContent).toContain("DEAD_LETTER (cleared)");
     expect(details.textContent).toContain("13");
   });
 
   it("reports the quarantine as dealt with instead of as ten open faults", async () => {
     await goto("#/overview");
-    const card = cardByTitle("Quarantine");
+    const card = cardByTitle("Held back");
     expect(card).toBeTruthy();
     expect(card.querySelector("p.error")).toBeNull();
-    expect(card.textContent).toContain("Nothing outstanding");
-    expect(card.textContent).toContain("10 cleared submission(s) on record");
+    expect(card.textContent).toContain("Nothing held back now");
+    expect(card.textContent).toContain("10 cleared set(s) on record");
     // The way in is kept: cleared is not the same as gone.
     expect(card.querySelector("a").getAttribute("href")).toBe("#/errors/quarantine");
   });
@@ -204,7 +204,7 @@ describe("a cleared failure stops counting everywhere", () => {
     await goto("#/errors/quarantine");
     expect(requested.some((p) => p.includes("/quarantine?cleared=without"))).toBe(true);
 
-    const card = cardByTitle("Quarantined result submissions");
+    const card = cardByTitle("Results we held back");
     expect(card.textContent).toContain("10 cleared submission(s) hidden");
     expect(doc.getElementById("quarantine-cleared")).toBeTruthy();
   });

@@ -90,9 +90,9 @@ const stray = await page.eval(`return {
   strayNull: /(^|\\s)(null|undefined|NaN)(\\s|$)/.test(document.getElementById("app").textContent) };`);
 console.log("stray placeholder scan:", JSON.stringify(stray));
 ok("no literal null/undefined/NaN painted anywhere in the shell", !stray.strayNull, stray.head);
-ok("sidebar is grouped", nav.groups.join(",") === "Work,Catalogue,Fleet,Admin", nav.groups.join(","));
+ok("sidebar is grouped", nav.groups.join(",") === "Work,Library,Machines,Admin", nav.groups.join(","));
 // 13 built into app.js plus the two that live in their own modules.
-ok("an owner sees every destination", nav.items.length === 15, `${nav.items.length} items`);
+ok("an owner sees every destination", nav.items.length === 18, `${nav.items.length} items`);
 ok(
   "including the two module-backed ones",
   nav.items.includes("Maintenance") && nav.items.includes("Docs"),
@@ -116,7 +116,7 @@ console.log("\n=== 3. a deep link restores the sidebar item AND the tab ===");
 for (const [hash, wantNav, wantTab] of [
   ["#/system/backup", "System", "Backup"],
   ["#/workers/enrolment", "Workers", "Enrolment"],
-  ["#/queues/depth", "Queues", "Depth"],
+  ["#/queues/depth", "Queues", "Backlog"],
   ["#/users/sessions", "Users", "Sessions"],
 ]) {
   await page.goto(`${O}/${hash}`, 1800);
@@ -139,7 +139,13 @@ const nested = await page.eval(`return {
   nav: document.querySelector('.nav a[aria-current="page"]')?.textContent.trim() ?? null,
   crumb: document.querySelector("#page-head .crumb")?.textContent ?? null,
   heading: document.querySelector("#page-head h1")?.textContent ?? null,
-  tab: document.querySelector('#view [role="tab"][aria-selected="true"]')?.textContent ?? null,
+  // The shell's tablist, the same place every other tabbed destination puts it.
+  // This used to read '#view [role="tab"]': the shell suppressed its tabs on a
+  // param route, so the extension detail view drew a second strip of its own
+  // inside the view. That strip is gone, and the section's tabs now render in
+  // the shell for a param route, which is where they belong.
+  tab: document.querySelector('#tabs button[aria-selected="true"]')?.textContent ?? null,
+  inViewTabs: document.querySelectorAll('#view [role="tab"]').length,
   hash: location.hash,
   cards: [...document.querySelectorAll("#view .card > h2")].map((h) => h.textContent) };`);
 console.log("nested:", JSON.stringify(nested));
@@ -149,9 +155,40 @@ ok(
   JSON.stringify(nested),
 );
 ok(
+  "and the detail view draws no tab strip of its own",
+  nested.inViewTabs === 0,
+  `${nested.inViewTabs} in-view tabs`,
+);
+ok(
   "the series-map view rendered its own panels",
   nested.cards.includes("Tracked series") && nested.cards.includes("Bulk curation"),
   nested.cards.join(" | "),
+);
+
+/*
+ * The other half of the same fix. Overview, Series map, Schedule, Config and
+ * Versions are sections of ONE extension, so on the bare list they named
+ * nothing: `#/extensions` has no param, so the router blanked the selected tab
+ * and `#/extensions/config` canonicalised straight back to `#/extensions`.
+ * Five tabs, none selected, each bouncing the operator to where they already
+ * were. Reported as "stuff that shows even though they are extension only".
+ */
+await page.goto(`${O}/#/extensions`, 2200);
+const listTabs = await page.eval(`return {
+  shellTabs: [...document.querySelectorAll("#tabs button")].map((b) => b.textContent),
+  inViewTabs: document.querySelectorAll('#view [role="tab"]').length,
+  hash: location.hash,
+  cards: [...document.querySelectorAll("#view .card > h2")].map((h) => h.textContent) };`);
+console.log("extensions list:", JSON.stringify(listTabs));
+ok(
+  "the extensions list offers no single-extension tabs",
+  listTabs.shellTabs.length === 0 && listTabs.inViewTabs === 0,
+  JSON.stringify(listTabs.shellTabs),
+);
+ok(
+  "and it leads with the extension index, not with the platform defaults",
+  listTabs.cards[0] === "Extensions",
+  listTabs.cards.join(" | "),
 );
 
 // ===========================================================================
@@ -292,8 +329,16 @@ for (const [w, h, label] of [[1400, 900, "desktop"], [820, 900, "tablet"], [390,
       return t ? getComputedStyle(t.querySelector("tbody tr")).display : null; })(),
     scrollerScrolls: (() => { const s = document.querySelector("#view .scroll");
       return s ? s.scrollWidth > s.clientWidth : null; })(),
-    minTouch: Math.min(...[...document.querySelectorAll("#view button")].slice(0, 12)
-      .map((b) => Math.round(b.getBoundingClientRect().height))) };`);
+    /* Rendered buttons only. Below 620px the header row is display:none and the
+       sort buttons inside it collapse to 0x0; they are not painted and not
+       focusable, so measuring them said "0px" about a control no thumb can
+       reach. Filtering on offsetParent is what makes this measure the controls
+       an operator actually taps. */
+    minTouch: (() => {
+      const shown = [...document.querySelectorAll("#view button")]
+        .filter((b) => b.offsetParent !== null).slice(0, 12);
+      return shown.length ? Math.min(...shown.map((b) => Math.round(b.getBoundingClientRect().height))) : null;
+    })() };`);
   console.log(`${label} ${w}x${h}:`, JSON.stringify(layout));
   ok(
     `${label}: the page never scrolls sideways`,

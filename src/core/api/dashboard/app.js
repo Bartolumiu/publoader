@@ -1184,7 +1184,53 @@ const STATE_TONE = {
   OWNER: "busy",
 };
 
-const chip = (value) => el("span", { class: `chip ${STATE_TONE[value] || ""}`.trim(), text: value ?? "-" });
+/**
+ * What each state token means, for a reader who has not seen the schema.
+ *
+ * The tokens stay on screen as they are: they are what the CLI prints, what the
+ * bot answers with and what an operator greps the logs for, so translating them
+ * here would leave two names for one thing. The sentence rides along as the
+ * chip's title instead. Not `aria-label`, which would replace the token a
+ * reader can see with a sentence they cannot.
+ */
+const STATE_MEANING = {
+  PENDING: "Waiting its turn. Nothing has gone wrong.",
+  USED: "Already used once, and cannot be used again.",
+  EXPIRED: "Ran out of time before it was used.",
+  REVOKED: "Switched off by hand before it expired.",
+  PROCESSED: "Finished.",
+  SUCCEEDED: "Finished, and it worked.",
+  COMMITTED: "Saved for good.",
+  DONE: "Finished, and nothing more will happen to it.",
+  ACTIVE: "Working normally right now.",
+  TRACKED: "Matched to a title on MangaDex.",
+  CREATED: "Made, but not started yet.",
+  FAILED: "Did not work. It will be tried again if it has attempts left.",
+  DEAD_LETTER: "Tried the maximum number of times and gave up. It needs a person.",
+  QUARANTINED: "Held back because it did not look right, so it was not used.",
+  CANCELLED: "Stopped on purpose before it finished.",
+  SKIPPED: "Passed over on purpose. Nothing went wrong.",
+  DRAINED: "Being taken out of service; it finishes what it holds and takes nothing new.",
+  EXECUTING: "Running right now.",
+  INGESTING: "Its results are being read in right now.",
+  RUNNING: "Running right now.",
+  LEASED: "A worker has picked it up and is on it now.",
+  CREATING: "Being made right now.",
+  enabled: "Switched on, and allowed to run.",
+  disabled: "Switched off. It will not run until it is enabled again.",
+  approved: "Allowed to sign in.",
+  pending: "Waiting for somebody to approve it.",
+  OWNER: "May do everything, including managing accounts and credentials.",
+};
+
+const chip = (value) => {
+  const meaning = STATE_MEANING[value];
+  return el("span", {
+    class: `chip ${STATE_TONE[value] || ""}`.trim(),
+    text: value ?? "-",
+    ...(meaning ? { title: meaning } : {}),
+  });
+};
 
 function fmtTime(value) {
   if (!value) return "-";
@@ -1663,6 +1709,10 @@ function live(resources, render, { reserve = 0, skeleton } = {}) {
     const loading = resources.some((r) => r.status === "loading" || r.status === "idle");
     const failed = resources.find((r) => r.status === "error");
     host.dataset.refreshing = String(resources.some((r) => r.status === "refreshing"));
+    // The reserved height is scaffolding for the wait, not a floor for the
+    // result: held after the answer lands, it was blank deck under every short
+    // card. Released once there is something real to measure.
+    host.dataset.loaded = String(!loading && !failed);
     if (failed) return setChildren(host, errorState(failed));
     if (loading) return setChildren(host, skeleton ? skeleton() : skeletonTable());
     // setChildren, not replaceChildren: a view whose render returns nothing for
@@ -1720,7 +1770,7 @@ const NAV = [
       ["platform", "Platform"],
       ["mangadex", "MangaDex"],
     ],
-    blurb: "Platform state, queue depths and the upload side's session.",
+    blurb: "Is everything running, how much is waiting, and are we still signed in to MangaDex.",
   },
   {
     id: "runs",
@@ -1731,9 +1781,9 @@ const NAV = [
     param: true,
     tabs: [
       ["recent", "Recent"],
-      ["dead-letter", "Dead letter"],
+      ["dead-letter", "Gave up"],
     ],
-    blurb: "Scrape runs and the jobs they fanned out into.",
+    blurb: "Every check we made on a publisher for new chapters, and how it went.",
   },
   {
     id: "queues",
@@ -1748,9 +1798,9 @@ const NAV = [
     tabs: [
       ["chapters", "Chapters"],
       ["tasks", "Tasks"],
-      ["depth", "Depth"],
+      ["depth", "Backlog"],
     ],
-    blurb: "What is about to be sent to MangaDex, and the durable rows behind it.",
+    blurb: "Chapters waiting to go to MangaDex, in the order they will go.",
   },
   {
     id: "activity",
@@ -1758,7 +1808,7 @@ const NAV = [
     group: "Work",
     icon: "activity",
     scope: "runs:read",
-    blurb: "Runs, jobs, upload tasks, quarantine and audit in one timeline.",
+    blurb: "Everything that has happened lately, in one list.",
   },
   {
     id: "errors",
@@ -1768,9 +1818,9 @@ const NAV = [
     scope: "runs:read",
     tabs: [
       ["failures", "Failures"],
-      ["quarantine", "Quarantine"],
+      ["quarantine", "Held back"],
     ],
-    blurb: "Everything that failed, newest first.",
+    blurb: "Everything that went wrong. Start here when something looks stuck.",
   },
   {
     id: "logs",
@@ -1781,12 +1831,12 @@ const NAV = [
     // Errors is the curated view of what broke. This is the uncurated one, and
     // it exists because the line that explains an incident is usually not an
     // error: what a check concluded, which titles were skipped and why.
-    blurb: "Raw log lines from the core services, newest first.",
+    blurb: "Everything the software wrote, not just the failures. More detail than Errors.",
   },
   {
     id: "extensions",
     label: "Extensions",
-    group: "Catalogue",
+    group: "Library",
     icon: "extensions",
     scope: "extensions:read",
     param: true,
@@ -1802,7 +1852,7 @@ const NAV = [
       ["config", "Config"],
       ["versions", "Versions"],
     ],
-    blurb: "Published bundles, and everything about one extension.",
+    blurb: "The publishers we read from. One extension reads one publisher's site.",
   },
   // Its own `chapters:read` rather than `runs:read`: reading this destination
   // is reading the public catalogue, and the three actions it offers end in a
@@ -1811,7 +1861,7 @@ const NAV = [
   {
     id: "chapters",
     label: "Chapters",
-    group: "Catalogue",
+    group: "Library",
     icon: "chapters",
     scope: "chapters:read",
     param: true,
@@ -1823,36 +1873,36 @@ const NAV = [
       ["deleted", "Deleted"],
       ["edited", "Edited"],
     ],
-    blurb: "Every chapter this platform has published, and what has happened to it since.",
+    blurb: "Every chapter we have put on MangaDex, and what happened to it since.",
   },
   {
     id: "tracked",
     label: "Tracked",
-    group: "Catalogue",
+    group: "Library",
     icon: "tracked",
     scope: "tracked:read",
-    blurb: "The series map across every extension.",
+    blurb: "Which series on a publisher's site goes with which MangaDex title.",
   },
   {
     id: "untracked",
     label: "Untracked",
-    group: "Catalogue",
+    group: "Library",
     icon: "untracked",
     scope: "untracked:read",
     param: true,
-    blurb: "Series the scrapers found that MangaDex does not have yet.",
+    blurb: "Series we found that are not matched to a MangaDex title yet.",
   },
   {
     id: "workers",
     label: "Workers",
-    group: "Fleet",
+    group: "Machines",
     icon: "workers",
     scope: "workers:read",
     tabs: [
       ["fleet", "Fleet"],
       ["enrolment", "Enrolment"],
     ],
-    blurb: "The hosts that run extensions, and how to add one.",
+    blurb: "The computers that read the publishers' sites, and how to add one.",
   },
   // Account administration and credential minting are the two things an ADMIN
   // cannot do, and they need the OWNER role rather than a scope: a wildcard api
@@ -1868,7 +1918,7 @@ const NAV = [
       ["sessions", "Sessions"],
       ["signups", "Signups"],
     ],
-    blurb: "Operator accounts, their roles and their live sessions.",
+    blurb: "Who can sign in, what they may do, and who is signed in now.",
   },
   {
     id: "tokens",
@@ -1880,7 +1930,7 @@ const NAV = [
       ["issued", "Issued"],
       ["mint", "Mint"],
     ],
-    blurb: "Scoped per-client credentials.",
+    blurb: "Passwords for other programs, not for people. Each is limited to what that program needs.",
   },
   {
     id: "permissions",
@@ -1888,7 +1938,7 @@ const NAV = [
     group: "Admin",
     icon: "permissions",
     owner: true,
-    blurb: "What each role may do on this deployment.",
+    blurb: "What each kind of account is allowed to do.",
   },
   {
     id: "audit",
@@ -1897,7 +1947,7 @@ const NAV = [
     icon: "audit",
     scope: "audit:read",
     param: true,
-    blurb: "Who did what, and with which arguments.",
+    blurb: "A permanent record of every change, and exactly what changed.",
   },
   {
     id: "system",
@@ -1906,12 +1956,12 @@ const NAV = [
     icon: "system",
     scope: "settings:read",
     tabs: [
-      ["schema", "Schema"],
+      ["schema", "Database"],
       ["mangadex", "MangaDex"],
       ["cards", "Unavailable cards"],
       ["backup", "Backup"],
     ],
-    blurb: "The things that used to need a shell on the host.",
+    blurb: "Housekeeping that used to need commands typed on the server.",
   },
   // Two views that live in their own ES modules (dashboard/sysops.js and
   // dashboard/docs.js). They are loaded on demand, see `lazyView`, so this
@@ -1922,7 +1972,7 @@ const NAV = [
     group: "Admin",
     icon: "system",
     scope: "bundles:read",
-    blurb: "Fetch extension code from GitHub, install a bundle, restart a service.",
+    blurb: "Update the code we run, and restart a part of the system.",
     module: "/dash/sysops.js",
     export: "viewSysops",
   },
@@ -1932,7 +1982,7 @@ const NAV = [
     group: "Admin",
     icon: "audit",
     scope: "stats:read",
-    blurb: "The operator handbook that ships with this build.",
+    blurb: "The full handbook for this system, written out in detail.",
     module: "/dash/docs.js",
     export: "viewDocs",
   },
@@ -2488,9 +2538,17 @@ function closeMenus() {
 function renderTabs(entry) {
   const host = $("tabs");
   const tabs = entry?.tabs ?? [];
-  if (!tabs.length || store.route.param) {
-    // A detail view (`#/audit/<id>`) is not one of the section's tabs, and
-    // offering them there would navigate away from the thing being read.
+  const param = store.route.param;
+  /*
+   * Whose tabs are these? For most sections they are sections of the list, so a
+   * detail view (`#/audit/<id>`) must not offer them. A `tabsForParam` section
+   * is the mirror image: its tabs are sections of ONE extension, so on the bare
+   * list they were dead — `resolveRoute` blanks the tab with no param, and
+   * `#/extensions/config` canonicalises back to `#/extensions`. Reading
+   * `tabsForParam` here is what keeps this agreeing with `resolveRoute`.
+   */
+  const wanted = entry?.tabsForParam ? Boolean(param) : !param;
+  if (!tabs.length || !wanted) {
     host.replaceChildren();
     return;
   }
@@ -2504,7 +2562,9 @@ function renderTabs(entry) {
         "aria-controls": "view",
         tabindex: id === store.route.tab ? "0" : "-1",
         text: label,
-        onclick: () => navigate(routeTo(entry.id, null, id)),
+        // Carrying the param is what makes these the extension's own tabs
+        // rather than a jump back to the list.
+        onclick: () => navigate(routeTo(entry.id, param, id)),
         onkeydown: (event) => moveTabFocus(event, tabs, entry),
       }),
     ),
@@ -2521,7 +2581,7 @@ function moveTabFocus(event, tabs, entry) {
   const index = ids.indexOf(store.route.tab);
   const next =
     move === "first" ? 0 : move === "last" ? ids.length - 1 : (index + move + ids.length) % ids.length;
-  navigate(routeTo(entry.id, null, ids[next]));
+  navigate(routeTo(entry.id, store.route.param, ids[next]));
   $(`tab-${ids[next]}`)?.focus();
 }
 
@@ -2837,30 +2897,30 @@ const OUTSTANDING_JOB_STATES = ["DEAD_LETTER", "RUNNING", "LEASED", "PENDING"];
 function quarantineCard(total, outstanding = null) {
   const open = outstanding === null ? total : Math.min(total, outstanding);
   const cleared = Math.max(0, total - open);
-  const link = routeLink(routeTo("errors", null, "quarantine"), "Open the quarantine →");
+  const link = routeLink(routeTo("errors", null, "quarantine"), "See what was held back →");
 
   if (open > 0) {
     return card(
-      "Quarantine",
+      "Held back",
       el(
         "div",
         {},
-        el("p", { class: "error", text: `${open} quarantined result submission(s).` }),
+        el("p", { class: "error", text: `${open} set(s) of results were held back and not used.` }),
         cleared > 0 ? el("p", { class: "dim small", text: `${cleared} more already cleared.` }) : null,
         row(link),
       ),
     );
   }
   return card(
-    "Quarantine",
+    "Held back",
     cleared > 0
       ? el(
           "div",
           {},
-          el("p", { class: "dim", text: `Nothing outstanding; ${cleared} cleared submission(s) on record.` }),
+          el("p", { class: "dim", text: `Nothing held back now; ${cleared} cleared set(s) on record.` }),
           row(link),
         )
-      : el("p", { class: "dim", text: "Nothing is quarantined." }),
+      : el("p", { class: "dim", text: "Nothing has been held back." }),
   );
 }
 
@@ -2897,7 +2957,7 @@ function outstandingJobsCard(jobs, deadLetterOutstanding = null) {
   const settledTotal = settled.reduce((sum, [, count]) => sum + count, 0);
 
   return card(
-    "Jobs outstanding",
+    "Work still to do",
     entries.length
       ? el(
           "div",
@@ -2917,14 +2977,14 @@ function outstandingJobsCard(jobs, deadLetterOutstanding = null) {
               )
             : emptyState(
                 deadLetterCleared > 0
-                  ? `Nothing outstanding; ${deadLetterCleared} dead-lettered job(s) were cleared in Errors.`
-                  : "Nothing outstanding; every job has finished.",
+                  ? `Nothing left to do; ${deadLetterCleared} job(s) that gave up were cleared in Errors.`
+                  : "Nothing left to do; every job has finished.",
               ),
           settled.length
             ? el(
                 "details",
                 {},
-                el("summary", { text: `Settled (${settledTotal.toLocaleString()})` }),
+                el("summary", { text: `Finished (${settledTotal.toLocaleString()})` }),
                 table(
                   ["State", "Count"],
                   settled
@@ -3029,7 +3089,7 @@ VIEWS.overview = (route) => {
     "div",
     {},
     card(
-      "Platform",
+      "Scheduling",
       live(
         [stats],
         (data) =>
@@ -3051,9 +3111,9 @@ VIEWS.overview = (route) => {
           "div",
           {},
           outstandingJobsCard(data.jobs || {}, data.errorsOutstanding?.jobs ?? null),
-          counts("Workers by status", Object.entries(data.workers || {}), "No worker has ever enrolled."),
+          counts("Workers right now", Object.entries(data.workers || {}), "No worker has ever enrolled."),
           card(
-            "Upload queue: outstanding",
+            "Waiting to go to MangaDex",
             (data.uploadTasks || []).length
               ? outstandingTasks(data.uploadTasks, {
                   emptyText: "Nothing outstanding; every queued upload has been published.",
@@ -7959,7 +8019,7 @@ function quarantinePanel() {
     api(`/quarantine?cleared=${encodeURIComponent(store.filters.quarantineCleared)}`),
   );
   return card(
-    "Quarantined result submissions",
+    "Results we held back",
     el("p", {
       class: "dim small",
       text:
@@ -8018,7 +8078,7 @@ function quarantinePanel() {
             ]),
             {
               empty:
-                showing === "only" ? "Nothing has been cleared." : "Nothing is quarantined.",
+                showing === "only" ? "Nothing has been cleared." : "Nothing has been held back.",
             },
           ),
         ),
@@ -8043,103 +8103,194 @@ VIEWS.extensions = (route) => {
     can("settings:read") ? api("/upload-schedule", { quiet: true }) : Promise.resolve(null),
   );
 
+  /*
+   * The index leads; the platform-wide defaults follow it. This page used to
+   * open with three settings cards and keep the extensions at the bottom under
+   * "Published bundles", naming the section after one of its columns; and
+   * Priority and Paused, which belong to one extension, sat in the global
+   * pacing card as two checkbox grids. Both are now columns on the row.
+   */
   return el(
     "div",
     {},
-    can("settings:read")
-      ? card(
-          "Chapter removal mode",
-          live([removal], (data) => (data ? removalModeControls(data, removal) : el("span", {})), {
-            reserve: 40,
-            skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
-          }),
-        )
-      : null,
-    can("settings:read")
-      ? card(
-          "Publisher fetch pacing",
-          el("p", {
-            class: "dim small",
-            text:
-              "How fast a worker may talk to one publisher, and how regular it looks. A fixed " +
-              "interval is recognisable on its own, and workers given segments of the same run " +
-              "would otherwise start in step. Extensions can override this individually on their " +
-              "own Config tab.",
-          }),
-          live([throttle], (data) => (data ? fetchThrottleControls(data, throttle) : el("span", {})), {
-            reserve: 40,
-            skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
-          }),
-        )
-      : null,
-    can("settings:read")
-      ? card(
-          "Release pacing",
-          el("p", {
-            class: "dim small",
-            text:
-              "How many chapters may go up per day. A run still queues everything it decided in " +
-              "one pass; whatever is over a day's budget is dated forward instead of going up at " +
-              "once, so this changes when a chapter is released, never whether it is. 0 is no " +
-              "limit, not a stop. Extensions can override this individually on their own Config tab.",
-          }),
-          live(
-            [uploadSchedule],
-            (data) => (data ? uploadScheduleControls(data, uploadSchedule) : el("span", {})),
-            {
-              reserve: 40,
-              skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
-            },
-          ),
-        )
-      : null,
-    can("bundles:write") ? publishCard(extensions) : null,
     card(
-      "Published bundles",
+      "Extensions",
+      el("p", {
+        class: "dim small",
+        text:
+          "Every extension this platform knows. Priority and Paused belong to the extension and " +
+          "are set here; open one for its own fetch pacing, release pacing, schedule, series map " +
+          "and versions.",
+      }),
       live(
-        [extensions],
-        (data) =>
-          table(
-            ["Extension", "Version", "sha256", "Published", "State", ""],
-            data.extensions.map((ext) => [
-              routeLink(routeTo("extensions", ext.name, "overview"), ext.name),
-              ext.version,
-              el("code", { text: (ext.sha256 || "").slice(0, 12) }),
-              fmtTime(ext.publishedAt),
-              chip(ext.disabled ? "disabled" : "enabled"),
-              [
-                gatedButton("runs:write", { text: "Run", onclick: (e) => triggerRun(ext.name, "UPDATE", e.currentTarget) }),
-                gatedButton("runs:write", { text: "Force", onclick: (e) => triggerRun(ext.name, "FORCE", e.currentTarget) }),
-                gatedButton("runs:write", {
-                  class: "danger",
-                  text: "Clean",
-                  onclick: (e) => triggerRun(ext.name, "CLEAN", e.currentTarget),
-                }),
-                gatedButton("extensions:write", {
-                  text: ext.disabled ? "Enable" : "Disable",
-                  onclick: (event) =>
-                    act(
-                      `extension.${ext.disabled ? "enable" : "disable"}`,
-                      () =>
-                        api(
-                          `/extensions/${encodeURIComponent(ext.name)}/${ext.disabled ? "enable" : "disable"}`,
-                          { method: "POST", body: {} },
-                        ),
-                      { button: event.currentTarget, refresh: [extensions, summary] },
-                    ),
-                }),
-              ],
-            ]),
-            {
-              empty:
-                "No bundle is published, so nothing can run. Publish an extension bundle to get started.",
-            },
-          ),
-        { reserve: 240, skeleton: () => skeletonTable(5, 6) },
+        [extensions, uploadSchedule],
+        (data, schedule) => extensionIndexTable(data, schedule, extensions, uploadSchedule),
+        { reserve: 240, skeleton: () => skeletonTable(6, 8) },
       ),
     ),
+    can("bundles:write") ? publishCard(extensions) : null,
+    can("settings:read")
+      ? card(
+          "Platform defaults",
+          el("p", {
+            class: "dim small",
+            text:
+              "These apply to every extension that does not override them. An extension overrides " +
+              "them on its own Config tab, field by field, and follows the value here for every " +
+              "field it leaves alone.",
+          }),
+          // Each default is its own block with a stable id: three settings in
+          // one card, and "the release pacing fields" has to name something
+          // narrower than the card to be reachable at all.
+          el(
+            "div",
+            { class: "setting", id: "setting-removal-mode" },
+            el("h3", { text: "Chapter removal mode" }),
+            live([removal], (data) => (data ? removalModeControls(data, removal) : el("span", {})), {
+              reserve: 40,
+              skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
+            }),
+          ),
+          el(
+            "div",
+            { class: "setting", id: "setting-fetch-pacing" },
+            el("h3", { text: "Publisher fetch pacing" }),
+            el("p", {
+              class: "dim small",
+              text:
+                "How fast a worker may talk to one publisher, and how regular it looks. A fixed " +
+                "interval is recognisable on its own, and workers given segments of the same run " +
+                "would otherwise start in step.",
+            }),
+            live([throttle], (data) => (data ? fetchThrottleControls(data, throttle) : el("span", {})), {
+              reserve: 40,
+              skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
+            }),
+          ),
+          el(
+            "div",
+            { class: "setting", id: "setting-release-pacing" },
+            el("h3", { text: "Release pacing" }),
+            el("p", {
+              class: "dim small",
+              text:
+                "How many chapters may go up per day. A run still queues everything it decided in " +
+                "one pass; whatever is over a day's budget is dated forward instead of going up at " +
+                "once, so this changes when a chapter is released, never whether it is. 0 is no " +
+                "limit, not a stop.",
+            }),
+            live(
+              [uploadSchedule],
+              (data) => (data ? uploadScheduleControls(data, uploadSchedule) : el("span", {})),
+              {
+                reserve: 40,
+                skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
+              },
+            ),
+          ),
+        )
+      : null,
   );
 };
+
+/**
+ * The extension directory: one row per extension, carrying the state that
+ * belongs to that extension rather than to the platform.
+ *
+ * Rows are the union of the published bundles and the extensions the scheduler
+ * knows about, because those two sets come apart: an extension can be paused
+ * before its first bundle is published, and one whose bundle was yanked still
+ * holds its Priority and Paused settings. Listing only bundles would silently
+ * drop the second kind, and "why is this extension not here" is a worse
+ * question than a row with an empty version.
+ */
+function extensionIndexTable(data, schedule, extResource, scheduleResource) {
+  const bundles = new Map((data.extensions ?? []).map((ext) => [ext.name, ext]));
+  const paused = new Set(schedule?.paused ?? []);
+  const priority = new Set(schedule?.priority ?? []);
+  const overrides = new Set(Object.keys(schedule?.overrides ?? {}));
+  const names = [...new Set([...bundles.keys(), ...(schedule?.extensions ?? [])])].sort();
+
+  // Both settings are one list each, posted whole; a row toggle therefore edits
+  // its own membership of that list and sends the rest back unchanged.
+  const setMembership = (route, current, name, on) => {
+    const next = new Set(current);
+    if (on) next.add(name);
+    else next.delete(name);
+    return act(
+      `upload-schedule.${route}`,
+      () =>
+        api(`/upload-schedule/${route}`, {
+          method: "POST",
+          body: { extensions: [...next].sort() },
+        }),
+      { refresh: [scheduleResource] },
+    );
+  };
+
+  const toggle = (kind, set, name) =>
+    schedule
+      ? el("input", {
+          type: "checkbox",
+          id: `ext-${kind}-${name}`,
+          checked: set.has(name),
+          "aria-label": `${kind} for ${name}`,
+          // Writes the setting the moment it is clicked, so a reader must not
+          // be able to arm it.
+          disabled: !can("settings:write"),
+          onchange: (event) => setMembership(kind, set, name, event.target.checked),
+        })
+      : el("span", { class: "dim", text: "-" });
+
+  return table(
+    ["Extension", "Version", "sha256", "Published", "Bundle", "Priority", "Paused", "Pacing", ""],
+    names.map((name) => {
+      const ext = bundles.get(name);
+      return [
+        routeLink(routeTo("extensions", name, "overview"), name),
+        ext ? ext.version : el("span", { class: "dim", text: "not published" }),
+        ext ? el("code", { text: (ext.sha256 || "").slice(0, 12) }) : "",
+        ext ? fmtTime(ext.publishedAt) : "",
+        ext ? chip(ext.disabled ? "disabled" : "enabled") : el("span", { class: "dim", text: "-" }),
+        toggle("priority", priority, name),
+        toggle("paused", paused, name),
+        // Says which extensions the defaults below do NOT reach, on the row of
+        // the extension it is true of, rather than as a list of names under the
+        // control an operator is about to edit.
+        overrides.has(name)
+          ? routeLink(routeTo("extensions", name, "config"), "overridden")
+          : el("span", { class: "dim", text: "default" }),
+        [
+          gatedButton("runs:write", { text: "Run", onclick: (e) => triggerRun(name, "UPDATE", e.currentTarget) }),
+          gatedButton("runs:write", { text: "Force", onclick: (e) => triggerRun(name, "FORCE", e.currentTarget) }),
+          gatedButton("runs:write", {
+            class: "danger",
+            text: "Clean",
+            onclick: (e) => triggerRun(name, "CLEAN", e.currentTarget),
+          }),
+          ext
+            ? gatedButton("extensions:write", {
+                text: ext.disabled ? "Enable" : "Disable",
+                onclick: (event) =>
+                  act(
+                    `extension.${ext.disabled ? "enable" : "disable"}`,
+                    () =>
+                      api(
+                        `/extensions/${encodeURIComponent(name)}/${ext.disabled ? "enable" : "disable"}`,
+                        { method: "POST", body: {} },
+                      ),
+                    { button: event.currentTarget, refresh: [extResource, summary] },
+                  ),
+              })
+            : null,
+        ],
+      ];
+    }),
+    {
+      empty: "No bundle is published, so nothing can run. Publish an extension bundle to get started.",
+    },
+  );
+}
 
 function removalModeControls(removal, resource) {
   const modeSelect = el(
@@ -8396,75 +8547,6 @@ function uploadScheduleControls(data, resource) {
       ` ${label}`,
     );
 
-  const paused = new Set(data.paused ?? []);
-  const setPaused = (name, on) => {
-    const next = new Set(paused);
-    if (on) next.add(name);
-    else next.delete(name);
-    act(
-      "upload-schedule.paused",
-      () =>
-        api("/upload-schedule/paused", {
-          method: "POST",
-          body: { extensions: [...next].sort() },
-        }),
-      { refresh: [resource] },
-    );
-  };
-  const priority = new Set(data.priority ?? []);
-  // Every extension the platform knows, not just the ones already prioritised,
-  // so turning priority ON is a click rather than knowing a name to type.
-  const knownExtensions = data.extensions ?? [...priority].sort();
-  const setPriority = (name, on) => {
-    const next = new Set(priority);
-    if (on) next.add(name);
-    else next.delete(name);
-    act(
-      "upload-schedule.priority",
-      () =>
-        api("/upload-schedule/priority", {
-          method: "POST",
-          body: { extensions: [...next].sort() },
-        }),
-      { refresh: [resource] },
-    );
-  };
-  const priorityBoxes = knownExtensions.length
-    ? knownExtensions.map((name) =>
-        el(
-          "label",
-          { class: "inline", for: `schedule-priority-${name}` },
-          el("input", {
-            id: `schedule-priority-${name}`,
-            type: "checkbox",
-            checked: priority.has(name),
-            // Writes the setting on click, so a reader must not arm it.
-            disabled: !can("settings:write"),
-            onchange: (event) => setPriority(name, event.target.checked),
-          }),
-          ` ${name}`,
-        ),
-      )
-    : [el("span", { class: "dim small", text: "No extensions configured yet." })];
-
-  const pausedBoxes = knownExtensions.length
-    ? knownExtensions.map((name) =>
-        el(
-          "label",
-          { class: "inline", for: `schedule-paused-${name}` },
-          el("input", {
-            id: `schedule-paused-${name}`,
-            type: "checkbox",
-            checked: paused.has(name),
-            disabled: !can("settings:write"),
-            onchange: (event) => setPaused(name, event.target.checked),
-          }),
-          ` ${name}`,
-        ),
-      )
-    : [el("span", { class: "dim small", text: "No extensions configured yet." })];
-
-  const overrides = Object.keys(data.overrides ?? {});
   return el("div", {}, [
     row(
       el("label", { class: "inline", for: "schedule-per-day", text: "Per day" }),
@@ -8506,32 +8588,26 @@ function uploadScheduleControls(data, resource) {
         "across it, and anything newly queued is dated behind the queue's tail rather than on top " +
         "of it. 0 paces only a day that is full.",
     }),
-    row(el("span", { class: "inline", text: "Priority" }), ...priorityBoxes),
+    // Priority and Paused used to be two checkbox grids here. They are settings
+    // of one extension, so they are now columns of the index above, where they
+    // sit beside the extension they apply to; what stays here is the
+    // explanation of what the two states mean, which is platform-wide.
     el("p", {
       class: "dim small",
       text:
-        "A priority extension's routine updates are queued due immediately: they ignore the " +
-        "queue however long it is, and go out whether or not the day's budget is spent. For a " +
-        "daily publisher whose chapters are worth little late. Clean runs are never prioritised — " +
-        "a clean run is the backlog, and spreading it is the point.",
+        "Priority, set per extension above: that extension's routine updates are queued due " +
+        "immediately. They ignore the queue however long it is, and go out whether or not the " +
+        "day's budget is spent — for a daily publisher whose chapters are worth little late. " +
+        "Clean runs are never prioritised; a clean run is the backlog, and spreading it is the point.",
     }),
-    row(el("span", { class: "inline", text: "Paused" }), ...pausedBoxes),
     el("p", {
       class: "dim small",
       text:
-        "A paused extension's queued work is held: the uploader steps over it and everybody " +
-        "else keeps draining. Nothing is cancelled or re-dated, so un-pausing resumes exactly " +
-        "where the queue was. It does not stop the queue growing — runs still add to it.",
+        "Paused, set per extension above: that extension's queued work is held. The uploader " +
+        "steps over it and everybody else keeps draining. Nothing is cancelled or re-dated, so " +
+        "un-pausing resumes exactly where the queue was. It does not stop the queue growing — " +
+        "runs still add to it.",
     }),
-    // Named rather than counted, for the reason the pacing card above names
-    // them: a number does not tell an operator whether the global they are
-    // editing reaches the extension whose backlog they are worried about.
-    overrides.length
-      ? el("p", {
-          class: "dim small",
-          text: `Overridden for: ${overrides.join(", ")}. Those extensions ignore the fields they set here.`,
-        })
-      : el("p", { class: "dim small", text: "No extension overrides; every extension follows this." }),
   ]);
 }
 
@@ -8940,7 +9016,6 @@ function extensionDetail(name, tab) {
   if (tab === "config") return configPanel(name);
   if (tab === "versions") return versionsPanel(name);
 
-  // Tabs are suppressed for a param route, so a detail view carries its own.
   const activity = new Resource(`activity:${name}`, () =>
     api(`/extensions/${encoded}/activity?limit=10`, { quiet: true }),
   );
@@ -8948,7 +9023,6 @@ function extensionDetail(name, tab) {
   return el(
     "div",
     {},
-    extensionTabs(name, "overview"),
     live(
       [activity],
       (data) =>
@@ -9066,31 +9140,6 @@ function extensionDetail(name, tab) {
 }
 
 /**
- * The detail view's own tab strip.
- *
- * The shell hides the section tabs for a param route, they would navigate away
- * from the thing being read, so a detail view that has sections draws them
- * itself, pointing at `#/extensions/<name>/<tab>`.
- */
-function extensionTabs(name, current) {
-  const tabs = NAV_BY_ID.get("extensions").tabs;
-  return el(
-    "div",
-    { class: "tabs", role: "tablist", "aria-label": `Sections of ${name}` },
-    tabs.map(([id, label]) =>
-      el("button", {
-        type: "button",
-        role: "tab",
-        id: `tab-${id}`,
-        "aria-selected": String(id === current),
-        text: label,
-        onclick: () => navigate(routeTo("extensions", name, id)),
-      }),
-    ),
-  );
-}
-
-/**
  * Weekday labels, Monday first.
  *
  * The index IS the contract value (Monday=0, Python's `weekday()`), which the
@@ -9164,7 +9213,6 @@ function schedulePanel(name) {
   return el(
     "div",
     {},
-    extensionTabs(name, "schedule"),
     card(
       "Schedule (UTC)",
       live(
@@ -9445,15 +9493,14 @@ function configPanel(name) {
   return el(
     "div",
     {},
-    extensionTabs(name, "config"),
     can("settings:read")
       ? card(
           "Fetch pacing",
           el("p", {
             class: "dim small",
             text:
-              "How fast a worker may talk to this publisher. Set here it overrides the global on " +
-              "System, field by field; cleared, this extension follows the global as it changes.",
+              "How fast a worker may talk to this publisher. Set here it overrides the platform default on " +
+              "Extensions, field by field; cleared, this extension follows that default as it changes.",
           }),
           live(
             [throttle],
@@ -9473,8 +9520,8 @@ function configPanel(name) {
             text:
               "How many of this extension's chapters may go up per day. A run still queues " +
               "everything it decided; whatever is over the day's budget is dated forward rather " +
-              "than released at once, and 0 is no limit. Set here it overrides the global on " +
-              "System, field by field; cleared, this extension follows the global as it changes.",
+              "than released at once, and 0 is no limit. Set here it overrides the platform default on " +
+              "Extensions, field by field; cleared, this extension follows that default as it changes.",
           }),
           live(
             [schedule],
@@ -9695,7 +9742,6 @@ function versionsPanel(name) {
   return el(
     "div",
     {},
-    extensionTabs(name, "versions"),
     card(
       "Published versions",
       el("p", {
@@ -9775,7 +9821,6 @@ function seriesMapPanel(name) {
   return el(
     "div",
     {},
-    extensionTabs(name, "series-map"),
     trackedCard(name, tracked),
     bulkCurationCard(name, tracked),
     // Last on the page on purpose: it is what an operator reaches for after

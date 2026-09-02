@@ -1179,14 +1179,18 @@ input[type="search"] {
   margin-top: 0;
 }
 
+/* `auto-fill`, not `auto-fit`. A gauge is a fixed size on a panel. `auto-fit`
+   collapses the empty tracks, so one worker ACTIVE stretched across the whole
+   faceplate and read as a bigger instrument than the same number in a full
+   row. `auto-fill` keeps the tracks, so a lone reading stays its own size. */
 .grid {
   display: grid;
   gap: 8px;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
 }
 
 .grid.tight {
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
 }
 
 .row {
@@ -1556,9 +1560,24 @@ ul.errors li {
 /* ---- loading, empty, error --------------------------------------------- */
 
 /* A region that swaps content when data arrives. The reserved height is what
-   keeps the page from jumping under the operator's pointer. */
+   keeps the page from jumping under the operator's pointer while it waits, and
+   it is given back the moment the answer is on screen: held after that, it was
+   a floor of blank deck under every short card on every page. */
 .live {
   min-height: var(--reserve, 0);
+}
+
+.live[data-loaded="true"] {
+  min-height: 0;
+}
+
+/* `--reserve` is a custom property, so it inherits. A region nested inside
+   another — the pause controls inside the platform card — picked up its
+   parent's reservation and applied it again as its own floor, which is the
+   gap that sat under those buttons. A nested region reserves nothing unless
+   it sets its own, and an inline `--reserve` still beats this. */
+.live .live {
+  --reserve: 0px;
 }
 
 /* No shimmer: a sweeping gradient is motion, and motion on a console means
@@ -2462,6 +2481,19 @@ th.sorted .sort-mark {
   .page-count {
     margin-left: 0;
     flex: 1 0 100%;
+  }
+
+  /* A thumb is not a pointer. 26-28px is fine to click and awkward to tap, and
+     once the header row is gone these are the only sort and page controls. */
+  .table-sortbar select,
+  .table-sortbar .sort-dir,
+  .page-n,
+  .page-step {
+    min-height: 40px;
+  }
+
+  .page-n {
+    min-width: 40px;
   }
 }
 
