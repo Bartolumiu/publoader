@@ -1516,8 +1516,29 @@ describe("/errors", () => {
 });
 
 describe("retired pointers stay accurate as endpoints land", () => {
-  it("sends /logs to /errors now that a failure feed exists", async () => {
-    expect((await invoke("logs", fakeApi())).text).toContain("/errors");
+  it("no longer retires /logs, because the log endpoint exists now", async () => {
+    // The retirement text said "there is no log API". There is
+    // (`GET /api/v1/admin/logs`), so keeping the pointer would be a lie the
+    // bot tells whenever someone reaches for the obvious command.
+    const logs = vi.fn().mockResolvedValue({
+      logs: [
+        { createdAt: "2026-07-29T15:00:00Z", level: 50, service: "core-uploader", msg: "upload failed" },
+      ],
+      nextBefore: null,
+      covers: ["core-api", "core-uploader"],
+    });
+    const reply = await invoke("logs", fakeApi({ logs }));
+    expect(reply.text).toContain("core-uploader");
+    expect(reply.text).toContain("upload failed");
+    expect(reply.footer).toContain("core-api");
+  });
+
+  it("defaults /logs to warnings and above, not to everything", async () => {
+    // An unfiltered tail in a chat window is routine info lines with the
+    // interesting one scrolled off the top.
+    const logs = vi.fn().mockResolvedValue({ logs: [], nextBefore: null, covers: [] });
+    await invoke("logs", fakeApi({ logs }));
+    expect(logs).toHaveBeenCalledWith("discord:ardax", expect.objectContaining({ minLevel: 40 }));
   });
 
   it("sends /logout and /login to /mdauth clear", async () => {
@@ -1773,5 +1794,236 @@ describe("recheck", () => {
       expect(recheckExtension).not.toHaveBeenCalled();
       expect(reply.text).toContain("Name a `series`");
     });
+  });
+});
+
+describe("/uploads", () => {
+  const view = {
+    global: { perDay: 100, spacingSeconds: 300 },
+    overrides: { comikey: { perDay: 20 } },
+    defaults: { perDay: 50 },
+    scope: "platform",
+    priority: ["mangaplus"],
+    paused: [],
+  };
+
+  it("shows the global pacing, the overrides and the scope", async () => {
+    const reply = await invoke("uploads", fakeApi({ uploadSchedule: vi.fn().mockResolvedValue(view) }), {}, "show");
+    const rendered = fieldText(reply);
+    expect(rendered).toContain("100/day");
+    expect(rendered).toContain("300s apart");
+    expect(rendered).toContain("comikey");
+    expect(rendered).toContain("mangaplus");
+  });
+
+  it("sends only the values given, leaving the rest alone", async () => {
+    // The endpoint treats an absent field as "unchanged", so sending nulls for
+    // the untouched options would silently reset three settings to change one.
+    const setUploadSchedule = vi.fn().mockResolvedValue({ global: { spacingSeconds: 600 } });
+    await invoke("uploads", fakeApi({ setUploadSchedule }), { "spacing-seconds": 600 }, "set");
+    expect(setUploadSchedule).toHaveBeenCalledWith("discord:ardax", { spacingSeconds: 600 });
+  });
+
+  it("keeps spacing 0 rather than reading it as unset", async () => {
+    // 0 means "spread the day evenly", which is a real setting.
+    const setUploadSchedule = vi.fn().mockResolvedValue({ global: { spacingSeconds: 0 } });
+    const reply = await invoke("uploads", fakeApi({ setUploadSchedule }), { "spacing-seconds": 0 }, "set");
+    expect(setUploadSchedule).toHaveBeenCalledWith("discord:ardax", { spacingSeconds: 0 });
+    expect(reply.text).toContain("spread evenly");
+  });
+
+  it("targets one extension when named", async () => {
+    const setUploadScheduleFor = vi.fn().mockResolvedValue({ ok: true, extension: "comikey", cleared: false });
+    await invoke("uploads", fakeApi({ setUploadScheduleFor }), { extension: "comikey", "per-day": 20 }, "set");
+    expect(setUploadScheduleFor).toHaveBeenCalledWith("discord:ardax", "comikey", { perDay: 20 });
+  });
+
+  it("refuses a set with nothing in it instead of sending an empty patch", async () => {
+    // An empty patch on the per-extension route means "clear the override",
+    // so an accidental one would silently undo a deliberate setting.
+    const setUploadSchedule = vi.fn();
+    const reply = await invoke("uploads", fakeApi({ setUploadSchedule }), {}, "set");
+    expect(setUploadSchedule).not.toHaveBeenCalled();
+    expect(reply.text).toContain("Nothing to change");
+  });
+
+  it("clears an override by sending an empty patch deliberately", async () => {
+    const setUploadScheduleFor = vi.fn().mockResolvedValue({ ok: true, extension: "comikey", cleared: true });
+    const reply = await invoke("uploads", fakeApi({ setUploadScheduleFor }), { extension: "comikey" }, "clear");
+    expect(setUploadScheduleFor).toHaveBeenCalledWith("discord:ardax", "comikey", {});
+    expect(reply.text).toContain("follows the global");
+  });
+
+  it("gates reads and writes differently", () => {
+    const uploads = COMMANDS_BY_NAME.get("uploads")!;
+    expect(resolveSensitivity(uploads, "show")).toBe("read");
+    expect(resolveSensitivity(uploads, "set")).toBe("mutate");
+    expect(resolveSensitivity(uploads, "clear")).toBe("mutate");
+  });
+});
+
+describe("/throttle", () => {
+  it("shows the global throttle and any overrides", async () => {
+    const fetchThrottle = vi.fn().mockResolvedValue({
+      global: { minIntervalMs: 2000, jitter: true },
+      overrides: { omoi: { minIntervalMs: 5000 } },
+      defaults: { minIntervalMs: 1000 },
+    });
+    const reply = await invoke("throttle", fakeApi({ fetchThrottle }), {}, "show");
+    const rendered = fieldText(reply);
+    expect(rendered).toContain("2000ms apart");
+    expect(rendered).toContain("jittered");
+    expect(rendered).toContain("omoi");
+  });
+
+  it("sends only what was given", async () => {
+    const setFetchThrottle = vi.fn().mockResolvedValue({ global: { minIntervalMs: 3000 } });
+    await invoke("throttle", fakeApi({ setFetchThrottle }), { "min-interval-ms": 3000 }, "set");
+    expect(setFetchThrottle).toHaveBeenCalledWith("discord:ardax", { minIntervalMs: 3000 });
+  });
+
+  it("carries jitter:false, which is a setting and not an omission", async () => {
+    const setFetchThrottle = vi.fn().mockResolvedValue({ global: { jitter: false } });
+    await invoke("throttle", fakeApi({ setFetchThrottle }), { jitter: false }, "set");
+    expect(setFetchThrottle).toHaveBeenCalledWith("discord:ardax", { jitter: false });
+  });
+
+  it("warns about the consequence of lowering the global gap", async () => {
+    const setFetchThrottle = vi.fn().mockResolvedValue({ global: { minIntervalMs: 200 } });
+    const reply = await invoke("throttle", fakeApi({ setFetchThrottle }), { "min-interval-ms": 200 }, "set");
+    expect(reply.footer).toContain("rate limiting");
+  });
+});
+
+describe("/activity", () => {
+  it("renders the feed worst-first with its window in the title", async () => {
+    const activity = vi.fn().mockResolvedValue({
+      events: [
+        { kind: "run", severity: "error", at: "2026-07-29T15:00:00Z", message: "scrape failed", extension: "omoi" },
+      ],
+    });
+    const reply = await invoke("activity", fakeApi({ activity }), { hours: 6 });
+    expect(reply.title).toContain("6h");
+    expect(reply.text).toContain("scrape failed");
+    expect(reply.text).toContain("omoi");
+    expect(reply.tone).toBe("warn");
+  });
+
+  it("says so plainly when nothing happened", async () => {
+    const activity = vi.fn().mockResolvedValue({ events: [] });
+    const reply = await invoke("activity", fakeApi({ activity }), {});
+    expect(reply.text).toContain("Nothing in the last 24h");
+    expect(reply.tone).toBe("ok");
+  });
+
+  it("notes hidden audit entries only when the caller lacks the scope", async () => {
+    const activity = vi.fn().mockResolvedValue({ events: [] });
+    const withAudit = await invoke("activity", fakeApi({ activity }), {}, undefined, ["runs:read", "audit:read"]);
+    expect(withAudit.footer).toBeUndefined();
+    const without = await invoke("activity", fakeApi({ activity }), {}, undefined, ["runs:read"]);
+    expect(without.footer).toContain("Audit entries are hidden");
+  });
+});
+
+describe("/queue purge", () => {
+  it("counts before deleting, and deletes nothing without confirmation", async () => {
+    // A purge cannot be undone, so the count is the whole point: "it matched
+    // far more than I expected" is the failure worth catching.
+    const purgeQueue = vi.fn().mockResolvedValue({ dryRun: true, matched: 412 });
+    const reply = await invoke("queue", fakeApi({ purgeQueue }), { extension: "comikey" }, "purge");
+    expect(purgeQueue).toHaveBeenCalledTimes(1);
+    expect(purgeQueue).toHaveBeenCalledWith("discord:ardax", expect.objectContaining({ dryRun: true }));
+    expect(reply.text).toContain("412");
+    expect(reply.text).toContain("comikey");
+    expect(reply.footer).toContain("cannot be undone");
+    expect(reply.tone).toBe("warn");
+  });
+
+  it("still counts first even when confirmed", async () => {
+    const purgeQueue = vi
+      .fn()
+      .mockResolvedValueOnce({ dryRun: true, matched: 3 })
+      .mockResolvedValueOnce({ deleted: 3 });
+    const reply = await invoke("queue", fakeApi({ purgeQueue }), { confirm: true, state: "FAILED" }, "purge");
+    expect(purgeQueue).toHaveBeenCalledTimes(2);
+    expect(purgeQueue).toHaveBeenLastCalledWith(
+      "discord:ardax",
+      expect.objectContaining({ dryRun: false, confirm: true }),
+    );
+    expect(reply.text).toContain("Deleted **3**");
+  });
+
+  it("says loudly when no filter was given, because that is the whole queue", async () => {
+    const purgeQueue = vi.fn().mockResolvedValue({ dryRun: true, matched: 9000 });
+    const reply = await invoke("queue", fakeApi({ purgeQueue }), {}, "purge");
+    expect(reply.text).toContain("the whole queue");
+  });
+
+  it("stops at the count when nothing matches", async () => {
+    const purgeQueue = vi.fn().mockResolvedValue({ dryRun: true, matched: 0 });
+    const reply = await invoke("queue", fakeApi({ purgeQueue }), { confirm: true }, "purge");
+    expect(purgeQueue).toHaveBeenCalledTimes(1);
+    expect(reply.text).toContain("Nothing matches");
+  });
+
+  it("is gated as destructive", () => {
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("queue")!, "purge")).toBe("destructive");
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("queue")!, "restagger")).toBe("mutate");
+  });
+});
+
+describe("/queue restagger", () => {
+  it("re-spaces the chosen queue and reports how many moved", async () => {
+    const restaggerQueue = vi.fn().mockResolvedValue({ moved: 40, gapSeconds: 300 });
+    const reply = await invoke("queue", fakeApi({ restaggerQueue }), { "gap-seconds": 300, kind: "EDIT" }, "restagger");
+    expect(restaggerQueue).toHaveBeenCalledWith("discord:ardax", 300, "EDIT");
+    expect(reply.text).toContain("40");
+  });
+
+  it("defaults to the upload queue", async () => {
+    const restaggerQueue = vi.fn().mockResolvedValue({ moved: 0, gapSeconds: 60 });
+    await invoke("queue", fakeApi({ restaggerQueue }), { "gap-seconds": 60 }, "restagger");
+    expect(restaggerQueue).toHaveBeenCalledWith("discord:ardax", 60, "UPLOAD");
+  });
+});
+
+describe("/runs cancel", () => {
+  it("refuses without confirmation, naming what is abandoned", async () => {
+    const cancelRun = vi.fn();
+    const reply = await invoke("runs", fakeApi({ cancelRun }), { id: "run-1" }, "cancel");
+    expect(cancelRun).not.toHaveBeenCalled();
+    expect(reply.text).toContain("in flight");
+  });
+
+  it("cancels when confirmed", async () => {
+    const cancelRun = vi.fn().mockResolvedValue({ ok: true });
+    const reply = await invoke("runs", fakeApi({ cancelRun }), { id: "run-1", confirm: true }, "cancel");
+    expect(cancelRun).toHaveBeenCalledWith("discord:ardax", "run-1");
+    expect(reply.tone).toBe("ok");
+  });
+
+  it("says how wide cancel-all reaches before doing it", async () => {
+    const cancelAllRuns = vi.fn();
+    const all = await invoke("runs", fakeApi({ cancelAllRuns }), {}, "cancel-all");
+    expect(all.text).toContain("every active run on the platform");
+    const one = await invoke("runs", fakeApi({ cancelAllRuns }), { extension: "omoi" }, "cancel-all");
+    expect(one.text).toContain("omoi");
+    expect(cancelAllRuns).not.toHaveBeenCalled();
+  });
+
+  it("reports what cancel-all stopped", async () => {
+    const cancelAllRuns = vi.fn().mockResolvedValue({ ok: true, runs: 2, jobs: 17 });
+    const reply = await invoke("runs", fakeApi({ cancelAllRuns }), { confirm: true }, "cancel-all");
+    expect(cancelAllRuns).toHaveBeenCalledWith("discord:ardax", undefined);
+    expect(reply.text).toContain("**2**");
+    expect(reply.text).toContain("**17**");
+  });
+
+  it("keeps the read subcommands readable", () => {
+    const runs = COMMANDS_BY_NAME.get("runs")!;
+    expect(resolveSensitivity(runs, "recent")).toBe("read");
+    expect(resolveSensitivity(runs, "show")).toBe("read");
+    expect(resolveSensitivity(runs, "cancel")).toBe("destructive");
+    expect(resolveSensitivity(runs, "cancel-all")).toBe("destructive");
   });
 });

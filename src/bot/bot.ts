@@ -861,6 +861,10 @@ export class PubloaderBot {
       await this.respondWithCatalogues(interaction, needle);
       return;
     }
+    if (focused.name === "service") {
+      await this.respondWithLogServices(interaction, needle);
+      return;
+    }
     // `id` is a row id on several commands; only the untracked queue can offer
     // suggestions for one, and answering the others from it would be wrong.
     if (focused.name === "id" && interaction.commandName === "untracked") {
@@ -979,6 +983,28 @@ export class PubloaderBot {
   }
 
   /** The catalogues one extension actually has. Empty for all but viz. */
+  /**
+   * Services that actually appear in the log table.
+   *
+   * Read from the data rather than hardcoded: the set is whatever has written a
+   * line, so a service added later shows up without this file changing, and one
+   * that has never logged is not offered as a filter that returns nothing.
+   */
+  private async respondWithLogServices(interaction: AutocompleteInteraction, needle: string): Promise<void> {
+    let choices: { name: string; value: string }[] = [];
+    try {
+      const { services } = await this.apiFor(interaction.user.id).logSources(actorFor(interaction.user.username));
+      const query = needle.trim().toLowerCase();
+      choices = services
+        .filter((name) => name && (!query || name.toLowerCase().includes(query)))
+        .slice(0, 25)
+        .map((name) => ({ name, value: name }));
+    } catch (err) {
+      this.log.debug({ err }, "autocomplete could not list log services");
+    }
+    await interaction.respond(choices).catch(() => undefined);
+  }
+
   private async respondWithCatalogues(interaction: AutocompleteInteraction, needle: string): Promise<void> {
     const extension = interaction.options.getString("extension");
     let choices: { name: string; value: string }[] = [];
