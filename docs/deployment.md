@@ -946,6 +946,16 @@ register slash commands`, and that the invite included the
 `applications.commands` scope. With no guild pinned the commands are global and
 can take up to an hour to propagate; the bot warns about this at startup.
 
+**Every command appears twice, in every server.** A leftover *global*
+registration. Discord shows a guild the union of its own commands and the
+application's global set, so the two do not coexist quietly — they duplicate.
+The bot registers globally only when no guild is pinned, which includes a cold
+start where the control plane was not up yet and `DISCORD_GUILD_ID` was empty;
+it now defers registration in that case rather than guessing, and clears the
+global set whenever it registers guild-scoped. If an old deployment left one
+behind, `PUT []` to
+`https://discord.com/api/v10/applications/<APP_ID>/commands` clears it.
+
 **Commands do not appear in a *second* server.** Guild-scoped commands exist
 only in the guilds they were published to, so a server that is not pinned gets
 nothing — and would be refused anyway. Pin it too (dashboard → Permissions →
