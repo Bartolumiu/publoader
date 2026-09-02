@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook, requireOwner, requireScope } from "../auth.js";
-import { sessionAuthenticator } from "../session.js";
+import { sessionAuthenticator, impersonationResolver} from "../session.js";
 import { InvalidScopesError } from "../../store/apiTokens.js";
 import { SCOPE_PRESETS, SCOPES } from "../scopes.js";
 
@@ -19,6 +19,7 @@ export function registerTokenRoutes(app: FastifyInstance, ctx: AppContext): void
         adminToken: ctx.config.adminToken,
         session: sessionAuthenticator(ctx),
         apiTokens: ctx.apiTokens,
+        impersonation: impersonationResolver(ctx),
       }),
     );
     scope.addHook("preHandler", requireScope("users:admin"));

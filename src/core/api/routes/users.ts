@@ -3,7 +3,7 @@ import type { AdminUser } from "@prisma/client";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook, requireOwner, requireScope } from "../auth.js";
-import { sessionAuthenticator } from "../session.js";
+import { sessionAuthenticator, impersonationResolver} from "../session.js";
 import { MIN_PASSWORD_LENGTH, toPublicUser } from "../../store/adminUsers.js";
 
 /**
@@ -30,6 +30,7 @@ export function registerUserRoutes(app: FastifyInstance, ctx: AppContext): void 
         adminToken: ctx.config.adminToken,
         session: sessionAuthenticator(ctx),
         apiTokens: ctx.apiTokens,
+        impersonation: impersonationResolver(ctx),
       }),
     );
     scope.addHook("preHandler", async (req, reply) => {

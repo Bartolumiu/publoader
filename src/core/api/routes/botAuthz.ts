@@ -2,9 +2,9 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook, requireScope } from "../auth.js";
-import { sessionAuthenticator } from "../session.js";
-import { AUTHZ_LISTS, entriesToIdLists, normaliseEntries, rejectedIds } from "../../store/botAuthz.js";
-import type { AuthzEntries, AuthzEntry, AuthzListName } from "../../store/botAuthz.js";
+import { sessionAuthenticator, impersonationResolver} from "../session.js";
+import { AUTHZ_LISTS, AUTHZ_MODES, entriesToIdLists, normaliseEntries, rejectedIds } from "../../store/botAuthz.js";
+import type { AuthzEntries, AuthzEntry, AuthzListName, AuthzMode } from "../../store/botAuthz.js";
 
 /**
  * Who the Discord bot takes orders from: which guilds, which channels, which
@@ -50,6 +50,7 @@ const PutBody = z.object({
   channels: ListInput.optional(),
   adminUsers: ListInput.optional(),
   adminRoles: ListInput.optional(),
+  mode: z.enum(AUTHZ_MODES).optional(),
 });
 
 /**
@@ -63,7 +64,16 @@ export interface BotAuthzView {
   entries: AuthzEntries;
   /** True once anything has been stored; false means the bot uses `.env`. */
   configured: boolean;
-  /** Plain id lists, which is what the bot consumes. */
+  /** Which model decides who may run a state-changing command. */
+  mode: AuthzMode;
+  /**
+   * Plain id lists, which is what the bot consumes.
+   *
+   * In `dashboard` mode `adminUserIds` is *derived* from the operator accounts
+   * rather than read from the stored list, so the bot needs no notion of the
+   * mode to gate on: it consumes this either way and the answer is already
+   * right.
+   */
   effective: ReturnType<typeof entriesToIdLists>;
   /** The misconfigurations worth shouting about, in words. */
   warnings: string[];
@@ -80,7 +90,12 @@ export interface BotAuthzView {
  * and warning that "no channels are allowed" would be stating a falsehood
  * about a deployment whose `.env` is perfectly well configured.
  */
-export function warningsFor(entries: AuthzEntries, configured = true): string[] {
+export function warningsFor(
+  entries: AuthzEntries,
+  configured = true,
+  mode: AuthzMode = "allowlist",
+  linkedCount = 0,
+): string[] {
   if (!configured) {
     return [
       "Nothing is stored yet, so the bot is still using the DISCORD_* variables it was deployed with. " +
@@ -89,12 +104,20 @@ export function warningsFor(entries: AuthzEntries, configured = true): string[] 
     ];
   }
   const out: string[] = [];
+  if (mode === "dashboard" && linkedCount === 0) {
+    // The derived list is empty, so nobody can run anything that changes state
+    // — and unlike an empty stored list, there is nothing on this page to fix.
+    out.push(
+      "No operator account has linked a Discord login, so nobody can run a state-changing command. " +
+        "Each person signs in to this dashboard and links Discord from their account page.",
+    );
+  }
   if (entries.channels.length === 0) {
     out.push(
       "No allowed channels: every state-changing command is refused, and read-only commands work in any channel the bot can see.",
     );
   }
-  if (entries.adminUsers.length === 0 && entries.adminRoles.length === 0) {
+  if (mode === "allowlist" && entries.adminUsers.length === 0 && entries.adminRoles.length === 0) {
     out.push("No admin users or roles: every state-changing command is refused.");
   }
   if (entries.guilds.length === 0) {
@@ -105,12 +128,20 @@ export function warningsFor(entries: AuthzEntries, configured = true): string[] 
   return out;
 }
 
-export function viewOf(entries: AuthzEntries, configured: boolean): BotAuthzView {
+export function viewOf(
+  entries: AuthzEntries,
+  configured: boolean,
+  mode: AuthzMode = "allowlist",
+  linkedDiscordIds: string[] = [],
+): BotAuthzView {
+  const effective = entriesToIdLists(entries);
+  if (mode === "dashboard") effective.adminUserIds = linkedDiscordIds;
   return {
     entries,
     configured,
-    effective: entriesToIdLists(entries),
-    warnings: warningsFor(entries, configured),
+    mode,
+    effective,
+    warnings: warningsFor(entries, configured, mode, linkedDiscordIds.length),
   };
 }
 
@@ -122,6 +153,7 @@ export function registerBotAuthzRoutes(app: FastifyInstance, ctx: AppContext): v
         adminToken: ctx.config.adminToken,
         session: sessionAuthenticator(ctx),
         apiTokens: ctx.apiTokens,
+        impersonation: impersonationResolver(ctx),
       }),
     );
     scope.addHook("preHandler", async (req, reply) => {
@@ -135,8 +167,15 @@ export function registerBotAuthzRoutes(app: FastifyInstance, ctx: AppContext): v
       req.principal?.name ??
       `admin:${(req.headers["x-actor"] as string | undefined)?.slice(0, 64) ?? req.adminActor ?? "unknown"}`;
 
-    const load = async (): Promise<BotAuthzView> =>
-      viewOf(await ctx.botAuthz.get(), await ctx.botAuthz.isConfigured());
+    const load = async (): Promise<BotAuthzView> => {
+      const mode = await ctx.botAuthz.getMode();
+      return viewOf(
+        await ctx.botAuthz.get(),
+        await ctx.botAuthz.isConfigured(),
+        mode,
+        mode === "dashboard" ? await ctx.botAuthz.linkedDiscordIds() : [],
+      );
+    };
 
     /**
      * What the bot enforces, and what an editor edits.
@@ -175,11 +214,13 @@ export function registerBotAuthzRoutes(app: FastifyInstance, ctx: AppContext): v
       }
 
       const before = await ctx.botAuthz.get();
+      const beforeMode = await ctx.botAuthz.getMode();
       const patch: Partial<Record<AuthzListName, AuthzEntry[]>> = {};
       for (const name of AUTHZ_LISTS) {
         const input = parsed.data[name];
         if (input) patch[name] = normaliseEntries(input);
       }
+      if (parsed.data.mode) await ctx.botAuthz.setMode(parsed.data.mode);
       const after = await ctx.botAuthz.setLists(patch);
 
       // Record what actually changed, per list, with both sides. "Who let this
@@ -198,7 +239,14 @@ export function registerBotAuthzRoutes(app: FastifyInstance, ctx: AppContext): v
         await ctx.audit.record(actor(req), "discord.authz.update", "discord-bot", changes);
       }
 
-      return viewOf(after, true);
+      const mode = await ctx.botAuthz.getMode();
+      if (parsed.data.mode && parsed.data.mode !== beforeMode) {
+        await ctx.audit.record(actor(req), "discord.authz.mode", "discord-bot", {
+          from: beforeMode,
+          to: parsed.data.mode,
+        });
+      }
+      return viewOf(after, true, mode, mode === "dashboard" ? await ctx.botAuthz.linkedDiscordIds() : []);
     });
 
     /**
@@ -210,7 +258,7 @@ export function registerBotAuthzRoutes(app: FastifyInstance, ctx: AppContext): v
     scope.delete("/api/v1/admin/discord/authz", async (req) => {
       await ctx.botAuthz.clear();
       await ctx.audit.record(actor(req), "discord.authz.reset", "discord-bot");
-      return viewOf(await ctx.botAuthz.get(), false);
+      return viewOf(await ctx.botAuthz.get(), false, await ctx.botAuthz.getMode());
     });
   });
 }

@@ -14,7 +14,7 @@ import {
   normaliseNamespace,
   parsePairs,
 } from "../../store/trackedManga.js";
-import { sessionAuthenticator } from "../session.js";
+import { sessionAuthenticator, impersonationResolver} from "../session.js";
 import {
   Manifest,
   ManifestScheduleEntry,
@@ -219,6 +219,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         adminToken: ctx.config.adminToken,
         session: sessionAuthenticator(ctx),
         apiTokens: ctx.apiTokens,
+        impersonation: impersonationResolver(ctx),
       }),
     );
     scope.addHook("preHandler", async (req, reply) => {

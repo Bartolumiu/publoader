@@ -107,6 +107,22 @@ export function hasScope(principal: Principal, required: Scope): boolean {
   return false;
 }
 
+/**
+ * The scopes *both* sides grant, resolved to concrete names.
+ *
+ * Used when one credential acts on another principal's behalf: the answer must
+ * be what they have in common, so acting-as can only ever narrow authority and
+ * never widen it. Resolved concretely rather than by keeping both wildcard
+ * lists, because `*` on one side and `runs:read` on the other must produce
+ * `runs:read` — carrying the wildcard forward would silently hand over
+ * everything the *other* side held.
+ */
+export function intersectScopes(a: readonly string[], b: readonly string[]): Scope[] {
+  const left = { scopes: a } as Principal;
+  const right = { scopes: b } as Principal;
+  return SCOPES.filter((scope) => hasScope(left, scope) && hasScope(right, scope));
+}
+
 export type Role = "OWNER" | "ADMIN" | "CONTRIBUTOR";
 
 /**

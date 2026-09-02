@@ -200,6 +200,46 @@ leaving `/status` working while the allowlists are being filled in makes the bot
 useful during setup. This is deliberate and tested
 (`test/unit/botAuthz.test.ts`).
 
+### Who may operate the bot: two models
+
+**Discord allowlist** (default, and how this has always worked). The admin-user
+and admin-role lists decide who may run a state-changing command, and everyone
+on them acts with the bot's *own* authority — identical for all of them,
+whatever their operator account says.
+
+**Operator accounts.** Anyone with an approved account on the dashboard who has
+linked a Discord login may use the bot, and each command runs with **that
+account's** permissions. A read-only account is read-only in Discord. There is
+no second list to keep in step, and removing someone on the dashboard removes
+them from the bot at the same moment.
+
+Switch between them on the dashboard's Permissions page.
+
+How the second one works: the bot sends `x-on-behalf-of-discord: <user id>`
+alongside its own token, and the control plane runs the request with
+`intersect(bot token scopes, that account's effective scopes)`.
+
+The intersection is the whole security property, and it holds both ways:
+
+- A narrow account is never widened by a broad token. A contributor cannot
+  trigger a run through a bot that could trigger one itself.
+- A broad account is never widened past the token. Acting as an OWNER — `*` on
+  the dashboard — yields exactly the bot token's scopes, so `BOT_API_TOKEN`
+  stays the ceiling and a compromised bot gains nothing by naming an owner.
+
+Two deliberate limits:
+
+- **An impersonated OWNER is capped at ADMIN.** `requireOwner` exists to keep
+  API tokens out of permission and account editing; letting acting-as reach it
+  would hand a bot the one thing no token may have. Those routes stay
+  dashboard-only.
+- **An unapproved or unlinked account is refused**, with a reply saying so. The
+  fix is to link an account or have an owner approve it — never to widen a
+  token.
+
+Scopes are resolved per request, so revoking someone on the dashboard takes
+effect on their next command rather than at the next deploy.
+
 ### Editing the allowlists
 
 The four lists live in the control plane, not in `.env`, so changing who may

@@ -30,6 +30,24 @@ export type AuthzListName = (typeof AUTHZ_LISTS)[number];
 
 export type AuthzEntries = Record<AuthzListName, AuthzEntry[]>;
 
+/**
+ * How the bot decides who may run a state-changing command.
+ *
+ * `allowlist` is the original model: a list of Discord ids and roles kept here,
+ * and every allowed person wields the bot token's full authority.
+ *
+ * `dashboard` derives both halves from the operator accounts instead. Anyone
+ * with an approved account and a linked Discord login may use the bot, and each
+ * command runs with *their* scopes — so a read-only account stays read-only in
+ * Discord. It removes the second list to maintain, and makes revoking someone
+ * on the dashboard revoke them in Discord at the same moment.
+ */
+export const AUTHZ_MODES = ["allowlist", "dashboard"] as const;
+export type AuthzMode = (typeof AUTHZ_MODES)[number];
+export const DEFAULT_AUTHZ_MODE: AuthzMode = "allowlist";
+
+const MODE_KEY = "discord.authz.mode";
+
 /** Settings keys. Namespaced so a future second bot can get its own prefix. */
 const KEY: Record<AuthzListName, string> = {
   guilds: "discord.authz.guilds",
@@ -124,6 +142,22 @@ export class BotAuthzStore {
     return out;
   }
 
+  async getMode(): Promise<AuthzMode> {
+    const row = await this.prisma.setting.findUnique({ where: { key: MODE_KEY } });
+    const value = row?.value ?? "";
+    // An unrecognised value reads as the conservative default rather than
+    // throwing: a hand-edited row must not stop the bot from starting.
+    return (AUTHZ_MODES as readonly string[]).includes(value) ? (value as AuthzMode) : DEFAULT_AUTHZ_MODE;
+  }
+
+  async setMode(mode: AuthzMode): Promise<void> {
+    await this.prisma.setting.upsert({
+      where: { key: MODE_KEY },
+      create: { key: MODE_KEY, value: mode },
+      update: { value: mode },
+    });
+  }
+
   /** Has an operator ever configured any of this? Decides env fallback. */
   async isConfigured(): Promise<boolean> {
     const count = await this.prisma.setting.count({
@@ -167,7 +201,22 @@ export class BotAuthzStore {
    * deployed with.
    */
   async clear(): Promise<void> {
-    await this.prisma.setting.deleteMany({ where: { key: { in: Object.values(KEY) } } });
+    await this.prisma.setting.deleteMany({ where: { key: { in: [...Object.values(KEY), MODE_KEY] } } });
+  }
+
+  /**
+   * Discord ids of every approved account that has linked a Discord login.
+   *
+   * This is the admin list in `dashboard` mode: derived, so it follows account
+   * changes with no second list to keep in step. Ids only — the bot matches on
+   * them and has no business knowing who they belong to.
+   */
+  async linkedDiscordIds(): Promise<string[]> {
+    const rows = await this.prisma.adminUser.findMany({
+      where: { approved: true, discordId: { not: null } },
+      select: { discordId: true },
+    });
+    return rows.map((r) => r.discordId).filter((id): id is string => id !== null);
   }
 }
 

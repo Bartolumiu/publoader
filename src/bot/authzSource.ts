@@ -43,6 +43,12 @@ export class AuthzSource {
   private readonly refreshMs: number;
   private current: AuthzConfig;
   private currentOrigin: AuthzOrigin = "env";
+  /**
+   * Which model the control plane says is in force. `allowlist` until told
+   * otherwise, so a deployment that has never opted in keeps the old behaviour
+   * even before the first refresh lands.
+   */
+  private currentMode: "allowlist" | "dashboard" = "allowlist";
   private timer: NodeJS.Timeout | null = null;
   /** Set once a refresh has succeeded, so a first-boot failure is loud. */
   private everLoaded = false;
@@ -63,6 +69,14 @@ export class AuthzSource {
 
   get origin(): AuthzOrigin {
     return this.currentOrigin;
+  }
+
+  /**
+   * `dashboard` means each command runs with the caller's own operator
+   * permissions; `allowlist` means it runs with the bot token's.
+   */
+  get mode(): "allowlist" | "dashboard" {
+    return this.currentMode;
   }
 
   /** Have we ever successfully read the stored config? */
@@ -96,6 +110,9 @@ export class AuthzSource {
       return { changed: false, guildsChanged: false };
     }
 
+    // The mode is the control plane's answer regardless of whether any list has
+    // been stored: it decides how a command is authorized, not who is listed.
+    this.currentMode = view.mode === "dashboard" ? "dashboard" : "allowlist";
     const next = view.configured ? authzFromLists(view.effective) : this.envConfig;
     const origin: AuthzOrigin = view.configured ? "stored" : "env";
     const first = !this.everLoaded;
