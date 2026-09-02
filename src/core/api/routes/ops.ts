@@ -469,17 +469,50 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
           kind: z.enum(UPLOAD_TASK_KINDS).optional(),
           state: z.enum(UPLOAD_TASK_STATES).optional(),
           limit: z.coerce.number().int().min(1).max(500).default(100),
+          /**
+           * Substring of the dedupe key. For an UPLOAD that key is
+           * `chapterId|chapterNumber|language` (uploadDedupeKey), so `||`
+           * finds the tasks queued with no chapter number and `|es-la` finds
+           * one language. Matched literally: `%` and `_` are escaped, because
+           * an operator typing a key is not writing a LIKE pattern.
+           */
+          q: z.string().min(1).max(200).optional(),
+          /**
+           * `recent` (the default) is the dashboard's view: newest activity
+           * first, one page of it. `id` is the one you can WALK -- a stable
+           * order that does not shift while the queue drains, which "most
+           * recently updated" does on every lease.
+           */
+          order: z.enum(["recent", "id"]).default("recent"),
+          /**
+           * Page from the last id of the previous page; only meaningful with
+           * `order=id`. Keyset rather than offset because the queue is being
+           * drained while it is read, and an offset silently skips rows as
+           * earlier ones leave the state being filtered on.
+           */
+          after: z.string().uuid().optional(),
         }),
         req.query ?? {},
       );
+
+      if (query.after && query.order !== "id") {
+        throw Object.assign(new Error("`after` needs `order=id`: paging a shifting order skips rows"), {
+          statusCode: 400,
+        });
+      }
+
+      // `contains` with escaped wildcards: Prisma passes the string to LIKE.
+      const needle = query.q?.replace(/([\\%_])/g, "\\$1");
 
       const [tasks, counts] = await Promise.all([
         ctx.prisma.uploadTask.findMany({
           where: {
             ...(query.kind ? { kind: query.kind } : {}),
             ...(query.state ? { state: query.state } : {}),
+            ...(needle ? { dedupeKey: { contains: needle } } : {}),
+            ...(query.after ? { id: { gt: query.after } } : {}),
           },
-          orderBy: { updatedAt: "desc" },
+          orderBy: query.order === "id" ? { id: "asc" } : { updatedAt: "desc" },
           take: query.limit,
           select: {
             id: true,
