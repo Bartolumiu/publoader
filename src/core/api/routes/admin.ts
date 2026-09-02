@@ -1608,7 +1608,15 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         // The queue row is what makes this more than a tracked-map write: it
         // carries the state the untracked pipeline reads, and a row left NEW
         // behind a mapping is a series that gets offered for creation again.
-        const row = resolution.match?.untracked ?? null;
+        //
+        // Only the row for the series actually being mapped, though. An
+        // override says the resolver got it wrong, and the row it found belongs
+        // to whatever it resolved: closing that one would mark some OTHER
+        // series TRACKED against a title nothing mapped it to, and leave it out
+        // of the queue for good.
+        const resolvedIdentity =
+          resolution.match?.extension === extension && resolution.match?.mangaId === mangaId;
+        const row = resolvedIdentity ? (resolution.match?.untracked ?? null) : null;
         const closable = row !== null && row.state !== "CREATING";
         const mayCloseRow = hasScope(req.principal!, "untracked:write");
 
@@ -2035,6 +2043,59 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       if (res.count !== 1) return reply.code(409).send({ error: "not skippable" });
       await ctx.audit.record(actor(req), "untracked.skip", id);
       return { ok: true };
+    });
+
+    /**
+     * Skip a batch of them.
+     *
+     * The single-row route is what the queue offered, and the queue is
+     * thousands of rows deep: parking a publisher's back catalogue meant one
+     * request per series, each with its own confirmation, and a 409 in the
+     * middle left the operator to work out which half had gone through.
+     *
+     * Reports rather than refuses. A batch of fifty picked off a listing will
+     * routinely contain a row somebody else already skipped, or one that has
+     * since been mapped, and failing the whole batch over it would make the
+     * button useless exactly when it is worth having; so the answer names what
+     * it left alone and why, and the skippable rows are skipped either way.
+     */
+    scope.post("/api/v1/admin/untracked/skip", { preHandler: requireScope("untracked:write") }, async (req) => {
+      const body = parseOrThrow(
+        z.object({ ids: z.array(z.string().uuid()).min(1).max(500) }).strict(),
+        req.body ?? {},
+      );
+
+      const rows = await ctx.prisma.untrackedManga.findMany({
+        where: { id: { in: body.ids } },
+        select: { id: true, state: true, mangaName: true },
+      });
+      const found = new Set(rows.map((row) => row.id));
+      const skippable = rows.filter((row) => row.state === "NEW" || row.state === "FAILED");
+
+      const skipped = skippable.length
+        ? await ctx.prisma.untrackedManga.updateMany({
+            where: { id: { in: skippable.map((row) => row.id) }, state: { in: ["NEW", "FAILED"] } },
+            data: { state: "SKIPPED" },
+          })
+        : { count: 0 };
+
+      if (skipped.count > 0) {
+        await ctx.audit.record(actor(req), "untracked.skip", `${skipped.count} series`, {
+          ids: skippable.map((row) => row.id),
+        });
+      }
+
+      return {
+        ok: true,
+        skipped: skipped.count,
+        // Both kinds of "not this one", kept apart: a row in the wrong state is
+        // a fact about the queue, an id that matched nothing is a fact about
+        // the request, and rolling them into one number hides which happened.
+        unchanged: rows
+          .filter((row) => row.state !== "NEW" && row.state !== "FAILED")
+          .map((row) => ({ id: row.id, mangaName: row.mangaName, state: row.state })),
+        missing: body.ids.filter((id) => !found.has(id)),
+      };
     });
 
     /**

@@ -9009,6 +9009,28 @@ function publishVerdict(verdict, label, onPublish) {
 
 // -------------------------------------------------- one extension, in full
 
+/**
+ * A curation count that is also the way into the rows it counts.
+ *
+ * These numbers are most of the reason to open an extension's overview, and
+ * every one of them was a dead end: reading "412 untracked NEW" and then having
+ * to find the queue, pick the extension out of a select and pick the state is
+ * three steps to arrive at the list the number was already describing.
+ *
+ * Falls back to a plain tile where the principal cannot open the destination,
+ * rather than offering a link that answers with "this account cannot open
+ * that". The count itself is readable with `extensions:read`, which is what got
+ * this page drawn.
+ */
+function curationTile({ count, label, scope, href, title, onclick }) {
+  const value = el("div", { class: "n", text: String(count ?? 0) });
+  const key = el("div", { class: "k", text: label });
+  if (!can(scope)) {
+    return el("div", { class: "stat", title: `Opening this needs the "${scope}" scope` }, value, key);
+  }
+  return el("a", { class: "stat linked", href, title, ...(onclick ? { onclick } : {}) }, value, key);
+}
+
 function extensionDetail(name, tab) {
   const encoded = encodeURIComponent(name);
   if (tab === "series-map") return seriesMapPanel(name);
@@ -9055,16 +9077,32 @@ function extensionDetail(name, tab) {
             el(
               "div",
               { class: "grid tight" },
-              [
-                ["tracked series", String(data.tracked)],
-                ...Object.entries(data.untracked || {}).map(([k, v]) => [`untracked ${k}`, String(v)]),
-              ].map(([key, value]) =>
-                el(
-                  "div",
-                  { class: "stat" },
-                  el("div", { class: "n", text: value }),
-                  el("div", { class: "k", text: key }),
-                ),
+              curationTile({
+                count: data.tracked,
+                label: "tracked series",
+                scope: "tracked:read",
+                href: routeTo("extensions", name, "series-map"),
+                title: `Open ${name}'s series map`,
+              }),
+              Object.entries(data.untracked || {}).map(([state, count]) =>
+                curationTile({
+                  count,
+                  label: `untracked ${state}`,
+                  scope: "untracked:read",
+                  href: routeTo("untracked", null, null),
+                  title: `Open the ${count} ${state} row(s) ${name} has in the untracked queue`,
+                  // The hash names a section, not a filter, so the filter is set
+                  // on the way through. A middle-click therefore lands on the
+                  // unfiltered queue: fewer rows than asked for would be a lie,
+                  // more of them is merely further to scroll.
+                  onclick: () =>
+                    setFilter({
+                      untrackedExtension: name,
+                      untrackedState: state,
+                      untrackedQuery: "",
+                      untrackedCursors: [],
+                    }),
+                }),
               ),
             ),
           ),
@@ -10695,6 +10733,35 @@ function mapFromLinkCard() {
     placeholder: "https://comikey.com/comics/…",
     disabled: !writable,
   });
+  /**
+   * The extension, editable.
+   *
+   * The resolver reads it off the link's host, and a host serving two
+   * catalogues, or an extension published after the row it is resolving, is
+   * exactly when it gets it wrong — which used to leave the operator with a
+   * correct series id, a visibly wrong extension, and no field to correct it
+   * in. Free text with suggestions rather than a picker, for the same reason
+   * the catalogue box is: a name has to be typeable before its list arrives.
+   */
+  const extensionInput = el("input", {
+    id: "map-extension",
+    type: "text",
+    placeholder: "found from the link",
+    list: "map-extension-names",
+    disabled: !writable,
+  });
+  const extensionNames = el("datalist", { id: "map-extension-names" });
+  void api("/extensions")
+    .then((data) => {
+      for (const name of (data.extensions ?? []).map((e) => e.name ?? e).filter(Boolean).sort()) {
+        extensionNames.append(el("option", { value: name }));
+      }
+    })
+    .catch(() => {
+      // Suggestions only. The field is typeable without them, and losing the
+      // list must not take the card down with it.
+    });
+
   const mangaIdInput = el("input", {
     id: "map-manga-id",
     type: "text",
@@ -10721,6 +10788,9 @@ function mapFromLinkCard() {
     resolved = resolution;
     const match = resolution?.match ?? null;
     mangaIdInput.value = match?.mangaId ?? "";
+    // Seeded, not locked: both halves of the identity are the resolver's
+    // opinion, and both are correctable.
+    extensionInput.value = match?.extension ?? "";
     if (!match) {
       setChildren(
         found,
@@ -10769,22 +10839,51 @@ function mapFromLinkCard() {
     const target = mdTitleIdFrom(mdInput.value);
     if (target.error) return void toast(target.error, false);
     const mangaId = mangaIdInput.value.trim();
+    const extension = extensionInput.value.trim();
     const match = resolved?.match ?? null;
     if (!match && !mangaId) {
       return void toast("look the link up first, or type the series id yourself", false);
     }
-    if (match && !match.mangaId && !mangaId) {
-      return void toast(`${match.extension} is the extension; type the series id it uses`, false);
+    if (!extension && !match?.extension) {
+      return void toast("which extension covers that site? type its name", false);
+    }
+    if (!mangaId && !match?.mangaId) {
+      return void toast(`${extension || match.extension} is the extension; type the series id it uses`, false);
     }
 
-    // A repoint is the one write here with no visible consequence and a large
-    // invisible one, so it is confirmed against the title it currently points
-    // at rather than reported afterwards.
-    const current = match?.tracked?.mdMangaId ?? null;
-    if (current && current !== target.id) {
+    const body = {
+      url,
+      mdMangaId: target.id,
+      // Sent only where the operator changed it. An override tells the server
+      // to stop believing its own resolver, which also stops it closing the
+      // queue row that resolver found, so claiming one needlessly costs a
+      // correct row its close.
+      ...(mangaId && mangaId !== match?.mangaId ? { mangaId } : {}),
+      ...(extension && extension !== match?.extension ? { extension } : {}),
+    };
+
+    /**
+     * Ask the server what this would do before doing it.
+     *
+     * A repoint is the one write here with no visible consequence and a large
+     * invisible one — the series keeps publishing, its chapters just start
+     * landing on a different title — so it is confirmed against the title it
+     * currently points at. That used to be read off the resolution, which is an
+     * answer about the series the RESOLVER picked; the moment either half of
+     * the identity is overridden, that is a different series, and the
+     * confirmation would have been about the wrong one (or absent, which is
+     * worse). The dry run costs one request and is the only thing that knows.
+     */
+    const plan = await act(
+      "source.map.preview",
+      () => api("/source/map", { method: "POST", body: { ...body, dryRun: true } }),
+      { button },
+    );
+    if (!plan) return;
+    if (plan.outcome === "repointed") {
       const confirmed = await confirmDialog({
         title: "That series is already mapped",
-        lead: `${match.extension}/${mangaId || match.mangaId} currently points at ${current}.`,
+        lead: `${plan.extension}/${plan.mangaId} currently points at ${plan.previousMdMangaId}.`,
         points: [
           `Mapping it again repoints it to ${target.id}.`,
           "The series keeps publishing; new chapters just start landing on the other title.",
@@ -10795,11 +10894,6 @@ function mapFromLinkCard() {
       if (!confirmed) return;
     }
 
-    const body = {
-      url,
-      mdMangaId: target.id,
-      ...(mangaId && mangaId !== match?.mangaId ? { mangaId } : {}),
-    };
     const result = await act("source.map", () => api("/source/map", { method: "POST", body }), { button });
     if (!result) return;
     setChildren(
@@ -10813,6 +10907,7 @@ function mapFromLinkCard() {
       sourceInput.value = "";
       mdInput.value = "";
       mangaIdInput.value = "";
+      extensionInput.value = "";
       resolved = null;
     }
   };
@@ -10844,7 +10939,9 @@ function mapFromLinkCard() {
       }),
     ),
     found,
+    extensionNames,
     row(
+      el("span", { class: "row tight" }, el("label", { class: "inline", for: "map-extension", text: "Extension" }), extensionInput),
       el("span", { class: "row tight" }, el("label", { class: "inline", for: "map-manga-id", text: "Series id" }), mangaIdInput),
       el("span", { class: "row tight" }, el("label", { class: "inline", for: "map-md", text: "MangaDex" }), mdInput),
       gatedButton("tracked:append", {
@@ -10853,6 +10950,13 @@ function mapFromLinkCard() {
         onclick: (event) => void mapIt(event.currentTarget),
       }),
     ),
+    el("p", {
+      class: "dim small",
+      text:
+        "Both the extension and the series id are the resolver's reading of the link, and both can be " +
+        "corrected before mapping. Correcting either one leaves the untracked queue row it found alone, " +
+        "since that row describes the series it read, not the one you are mapping.",
+    }),
   );
 }
 
@@ -10871,7 +10975,7 @@ function mapFromLinkCard() {
  * per-row verdict rather than against their own reading of what they pasted.
  * "Apply" does not exist until a preview has come back.
  */
-function mapManyCard() {
+function mapManyCard({ seed = "", heading = "Map many from links", onDone } = {}) {
   const writable = can("tracked:append");
 
   const text = el("textarea", {
@@ -10879,6 +10983,10 @@ function mapManyCard() {
     spellcheck: "false",
     rows: "6",
     disabled: !writable,
+    // textContent, which is what a textarea's initial value actually is. The
+    // seed is the links of rows ticked somewhere else, so the operator only has
+    // to supply the half that needs a person: the MangaDex title for each.
+    ...(seed ? { text: seed } : {}),
     placeholder:
       "https://comikey.com/comics/a-series https://mangadex.org/title/<uuid>\n" +
       "https://mangaplus.shueisha.co.jp/titles/100001, <uuid>\n" +
@@ -11016,11 +11124,12 @@ function mapManyCard() {
         }),
       );
       text.value = "";
+      onDone?.(applied);
     });
   };
 
   return card(
-    "Map many from links",
+    heading,
     el("p", {
       class: "dim small",
       text:
@@ -11512,6 +11621,19 @@ VIEWS.untracked = (route) => {
 
   const walked = () => store.filters.untrackedCursors ?? [];
 
+  /**
+   * The ticked rows, whole, by id.
+   *
+   * The whole row rather than the id: every bulk action here is refused for
+   * some states and allowed for others, and a bar that cannot see the states it
+   * holds can only offer buttons that fail. Kept across pages and across filter
+   * changes, because working a queue this size means picking rows off several
+   * pages of one filter before acting on them.
+   */
+  const selected = new Map();
+  /** The last bulk outcome, in words. Too much to say in a toast. */
+  const bulkNote = el("div", { class: "dim small" });
+
   const queue = new Resource("untracked", () => {
     const params = new URLSearchParams({ state: store.filters.untrackedState, limit: "50" });
     const q = store.filters.untrackedQuery.trim();
@@ -11652,9 +11774,23 @@ VIEWS.untracked = (route) => {
           el(
             "div",
             {},
+            untrackedBulkBar(selected, data.untracked, queue, bulkNote),
+            bulkNote,
             table(
-            ["Series", "Extension", "Lang", "State", "Attempts", "Result", ""],
+            ["", "Series", "Extension", "Lang", "State", "Attempts", "Result", ""],
             data.untracked.map((item) => [
+              el("input", {
+                type: "checkbox",
+                checked: selected.has(item.id),
+                "aria-label": `Select ${item.mangaName}`,
+                onchange: (event) => {
+                  if (event.target.checked) selected.set(item.id, item);
+                  else selected.delete(item.id);
+                  // Redraws from what is already in hand; the bar counts the
+                  // selection and the states in it, so it has to see this.
+                  queue.emit();
+                },
+              }),
               el(
                 "div",
                 {},
@@ -11674,6 +11810,19 @@ VIEWS.untracked = (route) => {
               item.mdMangaId ? mdTitleLink(item.mdMangaId, "on MangaDex") : truncate(item.lastError, 100),
               [
                 routeLink(routeTo("untracked", item.id, null), "Open", { class: "button-link inline" }),
+                // Beside Approve, not behind Open. Approving creates a second
+                // MangaDex title for a series that usually already has one, and
+                // an answer that takes one click will beat an answer that takes
+                // a page load every time.
+                gatedButton("untracked:write", {
+                  text: "Map…",
+                  disabled: item.state === "TRACKED" && Boolean(item.mdMangaId),
+                  title:
+                    item.state === "TRACKED" && item.mdMangaId
+                      ? "Already mapped; repoint it in the series map instead"
+                      : "Map it onto a MangaDex title that already exists",
+                  onclick: () => untrackedMapDialog(item, queue),
+                }),
                 untrackedApproveButton(item, queue),
                 gatedButton("untracked:write", {
                   text: "Skip",
@@ -11692,7 +11841,7 @@ VIEWS.untracked = (route) => {
               // Ordered by the server: this is fifty rows of a queue that runs
               // to thousands, and the operator sorting it is looking for one.
               sort: {
-                keys: ["series", "extension", "language", "state", "attempts", "result", null],
+                keys: [null, "series", "extension", "language", "state", "attempts", "result", null],
                 value: store.filters.untrackedSort,
                 onSort: (column, dir) => {
                   setFilter({ untrackedSort: { column, dir } });
@@ -11703,7 +11852,7 @@ VIEWS.untracked = (route) => {
           ),
             untrackedPager(data, walked(), page),
           ),
-        { reserve: 300, skeleton: () => skeletonTable(7, 7) },
+        { reserve: 300, skeleton: () => skeletonTable(8, 7) },
       ),
     ),
   );
@@ -11748,6 +11897,384 @@ function untrackedPager(data, trail, go) {
       disabled: !data.nextCursor,
       onclick: () => go([...trail, data.nextCursor]),
     }),
+  );
+}
+
+/**
+ * Act on many queue rows at once.
+ *
+ * WHY THIS EXISTS. The queue is thousands of rows deep and arrives in
+ * publisher-sized lumps: one run adds a catalogue, and the answer for the whole
+ * catalogue is usually the same answer. Everything here was a per-row button,
+ * so parking one publisher's back catalogue was several hundred clicks, each
+ * with its own confirmation — which is not a slow way of doing it, it is a
+ * reason it does not get done, and an untriaged queue is what the auto-map and
+ * the duplicate titles both come out of.
+ *
+ * The selection is deliberately not "everything matching the filter". Approve
+ * publishes real titles on MangaDex, and a filter that quietly widens between
+ * the preview and the press is not something to hand that power to; ticked rows
+ * are a list the operator can see the end of.
+ */
+function untrackedBulkBar(selected, rows, queue, note) {
+  const writable = can("untracked:write");
+  const count = selected.size;
+  const pageTicked = rows.length > 0 && rows.every((row) => selected.has(row.id));
+  const inState = (...states) => [...selected.values()].filter((row) => states.includes(row.state));
+  const say = (...children) => setChildren(note, ...children);
+
+  /** Rows that have gone; the queue reload will not bring them back ticked. */
+  const forget = (gone) => {
+    for (const row of gone) selected.delete(row.id);
+  };
+
+  const approvable = inState("NEW", "FAILED");
+  const skippable = inState("NEW", "FAILED");
+  const skipped = inState("SKIPPED");
+
+  /**
+   * Create the titles one at a time, from here.
+   *
+   * Not a batch endpoint: each approval is a write to MangaDex that takes
+   * seconds, and forty of them behind one request is a request that times out
+   * with twenty titles created and nothing said about which. One at a time is
+   * also the rate MangaDex is happier with, and it means a failure halfway
+   * through is a report rather than a mystery.
+   */
+  const approveMany = async (button) => {
+    const targets = approvable;
+    if (!targets.length) {
+      return void toast("none of the ticked rows can be approved; only NEW and FAILED can", false);
+    }
+    const confirmed = await confirmDialog({
+      title: `Create ${targets.length} MangaDex title(s)`,
+      lead: `This publishes ${targets.length} real, public title(s) on MangaDex, one after another.`,
+      points: [
+        `${targets.length} of the ${count} ticked row(s) are NEW or FAILED; the rest are left alone.`,
+        "The names are the ones the scrapers guessed. Open a row and correct it first if it looks wrong — a bad name has to be fixed on MangaDex afterwards.",
+        "Most series here are already on MangaDex under a name that did not match; Map… finds those without creating anything.",
+        "It cannot be undone from here, and what has already been created stays created if you stop it.",
+      ],
+      confirmLabel: `Create ${targets.length} title(s)`,
+    });
+    if (!confirmed) return;
+
+    button.dataset.pending = "true";
+    button.disabled = true;
+    const failures = [];
+    let created = 0;
+    try {
+      for (const [index, row] of targets.entries()) {
+        say(`Creating ${index + 1} of ${targets.length}: ${truncate(row.mangaName, 60)}…`);
+        try {
+          await api(`/untracked/${row.id}/approve`, { method: "POST", body: {} });
+          created += 1;
+          selected.delete(row.id);
+        } catch (err) {
+          // A signed-out session fails every remaining row the same way; the
+          // login prompt is already up, so stop rather than write it 39 times.
+          if (err instanceof ApiError && err.status === 401) break;
+          failures.push({ row, message: err.message });
+        }
+      }
+    } finally {
+      delete button.dataset.pending;
+      button.disabled = false;
+      void queue.load({ force: true });
+      void summary.load({ force: true });
+    }
+
+    say(
+      el("span", { text: `Created ${created} of ${targets.length}. ` }),
+      failures.length ? el("span", { class: "error", text: `${failures.length} failed:` }) : null,
+      failures.map((failure) =>
+        el("div", { class: "small", text: `${truncate(failure.row.mangaName, 50)} — ${failure.message}` }),
+      ),
+    );
+  };
+
+  const skipMany = async (button) => {
+    const targets = skippable;
+    if (!targets.length) {
+      return void toast("none of the ticked rows can be skipped; only NEW and FAILED can", false);
+    }
+    const confirmed = await confirmDialog({
+      title: `Skip ${targets.length} series`,
+      lead: "They leave the queue and stop being offered for creation.",
+      points: [
+        "Nothing on MangaDex changes; this is a note to ourselves about what not to create.",
+        "Reversible: they show up under the SKIPPED filter, and Unskip puts them back.",
+      ],
+      confirmLabel: `Skip ${targets.length}`,
+      danger: false,
+    });
+    if (!confirmed) return;
+    const report = await act(
+      "untracked.skip",
+      () => api("/untracked/skip", { method: "POST", body: { ids: targets.map((row) => row.id) } }),
+      { button, refresh: [queue] },
+    );
+    if (!report) return;
+    forget(targets);
+    say(
+      `Skipped ${report.skipped}.` +
+        (report.unchanged?.length
+          ? ` ${report.unchanged.length} left alone; they are past NEW or FAILED already.`
+          : ""),
+    );
+  };
+
+  /**
+   * Put skipped rows back, against the server's own dry run.
+   *
+   * The dry run is not decoration here: a skipped row goes stale the moment
+   * somebody maps that series by hand, and requeueing one of those would have a
+   * SECOND MangaDex title created for a series that already has one. The server
+   * knows which of the ticked rows those are; nothing in the browser does.
+   */
+  const unskipMany = async (button) => {
+    const targets = skipped;
+    if (!targets.length) return void toast("tick some SKIPPED rows to put back", false);
+    const ids = targets.map((row) => row.id);
+    const dry = await act(
+      "untracked.unskip.preview",
+      () => api("/untracked/unskip", { method: "POST", body: { ids, dryRun: true } }),
+      { button },
+    );
+    if (!dry) return;
+    if (!dry.requeued) {
+      return void say(
+        `None of those ${dry.matched} row(s) can go back: ` +
+          `${dry.alreadyTracked?.length ?? 0} are for series that are already mapped.`,
+      );
+    }
+    const confirmed = await confirmDialog({
+      title: `Put ${dry.requeued} series back in the queue`,
+      lead: "They go back to NEW, which makes them candidates for title creation again.",
+      points: [
+        `${dry.matched} of the ticked row(s) are skipped; ${dry.requeued} of those can be requeued.`,
+        dry.alreadyTracked?.length
+          ? `${dry.alreadyTracked.length} are left alone: the series is already mapped, and requeueing one is how a second title gets created for it.`
+          : "None of them is for a series that is already mapped.",
+        "Their attempt counts are reset, so a row that failed gets a fresh budget.",
+      ],
+      confirmLabel: `Requeue ${dry.requeued}`,
+      danger: false,
+    });
+    if (!confirmed) return;
+    const done = await act(
+      "untracked.unskip",
+      () => api("/untracked/unskip", { method: "POST", body: { ids, dryRun: false } }),
+      { button, refresh: [queue] },
+    );
+    if (!done) return;
+    forget(targets);
+    say(`Put ${done.updated ?? done.requeued} series back in the queue as NEW.`);
+  };
+
+  /**
+   * Hand the ticked rows to the paste box, already filled in.
+   *
+   * The links are the half of that paste nobody should be retyping: they are on
+   * the screen already. What is left is the MangaDex link for each, which is
+   * the part that needs a person looking at a catalogue.
+   */
+  const mapMany = () => {
+    if (!count) return void toast("tick some rows first", false);
+    const seed = [...selected.values()]
+      .map((row) => `# ${truncate(row.mangaName, 70)}\n${row.mangaUrl} `)
+      .join("\n");
+    openModal(
+      `Map ${count} series from links`,
+      mapManyCard({ seed, heading: null, onDone: () => void queue.load({ force: true }) }),
+    );
+  };
+
+  const bulk = (label, fn, targets, why, danger) =>
+    gatedButton("untracked:write", {
+      class: danger ? "danger" : null,
+      text: label,
+      disabled: targets === 0,
+      title: targets === 0 ? why : `${label} ${targets} row(s)`,
+      onclick: (event) => void fn(event.currentTarget),
+    });
+
+  return el(
+    "div",
+    { class: "row bulk-bar" },
+    el("span", {
+      class: count ? null : "dim",
+      text: count ? `${count} selected` : "Tick series to act on several at once",
+    }),
+    bulk("Approve…", approveMany, approvable.length, "None of the ticked rows is NEW or FAILED", true),
+    gatedButton("tracked:append", {
+      text: "Map…",
+      disabled: count === 0,
+      title: count === 0 ? "Tick the series to map" : `Map ${count} series from their links`,
+      onclick: mapMany,
+    }),
+    bulk("Skip", skipMany, skippable.length, "None of the ticked rows is NEW or FAILED", false),
+    bulk("Unskip", unskipMany, skipped.length, "None of the ticked rows is SKIPPED", false),
+    el("span", { class: "grow" }),
+    count
+      ? el("button", {
+          type: "button",
+          text: "Clear selection",
+          onclick: () => {
+            selected.clear();
+            setChildren(note);
+            queue.emit();
+          },
+        })
+      : null,
+    el("button", {
+      type: "button",
+      // "Loaded", not "on this page": the table pages the batch again under
+      // this bar, so the fifty rows in hand are not the twenty on the screen.
+      text: pageTicked ? "Deselect these" : `Select all ${rows.length} loaded`,
+      disabled: rows.length === 0 || !writable,
+      onclick: () => {
+        if (pageTicked) for (const row of rows) selected.delete(row.id);
+        else for (const row of rows) selected.set(row.id, row);
+        queue.emit();
+      },
+    }),
+  );
+}
+
+/**
+ * Map one queue row onto a MangaDex title, from the listing.
+ *
+ * The same act as the detail page's card, minus the page load: an operator
+ * working a publisher's catalogue with MangaDex open in another tab has the
+ * link already, and making them open a row to use it is what makes Approve —
+ * the button that creates a duplicate — the path of least resistance.
+ *
+ * It still will not map on a bare id alone. The title is read back and shown
+ * first, with its alt titles, because the failure this whole path exists to
+ * prevent is chapters landing on somebody else's series, and a pasted uuid is
+ * exactly as easy to get wrong as a name.
+ */
+function untrackedMapDialog(item, queue) {
+  const input = el("input", {
+    id: "untracked-map-md",
+    type: "text",
+    placeholder: "mangadex.org/title/… link, or the bare id",
+  });
+  const found = el("div", { class: "md-candidates" });
+  const status = el("div", { class: "dim small" });
+  /** The title read back from MangaDex. The Map button acts on this, only. */
+  let candidate = null;
+  const mapButton = gatedButton("untracked:write", {
+    class: "primary",
+    text: "Map it",
+    disabled: true,
+    onclick: (event) => void mapIt(event.currentTarget),
+  });
+
+  const lookUp = async (button) => {
+    candidate = null;
+    mapButton.disabled = true;
+    found.replaceChildren();
+    const parsed = mdTitleIdFrom(input.value);
+    if (parsed.error) {
+      status.textContent = parsed.error;
+      return;
+    }
+    await act(
+      "untracked.lookup",
+      async () => {
+        const body = await api(
+          `/mangadex/title/${encodeURIComponent(parsed.id)}` +
+            `?reportedName=${encodeURIComponent(item.mangaName)}`,
+        );
+        if (!body.title) {
+          status.textContent = `MangaDex has no title ${parsed.id}. It may be deleted, merged, or a typo.`;
+          return;
+        }
+        candidate = body.title;
+        mapButton.disabled = !can("untracked:write");
+        status.textContent = "Check this is the same series. Nothing is written until you map it.";
+        setChildren(
+          found,
+          el(
+            "div",
+            { class: "md-candidate" },
+            el(
+              "div",
+              {},
+              el("div", {}, el("a", {
+                href: candidate.url,
+                target: "_blank",
+                rel: "noreferrer noopener",
+                text: candidate.title,
+              }), candidate.likely ? el("span", { class: "chip", text: "likely match" }) : null),
+              candidate.altTitles?.length
+                ? el("div", { class: "dim small", text: truncate(candidate.altTitles.join(" · "), 160) })
+                : null,
+              el("code", { class: "dim small", text: candidate.id }),
+            ),
+          ),
+        );
+      },
+      { button },
+    );
+  };
+
+  const mapIt = async (button) => {
+    if (!candidate) return void toast("look the title up first", false);
+    const confirmed = await confirmDialog({
+      title: `Map “${item.mangaName}” to an existing MangaDex title`,
+      lead: "This adds the series to the tracked map; uploads for it start going to this title.",
+      points: [
+        `Source: ${item.extension} · ${item.mangaId}`,
+        `MangaDex title: ${candidate.title}`,
+        candidate.url,
+        "No new title is created. Check this is the same series — a wrong mapping uploads chapters onto someone else's title.",
+      ],
+      confirmLabel: "Map to this title",
+    });
+    if (!confirmed) return;
+    const ok = await act(
+      "untracked.map",
+      () => api(`/untracked/${item.id}/map`, { method: "POST", body: { mdMangaId: candidate.id } }),
+      { button, refresh: [queue] },
+    );
+    if (ok) closeModal();
+  };
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    void lookUp(null);
+  });
+
+  openModal(
+    `Map ${truncate(item.mangaName, 50)}`,
+    el(
+      "div",
+      {},
+      el("p", { class: "dim small" }, "Source: ", el("code", { text: `${item.extension} · ${item.mangaId}` })),
+      el("p", { class: "dim small" }, el("a", {
+        href: item.mangaUrl,
+        target: "_blank",
+        rel: "noreferrer noopener",
+        text: truncate(item.mangaUrl, 80),
+      })),
+      el("label", { for: "untracked-map-md", text: "MangaDex link or id" }),
+      input,
+      row(
+        el("button", {
+          type: "button",
+          text: "Look it up",
+          onclick: (event) => void lookUp(event.currentTarget),
+        }),
+        routeLink(routeTo("untracked", item.id, null), "Search by name instead", { class: "button-link inline" }),
+      ),
+      status,
+      found,
+      el("div", { class: "row end" }, el("button", { type: "button", text: "Cancel", onclick: closeModal }), mapButton),
+    ),
   );
 }
 
