@@ -40,13 +40,17 @@ import {
   type WorkerAction,
 } from "./apiClient.js";
 import type { Sensitivity } from "./authz.js";
-import type { BotAuthzView } from "./apiClient.js";
+import type { BotAuthzView, Scope } from "./apiClient.js";
+import { hasScope } from "../core/api/scopes.js";
 import type { AuthzEntry, AuthzListName } from "../core/store/botAuthz.js";
 import { DEFAULT_COOLDOWN_DAYS, MAX_COOLDOWN_DAYS, NAMESPACE_RE } from "../core/store/trackedManga.js";
 import { mdTitleUrl, parseMdTitleId } from "../core/md/titleId.js";
 
 /** Discord's hard cap is 2000 characters; leave room for our own framing. */
-const DISCORD_BODY_LIMIT = 1900;
+// An embed description holds 4096 characters where a plain message holds 2000,
+// and every reply is an embed now; the headroom is what lets a listing show the
+// rows an operator actually asked for instead of a third of them.
+const DISCORD_BODY_LIMIT = 3900;
 
 /** Reading command arguments, without depending on discord.js in handlers. */
 export interface OptionReader {
@@ -64,6 +68,38 @@ export interface BotReply {
    * enrollment token is the only thing that uses this.
    */
   dm?: string;
+  /**
+   * Presentation, applied by the transport rather than by each handler.
+   *
+   * A handler returns what it wants to say and, at most, how it went; turning
+   * that into an embed is one decision made in one place. Forty-seven commands
+   * each building their own would drift within a week, and none of them have
+   * any reason to know what colour a warning is.
+   */
+  title?: string;
+  tone?: ReplyTone;
+  /** Rendered as embed fields, above the text. Keep values short. */
+  fields?: { name: string; value: string; inline?: boolean }[];
+  /** Small print under the embed: counts, truncation notes, "as of" times. */
+  footer?: string;
+}
+
+/** What happened, which is all a handler should have to say about colour. */
+export type ReplyTone = "ok" | "info" | "warn" | "error" | "denied";
+
+/**
+ * A `can()` for one caller's scope set.
+ *
+ * An unknown or empty set answers true for everything, which is the only safe
+ * default *for rendering*: this decides how much of a reply to show, never
+ * whether the call is allowed — the API decides that, and it does so whether or
+ * not the bot managed to look the caller up. Failing closed here would blank
+ * out working commands the moment scope introspection hiccuped.
+ */
+export function scopeChecker(scopes: readonly string[] | undefined): (scope: Scope) => boolean {
+  if (!scopes || scopes.length === 0) return () => true;
+  const principal = { kind: "api-token", name: "discord-caller", scopes } as const;
+  return (scope: Scope) => hasScope(principal, scope);
 }
 
 export interface HandlerContext {
@@ -74,6 +110,18 @@ export interface HandlerContext {
   log: Logger;
   /** Stable per-invocation id, used as the run idempotency key. */
   interactionId: string;
+  /**
+   * What the person who typed the command may do, resolved per invocation.
+   *
+   * Lets a handler leave out the parts of a reply the asker cannot see rather
+   * than showing everyone everything: someone without `workers:read` gets
+   * `/status` without the fleet section instead of a refusal or a table they
+   * are not entitled to. Empty when the deployment does not scope per person,
+   * in which case `can()` answers true and nothing is trimmed.
+   */
+  scopes?: readonly string[];
+  /** `true` when the caller holds `scope`, or when scopes are unknown. */
+  can(scope: Scope): boolean;
 }
 
 /**
@@ -261,50 +309,62 @@ export class UserError extends Error {
 
 async function statusReply(ctx: HandlerContext): Promise<BotReply> {
   const stats = await ctx.api.stats(ctx.actor);
-  const parts: string[] = [];
+  const fields: NonNullable<BotReply["fields"]> = [];
 
-  parts.push(stats.paused ? "**Platform: PAUSED** :pause_button:" : "**Platform: running** :green_circle:");
-  parts.push(`**Jobs**: ${counts(stats.jobs)}`);
+  fields.push({ name: "Jobs", value: counts(stats.jobs), inline: true });
 
-  const depths = stats.uploadTasks ?? [];
-  if (depths.length === 0) {
-    parts.push("**Upload tasks**: none queued");
+  const depths = (stats.uploadTasks ?? []).filter((d) => d.count > 0);
+  fields.push({
+    name: "Upload tasks",
+    value: depths.length > 0 ? depths.map((d) => `${d.kind}/${d.state}=${d.count}`).join(" ") : "none queued",
+    inline: true,
+  });
+
+  fields.push({ name: "Workers", value: counts(stats.workers), inline: true });
+  fields.push({
+    name: "Quarantined",
+    value: stats.quarantined > 0 ? `${stats.quarantined} — see \`/quarantine\`` : "0",
+    inline: true,
+  });
+
+  // The fleet is only fetched for someone entitled to see it. Asking and
+  // catching the 403 would work, but it spends a request to learn something
+  // already known, and it puts "you cannot see this" in front of a person who
+  // did not ask about workers — a reply should be shaped to its reader, not
+  // annotated with what was withheld from them.
+  let fleetHidden = false;
+  if (ctx.can("workers:read")) {
+    try {
+      const { workers } = await ctx.api.workers(ctx.actor);
+      if (workers.length > 0) {
+        const fleet = workers
+          .slice(0, 10)
+          .map((w) => `• \`${w.name}\`: ${w.status}/${w.trust}, heartbeat ${age(w.lastHeartbeatAt)}`);
+        if (workers.length > 10) fleet.push(`…and ${workers.length - 10} more`);
+        fields.push({ name: "Fleet", value: fleet.join("\n") });
+      }
+    } catch (err) {
+      // `can()` answers optimistically when the caller's scopes could not be
+      // resolved, so the 403 is still reachable and must not take the whole
+      // status command down with it — the rest of the reply is still useful.
+      if (err instanceof AdminApiError && err.status === 403) {
+        fleetHidden = true;
+        fields.push({ name: "Fleet", value: "not shown: the bot's token lacks `workers:read`." });
+      } else {
+        throw err;
+      }
+    }
   } else {
-    const rendered = depths
-      .filter((d) => d.count > 0)
-      .map((d) => `${d.kind}/${d.state}=${d.count}`)
-      .join(" ");
-    parts.push(`**Upload tasks**: ${rendered || "none queued"}`);
+    fleetHidden = true;
   }
 
-  parts.push(`**Workers**: ${counts(stats.workers)}`);
-  parts.push(
-    stats.quarantined > 0
-      ? `**Quarantined results**: ${stats.quarantined} :warning: (see \`/quarantine\`)`
-      : "**Quarantined results**: 0",
-  );
-
-  // The legacy /status also listed workers by name with per-worker queue depth.
-  // Stats only carries counts by status, so fetch the fleet too; but a missing
-  // workers:read scope must not take the whole status command down with it.
-  try {
-    const { workers } = await ctx.api.workers(ctx.actor);
-    if (workers.length > 0) {
-      const fleet = workers
-        .slice(0, 10)
-        .map((w) => `• \`${w.name}\`: ${w.status}/${w.trust}, heartbeat ${age(w.lastHeartbeatAt)}`);
-      if (workers.length > 10) fleet.push(`…and ${workers.length - 10} more`);
-      parts.push(`**Fleet**\n${fleet.join("\n")}`);
-    }
-  } catch (err) {
-    if (err instanceof AdminApiError && err.status === 403) {
-      parts.push("**Fleet** not shown: the bot's token lacks `workers:read`.");
-    } else {
-      throw err;
-    }
-  }
-
-  return { text: lines(parts) };
+  return {
+    text: stats.paused ? "The platform is **paused**: nothing is being scheduled or dispatched." : "Running normally.",
+    title: stats.paused ? "Platform paused" : "Platform healthy",
+    tone: stats.paused ? "warn" : stats.quarantined > 0 ? "warn" : "ok",
+    fields,
+    footer: fleetHidden && !ctx.can("workers:read") ? "Some sections are hidden by your permissions." : undefined,
+  };
 }
 
 // ---- schedule options and parsing -----------------------------------------
@@ -668,7 +728,7 @@ const commands: BotCommand[] = [
     name: "status",
     description: "Platform health: pause state, job counts, upload-task depths, worker fleet.",
     sensitivity: "read",
-    ephemeral: false,
+    ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("status")
       .setDescription("Platform health: pause state, job counts, upload-task depths, worker fleet."),
@@ -681,7 +741,7 @@ const commands: BotCommand[] = [
     name: "ping",
     description: "Check that the bot can reach the core API, and how long it takes.",
     sensitivity: "read",
-    ephemeral: false,
+    ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("ping")
       .setDescription("Check that the bot can reach the core API, and how long it takes."),
@@ -698,7 +758,7 @@ const commands: BotCommand[] = [
     name: "stats",
     description: "Alias for /status, kept from the legacy bot.",
     sensitivity: "read",
-    ephemeral: false,
+    ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("stats")
       .setDescription("Alias for /status, kept from the legacy bot."),

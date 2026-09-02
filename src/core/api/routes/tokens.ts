@@ -12,6 +12,44 @@ import { SCOPE_PRESETS, SCOPES } from "../scopes.js";
  * account administration rather than with the areas a token can reach.
  */
 export function registerTokenRoutes(app: FastifyInstance, ctx: AppContext): void {
+  /**
+   * "What may *I* do?", for whoever is asking.
+   *
+   * Deliberately outside the `users:admin` block below: this grants nothing and
+   * names nobody else, so requiring the right to administer accounts in order
+   * to read your own authority would be backwards. Every caller can already
+   * discover this by trying commands until one is refused; answering directly
+   * is the same information without the wreckage.
+   *
+   * It is what lets a client tailor itself to the caller — the Discord bot uses
+   * it to leave out the parts of a reply the asker has no scope to see, rather
+   * than showing everyone everything or refusing the whole command.
+   *
+   * Under `x-on-behalf-of-discord` the scopes returned are the *intersection*
+   * already computed by the auth layer, so this answers for the person the
+   * request is being made for, not for the token carrying it.
+   */
+  app.register(async (scope) => {
+    scope.addHook(
+      "preHandler",
+      adminAuthHook({
+        adminToken: ctx.config.adminToken,
+        session: sessionAuthenticator(ctx),
+        apiTokens: ctx.apiTokens,
+        impersonation: impersonationResolver(ctx),
+      }),
+    );
+
+    scope.get("/api/v1/admin/tokens/self", async (req) => ({
+      name: req.principal?.name ?? "unknown",
+      kind: req.principal?.kind ?? "unknown",
+      role: req.adminRole ?? null,
+      scopes: req.principal?.scopes ?? [],
+      /** Set when this request is being made for a linked operator account. */
+      actingForUserId: req.adminUserId ?? null,
+    }));
+  });
+
   app.register(async (scope) => {
     scope.addHook(
       "preHandler",
