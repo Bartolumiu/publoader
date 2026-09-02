@@ -5,7 +5,6 @@ import {
   ALL_COMMANDS,
   COMMANDS_BY_NAME,
   scopeChecker,
-  RETIRED_COMMANDS,
   resolveSensitivity,
   runCommand,
   type BotCommand,
@@ -90,19 +89,30 @@ describe("command table", () => {
     }
   });
 
-  it("covers every legacy command that has no platform equivalent", () => {
-    // The list the migration doc calls retired; if one is dropped here, someone
-    // typing it gets "unknown command" instead of a pointer.
-    for (const legacy of ["logs", "kill", "restart-workers", "config", "login", "logout", "pull", "reload", "restart"]) {
-      expect(COMMANDS_BY_NAME.has(legacy)).toBe(true);
+  it("registers no legacy names, so the picker is only live commands", () => {
+    // They were pointers for muscle memory from the Python bot. Sixteen of them
+    // filled half of Discord's picker with dead entries — `restart` beside
+    // `restart-workers`, `removal` beside the live `removal-mode` — which reads
+    // as a bot registering everything twice. The migration table lives in
+    // docs/ipc-to-api-mapping.md now, where it costs no menu slot.
+    for (const legacy of ["kill", "restart-workers", "config", "login", "logout", "pull", "reload", "restart",
+      "clean", "force", "history", "load", "unload", "refresh", "shutdown", "removal"]) {
+      expect(COMMANDS_BY_NAME.has(legacy)).toBe(false);
     }
   });
 
-  it("every retired command explains what to do instead", async () => {
-    for (const retired of RETIRED_COMMANDS) {
-      const reply = await invoke(retired.name, fakeApi());
-      expect(reply.text).toContain("is retired");
-      expect(reply.text).toContain(retired.replacement);
+  it("keeps the live command that each retired name pointed at", () => {
+    // Removing the pointers must not remove what they pointed to.
+    for (const live of ["logs", "jobs", "queue", "mdauth", "removal-mode", "extensions", "run"]) {
+      expect(COMMANDS_BY_NAME.has(live)).toBe(true);
+    }
+  });
+
+  it("registers no command whose description calls it retired", () => {
+    // The stubs are gone, and nothing should reintroduce one by copying an old
+    // definition: they are indistinguishable from real commands in the picker.
+    for (const command of ALL_COMMANDS) {
+      expect(command.description).not.toContain("Retired legacy");
     }
   });
 });
@@ -1515,49 +1525,6 @@ describe("/errors", () => {
   });
 });
 
-describe("retired pointers stay accurate as endpoints land", () => {
-  it("no longer retires /logs, because the log endpoint exists now", async () => {
-    // The retirement text said "there is no log API". There is
-    // (`GET /api/v1/admin/logs`), so keeping the pointer would be a lie the
-    // bot tells whenever someone reaches for the obvious command.
-    const logs = vi.fn().mockResolvedValue({
-      logs: [
-        { createdAt: "2026-07-29T15:00:00Z", level: 50, service: "core-uploader", msg: "upload failed" },
-      ],
-      nextBefore: null,
-      covers: ["core-api", "core-uploader"],
-    });
-    const reply = await invoke("logs", fakeApi({ logs }));
-    expect(reply.text).toContain("core-uploader");
-    expect(reply.text).toContain("upload failed");
-    expect(reply.footer).toContain("core-api");
-  });
-
-  it("defaults /logs to warnings and above, not to everything", async () => {
-    // An unfiltered tail in a chat window is routine info lines with the
-    // interesting one scrolled off the top.
-    const logs = vi.fn().mockResolvedValue({ logs: [], nextBefore: null, covers: [] });
-    await invoke("logs", fakeApi({ logs }));
-    expect(logs).toHaveBeenCalledWith("discord:ardax", expect.objectContaining({ minLevel: 40 }));
-  });
-
-  it("sends /logout and /login to /mdauth clear", async () => {
-    expect((await invoke("logout", fakeApi())).text).toContain("/mdauth clear");
-    expect((await invoke("login", fakeApi())).text).toContain("/mdauth clear");
-  });
-
-  it("no longer registers queue or mdauth as retired; they are real commands", () => {
-    const retiredNames = RETIRED_COMMANDS.map((r) => r.name);
-    expect(retiredNames).not.toContain("queue");
-    expect(retiredNames).not.toContain("mdauth");
-  });
-
-  it("sends /kill to both cancel paths", async () => {
-    const reply = await invoke("kill", fakeApi());
-    expect(reply.text).toContain("/jobs cancel");
-    expect(reply.text).toContain("/queue cancel");
-  });
-});
 
 
 /**

@@ -10,8 +10,8 @@
  *
  * Command parity is tracked in docs/ipc-to-api-mapping.md. Where the platform
  * has no equivalent, the command still exists and explains
- * what to do instead (see RETIRED_COMMANDS): a bot that answers "unknown
- * command" to `/logs` teaches nobody anything.
+ * what to do instead: a refusal that names the missing scope, or the option
+ * that was needed, teaches more than a bare failure.
  */
 import {
   SlashCommandBuilder,
@@ -159,7 +159,21 @@ export interface BotCommand {
    * `destructive`: the safe direction to fail.
    */
   sensitivity: Sensitivity | Record<string, Sensitivity>;
-  /** Reply visible only to the invoker. Default for anything operational. */
+  /**
+   * Reply visible only to the invoker.
+   *
+   * The split is about who benefits from seeing it, not about secrecy — every
+   * command already runs in an allowlisted channel.
+   *
+   * **Public**: platform state and the changes to it (`status`, `ping`, `run`,
+   * `pause`, `resume`), and the two feeds a team reads together (`runs`,
+   * `errors`). A channel that watches the platform get paused is a cheap audit
+   * trail, and an operator should not have to ask whether someone already
+   * triggered the run they were about to.
+   *
+   * **Ephemeral**: everything else — credentials, one person's permissions,
+   * configuration, and the long listings that would bury the channel.
+   */
   ephemeral: boolean;
   builder: SlashCommandBuilder | SlashCommandOptionsOnlyBuilder | SlashCommandSubcommandsOnlyBuilder;
   /**
@@ -816,7 +830,7 @@ const commands: BotCommand[] = [
     name: "status",
     description: "Platform health: pause state, job counts, upload-task depths, worker fleet.",
     sensitivity: "read",
-    ephemeral: true,
+    ephemeral: false,
     builder: new SlashCommandBuilder()
       .setName("status")
       .setDescription("Platform health: pause state, job counts, upload-task depths, worker fleet."),
@@ -829,7 +843,7 @@ const commands: BotCommand[] = [
     name: "ping",
     description: "Check that the bot can reach the core API, and how long it takes.",
     sensitivity: "read",
-    ephemeral: true,
+    ephemeral: false,
     builder: new SlashCommandBuilder()
       .setName("ping")
       .setDescription("Check that the bot can reach the core API, and how long it takes."),
@@ -846,7 +860,7 @@ const commands: BotCommand[] = [
     name: "stats",
     description: "Alias for /status, kept from the legacy bot.",
     sensitivity: "read",
-    ephemeral: true,
+    ephemeral: false,
     builder: new SlashCommandBuilder()
       .setName("stats")
       .setDescription("Alias for /status, kept from the legacy bot."),
@@ -1180,7 +1194,7 @@ const commands: BotCommand[] = [
     name: "runs",
     description: "Recent runs, one run in detail, or stopping one that is stuck.",
     sensitivity: { recent: "read", show: "read", cancel: "destructive", "cancel-all": "destructive" },
-    ephemeral: true,
+    ephemeral: false,
     builder: new SlashCommandBuilder()
       .setName("runs")
       .setDescription("Recent runs, one run in detail, or stopping one that is stuck.")
@@ -1676,7 +1690,7 @@ const commands: BotCommand[] = [
     name: "errors",
     description: "Recent failures, and clearing the ones you have dealt with.",
     sensitivity: { list: "read", clear: "mutate", restore: "mutate" },
-    ephemeral: true,
+    ephemeral: false,
     builder: new SlashCommandBuilder()
       .setName("errors")
       .setDescription("Recent failures, and clearing the ones you have dealt with.")
@@ -3493,112 +3507,19 @@ const commands: BotCommand[] = [
   },
 ];
 
-// ---- retired and renamed legacy commands ----------------------------------
-
-interface RetiredCommand {
-  name: string;
-  /** Why the capability is gone, or where it moved to. */
-  replacement: string;
-}
-
 /**
- * Legacy commands that still register, so typing the muscle-memory name gets a
- * pointer instead of "unknown command". Every entry matches a row in
- * docs/ipc-to-api-mapping.md → "Retired".
+ * Every command the bot registers.
+ *
+ * The legacy names from the Python bot used to register too, each answering
+ * with a pointer to its replacement rather than "unknown command". That was
+ * worth it while people still had the muscle memory; it stopped being worth it
+ * once there were sixteen of them, because Discord's picker shows all of them
+ * and half the menu was dead entries — `restart` beside `restart-workers`,
+ * `removal` beside the live `removal-mode`, which reads as a bot registering
+ * everything twice. The migration table they pointed at is still in
+ * docs/ipc-to-api-mapping.md, where it does not cost a menu slot.
  */
-export const RETIRED_COMMANDS: RetiredCommand[] = [
-  {
-    name: "kill",
-    replacement:
-      "There is no in-memory queue to drain. Cancel work individually, `/jobs cancel id:<id>` for scrape jobs, `/queue cancel id:<id>` for uploads, or `/pause` the platform to stop new work.",
-  },
-  {
-    name: "restart-workers",
-    replacement:
-      "Upload workers are separate containers (`docker compose restart core-uploader`) and scrape workers are remote hosts: `/workers drain id:<id>`, restart the agent there, then `/workers activate id:<id>`. In-flight jobs are leased and requeue automatically.",
-  },
-  {
-    name: "config",
-    replacement:
-      "Configuration is environment- and Docker-secret-driven. Inspect it with `docker compose config` on the core host; nothing that holds a credential is readable or settable over the API, and certainly not from a chat message.",
-  },
-  {
-    name: "login",
-    replacement:
-      "There is no \"log in now\" operation. `/mdauth clear confirm:true` forgets the stored session, and the next MangaDex call authenticates from the configured credentials; same outcome, without a command that holds a password.",
-  },
-  {
-    name: "logout",
-    replacement:
-      "Use `/mdauth clear confirm:true` to forget the stored session. It does not revoke anything MangaDex-side; that is a credential rotation, see `docs/operations.md`.",
-  },
-  {
-    name: "pull",
-    replacement:
-      "Nothing overwrites a running deployment's source any more. Build bundles in CI and publish them: `publoader-admin bundle publish <dir> --source-commit <sha>`.",
-  },
-  {
-    name: "reload",
-    replacement:
-      "There is no in-process module tree to reload; extension code is fetched per job as a sha256-pinned bundle. Publish a new bundle and the next job picks it up.",
-  },
-  {
-    name: "restart",
-    replacement:
-      "A container must not rewrite and re-exec itself. Redeploy on the core host: `docker compose pull && docker compose up -d`.",
-  },
-  {
-    name: "refresh",
-    replacement:
-      "This was `pull` plus `reload`, and both are gone. Publish a new bundle instead; see `/pull` and `/reload`.",
-  },
-  {
-    name: "shutdown",
-    replacement:
-      "The bot has no Docker socket by design, so it cannot stop the platform. Use `/pause` to stop work, or `docker compose stop` on the core host.",
-  },
-  {
-    name: "load",
-    replacement: "Renamed: use `/extensions enable extension:<name>`.",
-  },
-  {
-    name: "unload",
-    replacement: "Renamed: use `/extensions disable extension:<name>`.",
-  },
-  {
-    name: "force",
-    replacement: "Folded into `/run`: use `/run extension:<name> mode:FORCE`.",
-  },
-  {
-    name: "clean",
-    replacement: "Folded into `/run`: use `/run extension:<name> mode:CLEAN confirm:true`.",
-  },
-  {
-    name: "history",
-    replacement: "Renamed: use `/runs recent` (optionally with `extension:`).",
-  },
-  {
-    name: "removal",
-    replacement: "Renamed: use `/removal-mode get` and `/removal-mode set mode:<mode>`.",
-  },
-];
-
-function retiredCommand(retired: RetiredCommand): BotCommand {
-  const description = `Retired legacy command; tells you what replaced it.`;
-  return {
-    name: retired.name,
-    description,
-    sensitivity: "read",
-    ephemeral: true,
-    builder: new SlashCommandBuilder().setName(retired.name).setDescription(description),
-    async run() {
-      return { text: `:no_entry_sign: **\`/${retired.name}\` is retired.**\n${retired.replacement}` };
-    },
-  };
-}
-
-/** Every command the bot registers, real and retired. */
-export const ALL_COMMANDS: BotCommand[] = [...commands, ...RETIRED_COMMANDS.map(retiredCommand)];
+export const ALL_COMMANDS: BotCommand[] = [...commands];
 
 export const COMMANDS_BY_NAME: ReadonlyMap<string, BotCommand> = new Map(
   ALL_COMMANDS.map((c) => [c.name, c]),
