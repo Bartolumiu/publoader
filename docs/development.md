@@ -327,8 +327,8 @@ padmin errors --cleared only  # what has been acknowledged, by whom, and why
 padmin errors clear 3f9a1c2b --note "upstream 503s, fixed in 1.4.2"
 padmin errors clear --all     # been through the list
 padmin errors restore 3f9a1c2b
-padmin dead-letter            # jobs that exhausted their attempts
-padmin quarantine             # envelopes rejected on policy grounds
+padmin dead-letter            # jobs that exhausted their attempts (cleared ones hidden)
+padmin quarantine             # envelopes rejected on policy grounds (likewise)
 padmin runs show <runId>      # the run and every one of its jobs
 padmin queues list --state DEAD_LETTER
 padmin stats

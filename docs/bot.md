@@ -379,8 +379,8 @@ DMs are closed the bot falls back to the ephemeral reply and says so.
 | `/runs show <id>` | read | `runs:read` | One run with every job, attempt count, segment and last error. |
 | `/jobs cancel <id>` | mutate | `runs:write` | Cancel one job. |
 | `/jobs retry <id>` | mutate | `runs:write` | Replay a dead-lettered job. |
-| `/dead-letter` | read | `runs:read` | Jobs that exhausted retries or hit a permanent error. |
-| `/quarantine` | read | `runs:read` | Result envelopes rejected by schema or policy validation; the signal a worker is misbehaving. |
+| `/dead-letter [show]` | read | `runs:read` | Jobs that exhausted retries or hit a permanent error. Anything cleared in `/errors clear` is hidden and counted, as it is there; `show` includes them or lists only them. |
+| `/quarantine [show]` | read | `runs:read` | Result envelopes rejected by schema or policy validation; the signal a worker is misbehaving. Cleared entries are hidden by default, as above. |
 | `/errors list [limit] [show]` | read | `runs:read` | One merged feed of everything that recently failed: dead-lettered jobs, failed upload tasks, quarantined submissions. The closest thing to the legacy `/logs`. Entries somebody has cleared are hidden by default and counted; `show` switches to including them or to only them. Each row prints the first eight characters of its id, which is what `clear` takes. |
 | `/errors clear [id] [all] [note]` | mutate | `runs:write` | Mark failures as read and dealt with so they leave the list. `id` is a full id or a leading prefix; `all: true` clears everything outstanding. Nothing is deleted; the jobs, tasks and submissions keep their state, and anything that fails again comes back on its own. `note` records why, for whoever reviews cleared entries later. |
 | `/errors restore [id] [all]` | mutate | `runs:write` | Put cleared entries back in the list: the undo, and the way to re-open something that turned out not to be fixed. |

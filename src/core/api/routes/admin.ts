@@ -24,7 +24,11 @@ import {
   type ScheduleSlot,
 } from "../../../contracts/manifest.js";
 import { MANGADEX_LANGUAGES } from "../../../contracts/languages.js";
-import { countOutstandingErrors } from "../../observability/errorFeed.js";
+import {
+  countOutstandingErrors,
+  listDeadLetterJobs,
+  listQuarantinedSubmissions,
+} from "../../observability/errorFeed.js";
 import { workerNames } from "../../store/workers.js";
 import {
   encodeSortCursor,
@@ -500,38 +504,30 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return { ok: true };
     });
 
-    scope.get("/api/v1/admin/dead-letter", { preHandler: requireScope("runs:read") }, async () => {
-      const jobs = await ctx.prisma.job.findMany({
-        where: { state: "DEAD_LETTER" },
-        orderBy: { updatedAt: "desc" },
-        take: 100,
-      });
-      return { jobs };
+    /**
+     * The dead-letter queue, hiding what an operator has already cleared.
+     *
+     * `cleared=without` (the default) is the to-do list and matches the error
+     * feed; `with` is the full queue, `only` is what has been dealt with. The
+     * rows are untouched either way — this is the feed's view filter, not a
+     * state change — and `clearedHidden` keeps the default from reading as
+     * "nothing ever failed".
+     */
+    scope.get("/api/v1/admin/dead-letter", { preHandler: requireScope("runs:read") }, async (req) => {
+      const query = parseOrThrow(
+        z.object({ cleared: z.enum(["without", "with", "only"]).default("without") }),
+        req.query ?? {},
+      );
+      return listDeadLetterJobs(ctx.prisma, { limit: 100, cleared: query.cleared });
     });
 
-    scope.get("/api/v1/admin/quarantine", { preHandler: requireScope("runs:read") }, async () => {
-      const results = await ctx.prisma.resultSubmission.findMany({
-        where: { state: "QUARANTINED" },
-        orderBy: { createdAt: "desc" },
-        take: 100,
-        select: {
-          id: true,
-          jobId: true,
-          workerId: true,
-          rejectReason: true,
-          createdAt: true,
-        },
-      });
-      const names = await workerNames(
-        ctx.prisma,
-        results.map((result) => result.workerId),
+    /** Quarantined submissions, hiding what has been cleared. See `/dead-letter`. */
+    scope.get("/api/v1/admin/quarantine", { preHandler: requireScope("runs:read") }, async (req) => {
+      const query = parseOrThrow(
+        z.object({ cleared: z.enum(["without", "with", "only"]).default("without") }),
+        req.query ?? {},
       );
-      return {
-        quarantined: results.map((result) => ({
-          ...result,
-          workerName: result.workerId ? (names.get(result.workerId) ?? null) : null,
-        })),
-      };
+      return listQuarantinedSubmissions(ctx.prisma, { limit: 100, cleared: query.cleared });
     });
 
     // ---- pause / resume ----

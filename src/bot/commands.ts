@@ -1356,24 +1356,47 @@ const commands: BotCommand[] = [
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("dead-letter")
-      .setDescription("Jobs that exhausted retries or hit a permanent error."),
+      .setDescription("Jobs that exhausted retries or hit a permanent error.")
+      .addStringOption((o) =>
+        o
+          .setName("show")
+          .setDescription("Which entries to list (default: outstanding only).")
+          .addChoices(
+            { name: "outstanding only", value: "without" },
+            { name: "outstanding and cleared", value: "with" },
+            { name: "cleared only", value: "only" },
+          ),
+      ),
     async run(ctx) {
-      const { jobs } = await ctx.api.deadLetter(ctx.actor);
-      if (jobs.length === 0) return { text: ":green_circle: Dead-letter queue is empty." };
+      // Cleared jobs are hidden by default, exactly as in `/errors list`: the
+      // two commands list the same failures and must agree on what is settled.
+      const show = ctx.options.string("show");
+      const cleared: ErrorClearedFilter = show === "with" || show === "only" ? show : "without";
+      const { jobs, clearedHidden } = await ctx.api.deadLetter(ctx.actor, cleared);
+      if (jobs.length === 0) {
+        if (cleared === "only") return { text: ":person_shrugging: No dead-lettered job has been cleared." };
+        return {
+          text:
+            clearedHidden > 0
+              ? `:green_circle: Nothing outstanding. ${clearedHidden} cleared job(s) hidden; \`/dead-letter show:cleared only\` to review.`
+              : ":green_circle: Dead-letter queue is empty.",
+        };
+      }
       const rendered = jobs
         .slice(0, 15)
         .map(
           (j) =>
             `• \`${j.id.slice(0, 8)}\` ${j.extension ?? "?"} attempt ${j.attempt} ${shortTime(j.updatedAt)}` +
+            (j.cleared ? ` _(cleared by ${j.cleared.by})_` : "") +
             (j.lastError ? `\n   \`${j.lastError.slice(0, 160)}\`` : ""),
         );
       if (jobs.length > 15) rendered.push(`…and ${jobs.length - 15} more`);
-      return {
-        text: lines([
-          `**${jobs.length} dead-lettered job(s)**: replay one with \`/jobs retry id:<id>\``,
-          ...rendered,
-        ]),
-      };
+      const heading =
+        cleared === "only"
+          ? `**${jobs.length} cleared dead-lettered job(s)**`
+          : `**${jobs.length} dead-lettered job(s)**: replay one with \`/jobs retry id:<id>\`` +
+            (clearedHidden > 0 && cleared === "without" ? ` · ${clearedHidden} cleared and hidden` : "");
+      return { text: lines([heading, ...rendered]) };
     },
   },
   {
@@ -1383,24 +1406,45 @@ const commands: BotCommand[] = [
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("quarantine")
-      .setDescription("Result envelopes rejected by schema or policy validation."),
+      .setDescription("Result envelopes rejected by schema or policy validation.")
+      .addStringOption((o) =>
+        o
+          .setName("show")
+          .setDescription("Which entries to list (default: outstanding only).")
+          .addChoices(
+            { name: "outstanding only", value: "without" },
+            { name: "outstanding and cleared", value: "with" },
+            { name: "cleared only", value: "only" },
+          ),
+      ),
     async run(ctx) {
-      const { quarantined } = await ctx.api.quarantine(ctx.actor);
-      if (quarantined.length === 0) return { text: ":green_circle: Nothing quarantined." };
+      const show = ctx.options.string("show");
+      const cleared: ErrorClearedFilter = show === "with" || show === "only" ? show : "without";
+      const { quarantined, clearedHidden } = await ctx.api.quarantine(ctx.actor, cleared);
+      if (quarantined.length === 0) {
+        if (cleared === "only") return { text: ":person_shrugging: Nothing quarantined has been cleared." };
+        return {
+          text:
+            clearedHidden > 0
+              ? `:green_circle: Nothing outstanding. ${clearedHidden} cleared submission(s) hidden; \`/quarantine show:cleared only\` to review.`
+              : ":green_circle: Nothing quarantined.",
+        };
+      }
       const rendered = quarantined
         .slice(0, 15)
         .map(
           (q) =>
             `• job \`${q.jobId.slice(0, 8)}\` worker \`${q.workerName ?? (q.workerId ?? "?").slice(0, 8)}\` ` +
-            `${shortTime(q.createdAt)}; \`${(q.rejectReason ?? "no reason recorded").slice(0, 140)}\``,
+            `${shortTime(q.createdAt)}; \`${(q.rejectReason ?? "no reason recorded").slice(0, 140)}\`` +
+            (q.cleared ? ` _(cleared by ${q.cleared.by})_` : ""),
         );
       if (quarantined.length > 15) rendered.push(`…and ${quarantined.length - 15} more`);
-      return {
-        text: lines([
-          `:warning: **${quarantined.length} quarantined submission(s)**: a worker submitting these repeatedly should be drained.`,
-          ...rendered,
-        ]),
-      };
+      const heading =
+        cleared === "only"
+          ? `**${quarantined.length} cleared submission(s)**`
+          : `:warning: **${quarantined.length} quarantined submission(s)**: a worker submitting these repeatedly should be drained.` +
+            (clearedHidden > 0 && cleared === "without" ? ` · ${clearedHidden} cleared and hidden` : "");
+      return { text: lines([heading, ...rendered]) };
     },
   },
   {
