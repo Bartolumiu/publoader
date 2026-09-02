@@ -110,6 +110,18 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
     { match: /\/mangadex\/title\//, body: { title: TITLE } },
     { match: /\/mangadex\/search/, body: { results: [TITLE] } },
     { match: /\/untracked\/automap$/, body: { ok: true, dryRun: true, mapped: [], considered: 0 } },
+    {
+      match: /\/untracked\/extensions\?/,
+      body: {
+        state: "NEW",
+        mapped: "hide",
+        extensions: [
+          { extension: "omoi", count: 116 },
+          { extension: "comikey", count: 92 },
+        ],
+        total: 208,
+      },
+    },
     { match: /\/untracked\/skip$/, body: () => SKIP_REPORT },
     { match: /\/untracked\/unskip$/, body: () => UNSKIP_REPORT },
     { match: /\/untracked\/[^/]+\/skip$/, body: { ok: true } },
@@ -454,5 +466,116 @@ describe("mapping one queue row from the listing", () => {
 
     expect(modal.textContent).toContain("not MangaDex");
     expect(callsTo("/mangadex/title/")).toHaveLength(0);
+  });
+});
+
+/**
+ * Two things an operator reported, both of which read as "the filter is
+ * broken" and neither of which was.
+ *
+ * The queue is ordered newest-first, and a scrape inserts a publisher's whole
+ * catalogue in one insert — a hundred and sixteen rows sharing a single
+ * millisecond. So the first pages of "all extensions" are one source every
+ * time, and the ninety-odd rows behind them are invisible. Without counts,
+ * "omoi is all there is" and "comikey's are on page three" look identical.
+ *
+ * And a series that already has a MangaDex title is not triage. Two thousand
+ * finished rows in the queue is how the eighty that need a decision get lost.
+ */
+describe("reading the queue when one source fills the first page", () => {
+  beforeEach(async () => {
+    calls = [];
+    const html = readFileSync(INDEX_HTML, "utf8");
+    const body = html.split("<body>")[1]?.split("</body>")[0];
+    if (!body) throw new Error("index.html has no <body>");
+    doc.body.innerHTML = body;
+    win.location.hash = "";
+    stubDialogs();
+    installFetch();
+    new Function(readFileSync(APP_JS, "utf8")).call(win);
+    await settle();
+    await goto("#/untracked");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllTimers();
+  });
+
+  it("says how much each source has waiting, so an empty page is legible", () => {
+    const ext = doc.getElementById("untracked-extension");
+    const labels = [...ext.querySelectorAll("option")].map((o: any) => o.textContent);
+    expect(labels).toContain("omoi · 116");
+    expect(labels).toContain("comikey · 92");
+    // The unfiltered total, so "all extensions" is a number rather than a hope.
+    expect(labels[0]).toBe("All extensions · 208");
+  });
+
+  it("counts what the current state and mapped filter actually select", () => {
+    const [facets] = calls.filter((c) => c.path.includes("/untracked/extensions"));
+    expect(String(facets!.path)).toContain("state=NEW");
+    expect(String(facets!.path)).toContain("mapped=hide");
+  });
+
+  it("re-counts when the state changes, because the numbers are per state", async () => {
+    const before = calls.filter((c) => c.path.includes("/untracked/extensions")).length;
+    const state = doc.getElementById("untracked-state");
+    state.value = "SKIPPED";
+    state.dispatchEvent(new win.Event("change", { bubbles: true }));
+    await settle();
+    expect(calls.filter((c) => c.path.includes("/untracked/extensions")).length).toBeGreaterThan(before);
+  });
+});
+
+describe("keeping resolved rows out of a triage queue", () => {
+  beforeEach(async () => {
+    calls = [];
+    const html = readFileSync(INDEX_HTML, "utf8");
+    const body = html.split("<body>")[1]?.split("</body>")[0];
+    if (!body) throw new Error("index.html has no <body>");
+    doc.body.innerHTML = body;
+    win.location.hash = "";
+    stubDialogs();
+    installFetch();
+    new Function(readFileSync(APP_JS, "utf8")).call(win);
+    await settle();
+    await goto("#/untracked");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllTimers();
+  });
+
+  it("asks for unresolved rows by default", () => {
+    const [listing] = calls.filter((c) => c.path.includes("/untracked?"));
+    expect(String(listing!.path)).toContain("mapped=hide");
+  });
+
+  it("shows resolved rows when a state only resolved rows are in is chosen", async () => {
+    // TRACKED rows are mapped by definition. Leaving the default in force would
+    // answer an explicit request for them with an empty page, which reads as
+    // "there are none" rather than "you filtered them out".
+    const state = doc.getElementById("untracked-state");
+    state.value = "TRACKED";
+    state.dispatchEvent(new win.Event("change", { bubbles: true }));
+    await settle();
+
+    const last = String(calls.filter((c) => c.path.includes("/untracked?")).at(-1)!.path);
+    expect(last).toContain("state=TRACKED");
+    expect(last).toContain("mapped=show");
+    // And the control that moved says so, rather than moving behind your back.
+    expect(doc.getElementById("untracked-mapped").value).toBe("show");
+  });
+
+  it("leaves the default alone for a state that is real work", async () => {
+    const state = doc.getElementById("untracked-state");
+    state.value = "FAILED";
+    state.dispatchEvent(new win.Event("change", { bubbles: true }));
+    await settle();
+
+    const last = String(calls.filter((c) => c.path.includes("/untracked?")).at(-1)!.path);
+    expect(last).toContain("state=FAILED");
+    expect(last).toContain("mapped=hide");
   });
 });
