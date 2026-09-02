@@ -295,6 +295,67 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     expect(badFilter.statusCode).toBe(400);
   });
 
+  it("finds the tasks queued with no chapter number, and walks past the first page", async () => {
+    // The case this exists for: an extension that could not read the
+    // publisher's chapter names queued hundreds of uploads whose dedupe key is
+    // `chapterId||language`. Those have to be found among tens of thousands of
+    // good ones before they upload a numberless chapter, and the endpoint could
+    // only ever show the most recently updated page of them.
+    for (let i = 0; i < 7; i += 1) await task({ dedupeKey: `numberless-${i}||en` });
+    for (let i = 0; i < 5; i += 1) await task({ dedupeKey: `fine-${i}|12|en` });
+
+    const numberless = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/upload-tasks?kind=UPLOAD&state=PENDING&q=%7C%7C",
+      headers: root,
+    });
+    expect(numberless.statusCode).toBe(200);
+    expect(numberless.json().tasks).toHaveLength(7);
+
+    // Walking: `order=id` is stable while the queue drains, and `after` pages
+    // from the last id rather than an offset that shifts under it.
+    const first = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/upload-tasks?q=%7C%7C&order=id&limit=4",
+      headers: root,
+    });
+    const firstIds = first.json().tasks.map((t: { id: string }) => t.id);
+    expect(firstIds).toHaveLength(4);
+
+    const second = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/upload-tasks?q=%7C%7C&order=id&limit=4&after=${firstIds[3]}`,
+      headers: root,
+    });
+    const secondIds = second.json().tasks.map((t: { id: string }) => t.id);
+    expect(secondIds).toHaveLength(3);
+    expect(new Set([...firstIds, ...secondIds]).size).toBe(7);
+  });
+
+  it("refuses to page an order that shifts underneath the caller", async () => {
+    const paged = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/upload-tasks?after=00000000-0000-4000-8000-000000000000",
+      headers: root,
+    });
+    expect(paged.statusCode).toBe(400);
+  });
+
+  it("treats a dedupe-key search as text, not as a LIKE pattern", async () => {
+    // `%` in a key an operator pasted must match a literal `%`, or the search
+    // quietly returns the whole queue.
+    await task({ dedupeKey: "literal%percent|1|en" });
+    await task({ dedupeKey: "no-wildcard-here|1|en" });
+
+    const hit = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/upload-tasks?q=%25percent",
+      headers: root,
+    });
+    expect(hit.json().tasks).toHaveLength(1);
+    expect(hit.json().tasks[0].dedupeKey).toBe("literal%percent|1|en");
+  });
+
   it("retries a dead-lettered task with a fresh attempt budget", async () => {
     const dead = await task({ state: "DEAD_LETTER", attempt: 5, lastError: "timed out" });
 
