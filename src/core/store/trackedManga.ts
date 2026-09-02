@@ -68,6 +68,14 @@ export interface BatchSummary {
   unchanged: number;
   removed: number;
   failed: number;
+  /**
+   * Untracked rows a removal in this batch let go of.
+   *
+   * A removal touches a second table — the queue row that claimed the mapping —
+   * and a summary that did not mention it would be describing half of what
+   * happened.
+   */
+  releasedQueueRows: { namespace: string; id: string; mangaId: string; mangaName: string; mdMangaId: string | null }[];
   results: BatchRowResult[];
 }
 
@@ -492,6 +500,48 @@ export class TrackedMangaStore {
    * current mappings and decides outcomes, so the preview is the real thing
    * minus its last statement, not a second implementation that can drift.
    */
+  /**
+   * Let go of the queue rows that a removed mapping leaves behind.
+   *
+   * THE BUG THIS FIXES. Removing a mapping deleted the map row and stopped
+   * there, so the untracked row kept saying TRACKED and kept naming the
+   * MangaDex title it no longer feeds. Nothing uploads for that series any
+   * more, and the queue says it is handled — which is the worst pair, because
+   * the row looks finished to every filter and to every person reading it.
+   *
+   * SKIPPED rather than NEW, deliberately. "Stop tracking this" is a decision,
+   * and putting the row back in the queue as work would offer it for title
+   * creation — so an operator un-mapping a duplicate would find a brand new
+   * MangaDex title created for the very series they were de-duplicating. Skip
+   * is the state that means "decided against", and Unskip is how it comes back.
+   *
+   * The MangaDex id is KEPT. It was never the false part: the series really is
+   * on that title, somebody really did map it there, and that is the first
+   * thing you want to know when you come back to the row. The state was the
+   * lie, and the state is what changes.
+   *
+   * Only the default catalogue: the untracked pipeline writes into that id
+   * space alone, so a namespaced mapping has no queue row to reconcile.
+   */
+  async releaseQueueRows(
+    extension: string,
+    namespace: string,
+    mangaIds: string[],
+    tx: Pick<PrismaClient, "untrackedManga"> = this.prisma,
+  ): Promise<{ id: string; mangaId: string; mangaName: string; mdMangaId: string | null }[]> {
+    if (namespace !== DEFAULT_NAMESPACE || mangaIds.length === 0) return [];
+    const rows = await tx.untrackedManga.findMany({
+      where: { extension, mangaId: { in: mangaIds }, state: { in: ["TRACKED", "CREATED"] } },
+      select: { id: true, mangaId: true, mangaName: true, mdMangaId: true },
+    });
+    if (rows.length === 0) return [];
+    await tx.untrackedManga.updateMany({
+      where: { id: { in: rows.map((row) => row.id) } },
+      data: { state: "SKIPPED" },
+    });
+    return rows;
+  }
+
   async applyBatch(
     extension: string,
     request: BatchRequest,
@@ -606,6 +656,9 @@ export class TrackedMangaStore {
       }
     }
 
+    /** Queue rows the removals let go of, for the caller to report and audit. */
+    const releasedRows: { namespace: string; id: string; mangaId: string; mangaName: string; mdMangaId: string | null }[] = [];
+
     // One transaction: a partially-applied paste is the worst outcome, because
     // the operator cannot tell what landed without diffing the table by hand.
     if (!opts.dryRun) {
@@ -631,6 +684,11 @@ export class TrackedMangaStore {
           await tx.trackedManga.deleteMany({
             where: { extension, namespace, mangaId: { in: mangaIds } },
           });
+          // In the same transaction as the deletion it answers to: a queue row
+          // still claiming a mapping this paste has just removed is exactly the
+          // inconsistency a half-applied batch would leave.
+          const released = await this.releaseQueueRows(extension, namespace, mangaIds, tx);
+          for (const row of released) releasedRows.push({ namespace, ...row });
         }
       });
     }
@@ -641,6 +699,9 @@ export class TrackedMangaStore {
       updated: count("updated"),
       unchanged: count("unchanged"),
       removed: count("removed"),
+      // Said out loud rather than left as a silent side effect: the paste
+      // changed rows in a table the operator did not name.
+      releasedQueueRows: releasedRows,
       failed: count("invalid") + count("rejected_needs_write") + count("not_found"),
       results,
     };
