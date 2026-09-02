@@ -346,6 +346,12 @@ DMs are closed the bot falls back to the ephemeral reply and says so.
 | `/status` | read | `stats:read` (+ `workers:read` for the fleet section) | Pause state, job counts by state, upload-task depths, worker fleet with heartbeat age. |
 | `/ping` | read | `stats:read` | Whether the admin API answers, and how fast. |
 | `/stats` | read | `stats:read` | Alias for `/status`, kept from the legacy bot. |
+| `/queue show <id>` | read | `runs:read` | One upload task in full: state, attempts, the chapter behind it, and the last error. |
+| `/queue reorder <id> <mode> [defer-seconds]` | mutate | `runs:write` | Move a task to the front, the back, or later. `defer` needs a delay and the others refuse one; both are caught here rather than relayed as a 400. |
+| `/runs chapters <id>` | read | `runs:read` | What one run found, counted by outcome. Counts only — the dashboard lists the rows. |
+| `/untracked unskip [extension] [confirm]` | mutate | `untracked:write` | Put skipped series back in the queue. Counts first, always. |
+| `/bundles versions <extension>` | read | `bundles:read` | Every published version, with the sha a run records — the version alone will not make a surprising result diagnosable a week later. |
+| `/bundles github` | read | `bundles:read` | Whether the GitHub publisher is configured and reachable. |
 | `/uploads priority [extensions]` | mutate | `settings:write` | Which extensions jump the upload queue. **Replaces** the whole list; anything not named is no longer prioritised. |
 | `/uploads paused [extensions]` | mutate | `settings:write` | Which extensions upload nothing. Replaces the whole list. |
 | `/uploads scope <scope>` | mutate | `settings:write` | Whether the daily budget is one shared pool or one per extension. |

@@ -1206,7 +1206,7 @@ const commands: BotCommand[] = [
   {
     name: "runs",
     description: "Recent runs, one run in detail, or stopping one that is stuck.",
-    sensitivity: { recent: "read", show: "read", cancel: "destructive", "cancel-all": "destructive" },
+    sensitivity: { recent: "read", show: "read", chapters: "read", cancel: "destructive", "cancel-all": "destructive" },
     ephemeral: false,
     builder: new SlashCommandBuilder()
       .setName("runs")
@@ -1226,6 +1226,12 @@ const commands: BotCommand[] = [
         s
           .setName("show")
           .setDescription("One run with every job, attempt count and error.")
+          .addStringOption((o) => o.setName("id").setDescription("Run id.").setRequired(true)),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("chapters")
+          .setDescription("What one run found, counted by outcome.")
           .addStringOption((o) => o.setName("id").setDescription("Run id.").setRequired(true)),
       )
       .addSubcommand((s) =>
@@ -1250,6 +1256,25 @@ const commands: BotCommand[] = [
       ),
     async run(ctx) {
       const sub = ctx.options.subcommand();
+
+      if (sub === "chapters") {
+        const summary = await ctx.api.runChapterSummary(ctx.actor, requireString(ctx.options, "id"));
+        const counts = Object.entries(summary)
+          .filter(([, v]) => typeof v === "number")
+          .map(([k, v]) => ({ name: k, value: String(v), inline: true }));
+        if (counts.length === 0) {
+          return { text: "That run recorded no chapters.", title: "Run chapters", tone: "info" };
+        }
+        return {
+          text: "",
+          title: "Run chapters",
+          tone: "info",
+          fields: counts.slice(0, 20),
+          // Counted rather than listed: a run can find thousands, and a
+          // chat window is the wrong place to page through them.
+          footer: "Counts only. The dashboard lists the rows behind them.",
+        };
+      }
 
       if (sub === "cancel") {
         const id = requireString(ctx.options, "id");
@@ -1417,6 +1442,8 @@ const commands: BotCommand[] = [
       "requeue-stale": "mutate",
       purge: "destructive",
       restagger: "mutate",
+      show: "read",
+      reorder: "mutate",
     },
     ephemeral: true,
     builder: new SlashCommandBuilder()
@@ -1466,6 +1493,36 @@ const commands: BotCommand[] = [
           .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true))
           .addBooleanOption((o) =>
             o.setName("confirm").setDescription("Required: the chapter will never be uploaded."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("show")
+          .setDescription("One upload task in full: state, attempts, and the chapter behind it.")
+          .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true)),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("reorder")
+          .setDescription("Move a task to the front, the back, or later.")
+          .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true))
+          .addStringOption((o) =>
+            o
+              .setName("mode")
+              .setDescription("Where to move it.")
+              .setRequired(true)
+              .addChoices(
+                { name: "front — go next", value: "front" },
+                { name: "back — go last", value: "back" },
+                { name: "defer — push back by a delay", value: "defer" },
+              ),
+          )
+          .addIntegerOption((o) =>
+            o
+              .setName("defer-seconds")
+              .setDescription("Only for mode:defer. How long to push it back.")
+              .setMinValue(1)
+              .setMaxValue(2592000),
           ),
       )
       .addSubcommand((s) =>
@@ -1561,6 +1618,61 @@ const commands: BotCommand[] = [
           ]),
         };
       }
+      if (sub === "show") {
+        const task = await ctx.api.uploadTask(ctx.actor, requireString(ctx.options, "id"));
+        const at = (key: string): string => {
+          const value = task[key];
+          return typeof value === "string" ? value : "—";
+        };
+        const chapter = task["chapter"] as Record<string, unknown> | undefined;
+        return {
+          text: "",
+          title: `Task ${String(task["id"] ?? "?").slice(0, 8)}`,
+          tone: at("state") === "DEAD_LETTER" || at("state") === "FAILED" ? "warn" : "info",
+          fields: [
+            { name: "Kind", value: at("kind"), inline: true },
+            { name: "State", value: at("state"), inline: true },
+            { name: "Attempts", value: String(task["attempts"] ?? 0), inline: true },
+            {
+              name: "Chapter",
+              value: chapter
+                ? clip(
+                    [chapter["chapterNumber"], chapter["chapterTitle"], chapter["chapterLanguage"]]
+                      .filter(Boolean)
+                      .join(" · "),
+                    200,
+                  )
+                : "—",
+            },
+            { name: "Last error", value: clip(at("lastError"), 400) },
+          ],
+        };
+      }
+
+      if (sub === "reorder") {
+        const id = requireString(ctx.options, "id");
+        const mode = (ctx.options.string("mode") ?? "back") as "front" | "back" | "defer";
+        const deferSeconds = ctx.options.integer("defer-seconds");
+        // The endpoint refuses `deferSeconds` without `defer`, and `defer`
+        // without it, rather than ignoring either — so say which is missing
+        // here instead of forwarding a request that will only come back 400.
+        if (mode === "defer" && deferSeconds === null) {
+          return { text: "`defer` needs `defer-seconds`.", tone: "warn" };
+        }
+        if (mode !== "defer" && deferSeconds !== null) {
+          return { text: "`defer-seconds` only applies to `mode: defer`.", tone: "warn" };
+        }
+        await ctx.api.reorderQueue(ctx.actor, [id], mode, deferSeconds ?? undefined);
+        return {
+          text:
+            mode === "defer"
+              ? `\`${id}\` pushed back by ${deferSeconds}s.`
+              : `\`${id}\` moved to the ${mode} of the queue.`,
+          title: "Queue reordered",
+          tone: "ok",
+        };
+      }
+
       if (sub === "purge") {
         const filter = {
           kind: (ctx.options.string("kind") as UploadTaskKind | null) ?? undefined,
@@ -2123,6 +2235,7 @@ const commands: BotCommand[] = [
       automap: "mutate",
       approve: "destructive",
       skip: "mutate",
+      unskip: "mutate",
     },
     ephemeral: true,
     builder: new SlashCommandBuilder()
@@ -2197,6 +2310,17 @@ const commands: BotCommand[] = [
           .addStringOption((o) => untrackedIdOption(o).setRequired(true))
           .addBooleanOption((o) =>
             o.setName("confirm").setDescription("Required: this creates a real MangaDex title and cannot be undone."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("unskip")
+          .setDescription("Put skipped series back in the queue. Counts first unless confirmed.")
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Only this extension.").setAutocomplete(true),
+          )
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Required to restore. Without it you get a count."),
           ),
       )
       .addSubcommand((s) =>
@@ -2302,7 +2426,34 @@ const commands: BotCommand[] = [
         };
       }
 
+      if (sub === "unskip") {
+        const extension = ctx.options.string("extension") ?? undefined;
+        const scoped = extension ? requireExtensionName(extension) : undefined;
+        const preview = await ctx.api.unskipUntracked(ctx.actor, { extension: scoped, dryRun: true });
+        const matched = preview.matched ?? 0;
+        if (matched === 0) {
+          return { text: "Nothing is skipped that matches.", title: "Unskip", tone: "info" };
+        }
+        if (ctx.options.boolean("confirm") !== true) {
+          return {
+            text: `That would put **${matched}** skipped series back in the queue${
+              scoped ? ` for \`${scoped}\`` : ""
+            }.`,
+            title: "Unskip — nothing restored yet",
+            tone: "warn",
+            footer: "Re-issue with `confirm: true`. They will be considered for creation again.",
+          };
+        }
+        const result = await ctx.api.unskipUntracked(ctx.actor, { extension: scoped, dryRun: false });
+        return {
+          text: `Restored **${result.restored ?? matched}** series to the untracked queue.`,
+          title: "Unskipped",
+          tone: "ok",
+        };
+      }
+
       const id = requireString(ctx.options, "id");
+
       if (sub === "skip") {
         await ctx.api.skipUntracked(ctx.actor, id);
         return { text: `:no_bell: \`${id}\` marked SKIPPED; no title will be created for it.` };
@@ -3215,6 +3366,58 @@ const commands: BotCommand[] = [
       ];
       for (const warning of after.warnings) parts.push(`:warning: ${warning}`);
       return { text: lines(parts) };
+    },
+  },
+  {
+    name: "bundles",
+    description: "Published versions of an extension, and the GitHub publisher's state.",
+    sensitivity: { versions: "read", github: "read" },
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("bundles")
+      .setDescription("Published versions of an extension, and the GitHub publisher's state.")
+      .addSubcommand((s) =>
+        s
+          .setName("versions")
+          .setDescription("Every published version of one extension, newest first.")
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
+          ),
+      )
+      .addSubcommand((s) =>
+        s.setName("github").setDescription("Whether the GitHub publisher is configured and reachable.")),
+    async run(ctx) {
+      if (ctx.options.subcommand() === "github") {
+        const status = await ctx.api.githubStatus(ctx.actor);
+        const entries = Object.entries(status)
+          .filter(([, v]) => typeof v === "string" || typeof v === "number" || typeof v === "boolean")
+          .slice(0, 10)
+          .map(([k, v]) => ({ name: k, value: String(v), inline: true }));
+        return {
+          text: entries.length === 0 ? "The publisher returned nothing to report." : "",
+          title: "GitHub publisher",
+          tone: status["ok"] === false ? "warn" : "info",
+          fields: entries,
+        };
+      }
+
+      const extension = requireExtensionName(requireString(ctx.options, "extension"));
+      const { versions } = await ctx.api.bundleVersions(ctx.actor, extension);
+      if (versions.length === 0) {
+        return { text: `\`${extension}\` has no published bundles.`, title: "Bundles", tone: "info" };
+      }
+      const rendered = versions.slice(0, 15).map((v) => {
+        // The sha is what a run records, so it is the thing that makes a
+        // surprising result a week old diagnosable; the version alone is not.
+        const sha = v.sha256 ? ` \`${String(v.sha256).slice(0, 12)}\`` : "";
+        const yanked = v.yanked ? " — **yanked**" : "";
+        return `**${v.version ?? "?"}**${sha} · ${shortTime(v.publishedAt ?? null)}${yanked}`;
+      });
+      return {
+        text: lines(rendered),
+        title: `${extension} — ${versions.length} version(s)`,
+        tone: "info",
+      };
     },
   },
   {

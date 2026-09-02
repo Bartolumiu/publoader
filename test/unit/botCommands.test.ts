@@ -2367,3 +2367,135 @@ describe("/workers extensions", () => {
     expect(reply.text).toContain("no jobs at all");
   });
 });
+
+describe("/queue show and reorder", () => {
+  it("shows a task with its last error, and flags a dead one", async () => {
+    const uploadTask = vi.fn().mockResolvedValue({
+      id: "11111111-2222",
+      kind: "UPLOAD",
+      state: "DEAD_LETTER",
+      attempts: 5,
+      lastError: "MangaDex 503",
+      chapter: { chapterNumber: "12", chapterTitle: "Some Title", chapterLanguage: "en" },
+    });
+    const reply = await invoke("queue", fakeApi({ uploadTask }), { id: "11111111-2222" }, "show");
+    const rendered = fieldText(reply);
+    expect(rendered).toContain("DEAD_LETTER");
+    expect(rendered).toContain("MangaDex 503");
+    expect(rendered).toContain("Some Title");
+    expect(reply.tone).toBe("warn");
+  });
+
+  it("refuses defer without a delay, rather than sending a request that 400s", async () => {
+    // The endpoint rejects each of these; catching it here names which half is
+    // missing instead of relaying a validation error.
+    const reorderQueue = vi.fn();
+    const missing = await invoke("queue", fakeApi({ reorderQueue }), { id: "t1", mode: "defer" }, "reorder");
+    expect(reorderQueue).not.toHaveBeenCalled();
+    expect(missing.text).toContain("needs `defer-seconds`");
+  });
+
+  it("refuses a delay without defer, which the endpoint also rejects", async () => {
+    const reorderQueue = vi.fn();
+    const stray = await invoke(
+      "queue",
+      fakeApi({ reorderQueue }),
+      { id: "t1", mode: "front", "defer-seconds": 60 },
+      "reorder",
+    );
+    expect(reorderQueue).not.toHaveBeenCalled();
+    expect(stray.text).toContain("only applies");
+  });
+
+  it("moves a task, and omits deferSeconds when it does not apply", async () => {
+    const reorderQueue = vi.fn().mockResolvedValue({ moved: 1 });
+    await invoke("queue", fakeApi({ reorderQueue }), { id: "t1", mode: "front" }, "reorder");
+    expect(reorderQueue).toHaveBeenCalledWith("discord:ardax", ["t1"], "front", undefined);
+    await invoke("queue", fakeApi({ reorderQueue }), { id: "t1", mode: "defer", "defer-seconds": 900 }, "reorder");
+    expect(reorderQueue).toHaveBeenLastCalledWith("discord:ardax", ["t1"], "defer", 900);
+  });
+});
+
+describe("/runs chapters", () => {
+  it("counts rather than lists, and says so", async () => {
+    // A run can find thousands; a chat window is the wrong place to page them.
+    const runChapterSummary = vi.fn().mockResolvedValue({ uploaded: 40, skipped: 3, failed: 1, runId: "r1" });
+    const reply = await invoke("runs", fakeApi({ runChapterSummary }), { id: "r1" }, "chapters");
+    const rendered = fieldText(reply);
+    expect(rendered).toContain("uploaded: 40");
+    expect(rendered).not.toContain("runId");
+    expect(reply.footer).toContain("Counts only");
+  });
+
+  it("says plainly when a run recorded nothing", async () => {
+    const reply = await invoke(
+      "runs",
+      fakeApi({ runChapterSummary: vi.fn().mockResolvedValue({}) }),
+      { id: "r1" },
+      "chapters",
+    );
+    expect(reply.text).toContain("no chapters");
+  });
+});
+
+describe("/untracked unskip", () => {
+  it("counts before restoring, and restores nothing unconfirmed", async () => {
+    const unskipUntracked = vi.fn().mockResolvedValue({ dryRun: true, matched: 12 });
+    const reply = await invoke("untracked", fakeApi({ unskipUntracked }), { extension: "omoi" }, "unskip");
+    expect(unskipUntracked).toHaveBeenCalledTimes(1);
+    expect(unskipUntracked).toHaveBeenCalledWith("discord:ardax", { extension: "omoi", dryRun: true });
+    expect(reply.text).toContain("**12**");
+    expect(reply.tone).toBe("warn");
+  });
+
+  it("restores when confirmed, having previewed first", async () => {
+    const unskipUntracked = vi
+      .fn()
+      .mockResolvedValueOnce({ dryRun: true, matched: 12 })
+      .mockResolvedValueOnce({ restored: 12 });
+    const reply = await invoke("untracked", fakeApi({ unskipUntracked }), { confirm: true }, "unskip");
+    expect(unskipUntracked).toHaveBeenCalledTimes(2);
+    expect(unskipUntracked).toHaveBeenLastCalledWith("discord:ardax", { extension: undefined, dryRun: false });
+    expect(reply.text).toContain("Restored **12**");
+  });
+
+  it("stops at the count when nothing is skipped", async () => {
+    const unskipUntracked = vi.fn().mockResolvedValue({ dryRun: true, matched: 0 });
+    const reply = await invoke("untracked", fakeApi({ unskipUntracked }), { confirm: true }, "unskip");
+    expect(unskipUntracked).toHaveBeenCalledTimes(1);
+    expect(reply.text).toContain("Nothing is skipped");
+  });
+});
+
+describe("/bundles", () => {
+  it("shows the sha alongside the version, since that is what a run records", async () => {
+    const bundleVersions = vi.fn().mockResolvedValue({
+      extension: "comikey",
+      versions: [
+        { version: "1.4.0", sha256: "abcdef0123456789", publishedAt: "2026-09-01T10:00:00Z" },
+        { version: "1.3.1", sha256: "0123456789abcdef", publishedAt: "2026-08-31T10:00:00Z", yanked: true },
+      ],
+    });
+    const reply = await invoke("bundles", fakeApi({ bundleVersions }), { extension: "comikey" }, "versions");
+    expect(reply.text).toContain("1.4.0");
+    expect(reply.text).toContain("abcdef012345");
+    expect(reply.text).toContain("yanked");
+  });
+
+  it("says an extension has none rather than rendering an empty list", async () => {
+    const reply = await invoke(
+      "bundles",
+      fakeApi({ bundleVersions: vi.fn().mockResolvedValue({ extension: "omoi", versions: [] }) }),
+      { extension: "omoi" },
+      "versions",
+    );
+    expect(reply.text).toContain("no published bundles");
+  });
+
+  it("reports the GitHub publisher, and warns when it is not ok", async () => {
+    const githubStatus = vi.fn().mockResolvedValue({ ok: false, repo: "publoader/extensions", configured: true });
+    const reply = await invoke("bundles", fakeApi({ githubStatus }), {}, "github");
+    expect(fieldText(reply)).toContain("publoader/extensions");
+    expect(reply.tone).toBe("warn");
+  });
+});
