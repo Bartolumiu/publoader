@@ -581,6 +581,46 @@ interface RequestSpec {
   timeoutMs?: number;
 }
 
+/** What a map sync did, or would have done. */
+export interface MapSyncReport {
+  dryRun?: boolean;
+  changed?: number;
+  added?: number;
+  removed?: number;
+  extensions?: string[];
+  /** Set when the shrink guard refused a suspiciously large removal. */
+  blocked?: string | null;
+  [key: string]: unknown;
+}
+
+export interface AuditSearchQuery {
+  q?: string;
+  actor?: string;
+  action?: string;
+  subject?: string;
+  limit?: number;
+}
+
+export interface EnrollTokenRow {
+  id: string;
+  trust: string;
+  note?: string | null;
+  createdAt: string;
+  expiresAt?: string | null;
+  usedAt?: string | null;
+  usedByWorkerName?: string | null;
+  revoked?: boolean;
+}
+
+export interface ExtensionConfigView {
+  extension?: string;
+  aliases?: unknown[];
+  multiChapters?: unknown[];
+  languages?: unknown[];
+  overrideOptions?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
 export interface QueuePurgeBody {
   kind?: UploadTaskKind;
   state?: UploadTaskState;
@@ -847,6 +887,60 @@ export class AdminApiClient {
       method: "DELETE",
       path: "/api/v1/admin/discord/authz",
       scope: "users:admin",
+      actor,
+    });
+  }
+
+  // ---- the series map, the audit log, and pending enrolments ----
+
+  /**
+   * Push the series map to its git repository.
+   *
+   * The endpoint defaults `dryRun` to **false**, which is the one default in
+   * the admin API that acts rather than reports. Every caller here passes it
+   * explicitly for that reason; see the `/maps sync` command, which inverts the
+   * default so a bare invocation cannot write.
+   */
+  syncMaps(actor: string, opts: { dryRun: boolean; extensions?: string[] }): Promise<MapSyncReport> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/maps/sync",
+      scope: "tracked:write",
+      actor,
+      json: { dryRun: opts.dryRun, extensions: opts.extensions ?? [] },
+    });
+  }
+
+  searchAudit(actor: string, query: AuditSearchQuery): Promise<{ events: AuditEntry[]; total?: number }> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/audit/search",
+      scope: "audit:read",
+      actor,
+      query: {
+        q: query.q,
+        actor: query.actor,
+        action: query.action,
+        subject: query.subject,
+        limit: query.limit,
+      },
+    });
+  }
+
+  enrollTokens(actor: string): Promise<{ tokens: EnrollTokenRow[] }> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/enroll-tokens",
+      scope: "workers:read",
+      actor,
+    });
+  }
+
+  extensionConfig(actor: string, extension: string): Promise<ExtensionConfigView> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/admin/extensions/${encodeURIComponent(extension)}/config`,
+      scope: "extensions:read",
       actor,
     });
   }

@@ -1994,3 +1994,157 @@ describe("/runs cancel", () => {
     expect(resolveSensitivity(runs, "cancel-all")).toBe("destructive");
   });
 });
+
+describe("/maps sync", () => {
+  it("never writes without confirmation, whatever the endpoint's own default is", async () => {
+    // `POST /maps/sync` defaults dryRun to FALSE — the one default in the admin
+    // API that acts rather than reports, because the scheduled job wants the
+    // write. A person typing a command does not.
+    const syncMaps = vi.fn().mockResolvedValue({ dryRun: true, added: 4, removed: 1 });
+    const reply = await invoke("maps", fakeApi({ syncMaps }), {}, "sync");
+    expect(syncMaps).toHaveBeenCalledTimes(1);
+    expect(syncMaps).toHaveBeenCalledWith("discord:ardax", { dryRun: true, extensions: [] });
+    expect(reply.text).toContain("Nothing written");
+    expect(reply.text).toContain("4 added");
+    expect(reply.footer).toContain("contributors read");
+  });
+
+  it("previews first, then writes, when confirmed", async () => {
+    const syncMaps = vi
+      .fn()
+      .mockResolvedValueOnce({ dryRun: true, added: 2 })
+      .mockResolvedValueOnce({ added: 2, removed: 0 });
+    const reply = await invoke("maps", fakeApi({ syncMaps }), { confirm: true }, "sync");
+    expect(syncMaps).toHaveBeenCalledTimes(2);
+    expect(syncMaps).toHaveBeenLastCalledWith("discord:ardax", { dryRun: false, extensions: [] });
+    expect(reply.title).toContain("written");
+    expect(reply.tone).toBe("ok");
+  });
+
+  it("scopes to one extension when named", async () => {
+    const syncMaps = vi.fn().mockResolvedValue({ dryRun: true, added: 0, removed: 0 });
+    await invoke("maps", fakeApi({ syncMaps }), { extension: "comikey" }, "sync");
+    expect(syncMaps).toHaveBeenCalledWith("discord:ardax", { dryRun: true, extensions: ["comikey"] });
+  });
+
+  it("says plainly when a sync would change nothing", async () => {
+    const syncMaps = vi.fn().mockResolvedValue({ dryRun: true, added: 0, removed: 0 });
+    const reply = await invoke("maps", fakeApi({ syncMaps }), {}, "sync");
+    expect(reply.text).toContain("0 added");
+  });
+
+  it("surfaces the shrink guard rather than reporting a clean write", async () => {
+    const syncMaps = vi
+      .fn()
+      .mockResolvedValueOnce({ dryRun: true, removed: 900 })
+      .mockResolvedValueOnce({ removed: 0, blocked: "shrink guard" });
+    const reply = await invoke("maps", fakeApi({ syncMaps }), { confirm: true }, "sync");
+    expect(reply.tone).toBe("warn");
+    expect(reply.footer).toContain("shrink guard");
+  });
+
+  it("is gated as destructive; it commits to a repository", () => {
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("maps")!, "sync")).toBe("destructive");
+  });
+});
+
+describe("/enrolments", () => {
+  const now = Date.now();
+  const rows = [
+    { id: "aaaaaaaa-1", trust: "TRUSTED", createdAt: "2026-07-01T00:00:00Z", note: "spare host" },
+    {
+      id: "bbbbbbbb-2",
+      trust: "COMMUNITY",
+      createdAt: "2026-07-01T00:00:00Z",
+      usedAt: "2026-07-02T00:00:00Z",
+      usedByWorkerName: "alpha",
+    },
+    {
+      id: "cccccccc-3",
+      trust: "COMMUNITY",
+      createdAt: "2026-07-01T00:00:00Z",
+      expiresAt: new Date(now - 1000).toISOString(),
+    },
+  ];
+
+  it("shows only what can still be redeemed, and warns that it can", async () => {
+    // An unused token is a live credential; listing it beside used ones buries
+    // the only row that matters.
+    const reply = await invoke("enrolments", fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }) }));
+    expect(reply.text).toContain("aaaaaaaa");
+    expect(reply.text).not.toContain("bbbbbbbb");
+    expect(reply.text).not.toContain("cccccccc");
+    expect(reply.tone).toBe("warn");
+    expect(reply.footer).toContain("Revoke");
+  });
+
+  it("includes the spent ones on request, labelled", async () => {
+    const reply = await invoke(
+      "enrolments",
+      fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }) }),
+      { all: true },
+    );
+    expect(reply.text).toContain("used by `alpha`");
+    expect(reply.text).toContain("expired");
+    expect(reply.footer).toBeUndefined();
+  });
+
+  it("is calm when there is nothing outstanding", async () => {
+    const reply = await invoke(
+      "enrolments",
+      fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: [rows[1]] }) }),
+    );
+    expect(reply.tone).toBe("ok");
+    expect(reply.text).toContain("No outstanding");
+  });
+});
+
+describe("/extension-config", () => {
+  it("counts the overrides and says why it is read-only", async () => {
+    // An extension reads its overrides from its published bundle, so editing
+    // these rows changes nothing about what it collects. Saying so here is the
+    // difference between a useful view and a trap.
+    const extensionConfig = vi.fn().mockResolvedValue({
+      aliases: [1, 2, 3],
+      multiChapters: [1],
+      languages: [],
+    });
+    const reply = await invoke("extension-config", fakeApi({ extensionConfig }), { extension: "comikey" });
+    expect(extensionConfig).toHaveBeenCalledWith("discord:ardax", "comikey");
+    expect(fieldText(reply)).toContain("3");
+    expect(reply.footer).toContain("republish");
+  });
+});
+
+describe("/audit search", () => {
+  it("uses the plain feed when nothing is filtered", async () => {
+    const audit = vi.fn().mockResolvedValue({ events: [] });
+    const searchAudit = vi.fn();
+    await invoke("audit", fakeApi({ audit, searchAudit }), {});
+    expect(audit).toHaveBeenCalledWith("discord:ardax", 20);
+    expect(searchAudit).not.toHaveBeenCalled();
+  });
+
+  it("switches to search the moment any filter is given", async () => {
+    const audit = vi.fn();
+    const searchAudit = vi.fn().mockResolvedValue({ events: [] });
+    await invoke("audit", fakeApi({ audit, searchAudit }), { action: "run.cancel" });
+    expect(audit).not.toHaveBeenCalled();
+    expect(searchAudit).toHaveBeenCalledWith(
+      "discord:ardax",
+      expect.objectContaining({ action: "run.cancel", limit: 20 }),
+    );
+  });
+
+  it("distinguishes 'nothing matched' from 'nothing recorded'", async () => {
+    const empty = { events: [] };
+    const unfiltered = await invoke("audit", fakeApi({ audit: vi.fn().mockResolvedValue(empty) }), {});
+    expect(unfiltered.text).toContain("No audit events recorded");
+    const filtered = await invoke(
+      "audit",
+      fakeApi({ searchAudit: vi.fn().mockResolvedValue(empty) }),
+      { q: "nope" },
+    );
+    expect(filtered.text).toContain("Nothing matched");
+  });
+});

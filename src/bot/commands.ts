@@ -37,6 +37,7 @@ import {
   type UntrackedState,
   type FetchThrottlePatch,
   type FetchThrottleValues,
+  type MapSyncReport,
   type UploadSchedulePatch,
   type UploadScheduleValues,
   type UploadTaskKind,
@@ -727,6 +728,17 @@ function describeFilter(filter: {
   if (filter.extension) parts.push(`extension \`${filter.extension}\``);
   if (filter.q) parts.push(`matching \`${filter.q}\``);
   return parts.length > 0 ? ` (${parts.join(", ")})` : " — **the whole queue**, no filter given";
+}
+
+/** A sync report as a sentence, saying "nothing" plainly when nothing moved. */
+function describeMapSync(report: MapSyncReport): string {
+  const parts: string[] = [];
+  if (typeof report.added === "number") parts.push(`${report.added} added`);
+  if (typeof report.removed === "number") parts.push(`${report.removed} removed`);
+  if (parts.length === 0 && typeof report.changed === "number") parts.push(`${report.changed} changed`);
+  const scope = report.extensions?.length ? ` across ${report.extensions.join(", ")}` : "";
+  if (parts.length === 0) return `No differences${scope}.`;
+  return `${parts.join(", ")}${scope}.`;
 }
 
 /** Pacing in words, skipping whatever is not set rather than printing nulls. */
@@ -2814,16 +2826,45 @@ const commands: BotCommand[] = [
     builder: new SlashCommandBuilder()
       .setName("audit")
       .setDescription("Who did what to the platform, most recent first.")
+      .addStringOption((o) => o.setName("actor").setDescription("Only this actor, e.g. discord:xunder."))
+      .addStringOption((o) => o.setName("action").setDescription("Only this action, e.g. run.cancel."))
+      .addStringOption((o) => o.setName("subject").setDescription("Only this subject: an id, a name."))
+      .addStringOption((o) => o.setName("q").setDescription("Substring across the whole entry."))
       .addIntegerOption((o) =>
         o.setName("limit").setDescription("How many events (1-50, default 20).").setMinValue(1).setMaxValue(50),
       ),
     async run(ctx) {
-      const { events } = await ctx.api.audit(ctx.actor, ctx.options.integer("limit") ?? 20);
-      if (events.length === 0) return { text: "No audit events recorded." };
+      const limit = ctx.options.integer("limit") ?? 20;
+      const filter = {
+        actor: ctx.options.string("actor") ?? undefined,
+        action: ctx.options.string("action") ?? undefined,
+        subject: ctx.options.string("subject") ?? undefined,
+        q: ctx.options.string("q") ?? undefined,
+      };
+      const filtered = Object.values(filter).some((v) => v !== undefined);
+
+      // Two endpoints, because they answer different questions: the plain feed
+      // is "what just happened", the search is "when did X happen". Sending an
+      // unfiltered search would work and would be slower for the common case.
+      const { events } = filtered
+        ? await ctx.api.searchAudit(ctx.actor, { ...filter, limit })
+        : await ctx.api.audit(ctx.actor, limit);
+
+      if (events.length === 0) {
+        return {
+          text: filtered ? "Nothing matched." : "No audit events recorded.",
+          title: "Audit",
+          tone: "info",
+        };
+      }
       const rendered = events.map(
-        (e) => `• \`${shortTime(e.createdAt)}\` **${e.action}** ${e.target ? `\`${e.target}\` ` : ""}; ${e.actor}`,
+        (e) => `\`${shortTime(e.createdAt)}\` **${e.action}** ${e.target ? `\`${e.target}\` ` : ""}· ${e.actor}`,
       );
-      return { text: lines([`**${events.length} audit event(s)**`, ...rendered]) };
+      return {
+        text: lines(rendered),
+        title: filtered ? `Audit — ${events.length} match(es)` : `Audit — last ${events.length}`,
+        tone: "info",
+      };
     },
   },
   {
@@ -3137,6 +3178,146 @@ const commands: BotCommand[] = [
       ];
       for (const warning of after.warnings) parts.push(`:warning: ${warning}`);
       return { text: lines(parts) };
+    },
+  },
+  {
+    name: "maps",
+    description: "Push the series map to the git repository contributors read.",
+    sensitivity: { sync: "destructive" },
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("maps")
+      .setDescription("Push the series map to the git repository contributors read.")
+      .addSubcommand((s) =>
+        s
+          .setName("sync")
+          .setDescription("Report what would change; pass confirm to actually write.")
+          .addStringOption((o) =>
+            o
+              .setName("extension")
+              .setDescription("Only this extension. Omit for all of them.")
+              .setAutocomplete(true),
+          )
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Required to write. Without it this only reports."),
+          ),
+      ),
+    async run(ctx) {
+      const extension = ctx.options.string("extension");
+      const extensions = extension ? [requireExtensionName(extension)] : [];
+      const confirmed = ctx.options.boolean("confirm") === true;
+
+      // The endpoint defaults `dryRun` to FALSE — the one default in the admin
+      // API that acts rather than reports, because a scheduled job wants the
+      // write. A person typing a command does not, so the default is inverted
+      // here: `/maps sync` on its own can only ever report.
+      const preview = await ctx.api.syncMaps(ctx.actor, { dryRun: true, extensions });
+      const summary = describeMapSync(preview);
+
+      if (!confirmed) {
+        return {
+          text: `Nothing written. ${summary}`,
+          title: "Map sync — dry run",
+          tone: "info",
+          footer: "Re-issue with `confirm: true` to write. This commits to a repository contributors read.",
+        };
+      }
+
+      const report = await ctx.api.syncMaps(ctx.actor, { dryRun: false, extensions });
+      return {
+        text: describeMapSync(report),
+        title: "Map sync written",
+        tone: report.blocked ? "warn" : "ok",
+        footer: report.blocked
+          ? "The shrink guard refused part of this; a large removal needs `force`, which is deliberately not exposed here."
+          : undefined,
+      };
+    },
+  },
+  {
+    name: "enrolments",
+    description: "Worker enrollment tokens: which are outstanding, used or expired.",
+    sensitivity: "read",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("enrolments")
+      .setDescription("Worker enrollment tokens: which are outstanding, used or expired.")
+      .addBooleanOption((o) =>
+        o.setName("all").setDescription("Include used, revoked and expired ones. Default: outstanding only."),
+      ),
+    async run(ctx) {
+      const { tokens } = await ctx.api.enrollTokens(ctx.actor);
+      const showAll = ctx.options.boolean("all") === true;
+      const now = Date.now();
+      const outstanding = tokens.filter(
+        (t) =>
+          !t.usedAt &&
+          !t.revoked &&
+          (!t.expiresAt || new Date(t.expiresAt).getTime() > now),
+      );
+      const shown = showAll ? tokens.slice(0, 20) : outstanding.slice(0, 20);
+
+      if (shown.length === 0) {
+        return {
+          text: showAll ? "No enrollment tokens have ever been minted." : "No outstanding enrollment tokens.",
+          title: "Enrolments",
+          tone: "ok",
+        };
+      }
+
+      const rendered = shown.map((t) => {
+        const state = t.revoked
+          ? "revoked"
+          : t.usedAt
+            ? `used by \`${t.usedByWorkerName ?? "?"}\``
+            : t.expiresAt && new Date(t.expiresAt).getTime() <= now
+              ? "expired"
+              : "outstanding";
+        return `\`${t.id.slice(0, 8)}\` ${t.trust} — ${state}${t.note ? ` · ${clip(t.note, 40)}` : ""}`;
+      });
+      return {
+        text: lines(rendered),
+        title: showAll ? "Enrolments" : `Outstanding enrolments — ${outstanding.length}`,
+        // An unused token is a credential someone can still redeem.
+        tone: outstanding.length > 0 && !showAll ? "warn" : "info",
+        footer:
+          outstanding.length > 0 && !showAll
+            ? "Each outstanding token still enrols a worker. Revoke any you did not hand out."
+            : undefined,
+      };
+    },
+  },
+  {
+    name: "extension-config",
+    description: "The stored overrides for one extension: aliases, languages, multi-chapters.",
+    sensitivity: "read",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("extension-config")
+      .setDescription("The stored overrides for one extension: aliases, languages, multi-chapters.")
+      .addStringOption((o) =>
+        o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
+      ),
+    async run(ctx) {
+      const extension = requireExtensionName(requireString(ctx.options, "extension"));
+      const config = await ctx.api.extensionConfig(ctx.actor, extension);
+      const count = (value: unknown): string => (Array.isArray(value) ? String(value.length) : "0");
+      return {
+        text: "",
+        title: `Config — ${extension}`,
+        tone: "info",
+        fields: [
+          { name: "Chapter aliases", value: count(config.aliases), inline: true },
+          { name: "Multi-chapters", value: count(config.multiChapters), inline: true },
+          { name: "Language maps", value: count(config.languages), inline: true },
+        ],
+        // Worth saying here rather than letting someone discover it: the stored
+        // overrides are read from the published bundle at run time, so editing
+        // these rows does not change what an extension collects. Republishing
+        // does.
+        footer:
+          "Read-only here. An extension reads its overrides from its published bundle, so changing these rows does not change what it collects — republish instead.",
+      };
     },
   },
   {
