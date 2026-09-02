@@ -922,7 +922,22 @@ export class UploadTaskWorkers {
 
       const gainedAPage = before.pages === 0 && (pages ?? 0) > 0;
       const commitDidWork = before.pages > 0 && version !== null && version > before.version;
-      if (gainedAPage || commitDidWork) return;
+      if (gainedAPage || commitDidWork) {
+        // The success is logged, and was not. A card that landed used to write
+        // nothing of its own, so the only evidence it worked was the absence of
+        // a failure -- which is precisely what the silent-success bug looked
+        // like from the outside, and why it survived a sweep of 3,756 chapters.
+        //
+        // `attempt` is the useful half. The retry line above is debug and
+        // production keeps nothing below info, so without this the number of
+        // reads a card needed is unrecoverable. It separates two futures: cards
+        // confirming on the first read means the page is attached by the time
+        // the commit returns, and cards still needing several means MangaDex
+        // attaches asynchronously and the old trailing PUT was destroying a
+        // result that had not arrived yet.
+        log.info({ mdChapterId, attempt, pages, version }, "card confirmed on the chapter");
+        return;
+      }
     }
 
     // What the commit claimed goes in the message. It is not evidence, but when
