@@ -2435,6 +2435,22 @@ th.sorted .sort-mark {
     margin-left: 0;
     flex: 1 0 100%;
   }
+
+  /* Density is the point on a desk, but a thumb is not a mouse pointer: 26-28px
+     is comfortable to click and awkward to tap, and these are the only controls
+     for sorting and paging once the header row is gone. Raised to the 40px the
+     rest of the phone layout already uses, which costs nothing — the sortbar
+     and pager are one row each, not a column of rows whose spacing accumulates. */
+  .table-sortbar select,
+  .table-sortbar .sort-dir,
+  .page-n,
+  .page-step {
+    min-height: 40px;
+  }
+
+  .page-n {
+    min-width: 40px;
+  }
 }
 
 /* ---- chapter card preview ------------------------------------------------ */

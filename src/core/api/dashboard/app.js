@@ -1798,7 +1798,7 @@ const NAV = [
       ["config", "Config"],
       ["versions", "Versions"],
     ],
-    blurb: "Published bundles, and everything about one extension.",
+    blurb: "Every extension, its release state, and the defaults they fall back on.",
   },
   // Its own `chapters:read` rather than `runs:read`: reading this destination
   // is reading the public catalogue, and the three actions it offers end in a
@@ -2462,9 +2462,22 @@ function closeMenus() {
 function renderTabs(entry) {
   const host = $("tabs");
   const tabs = entry?.tabs ?? [];
-  if (!tabs.length || store.route.param) {
-    // A detail view (`#/audit/<id>`) is not one of the section's tabs, and
-    // offering them there would navigate away from the thing being read.
+  const param = store.route.param;
+  /*
+   * Whose tabs are these? For most sections they are sections of the list, so a
+   * detail view (`#/audit/<id>`) must not offer them: they are not parts of the
+   * thing being read, and clicking one would navigate away from it.
+   *
+   * A `tabsForParam` section is the mirror image. Its tabs are sections of ONE
+   * extension, so they mean something only once an extension is named, and on
+   * the bare list they were not merely out of place but dead: `#/extensions`
+   * has no param, so `resolveRoute` blanks the tab, and `#/extensions/config`
+   * canonicalises straight back to `#/extensions`. Five tabs that bounced you
+   * where you already were. Reading `tabsForParam` here is what keeps this
+   * agreeing with `resolveRoute`, which has always honoured it.
+   */
+  const wanted = entry?.tabsForParam ? Boolean(param) : !param;
+  if (!tabs.length || !wanted) {
     host.replaceChildren();
     return;
   }
@@ -2478,7 +2491,9 @@ function renderTabs(entry) {
         "aria-controls": "view",
         tabindex: id === store.route.tab ? "0" : "-1",
         text: label,
-        onclick: () => navigate(routeTo(entry.id, null, id)),
+        // Carrying the param is what makes these the extension's own tabs
+        // rather than a jump back to the list.
+        onclick: () => navigate(routeTo(entry.id, param, id)),
         onkeydown: (event) => moveTabFocus(event, tabs, entry),
       }),
     ),
@@ -2495,7 +2510,7 @@ function moveTabFocus(event, tabs, entry) {
   const index = ids.indexOf(store.route.tab);
   const next =
     move === "first" ? 0 : move === "last" ? ids.length - 1 : (index + move + ids.length) % ids.length;
-  navigate(routeTo(entry.id, null, ids[next]));
+  navigate(routeTo(entry.id, store.route.param, ids[next]));
   $(`tab-${ids[next]}`)?.focus();
 }
 
@@ -7858,45 +7873,72 @@ VIEWS.extensions = (route) => {
     can("settings:read") ? api("/upload-schedule", { quiet: true }) : Promise.resolve(null),
   );
 
+  /*
+   * The index leads, and the platform-wide defaults follow it.
+   *
+   * This page used to open with three settings cards and keep the list of
+   * extensions at the bottom under the heading "Published bundles". That put
+   * the section's own subject last and named it after one of its columns, and
+   * it left the per-extension Priority and Paused controls stranded inside the
+   * global "Release pacing" card as two checkbox grids: extension-scoped state,
+   * drawn on the platform-wide surface, where an operator scanning one
+   * extension could not see it and an operator editing the global had to step
+   * over it. Both now live on the extension's own row.
+   */
   return el(
     "div",
     {},
+    card(
+      "Extensions",
+      el("p", {
+        class: "dim small",
+        text:
+          "Every extension this platform knows. Priority and Paused belong to the extension and " +
+          "are set here; open one for its own fetch pacing, release pacing, schedule, series map " +
+          "and versions.",
+      }),
+      live(
+        [extensions, uploadSchedule],
+        (data, schedule) => extensionIndexTable(data, schedule, extensions, uploadSchedule),
+        { reserve: 240, skeleton: () => skeletonTable(6, 8) },
+      ),
+    ),
+    can("bundles:write") ? publishCard(extensions) : null,
     can("settings:read")
       ? card(
-          "Chapter removal mode",
+          "Platform defaults",
+          el("p", {
+            class: "dim small",
+            text:
+              "These apply to every extension that does not override them. An extension overrides " +
+              "them on its own Config tab, field by field, and follows the value here for every " +
+              "field it leaves alone.",
+          }),
+          el("h3", { text: "Chapter removal mode" }),
           live([removal], (data) => (data ? removalModeControls(data, removal) : el("span", {})), {
             reserve: 40,
             skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
           }),
-        )
-      : null,
-    can("settings:read")
-      ? card(
-          "Publisher fetch pacing",
+          el("h3", { text: "Publisher fetch pacing" }),
           el("p", {
             class: "dim small",
             text:
               "How fast a worker may talk to one publisher, and how regular it looks. A fixed " +
               "interval is recognisable on its own, and workers given segments of the same run " +
-              "would otherwise start in step. Extensions can override this individually on their " +
-              "own Config tab.",
+              "would otherwise start in step.",
           }),
           live([throttle], (data) => (data ? fetchThrottleControls(data, throttle) : el("span", {})), {
             reserve: 40,
             skeleton: () => el("div", { class: "skeleton skeleton-line", style: { height: "34px" } }),
           }),
-        )
-      : null,
-    can("settings:read")
-      ? card(
-          "Release pacing",
+          el("h3", { text: "Release pacing" }),
           el("p", {
             class: "dim small",
             text:
               "How many chapters may go up per day. A run still queues everything it decided in " +
               "one pass; whatever is over a day's budget is dated forward instead of going up at " +
               "once, so this changes when a chapter is released, never whether it is. 0 is no " +
-              "limit, not a stop. Extensions can override this individually on their own Config tab.",
+              "limit, not a stop.",
           }),
           live(
             [uploadSchedule],
@@ -7908,53 +7950,107 @@ VIEWS.extensions = (route) => {
           ),
         )
       : null,
-    can("bundles:write") ? publishCard(extensions) : null,
-    card(
-      "Published bundles",
-      live(
-        [extensions],
-        (data) =>
-          table(
-            ["Extension", "Version", "sha256", "Published", "State", ""],
-            data.extensions.map((ext) => [
-              routeLink(routeTo("extensions", ext.name, "overview"), ext.name),
-              ext.version,
-              el("code", { text: (ext.sha256 || "").slice(0, 12) }),
-              fmtTime(ext.publishedAt),
-              chip(ext.disabled ? "disabled" : "enabled"),
-              [
-                gatedButton("runs:write", { text: "Run", onclick: (e) => triggerRun(ext.name, "UPDATE", e.currentTarget) }),
-                gatedButton("runs:write", { text: "Force", onclick: (e) => triggerRun(ext.name, "FORCE", e.currentTarget) }),
-                gatedButton("runs:write", {
-                  class: "danger",
-                  text: "Clean",
-                  onclick: (e) => triggerRun(ext.name, "CLEAN", e.currentTarget),
-                }),
-                gatedButton("extensions:write", {
-                  text: ext.disabled ? "Enable" : "Disable",
-                  onclick: (event) =>
-                    act(
-                      `extension.${ext.disabled ? "enable" : "disable"}`,
-                      () =>
-                        api(
-                          `/extensions/${encodeURIComponent(ext.name)}/${ext.disabled ? "enable" : "disable"}`,
-                          { method: "POST", body: {} },
-                        ),
-                      { button: event.currentTarget, refresh: [extensions, summary] },
-                    ),
-                }),
-              ],
-            ]),
-            {
-              empty:
-                "No bundle is published, so nothing can run. Publish an extension bundle to get started.",
-            },
-          ),
-        { reserve: 240, skeleton: () => skeletonTable(5, 6) },
-      ),
-    ),
   );
 };
+
+/**
+ * The extension directory: one row per extension, carrying the state that
+ * belongs to that extension rather than to the platform.
+ *
+ * Rows are the union of the published bundles and the extensions the scheduler
+ * knows about, because those two sets come apart: an extension can be paused
+ * before its first bundle is published, and one whose bundle was yanked still
+ * holds its Priority and Paused settings. Listing only bundles would silently
+ * drop the second kind, and "why is this extension not here" is a worse
+ * question than a row with an empty version.
+ */
+function extensionIndexTable(data, schedule, extResource, scheduleResource) {
+  const bundles = new Map((data.extensions ?? []).map((ext) => [ext.name, ext]));
+  const paused = new Set(schedule?.paused ?? []);
+  const priority = new Set(schedule?.priority ?? []);
+  const overrides = new Set(Object.keys(schedule?.overrides ?? {}));
+  const names = [...new Set([...bundles.keys(), ...(schedule?.extensions ?? [])])].sort();
+
+  // Both settings are one list each, posted whole; a row toggle therefore edits
+  // its own membership of that list and sends the rest back unchanged.
+  const setMembership = (route, current, name, on) => {
+    const next = new Set(current);
+    if (on) next.add(name);
+    else next.delete(name);
+    return act(
+      `upload-schedule.${route}`,
+      () =>
+        api(`/upload-schedule/${route}`, {
+          method: "POST",
+          body: { extensions: [...next].sort() },
+        }),
+      { refresh: [scheduleResource] },
+    );
+  };
+
+  const toggle = (kind, set, name) =>
+    schedule
+      ? el("input", {
+          type: "checkbox",
+          id: `ext-${kind}-${name}`,
+          checked: set.has(name),
+          "aria-label": `${kind} for ${name}`,
+          // Writes the setting the moment it is clicked, so a reader must not
+          // be able to arm it.
+          disabled: !can("settings:write"),
+          onchange: (event) => setMembership(kind, set, name, event.target.checked),
+        })
+      : el("span", { class: "dim", text: "-" });
+
+  return table(
+    ["Extension", "Version", "sha256", "Published", "Bundle", "Priority", "Paused", "Pacing", ""],
+    names.map((name) => {
+      const ext = bundles.get(name);
+      return [
+        routeLink(routeTo("extensions", name, "overview"), name),
+        ext ? ext.version : el("span", { class: "dim", text: "not published" }),
+        ext ? el("code", { text: (ext.sha256 || "").slice(0, 12) }) : "",
+        ext ? fmtTime(ext.publishedAt) : "",
+        ext ? chip(ext.disabled ? "disabled" : "enabled") : el("span", { class: "dim", text: "-" }),
+        toggle("priority", priority, name),
+        toggle("paused", paused, name),
+        // Says which extensions the defaults below do NOT reach, on the row of
+        // the extension it is true of, rather than as a list of names under the
+        // control an operator is about to edit.
+        overrides.has(name)
+          ? routeLink(routeTo("extensions", name, "config"), "overridden")
+          : el("span", { class: "dim", text: "default" }),
+        [
+          gatedButton("runs:write", { text: "Run", onclick: (e) => triggerRun(name, "UPDATE", e.currentTarget) }),
+          gatedButton("runs:write", { text: "Force", onclick: (e) => triggerRun(name, "FORCE", e.currentTarget) }),
+          gatedButton("runs:write", {
+            class: "danger",
+            text: "Clean",
+            onclick: (e) => triggerRun(name, "CLEAN", e.currentTarget),
+          }),
+          ext
+            ? gatedButton("extensions:write", {
+                text: ext.disabled ? "Enable" : "Disable",
+                onclick: (event) =>
+                  act(
+                    `extension.${ext.disabled ? "enable" : "disable"}`,
+                    () =>
+                      api(
+                        `/extensions/${encodeURIComponent(name)}/${ext.disabled ? "enable" : "disable"}`,
+                        { method: "POST", body: {} },
+                      ),
+                    { button: event.currentTarget, refresh: [extResource, summary] },
+                  ),
+              })
+            : null,
+        ],
+      ];
+    }),
+    {
+      empty: "No bundle is published, so nothing can run. Publish an extension bundle to get started.",
+    },
+  );
+}
 
 function removalModeControls(removal, resource) {
   const modeSelect = el(
@@ -8211,75 +8307,6 @@ function uploadScheduleControls(data, resource) {
       ` ${label}`,
     );
 
-  const paused = new Set(data.paused ?? []);
-  const setPaused = (name, on) => {
-    const next = new Set(paused);
-    if (on) next.add(name);
-    else next.delete(name);
-    act(
-      "upload-schedule.paused",
-      () =>
-        api("/upload-schedule/paused", {
-          method: "POST",
-          body: { extensions: [...next].sort() },
-        }),
-      { refresh: [resource] },
-    );
-  };
-  const priority = new Set(data.priority ?? []);
-  // Every extension the platform knows, not just the ones already prioritised,
-  // so turning priority ON is a click rather than knowing a name to type.
-  const knownExtensions = data.extensions ?? [...priority].sort();
-  const setPriority = (name, on) => {
-    const next = new Set(priority);
-    if (on) next.add(name);
-    else next.delete(name);
-    act(
-      "upload-schedule.priority",
-      () =>
-        api("/upload-schedule/priority", {
-          method: "POST",
-          body: { extensions: [...next].sort() },
-        }),
-      { refresh: [resource] },
-    );
-  };
-  const priorityBoxes = knownExtensions.length
-    ? knownExtensions.map((name) =>
-        el(
-          "label",
-          { class: "inline", for: `schedule-priority-${name}` },
-          el("input", {
-            id: `schedule-priority-${name}`,
-            type: "checkbox",
-            checked: priority.has(name),
-            // Writes the setting on click, so a reader must not arm it.
-            disabled: !can("settings:write"),
-            onchange: (event) => setPriority(name, event.target.checked),
-          }),
-          ` ${name}`,
-        ),
-      )
-    : [el("span", { class: "dim small", text: "No extensions configured yet." })];
-
-  const pausedBoxes = knownExtensions.length
-    ? knownExtensions.map((name) =>
-        el(
-          "label",
-          { class: "inline", for: `schedule-paused-${name}` },
-          el("input", {
-            id: `schedule-paused-${name}`,
-            type: "checkbox",
-            checked: paused.has(name),
-            disabled: !can("settings:write"),
-            onchange: (event) => setPaused(name, event.target.checked),
-          }),
-          ` ${name}`,
-        ),
-      )
-    : [el("span", { class: "dim small", text: "No extensions configured yet." })];
-
-  const overrides = Object.keys(data.overrides ?? {});
   return el("div", {}, [
     row(
       el("label", { class: "inline", for: "schedule-per-day", text: "Per day" }),
@@ -8321,32 +8348,26 @@ function uploadScheduleControls(data, resource) {
         "across it, and anything newly queued is dated behind the queue's tail rather than on top " +
         "of it. 0 paces only a day that is full.",
     }),
-    row(el("span", { class: "inline", text: "Priority" }), ...priorityBoxes),
+    // Priority and Paused used to be two checkbox grids here. They are settings
+    // of one extension, so they are now columns of the index above, where they
+    // sit beside the extension they apply to; what stays here is the
+    // explanation of what the two states mean, which is platform-wide.
     el("p", {
       class: "dim small",
       text:
-        "A priority extension's routine updates are queued due immediately: they ignore the " +
-        "queue however long it is, and go out whether or not the day's budget is spent. For a " +
-        "daily publisher whose chapters are worth little late. Clean runs are never prioritised — " +
-        "a clean run is the backlog, and spreading it is the point.",
+        "Priority, set per extension above: that extension's routine updates are queued due " +
+        "immediately. They ignore the queue however long it is, and go out whether or not the " +
+        "day's budget is spent — for a daily publisher whose chapters are worth little late. " +
+        "Clean runs are never prioritised; a clean run is the backlog, and spreading it is the point.",
     }),
-    row(el("span", { class: "inline", text: "Paused" }), ...pausedBoxes),
     el("p", {
       class: "dim small",
       text:
-        "A paused extension's queued work is held: the uploader steps over it and everybody " +
-        "else keeps draining. Nothing is cancelled or re-dated, so un-pausing resumes exactly " +
-        "where the queue was. It does not stop the queue growing — runs still add to it.",
+        "Paused, set per extension above: that extension's queued work is held. The uploader " +
+        "steps over it and everybody else keeps draining. Nothing is cancelled or re-dated, so " +
+        "un-pausing resumes exactly where the queue was. It does not stop the queue growing — " +
+        "runs still add to it.",
     }),
-    // Named rather than counted, for the reason the pacing card above names
-    // them: a number does not tell an operator whether the global they are
-    // editing reaches the extension whose backlog they are worried about.
-    overrides.length
-      ? el("p", {
-          class: "dim small",
-          text: `Overridden for: ${overrides.join(", ")}. Those extensions ignore the fields they set here.`,
-        })
-      : el("p", { class: "dim small", text: "No extension overrides; every extension follows this." }),
   ]);
 }
 
@@ -8755,7 +8776,6 @@ function extensionDetail(name, tab) {
   if (tab === "config") return configPanel(name);
   if (tab === "versions") return versionsPanel(name);
 
-  // Tabs are suppressed for a param route, so a detail view carries its own.
   const activity = new Resource(`activity:${name}`, () =>
     api(`/extensions/${encoded}/activity?limit=10`, { quiet: true }),
   );
@@ -8763,7 +8783,6 @@ function extensionDetail(name, tab) {
   return el(
     "div",
     {},
-    extensionTabs(name, "overview"),
     live(
       [activity],
       (data) =>
@@ -8881,31 +8900,6 @@ function extensionDetail(name, tab) {
 }
 
 /**
- * The detail view's own tab strip.
- *
- * The shell hides the section tabs for a param route, they would navigate away
- * from the thing being read, so a detail view that has sections draws them
- * itself, pointing at `#/extensions/<name>/<tab>`.
- */
-function extensionTabs(name, current) {
-  const tabs = NAV_BY_ID.get("extensions").tabs;
-  return el(
-    "div",
-    { class: "tabs", role: "tablist", "aria-label": `Sections of ${name}` },
-    tabs.map(([id, label]) =>
-      el("button", {
-        type: "button",
-        role: "tab",
-        id: `tab-${id}`,
-        "aria-selected": String(id === current),
-        text: label,
-        onclick: () => navigate(routeTo("extensions", name, id)),
-      }),
-    ),
-  );
-}
-
-/**
  * Weekday labels, Monday first.
  *
  * The index IS the contract value (Monday=0, Python's `weekday()`), which the
@@ -8979,7 +8973,6 @@ function schedulePanel(name) {
   return el(
     "div",
     {},
-    extensionTabs(name, "schedule"),
     card(
       "Schedule (UTC)",
       live(
@@ -9260,15 +9253,14 @@ function configPanel(name) {
   return el(
     "div",
     {},
-    extensionTabs(name, "config"),
     can("settings:read")
       ? card(
           "Fetch pacing",
           el("p", {
             class: "dim small",
             text:
-              "How fast a worker may talk to this publisher. Set here it overrides the global on " +
-              "System, field by field; cleared, this extension follows the global as it changes.",
+              "How fast a worker may talk to this publisher. Set here it overrides the platform default on " +
+              "Extensions, field by field; cleared, this extension follows that default as it changes.",
           }),
           live(
             [throttle],
@@ -9288,8 +9280,8 @@ function configPanel(name) {
             text:
               "How many of this extension's chapters may go up per day. A run still queues " +
               "everything it decided; whatever is over the day's budget is dated forward rather " +
-              "than released at once, and 0 is no limit. Set here it overrides the global on " +
-              "System, field by field; cleared, this extension follows the global as it changes.",
+              "than released at once, and 0 is no limit. Set here it overrides the platform default on " +
+              "Extensions, field by field; cleared, this extension follows that default as it changes.",
           }),
           live(
             [schedule],
@@ -9510,7 +9502,6 @@ function versionsPanel(name) {
   return el(
     "div",
     {},
-    extensionTabs(name, "versions"),
     card(
       "Published versions",
       el("p", {
@@ -9590,7 +9581,6 @@ function seriesMapPanel(name) {
   return el(
     "div",
     {},
-    extensionTabs(name, "series-map"),
     trackedCard(name, tracked),
     bulkCurationCard(name, tracked),
     // Last on the page on purpose: it is what an operator reaches for after
