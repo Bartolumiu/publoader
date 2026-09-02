@@ -1028,6 +1028,12 @@ has been dealt with in `cleared_errors` and it drops out, which is what keeps an
 empty feed meaningful. It hides only; no row changes state, the acknowledgement is
 recorded against the failure's timestamp so a repeat failure reappears on its own,
 and `/errors/restore` is a complete undo (`observability/errorFeed.ts`). The
+acknowledgement is honoured by every surface built on the same rows, not just the
+feed: `/admin/dead-letter` and `/admin/quarantine` take the same
+`?cleared=without|with|only`, the overview's job tile and quarantine card count
+what is outstanding rather than what is on record, and
+`publoader_dead_letter_jobs_outstanding` is the alertable twin of the raw depth
+gauge. A count that cannot be driven to zero is one operators learn to ignore. The
 through-line for the whole ops API is that an operator should never need a shell
 on the core container to answer "what is stuck and why"; container logs stay
 `docker logs`, because they describe processes, not platform state

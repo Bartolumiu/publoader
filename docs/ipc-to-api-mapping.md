@@ -78,7 +78,7 @@ surface them because they are where operational problems now appear.
 | `GET /runs/:id` | `runs show <id>` | Runs → click a run (drawer with every job) | Run detail with every job, attempt count, lease holder, and error. |
 | `POST /jobs/:id/cancel` | `jobs cancel <id>` | Runs → run drawer → Cancel | Cancel one job. |
 | `POST /jobs/:id/retry` | `jobs retry <id>` | Runs → run drawer → Retry, or Dead letter → Replay | Replay a dead-lettered job. |
-| `GET /dead-letter` | `dead-letter` | Runs → Dead letter | Jobs that exhausted retries or hit a permanent/policy error. |
+| `GET /dead-letter` | `dead-letter` | Runs → Dead letter | Jobs that exhausted retries or hit a permanent/policy error. Cleared ones hidden by default on all three surfaces. |
 | `GET /quarantine` | `quarantine` | Quarantine | Result envelopes rejected by schema or policy validation; the signal that a worker is misbehaving. |
 | `POST /bundles` | `bundle publish <dir>` | Extensions → Settings → Publish bundle (.zip) | Publish a content-addressed extension bundle. Also performs the one-time seed of `manga_id_map.json` / `override_options.json` into the database. |
 | `GET /audit` | `audit` | Audit | Who did what, when. |

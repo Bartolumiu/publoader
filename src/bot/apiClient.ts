@@ -215,6 +215,8 @@ export interface QuarantineEntry {
   workerName?: string | null;
   rejectReason: string | null;
   createdAt: string;
+  /** Present only when this quarantine has been acknowledged in the error feed. */
+  cleared?: { at: string; by: string; note: string | null };
 }
 
 export interface UntrackedEntry {
@@ -1351,21 +1353,35 @@ export class AdminApiClient {
     });
   }
 
-  deadLetter(actor: string): Promise<{ jobs: JobSummary[] }> {
+  /**
+   * The dead-letter queue. Cleared jobs are hidden by default and counted in
+   * `clearedHidden`, on the same terms as `errors` above: the two list the same
+   * failures, so an acknowledgement means the same thing in both.
+   */
+  deadLetter(
+    actor: string,
+    cleared: ErrorClearedFilter = "without",
+  ): Promise<{ jobs: (JobSummary & { cleared?: { at: string; by: string; note: string | null } })[]; clearedHidden: number }> {
     return this.request({
       method: "GET",
       path: "/api/v1/admin/dead-letter",
       scope: "runs:read",
       actor,
+      query: { cleared },
     });
   }
 
-  quarantine(actor: string): Promise<{ quarantined: QuarantineEntry[] }> {
+  /** Quarantined submissions, cleared ones hidden by default. See `deadLetter`. */
+  quarantine(
+    actor: string,
+    cleared: ErrorClearedFilter = "without",
+  ): Promise<{ quarantined: QuarantineEntry[]; clearedHidden: number }> {
     return this.request({
       method: "GET",
       path: "/api/v1/admin/quarantine",
       scope: "runs:read",
       actor,
+      query: { cleared },
     });
   }
 

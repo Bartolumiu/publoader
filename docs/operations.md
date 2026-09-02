@@ -591,9 +591,14 @@ A job reaches `DEAD_LETTER` when it exhausts `maxAttempts` on transient errors,
 or immediately on a `PERMANENT` or `POLICY` error.
 
 ```bash
-padmin dead-letter
+padmin dead-letter              # what nobody has cleared yet
+padmin dead-letter --cleared only   # what was already dealt with, and by whom
 padmin runs show <runId>        # per-job attempt count, lease holder, lastError
 ```
+
+A job cleared in `padmin errors clear` drops out of this list and is counted at
+the bottom of it. The row is untouched: `--cleared with` lists it again, retry
+still works on it, and it comes back on its own if it fails again.
 
 Read the `CLASS` column first; it tells you what kind of problem you have:
 
@@ -639,7 +644,7 @@ A quarantined result is a worker that submitted something the core refused to
 believe. This is the security-relevant queue, not just an error queue.
 
 ```bash
-padmin quarantine
+padmin quarantine               # cleared entries hidden, as in dead-letter
 ```
 
 Each row names the worker and the reason. Group them mentally:

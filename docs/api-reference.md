@@ -335,8 +335,8 @@ served to workers, not to admin clients.
 | `GET` | `/runs/:id/chapters/summary` | `runs:read` | Per-segment coverage and a per-series breakdown. A segment with no committed envelope reports `updated: null`, **not `0`**, and `complete` says whether the chapter list can be read as the whole run |
 | `POST` | `/jobs/:id/cancel` | `runs:write` | → `{ok, result: "cancelled"\|"flagged"}`. `PENDING` cancels immediately; a live lease is flagged and the worker aborts on its next renew. **`409`** if the job is in neither state |
 | `POST` | `/jobs/:id/retry` | `runs:write` | Replay a dead letter with a fresh attempt budget. **`409` job is not dead-lettered** |
-| `GET` | `/dead-letter` | `runs:read` | Up to 100 `DEAD_LETTER` jobs, newest first |
-| `GET` | `/quarantine` | `runs:read` | Up to 100 quarantined submissions; id, jobId, workerId, rejectReason, createdAt. **The envelope body is not returned** |
+| `GET` | `/dead-letter` | `runs:read` | `?cleared=without\|with\|only` (`without`). Up to 100 `DEAD_LETTER` jobs, newest first → `{jobs: [{…, cleared?}], clearedHidden}`. **Failures an operator cleared in `/errors` are hidden here too** and counted in `clearedHidden`; the rows are untouched, and retry still reaches every one |
+| `GET` | `/quarantine` | `runs:read` | `?cleared=without\|with\|only` (`without`). Up to 100 quarantined submissions; id, jobId, workerId, workerName, rejectReason, createdAt, `cleared?` → `{quarantined, clearedHidden}`. Cleared ones are hidden by default, as above. **The envelope body is not returned** |
 
 `routes/admin.ts:100-187`; the two chapter endpoints are `routes/chapters.ts`,
 backed by `store/runChapters.ts`. There is no run-level cancel; cancel the jobs.

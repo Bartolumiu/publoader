@@ -1,5 +1,5 @@
 import { ErrorSource } from "@prisma/client";
-import type { Prisma, PrismaClient } from "@prisma/client";
+import type { Job, Prisma, PrismaClient } from "@prisma/client";
 import { workerLabel, workerNames } from "../store/workers.js";
 
 /**
@@ -141,6 +141,21 @@ class Acknowledgements {
     return { NOT: { OR: rows.map((row) => ({ id: row.subjectId, updatedAt: { lte: row.errorAt } })) } };
   }
 
+  /**
+   * The complement of `jobExclusion`: only jobs whose latest failure has been
+   * acknowledged. Behind the "cleared only" view, and behind the count of what
+   * the default view is hiding.
+   *
+   * With nothing acknowledged this must match NOTHING, so it cannot fall back to
+   * `{}` the way the exclusions do: an empty `in` is the filter that is false for
+   * every row rather than true for every row.
+   */
+  jobInclusion(): Prisma.JobWhereInput {
+    const rows = this.forSource("job");
+    if (rows.length === 0) return { id: { in: [] } };
+    return { OR: rows.map((row) => ({ id: row.subjectId, updatedAt: { lte: row.errorAt } })) };
+  }
+
   uploadTaskExclusion(): Prisma.UploadTaskWhereInput {
     const rows = this.forSource("upload-task");
     if (rows.length === 0) return {};
@@ -151,6 +166,13 @@ class Acknowledgements {
     const rows = this.forSource("submission");
     if (rows.length === 0) return {};
     return { NOT: { OR: rows.map((row) => ({ id: row.subjectId, createdAt: { lte: row.errorAt } })) } };
+  }
+
+  /** The complement of `submissionExclusion`; see `jobInclusion` on the empty case. */
+  submissionInclusion(): Prisma.ResultSubmissionWhereInput {
+    const rows = this.forSource("submission");
+    if (rows.length === 0) return { id: { in: [] } };
+    return { OR: rows.map((row) => ({ id: row.subjectId, createdAt: { lte: row.errorAt } })) };
   }
 }
 
@@ -302,6 +324,116 @@ export async function countOutstandingErrors(prisma: PrismaClient): Promise<{
     prisma.resultSubmission.count({ where: { state: "QUARANTINED", ...acks.submissionExclusion() } }),
   ]);
   return { total: jobs + uploadTasks + submissions, jobs, uploadTasks, submissions };
+}
+
+/**
+ * Which acknowledged rows a listing wants: the default to-do list, the full
+ * record, or only what has been dealt with.
+ *
+ * Shared by the error feed, the dead-letter queue and the quarantine so the
+ * three surfaces answer the same question the same way. They used to disagree:
+ * clearing an entry emptied the feed while the dead-letter tab, the quarantine
+ * card, `padmin dead-letter` and the overview's job-state tile went on
+ * reporting the same failures, so "I have dealt with these" was true on one
+ * page and false on four.
+ */
+export type ClearedView = "without" | "with" | "only";
+
+/** The quarantine listing's row: the submission plus the worker's display name. */
+export interface QuarantinedSubmission {
+  id: string;
+  jobId: string;
+  workerId: string | null;
+  rejectReason: string | null;
+  createdAt: Date;
+  workerName: string | null;
+}
+
+/**
+ * The dead-letter queue, on the feed's terms.
+ *
+ * The same rows as before — nothing is deleted and no state changes — but an
+ * acknowledged job drops out of the default listing, and `clearedHidden` says
+ * how many, so the queue can never look empty by accident. Replay still reaches
+ * every row: `cleared: "with"` lists them, and retry never consulted this filter
+ * in the first place.
+ */
+export async function listDeadLetterJobs(
+  prisma: PrismaClient,
+  options: { limit: number; cleared?: ClearedView },
+): Promise<{ jobs: (Job & { cleared?: ErrorFeedEntry["cleared"] })[]; clearedHidden: number }> {
+  const view = options.cleared ?? "without";
+  const acks = await Acknowledgements.load(prisma);
+  const ackFilter = view === "without" ? acks.jobExclusion() : view === "only" ? acks.jobInclusion() : {};
+
+  const [jobs, clearedHidden] = await Promise.all([
+    prisma.job.findMany({
+      where: { state: "DEAD_LETTER", ...ackFilter },
+      orderBy: { updatedAt: "desc" },
+      take: options.limit,
+    }),
+    view === "without"
+      ? prisma.job.count({ where: { state: "DEAD_LETTER", ...acks.jobInclusion() } })
+      : Promise.resolve(0),
+  ]);
+
+  // Annotated on the rule the feed uses: an acknowledgement older than the row's
+  // latest failure is stale, and the row reads as outstanding again.
+  return {
+    jobs: jobs.map((job) => {
+      const ack = acks.get("job", job.id);
+      if (!ack || ack.errorAt < job.updatedAt) return job;
+      return { ...job, cleared: { at: ack.clearedAt, by: ack.clearedBy, note: ack.note } };
+    }),
+    clearedHidden,
+  };
+}
+
+/**
+ * Quarantined submissions, on the same terms as `listDeadLetterJobs`.
+ *
+ * A submission row never changes, so an acknowledged quarantine stays cleared: a
+ * fresh rejection from the same worker arrives as a new row with a new id, and
+ * shows up outstanding.
+ */
+export async function listQuarantinedSubmissions(
+  prisma: PrismaClient,
+  options: { limit: number; cleared?: ClearedView },
+): Promise<{
+  quarantined: (QuarantinedSubmission & { cleared?: ErrorFeedEntry["cleared"] })[];
+  clearedHidden: number;
+}> {
+  const view = options.cleared ?? "without";
+  const acks = await Acknowledgements.load(prisma);
+  const ackFilter =
+    view === "without" ? acks.submissionExclusion() : view === "only" ? acks.submissionInclusion() : {};
+
+  const [rows, clearedHidden] = await Promise.all([
+    prisma.resultSubmission.findMany({
+      where: { state: "QUARANTINED", ...ackFilter },
+      orderBy: { createdAt: "desc" },
+      take: options.limit,
+      select: { id: true, jobId: true, workerId: true, rejectReason: true, createdAt: true },
+    }),
+    view === "without"
+      ? prisma.resultSubmission.count({ where: { state: "QUARANTINED", ...acks.submissionInclusion() } })
+      : Promise.resolve(0),
+  ]);
+
+  const names = await workerNames(
+    prisma,
+    rows.map((row) => row.workerId),
+  );
+
+  return {
+    quarantined: rows.map((row) => {
+      const named = { ...row, workerName: row.workerId ? (names.get(row.workerId) ?? null) : null };
+      const ack = acks.get("submission", row.id);
+      if (!ack || ack.errorAt < row.createdAt) return named;
+      return { ...named, cleared: { at: ack.clearedAt, by: ack.clearedBy, note: ack.note } };
+    }),
+    clearedHidden,
+  };
 }
 
 /** What a clear or restore did, per entry, so a caller can report honestly. */

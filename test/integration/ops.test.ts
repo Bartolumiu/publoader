@@ -743,6 +743,113 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     expect(await prisma.clearedError.findFirst({ where: { subjectId: failed.id } })).toBeNull();
   });
 
+  // ---- the same acknowledgements, on the queues the feed is built from ----
+
+  it("hides a cleared job from the dead-letter queue, and counts what it hid", async () => {
+    // The bug this covers: clearing emptied the feed while the dead-letter tab,
+    // `padmin dead-letter` and the overview tile went on reporting the same
+    // failures, so an operator who had triaged everything still read "13
+    // dead-lettered" on four surfaces.
+    const { dead } = await threeFailures();
+    const other = await job({ state: "DEAD_LETTER", lastError: "still broken" });
+
+    const queue = async (query = "") => {
+      const res = await app.inject({ method: "GET", url: `/api/v1/admin/dead-letter${query}`, headers: root });
+      expect(res.statusCode).toBe(200);
+      return res.json() as {
+        jobs: { id: string; cleared?: { by: string; note: string | null } }[];
+        clearedHidden: number;
+      };
+    };
+
+    expect((await queue()).jobs).toHaveLength(2);
+
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/errors/clear",
+      headers: root,
+      payload: { refs: [{ source: "job", id: dead.id }], note: "upstream fixed" },
+    });
+
+    const outstanding = await queue();
+    expect(outstanding.jobs.map((j) => j.id)).toEqual([other.id]);
+    expect(outstanding.clearedHidden).toBe(1);
+
+    const withCleared = await queue("?cleared=with");
+    expect(withCleared.jobs).toHaveLength(2);
+    expect(withCleared.jobs.find((j) => j.id === dead.id)!.cleared).toMatchObject({
+      by: "admin:root",
+      note: "upstream fixed",
+    });
+    // Nothing is hidden from a view that asked for everything.
+    expect(withCleared.clearedHidden).toBe(0);
+
+    expect((await queue("?cleared=only")).jobs.map((j) => j.id)).toEqual([dead.id]);
+
+    // Hidden, not deleted, and still replayable: the state is untouched and
+    // retry never consulted the filter.
+    expect((await prisma.job.findUniqueOrThrow({ where: { id: dead.id } })).state).toBe("DEAD_LETTER");
+    const retried = await app.inject({
+      method: "POST",
+      url: `/api/v1/admin/jobs/${dead.id}/retry`,
+      headers: root,
+    });
+    expect(retried.statusCode).toBe(200);
+  });
+
+  it("hides a cleared quarantine from the quarantine listing", async () => {
+    const { submission, healthy } = await threeFailures();
+    const second = await job({ state: "SUCCEEDED" });
+    const other = await prisma.resultSubmission.create({
+      data: {
+        idempotencyKey: `sub2-${second.id}`,
+        jobId: second.id,
+        attempt: 1,
+        leaseId: "44444444-4444-4444-8444-444444444444",
+        workerId: "deadbeef-0000-4000-8000-000000000000",
+        envelope: {},
+        state: "QUARANTINED",
+        rejectReason: "schema mismatch",
+      },
+    });
+    expect(healthy.id).not.toBe(second.id);
+
+    const listing = async (query = "") => {
+      const res = await app.inject({ method: "GET", url: `/api/v1/admin/quarantine${query}`, headers: root });
+      expect(res.statusCode).toBe(200);
+      return res.json() as {
+        quarantined: { id: string; workerName: string | null; cleared?: { by: string } }[];
+        clearedHidden: number;
+      };
+    };
+
+    expect((await listing()).quarantined).toHaveLength(2);
+
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/errors/clear",
+      headers: root,
+      payload: { refs: [{ source: "submission", id: submission.id }] },
+    });
+
+    const outstanding = await listing();
+    expect(outstanding.quarantined.map((q) => q.id)).toEqual([other.id]);
+    expect(outstanding.clearedHidden).toBe(1);
+    expect((await listing("?cleared=only")).quarantined.map((q) => q.id)).toEqual([submission.id]);
+    // The worker name the listing has always resolved survives the rewrite.
+    expect(outstanding.quarantined[0]).toHaveProperty("workerName");
+    expect((await prisma.resultSubmission.findUniqueOrThrow({ where: { id: submission.id } })).state).toBe(
+      "QUARANTINED",
+    );
+  });
+
+  it("rejects a cleared filter it does not understand", async () => {
+    for (const url of ["/api/v1/admin/dead-letter?cleared=all", "/api/v1/admin/quarantine?cleared=all"]) {
+      const res = await app.inject({ method: "GET", url, headers: root });
+      expect(res.statusCode, url).toBe(400);
+    }
+  });
+
   // ---- scope containment ----
 
   it("confines each endpoint to the scope it declares", async () => {
