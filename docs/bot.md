@@ -346,6 +346,12 @@ DMs are closed the bot falls back to the ephemeral reply and says so.
 | `/status` | read | `stats:read` (+ `workers:read` for the fleet section) | Pause state, job counts by state, upload-task depths, worker fleet with heartbeat age. |
 | `/ping` | read | `stats:read` | Whether the admin API answers, and how fast. |
 | `/stats` | read | `stats:read` | Alias for `/status`, kept from the legacy bot. |
+| `/uploads priority [extensions]` | mutate | `settings:write` | Which extensions jump the upload queue. **Replaces** the whole list; anything not named is no longer prioritised. |
+| `/uploads paused [extensions]` | mutate | `settings:write` | Which extensions upload nothing. Replaces the whole list. |
+| `/uploads scope <scope>` | mutate | `settings:write` | Whether the daily budget is one shared pool or one per extension. |
+| `/notify show` / `/notify set <upload-successes>` | read / mutate | `settings:read` / `settings:write` | Whether successful uploads are announced to the webhooks, or only failures. |
+| `/enrolments revoke <id> [confirm]` | destructive | `enroll:write` | Kill an unredeemed enrollment token. Matched on the id prefix the listing shows; an ambiguous prefix is refused. |
+| `/workers extensions <id> <extensions>` | mutate | `workers:write` | Retarget which extensions a worker accepts. Applies on its next lease; nothing to restart. |
 | `/chapters list [archive] [extension] [series] [language] [q] [limit]` | read | `chapters:read` | What the platform has on MangaDex, by archive. Totals are global rather than filtered, so a narrow filter cannot hide a large archive. |
 | `/chapters collisions [extension] [include-acknowledged]` | read | `chapters:read` | Chapters two uploads both claimed. Resolving one is a dashboard action; see below. |
 | `/maps sync [extension] [confirm]` | destructive | `tracked:write` | Push the series map to its git repository. **Always a dry run without `confirm`**, inverting the endpoint's own default — that default exists for the scheduled job, not for a person typing a command. |
