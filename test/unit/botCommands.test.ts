@@ -4,6 +4,7 @@ import { AdminApiError, type AdminApiClient } from "../../src/bot/apiClient.js";
 import {
   ALL_COMMANDS,
   COMMANDS_BY_NAME,
+  scopeChecker,
   RETIRED_COMMANDS,
   resolveSensitivity,
   runCommand,
@@ -55,6 +56,7 @@ function invoke(
   api: AdminApiClient,
   values: Record<string, string | number | boolean | null> = {},
   subcommand?: string,
+  scopes?: readonly string[],
 ) {
   const command = COMMANDS_BY_NAME.get(name);
   if (!command) throw new Error(`no such command: ${name}`);
@@ -64,7 +66,16 @@ function invoke(
     options: options(values, subcommand),
     log,
     interactionId: "interaction-1",
+    scopes,
+    // Unset scopes mean "show everything", which is what every existing case
+    // here asserts; the trimming cases pass an explicit set.
+    can: scopeChecker(scopes),
   });
+}
+
+/** Embed fields flattened, so a test can ask what the reply actually shows. */
+function fieldText(reply: { fields?: { name: string; value: string }[] }): string {
+  return (reply.fields ?? []).map((f) => `${f.name}: ${f.value}`).join("\n");
 }
 
 describe("command table", () => {
@@ -152,10 +163,13 @@ describe("/status", () => {
       }),
     });
     const reply = await invoke("status", api);
-    expect(reply.text).toContain("Platform: running");
-    expect(reply.text).toContain("QUEUED=3");
-    expect(reply.text).toContain("UPLOAD/PENDING=7");
-    expect(reply.text).toContain("alpha");
+    // The numbers moved into embed fields; the text is now the one-line verdict.
+    const rendered = fieldText(reply);
+    expect(reply.title).toContain("healthy");
+    expect(reply.tone).toBe("ok");
+    expect(rendered).toContain("QUEUED=3");
+    expect(rendered).toContain("UPLOAD/PENDING=7");
+    expect(rendered).toContain("alpha");
   });
 
   it("says the platform is paused, loudly", async () => {
@@ -163,7 +177,10 @@ describe("/status", () => {
       stats: vi.fn().mockResolvedValue({ ...stats, paused: true }),
       workers: vi.fn().mockResolvedValue({ workers: [] }),
     });
-    expect((await invoke("status", api)).text).toContain("PAUSED");
+    const reply = await invoke("status", api);
+    expect(reply.text).toContain("paused");
+    expect(reply.title).toContain("paused");
+    expect(reply.tone).toBe("warn");
   });
 
   it("still reports status when the token cannot read the fleet", async () => {
@@ -175,8 +192,29 @@ describe("/status", () => {
       ),
     });
     const reply = await invoke("status", api);
-    expect(reply.text).toContain("QUEUED=3");
-    expect(reply.text).toContain("lacks `workers:read`");
+    expect(fieldText(reply)).toContain("QUEUED=3");
+    expect(fieldText(reply)).toContain("lacks `workers:read`");
+  });
+
+  it("does not even ask for the fleet when the caller may not see it", async () => {
+    // The point of scoping the reply: a read-only operator gets the platform
+    // numbers without a worker roster, and without a line telling them what
+    // they were denied.
+    const workers = vi.fn().mockResolvedValue({ workers: [] });
+    const api = fakeApi({ stats: vi.fn().mockResolvedValue(stats), workers });
+    const reply = await invoke("status", api, {}, undefined, ["stats:read"]);
+    expect(workers).not.toHaveBeenCalled();
+    expect(fieldText(reply)).not.toContain("Fleet");
+    expect(fieldText(reply)).toContain("QUEUED=3");
+    expect(reply.footer).toContain("hidden by your permissions");
+  });
+
+  it("shows the fleet to a caller who holds workers:read", async () => {
+    const workers = vi.fn().mockResolvedValue({ workers: [] });
+    const api = fakeApi({ stats: vi.fn().mockResolvedValue(stats), workers });
+    const reply = await invoke("status", api, {}, undefined, ["stats:read", "workers:read"]);
+    expect(workers).toHaveBeenCalled();
+    expect(reply.footer).toBeUndefined();
   });
 
   it("flags quarantined submissions", async () => {
@@ -184,7 +222,10 @@ describe("/status", () => {
       stats: vi.fn().mockResolvedValue({ ...stats, quarantined: 4 }),
       workers: vi.fn().mockResolvedValue({ workers: [] }),
     });
-    expect((await invoke("status", api)).text).toContain("4 :warning:");
+    const reply = await invoke("status", api);
+    expect(fieldText(reply)).toContain("4");
+    expect(fieldText(reply)).toContain("/quarantine");
+    expect(reply.tone).toBe("warn");
   });
 });
 

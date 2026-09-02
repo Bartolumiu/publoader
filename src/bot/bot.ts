@@ -10,6 +10,7 @@ import {
   ActionRowBuilder,
   Client,
   DiscordjsErrorCodes,
+  EmbedBuilder,
   Events,
   GatewayIntentBits,
   MessageFlags,
@@ -36,8 +37,11 @@ import {
   describeRegistrationFailure,
   resolveSensitivity,
   runCommand,
+  scopeChecker,
   type BotCommand,
+  type BotReply,
   type OptionReader,
+  type ReplyTone,
 } from "./commands.js";
 import type { Logger } from "../logging.js";
 
@@ -63,6 +67,9 @@ const MODAL_PREFIX = "publoader:";
 
 /** One @mention answer per person per this long, so a loop cannot flood. */
 const MENTION_COOLDOWN_MS = 10_000;
+
+/** How long a caller's resolved scopes are reused; see `scopesFor`. */
+const SCOPE_CACHE_TTL_MS = 60_000;
 
 /** What `publishToGuilds` did, split by outcome so each can be reported. */
 export interface GuildPublishResult {
@@ -166,6 +173,96 @@ export function mentionReport(facts: MentionFacts): string {
   return lines.join("\n");
 }
 
+/**
+ * Colours, chosen once so a reply's tone is not forty-seven separate opinions.
+ *
+ * Muted rather than saturated: these sit in an operations channel next to log
+ * lines, and a control-plane bot shouting in primary colours reads as a toy.
+ * The palette matches the dashboard's, so the two surfaces look related.
+ */
+const TONE_COLOUR: Record<ReplyTone, number> = {
+  ok: 0x3f9d5a,
+  info: 0x4a6fa5,
+  warn: 0xb8860b,
+  error: 0xa63d40,
+  denied: 0x6b6f76,
+};
+
+const TONE_MARK: Record<ReplyTone, string> = {
+  ok: "✓",
+  info: "•",
+  warn: "!",
+  error: "✕",
+  denied: "🔒",
+};
+
+/**
+ * Read a reply's tone off the marker it already starts with, and drop it.
+ *
+ * Forty-seven handlers had settled on `:x:`, `:warning:` and friends long
+ * before any of this was an embed. Inferring from that is what let every one of
+ * them gain a colour without being edited — and a handler that cares can still
+ * say `tone` explicitly, which wins.
+ *
+ * The marker is stripped once inferred: the embed's own mark and colour already
+ * say it, and two of them in a row reads as a stutter.
+ */
+export function inferTone(text: string): { tone: ReplyTone; text: string } {
+  const markers: [RegExp, ReplyTone][] = [
+    [/^:(?:x|rotating_light|bangbang):\s*/, "error"],
+    [/^:warning:\s*/, "warn"],
+    [/^:lock:\s*/, "denied"],
+    [/^:(?:white_check_mark|green_circle|heavy_check_mark):\s*/, "ok"],
+  ];
+  for (const [pattern, tone] of markers) {
+    if (pattern.test(text)) return { tone, text: text.replace(pattern, "") };
+  }
+  return { tone: "info", text };
+}
+
+/** Discord's cap on an embed description; the reason replies can be roomy. */
+const EMBED_DESCRIPTION_LIMIT = 4096;
+const EMBED_FIELD_LIMIT = 1024;
+
+/**
+ * Turn a handler's reply into the embed that is actually sent.
+ *
+ * One place decides presentation. A handler says what happened and, at most,
+ * how it went; it never picks a colour, a title or a layout, so the surface
+ * stays coherent as commands are added by different hands on different days.
+ */
+export function buildReplyEmbed(commandName: string, reply: BotReply): EmbedBuilder {
+  const inferred = inferTone(reply.text);
+  const tone: ReplyTone = reply.tone ?? inferred.tone;
+  const embed = new EmbedBuilder()
+    .setColor(TONE_COLOUR[tone])
+    .setTitle(`${TONE_MARK[tone]} ${reply.title ?? `/${commandName}`}`.slice(0, 256));
+
+  const description = (reply.tone ? reply.text : inferred.text).trim();
+  if (description) embed.setDescription(description.slice(0, EMBED_DESCRIPTION_LIMIT));
+
+  // Discord silently drops an embed with more than 25 fields, which would lose
+  // the reply rather than shorten it.
+  for (const field of (reply.fields ?? []).slice(0, 25)) {
+    embed.addFields({
+      name: field.name.slice(0, 256),
+      value: (field.value || "—").slice(0, EMBED_FIELD_LIMIT),
+      inline: field.inline ?? false,
+    });
+  }
+  if (reply.footer) embed.setFooter({ text: reply.footer.slice(0, 2048) });
+  return embed;
+}
+
+/** The same treatment for a failure, so errors do not arrive as bare text. */
+export function buildErrorEmbed(commandName: string, detail: string): EmbedBuilder {
+  return buildReplyEmbed(commandName, {
+    text: detail,
+    title: `/${commandName} failed`,
+    tone: "error",
+  });
+}
+
 export class FatalBotConfigError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
@@ -195,6 +292,8 @@ export class PubloaderBot {
   private readonly inFlight = new Set<string>();
   /** Last @mention answered per user id; see `onMention`. */
   private readonly mentionCooldown = new Map<string, number>();
+  /** Per-caller scope sets, for tailoring replies; see `scopesFor`. */
+  private readonly scopeCache = new Map<string, { scopes: readonly string[]; fetchedAt: number }>();
   private extensionCache: { names: string[]; fetchedAt: number } | null = null;
   /**
    * One extension's series map, for the `manga-id` and `catalogue`
@@ -505,6 +604,35 @@ export class PubloaderBot {
     return this.authzSource.mode === "dashboard" ? this.api.onBehalfOf(discordUserId) : this.api;
   }
 
+  /**
+   * What the person running this command may do, for shaping the reply.
+   *
+   * One introspection call per person per minute, not one per command: a reply
+   * that leaves out sections is a presentation decision, and paying a round
+   * trip for it on every keystroke of autocomplete would be absurd. A minute
+   * stale is harmless here because it never grants anything — the API still
+   * authorizes every call independently, so the worst a stale answer does is
+   * render a section that the subsequent request then refuses.
+   *
+   * Undefined on failure, which `scopeChecker` reads as "show everything".
+   */
+  private async scopesFor(discordUserId: string, actor: string): Promise<readonly string[] | undefined> {
+    const cached = this.scopeCache.get(discordUserId);
+    if (cached && Date.now() - cached.fetchedAt < SCOPE_CACHE_TTL_MS) return cached.scopes;
+    try {
+      const identity = await this.apiFor(discordUserId).tokenSelf(actor);
+      const scopes = identity?.scopes;
+      if (!scopes) return undefined;
+      this.scopeCache.set(discordUserId, { scopes, fetchedAt: Date.now() });
+      return scopes;
+    } catch (err) {
+      // Never fatal: the command itself is still authorized server-side, so a
+      // failure here costs a tailored reply and nothing else.
+      this.log.debug({ err }, "could not resolve caller scopes; replying in full");
+      return undefined;
+    }
+  }
+
   private async onInteraction(interaction: Interaction): Promise<void> {
     if (interaction.isAutocomplete()) {
       await this.onAutocomplete(interaction);
@@ -548,7 +676,16 @@ export class PubloaderBot {
       // place a pattern of attempts is visible.
       log.warn({ sensitivity, reason: decision.reason }, "command denied");
       await interaction
-        .reply({ content: `:lock: ${decision.reason}`, flags: MessageFlags.Ephemeral })
+        .reply({
+          embeds: [
+            buildReplyEmbed(command.name, {
+              text: decision.reason,
+              title: "Not allowed here",
+              tone: "denied",
+            }),
+          ],
+          flags: MessageFlags.Ephemeral,
+        })
         .catch(() => undefined);
       return;
     }
@@ -580,8 +717,11 @@ export class PubloaderBot {
       // Admin API calls routinely exceed Discord's 3s interaction window.
       await interaction.deferReply(command.ephemeral ? { flags: MessageFlags.Ephemeral } : {});
       log.info({ sensitivity, actor }, "command accepted");
+      const scopes = await this.scopesFor(interaction.user.id, actor);
       const reply = await runCommand(command, {
         api: this.apiFor(interaction.user.id),
+        scopes,
+        can: scopeChecker(scopes),
         actor,
         options: optionReaderOf(interaction),
         log,
@@ -604,13 +744,13 @@ export class PubloaderBot {
           });
         }
       }
-      await interaction.editReply({ content: reply.text });
+      await interaction.editReply({ embeds: [buildReplyEmbed(command.name, reply)] });
     } catch (err) {
       log.error({ err }, "interaction handling failed");
-      const message = `:x: \`/${command.name}\` failed.\n${describeApiError(err)}`;
+      const embed = buildErrorEmbed(command.name, describeApiError(err));
       await (interaction.deferred || interaction.replied
-        ? interaction.editReply({ content: message })
-        : interaction.reply({ content: message, flags: MessageFlags.Ephemeral })
+        ? interaction.editReply({ embeds: [embed] })
+        : interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral })
       ).catch(() => undefined);
     } finally {
       this.inFlight.delete(invoker.userId);
@@ -638,7 +778,16 @@ export class PubloaderBot {
     if (!decision.allowed) {
       log.warn({ sensitivity, reason: decision.reason }, "modal denied");
       await interaction
-        .reply({ content: `:lock: ${decision.reason}`, flags: MessageFlags.Ephemeral })
+        .reply({
+          embeds: [
+            buildReplyEmbed(command.name, {
+              text: decision.reason,
+              title: "Not allowed here",
+              tone: "denied",
+            }),
+          ],
+          flags: MessageFlags.Ephemeral,
+        })
         .catch(() => undefined);
       return;
     }
@@ -658,20 +807,23 @@ export class PubloaderBot {
     try {
       await interaction.deferReply(command.ephemeral ? { flags: MessageFlags.Ephemeral } : {});
       log.info({ sensitivity, actor }, "modal accepted");
+      const scopes = await this.scopesFor(interaction.user.id, actor);
       const reply = await runCommand(command, {
         api: this.apiFor(interaction.user.id),
+        scopes,
+        can: scopeChecker(scopes),
         actor,
         options: modalOptionReader(interaction),
         log,
         interactionId: interaction.id,
       });
-      await interaction.editReply({ content: reply.text });
+      await interaction.editReply({ embeds: [buildReplyEmbed(command.name, reply)] });
     } catch (err) {
       log.error({ err }, "modal handling failed");
-      const message = `:x: \`/${command.name}\` failed.\n${describeApiError(err)}`;
+      const embed = buildErrorEmbed(command.name, describeApiError(err));
       await (interaction.deferred || interaction.replied
-        ? interaction.editReply({ content: message })
-        : interaction.reply({ content: message, flags: MessageFlags.Ephemeral })
+        ? interaction.editReply({ embeds: [embed] })
+        : interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral })
       ).catch(() => undefined);
     } finally {
       this.inFlight.delete(invoker.userId);
