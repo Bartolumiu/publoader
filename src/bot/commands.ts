@@ -35,6 +35,10 @@ import {
   type TrackedEntry,
   type UntrackedEntry,
   type UntrackedState,
+  type FetchThrottlePatch,
+  type FetchThrottleValues,
+  type UploadSchedulePatch,
+  type UploadScheduleValues,
   type UploadTaskKind,
   type UploadTaskState,
   type WorkerAction,
@@ -666,6 +670,47 @@ function stillWorkingText(
       : "") +
     `It keeps going without me. Run \`${opts.command}\` again in a minute for the numbers.`
   );
+}
+
+/** Pacing in words, skipping whatever is not set rather than printing nulls. */
+function describeUploadValues(v: UploadScheduleValues | undefined): string {
+  if (!v) return "_default_";
+  const parts: string[] = [];
+  if (v.perDay !== undefined) parts.push(`${v.perDay}/day`);
+  if (v.perMangaPerDay !== undefined) parts.push(`${v.perMangaPerDay}/series/day`);
+  if (v.intervalHours !== undefined) parts.push(`every ${v.intervalHours}h`);
+  if (v.spacingSeconds !== undefined) {
+    // 0 is a real setting with a meaning, not an unset value.
+    parts.push(v.spacingSeconds === 0 ? "spread evenly" : `${v.spacingSeconds}s apart`);
+  }
+  return parts.length > 0 ? parts.join(", ") : "_default_";
+}
+
+function describeThrottle(v: FetchThrottleValues | undefined): string {
+  if (!v) return "_default_";
+  const parts: string[] = [];
+  if (v.minIntervalMs !== undefined) parts.push(`${v.minIntervalMs}ms apart`);
+  if (v.jitter !== undefined) parts.push(v.jitter ? "jittered" : "exact interval");
+  return parts.length > 0 ? parts.join(", ") : "_default_";
+}
+
+/** pino levels, as one glyph. Colour lives on the embed, not on every line. */
+function levelMark(level: number): string {
+  if (level >= 50) return "✕";
+  if (level >= 40) return "!";
+  return "·";
+}
+
+function severityMark(severity: string): string {
+  if (severity === "error") return "✕";
+  if (severity === "warn") return "!";
+  return "·";
+}
+
+/** One value inside a line; `truncate` is for whole replies. */
+function clip(text: string, limit: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= limit ? flat : `${flat.slice(0, limit - 1)}…`;
 }
 
 // ---- /access helpers -------------------------------------------------------
@@ -2869,6 +2914,334 @@ const commands: BotCommand[] = [
     },
   },
   {
+    name: "uploads",
+    description: "How fast chapters go out: daily budget, interval and spacing.",
+    sensitivity: { show: "read", set: "mutate", clear: "mutate" },
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("uploads")
+      .setDescription("How fast chapters go out: daily budget, interval and spacing.")
+      .addSubcommand((s) =>
+        s.setName("show").setDescription("The pacing in force, globally and per extension."),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("set")
+          .setDescription("Change the pacing. Omitted values are left alone.")
+          .addStringOption((o) =>
+            o
+              .setName("extension")
+              .setDescription("Only this extension. Omit to change the global pacing.")
+              .setAutocomplete(true),
+          )
+          .addIntegerOption((o) =>
+            o.setName("per-day").setDescription("Chapters per day.").setMinValue(0).setMaxValue(100000),
+          )
+          .addIntegerOption((o) =>
+            o
+              .setName("per-manga-per-day")
+              .setDescription("Chapters per series per day.")
+              .setMinValue(0)
+              .setMaxValue(100000),
+          )
+          .addIntegerOption((o) =>
+            o.setName("interval-hours").setDescription("Hours between batches.").setMinValue(1).setMaxValue(720),
+          )
+          .addIntegerOption((o) =>
+            o
+              .setName("spacing-seconds")
+              .setDescription("Gap between uploads. 0 spreads the day evenly.")
+              .setMinValue(0)
+              .setMaxValue(86400),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("clear")
+          .setDescription("Drop one extension's override so it follows the global again.")
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
+          ),
+      ),
+    async run(ctx) {
+      const sub = ctx.options.subcommand();
+
+      if (sub === "show") {
+        const view = await ctx.api.uploadSchedule(ctx.actor);
+        const fields: NonNullable<BotReply["fields"]> = [
+          { name: "Global", value: describeUploadValues(view.global), inline: true },
+          { name: "Budget scope", value: view.scope, inline: true },
+        ];
+        const overrides = Object.entries(view.overrides ?? {});
+        if (overrides.length > 0) {
+          fields.push({
+            name: "Per-extension",
+            value: overrides.map(([name, v]) => `\`${name}\`: ${describeUploadValues(v)}`).join("\n"),
+          });
+        }
+        if (view.priority?.length) fields.push({ name: "Priority", value: view.priority.join(", "), inline: true });
+        if (view.paused?.length) fields.push({ name: "Paused", value: view.paused.join(", "), inline: true });
+        return { text: "", title: "Upload pacing", tone: "info", fields };
+      }
+
+      const extension = ctx.options.string("extension");
+
+      if (sub === "clear") {
+        if (!extension) return { text: "Name the extension whose override to drop.", tone: "warn" };
+        await ctx.api.setUploadScheduleFor(ctx.actor, extension, {});
+        return { text: `\`${extension}\` follows the global pacing again.`, tone: "ok" };
+      }
+
+      const patch: UploadSchedulePatch = {};
+      const perDay = ctx.options.integer("per-day");
+      const perManga = ctx.options.integer("per-manga-per-day");
+      const interval = ctx.options.integer("interval-hours");
+      const spacing = ctx.options.integer("spacing-seconds");
+      if (perDay !== null) patch.perDay = perDay;
+      if (perManga !== null) patch.perMangaPerDay = perManga;
+      if (interval !== null) patch.intervalHours = interval;
+      if (spacing !== null) patch.spacingSeconds = spacing;
+
+      if (Object.keys(patch).length === 0) {
+        return {
+          text: "Nothing to change. Give at least one of `per-day`, `per-manga-per-day`, `interval-hours` or `spacing-seconds`.",
+          tone: "warn",
+        };
+      }
+
+      if (extension) {
+        await ctx.api.setUploadScheduleFor(ctx.actor, extension, patch);
+        return {
+          text: `\`${extension}\` now paces at ${describeUploadValues(patch)}.`,
+          title: "Upload pacing changed",
+          tone: "ok",
+          // Said because it is the surprise: changing pacing does not re-time
+          // work that is already queued.
+          footer: "Applies to newly enqueued uploads; anything already scheduled keeps its time.",
+        };
+      }
+      const { global } = await ctx.api.setUploadSchedule(ctx.actor, patch);
+      return {
+        text: `Global pacing is now ${describeUploadValues(global)}.`,
+        title: "Upload pacing changed",
+        tone: "ok",
+        footer: "Applies to newly enqueued uploads; anything already scheduled keeps its time.",
+      };
+    },
+  },
+  {
+    name: "throttle",
+    description: "How hard workers may hit a publisher: minimum gap and jitter.",
+    sensitivity: { show: "read", set: "mutate", clear: "mutate" },
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("throttle")
+      .setDescription("How hard workers may hit a publisher: minimum gap and jitter.")
+      .addSubcommand((s) => s.setName("show").setDescription("The throttle in force, globally and per extension."))
+      .addSubcommand((s) =>
+        s
+          .setName("set")
+          .setDescription("Change the throttle. Omitted values are left alone.")
+          .addStringOption((o) =>
+            o
+              .setName("extension")
+              .setDescription("Only this extension. Omit to change the global throttle.")
+              .setAutocomplete(true),
+          )
+          .addIntegerOption((o) =>
+            o
+              .setName("min-interval-ms")
+              .setDescription("Minimum gap between requests to one host.")
+              .setMinValue(100)
+              .setMaxValue(60000),
+          )
+          .addBooleanOption((o) =>
+            o.setName("jitter").setDescription("Vary the gap. An exact interval is itself a pattern."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("clear")
+          .setDescription("Drop one extension's override so it follows the global again.")
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
+          ),
+      ),
+    async run(ctx) {
+      const sub = ctx.options.subcommand();
+
+      if (sub === "show") {
+        const view = await ctx.api.fetchThrottle(ctx.actor);
+        const fields: NonNullable<BotReply["fields"]> = [
+          { name: "Global", value: describeThrottle(view.global), inline: true },
+          { name: "Default", value: describeThrottle(view.defaults), inline: true },
+        ];
+        const overrides = Object.entries(view.overrides ?? {});
+        if (overrides.length > 0) {
+          fields.push({
+            name: "Per-extension",
+            value: overrides.map(([name, v]) => `\`${name}\`: ${describeThrottle(v)}`).join("\n"),
+          });
+        }
+        return { text: "", title: "Fetch throttle", tone: "info", fields };
+      }
+
+      const extension = ctx.options.string("extension");
+
+      if (sub === "clear") {
+        if (!extension) return { text: "Name the extension whose override to drop.", tone: "warn" };
+        await ctx.api.setFetchThrottleFor(ctx.actor, extension, {});
+        return { text: `\`${extension}\` follows the global throttle again.`, tone: "ok" };
+      }
+
+      const patch: FetchThrottlePatch = {};
+      const minInterval = ctx.options.integer("min-interval-ms");
+      const jitter = ctx.options.boolean("jitter");
+      if (minInterval !== null) patch.minIntervalMs = minInterval;
+      if (jitter !== null) patch.jitter = jitter;
+
+      if (Object.keys(patch).length === 0) {
+        return { text: "Nothing to change. Give `min-interval-ms` and/or `jitter`.", tone: "warn" };
+      }
+
+      if (extension) {
+        const { effective } = await ctx.api.setFetchThrottleFor(ctx.actor, extension, patch);
+        return {
+          text: `\`${extension}\` now throttles at ${describeThrottle(effective)}.`,
+          title: "Throttle changed",
+          tone: "ok",
+        };
+      }
+      const { global } = await ctx.api.setFetchThrottle(ctx.actor, patch);
+      return {
+        text: `Global throttle is now ${describeThrottle(global)}.`,
+        title: "Throttle changed",
+        tone: "ok",
+        footer: "Lowering this risks rate limiting at the publisher, which looks like an outage.",
+      };
+    },
+  },
+  {
+    name: "logs",
+    description: "Recent lines from the core services' own log table.",
+    sensitivity: "read",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("logs")
+      .setDescription("Recent lines from the core services' own log table.")
+      .addStringOption((o) =>
+        o
+          .setName("level")
+          .setDescription("Minimum severity. Default: warnings and errors.")
+          .addChoices(
+            { name: "error", value: "50" },
+            { name: "warn and above (default)", value: "40" },
+            { name: "info and above", value: "30" },
+            { name: "everything", value: "10" },
+          ),
+      )
+      .addStringOption((o) =>
+        o.setName("service").setDescription("Only this service, e.g. core-uploader.").setAutocomplete(true),
+      )
+      .addStringOption((o) => o.setName("q").setDescription("Substring of the message."))
+      .addIntegerOption((o) =>
+        o.setName("limit").setDescription("How many lines (1-40, default 15).").setMinValue(1).setMaxValue(40),
+      ),
+    async run(ctx) {
+      const limit = ctx.options.integer("limit") ?? 15;
+      const { logs, covers } = await ctx.api.logs(ctx.actor, {
+        limit,
+        // Warnings and errors by default: an unfiltered tail in a chat window
+        // is a wall of routine info lines with the interesting one scrolled off.
+        minLevel: Number(ctx.options.string("level") ?? "40"),
+        service: ctx.options.string("service") ?? undefined,
+        q: ctx.options.string("q") ?? undefined,
+      });
+
+      if (logs.length === 0) {
+        return {
+          text: "No log lines matched.",
+          title: "Logs",
+          tone: "info",
+          footer: `Covers ${covers.join(", ")}. Extension runs are not here: workers keep no database.`,
+        };
+      }
+
+      const rendered = logs.map((line) => {
+        const where = line.component ? `${line.service}/${line.component}` : line.service;
+        return `\`${shortTime(line.createdAt)}\` ${levelMark(line.level)} **${where}** ${clip(line.msg, 140)}`;
+      });
+      return {
+        text: lines(rendered),
+        title: `Logs — ${logs.length} line(s)`,
+        tone: logs.some((l) => l.level >= 50) ? "warn" : "info",
+        footer: `Covers ${covers.join(", ")}. Extension runs are not here: workers keep no database.`,
+      };
+    },
+  },
+  {
+    name: "activity",
+    description: "What the platform has been doing lately, worst first.",
+    sensitivity: "read",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("activity")
+      .setDescription("What the platform has been doing lately, worst first.")
+      .addStringOption((o) =>
+        o
+          .setName("severity")
+          .setDescription("Default: everything.")
+          .addChoices(
+            { name: "errors only", value: "error" },
+            { name: "warnings and errors", value: "warn" },
+            { name: "everything", value: "all" },
+          ),
+      )
+      .addIntegerOption((o) =>
+        o.setName("hours").setDescription("How far back (1-168, default 24).").setMinValue(1).setMaxValue(168),
+      )
+      .addStringOption((o) =>
+        o.setName("extension").setDescription("Only this extension.").setAutocomplete(true),
+      )
+      .addStringOption((o) => o.setName("q").setDescription("Substring of the subject or message."))
+      .addIntegerOption((o) =>
+        o.setName("limit").setDescription("How many entries (1-30, default 12).").setMinValue(1).setMaxValue(30),
+      ),
+    async run(ctx) {
+      const hours = ctx.options.integer("hours") ?? 24;
+      const { events } = await ctx.api.activity(ctx.actor, {
+        severity: (ctx.options.string("severity") as "error" | "warn" | "all" | null) ?? "all",
+        hours,
+        extension: ctx.options.string("extension") ?? undefined,
+        q: ctx.options.string("q") ?? undefined,
+        limit: ctx.options.integer("limit") ?? 12,
+      });
+
+      // The endpoint folds in the audit trail only for a caller who may read
+      // it, so the note belongs on an empty result too: "nothing happened" and
+      // "nothing you can see happened" are different answers.
+      const hiddenNote = ctx.can("audit:read") ? undefined : "Audit entries are hidden by your permissions.";
+
+      if (events.length === 0) {
+        return { text: `Nothing in the last ${hours}h.`, title: "Activity", tone: "ok", footer: hiddenNote };
+      }
+
+      const rendered = events.map((e) => {
+        const where = e.extension ? ` \`${e.extension}\`` : "";
+        return `\`${shortTime(e.at)}\` ${severityMark(e.severity)} **${e.kind}**${where} ${clip(
+          e.message ?? e.subject ?? "",
+          120,
+        )}`;
+      });
+      return {
+        text: lines(rendered),
+        title: `Activity — last ${hours}h`,
+        tone: events.some((e) => e.severity === "error") ? "warn" : "info",
+        footer: hiddenNote,
+      };
+    },
+  },
+  {
     name: "whoami",
     description: "What this bot is, where it points, and what its token may do.",
     sensitivity: "read",
@@ -2922,11 +3295,6 @@ interface RetiredCommand {
  * docs/ipc-to-api-mapping.md → "Retired".
  */
 export const RETIRED_COMMANDS: RetiredCommand[] = [
-  {
-    name: "logs",
-    replacement:
-      "There is no log API; work runs on machines the core cannot read. For failures use `/errors list`, which merges dead-lettered jobs, failed uploads and quarantines into one list, and `/errors clear` once you have dealt with one. For process output, `docker compose logs -f core-api` on the core host.",
-  },
   {
     name: "kill",
     replacement:

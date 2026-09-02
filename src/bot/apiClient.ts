@@ -581,6 +581,79 @@ interface RequestSpec {
   timeoutMs?: number;
 }
 
+/** How many chapters go out, how often, and how far apart. */
+export interface UploadScheduleValues {
+  perDay?: number;
+  perMangaPerDay?: number;
+  intervalHours?: number;
+  /** 0 means auto: spread a day evenly and do not pace enqueueing. */
+  spacingSeconds?: number;
+}
+
+export type UploadSchedulePatch = UploadScheduleValues;
+
+export interface UploadScheduleView {
+  global: UploadScheduleValues;
+  overrides: Record<string, UploadScheduleValues>;
+  defaults: UploadScheduleValues;
+  scope: string;
+  priority: string[];
+  paused: string[];
+}
+
+/** How hard a worker is allowed to hit one publisher. */
+export interface FetchThrottleValues {
+  minIntervalMs?: number;
+  jitter?: boolean;
+  jitterRatio?: number;
+}
+
+export type FetchThrottlePatch = FetchThrottleValues;
+
+export interface FetchThrottleView {
+  global: FetchThrottleValues;
+  overrides: Record<string, FetchThrottleValues>;
+  defaults: FetchThrottleValues;
+}
+
+/** One line from the platform's own log table. */
+export interface LogLine {
+  createdAt: string;
+  /** pino levels: 10 trace, 20 debug, 30 info, 40 warn, 50 error. */
+  level: number;
+  service: string;
+  component?: string | null;
+  msg: string;
+  runId?: string | null;
+  jobId?: string | null;
+}
+
+export interface LogQuery {
+  limit?: number;
+  minLevel?: number;
+  service?: string;
+  q?: string;
+  since?: string;
+}
+
+/** One entry in the merged operational feed. */
+export interface ActivityEvent {
+  kind: string;
+  severity: string;
+  at: string;
+  subject?: string | null;
+  message?: string | null;
+  extension?: string | null;
+}
+
+export interface ActivityQuery {
+  severity?: "error" | "warn" | "info" | "all";
+  hours?: number;
+  extension?: string;
+  q?: string;
+  limit?: number;
+}
+
 export interface AdminApiClientOptions {
   baseUrl?: string | undefined;
   token: string;
@@ -756,6 +829,118 @@ export class AdminApiClient {
       path: "/api/v1/admin/discord/authz",
       scope: "users:admin",
       actor,
+    });
+  }
+
+  // ---- pacing: how fast we upload, and how fast we fetch ----
+
+  uploadSchedule(actor: string): Promise<UploadScheduleView> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/upload-schedule",
+      scope: "settings:read",
+      actor,
+    });
+  }
+
+  setUploadSchedule(actor: string, patch: UploadSchedulePatch): Promise<{ global: UploadScheduleValues }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/upload-schedule",
+      scope: "settings:write",
+      actor,
+      json: patch,
+    });
+  }
+
+  /** An empty patch clears the override, returning the extension to the global. */
+  setUploadScheduleFor(
+    actor: string,
+    extension: string,
+    patch: UploadSchedulePatch,
+  ): Promise<{ ok: boolean; extension: string; cleared: boolean }> {
+    return this.request({
+      method: "POST",
+      path: `/api/v1/admin/upload-schedule/${encodeURIComponent(extension)}`,
+      scope: "settings:write",
+      actor,
+      json: patch,
+    });
+  }
+
+  fetchThrottle(actor: string): Promise<FetchThrottleView> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/fetch-throttle",
+      scope: "settings:read",
+      actor,
+    });
+  }
+
+  setFetchThrottle(actor: string, patch: FetchThrottlePatch): Promise<{ global: FetchThrottleValues }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/fetch-throttle",
+      scope: "settings:write",
+      actor,
+      json: patch,
+    });
+  }
+
+  setFetchThrottleFor(
+    actor: string,
+    extension: string,
+    patch: FetchThrottlePatch,
+  ): Promise<{ ok: boolean; extension: string; cleared: boolean; effective: FetchThrottleValues }> {
+    return this.request({
+      method: "POST",
+      path: `/api/v1/admin/fetch-throttle/${encodeURIComponent(extension)}`,
+      scope: "settings:write",
+      actor,
+      json: patch,
+    });
+  }
+
+  // ---- logs and activity ----
+
+  logs(actor: string, query: LogQuery): Promise<{ logs: LogLine[]; nextBefore: string | null; covers: string[] }> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/logs",
+      scope: "runs:read",
+      actor,
+      query: {
+        limit: query.limit,
+        minLevel: query.minLevel,
+        service: query.service,
+        q: query.q,
+        since: query.since,
+      },
+    });
+  }
+
+  logSources(actor: string): Promise<{ services: string[]; components: string[] }> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/logs/sources",
+      scope: "runs:read",
+      actor,
+    });
+  }
+
+  activity(actor: string, query: ActivityQuery): Promise<{ events: ActivityEvent[] }> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/activity",
+      scope: "runs:read",
+      actor,
+      query: {
+        severity: query.severity,
+        hours: query.hours,
+        extension: query.extension,
+        q: query.q,
+        limit: query.limit,
+      },
     });
   }
 

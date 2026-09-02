@@ -328,6 +328,14 @@ DMs are closed the bot falls back to the ephemeral reply and says so.
 | `/status` | read | `stats:read` (+ `workers:read` for the fleet section) | Pause state, job counts by state, upload-task depths, worker fleet with heartbeat age. |
 | `/ping` | read | `stats:read` | Whether the admin API answers, and how fast. |
 | `/stats` | read | `stats:read` | Alias for `/status`, kept from the legacy bot. |
+| `/logs [level] [service] [q] [limit]` | read | `runs:read` | Recent lines from the core services' log table. Defaults to warnings and errors. Covers core-api, scheduler, processor and uploader; extension runs are not there, because workers keep no database. |
+| `/activity [severity] [hours] [extension] [q] [limit]` | read | `runs:read` | The merged operational feed, worst first. Audit entries are folded in only for a caller holding `audit:read`. |
+| `/uploads show` | read | `settings:read` | Upload pacing in force: daily budget, interval, spacing, budget scope, and any per-extension overrides. |
+| `/uploads set [extension] [per-day] [per-manga-per-day] [interval-hours] [spacing-seconds]` | mutate | `settings:write` | Change pacing globally, or for one extension. Omitted values are left alone. Applies to newly enqueued uploads only. |
+| `/uploads clear <extension>` | mutate | `settings:write` | Drop an override so the extension follows the global again. |
+| `/throttle show` | read | `settings:read` | Minimum gap between requests to one publisher, and jitter, globally and per extension. |
+| `/throttle set [extension] [min-interval-ms] [jitter]` | mutate | `settings:write` | Change it. Lowering the gap risks rate limiting at the publisher, which presents as an outage. |
+| `/throttle clear <extension>` | mutate | `settings:write` | Drop an override. |
 | `/whoami` | read | none | Which API the bot points at, a masked token fingerprint, the actor string your commands are attributed to, and the token's scopes when they are known. |
 | `/access show` | read | `users:admin` | The four allowlists in force, whether they come from the control plane or from `.env`, and any misconfiguration worth knowing about. |
 | `/access add <list> <id>` | destructive | `users:admin` | Allow a guild, channel, user or role. Takes a snowflake or a `#channel` / `@user` / `@role` mention. Needs `confirm: true`. |
