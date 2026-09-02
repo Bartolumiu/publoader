@@ -35,6 +35,7 @@ import {
   type TrackedEntry,
   type UntrackedEntry,
   type UntrackedState,
+  type ChapterArchive,
   type FetchThrottlePatch,
   type FetchThrottleValues,
   type MapSyncReport,
@@ -3178,6 +3179,117 @@ const commands: BotCommand[] = [
       ];
       for (const warning of after.warnings) parts.push(`:warning: ${warning}`);
       return { text: lines(parts) };
+    },
+  },
+  {
+    name: "chapters",
+    description: "What this platform has on MangaDex, and where two uploads collided.",
+    // Read-only on purpose. Every chapter *write* route refuses an api-token
+    // principal outright (`requireAdminRole`), whatever scope it holds and
+    // whoever it is acting for: deleting a chapter on MangaDex cannot be undone,
+    // so it happens from the dashboard, by a person, never through the bot.
+    sensitivity: "read",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("chapters")
+      .setDescription("What this platform has on MangaDex, and where two uploads collided.")
+      .addSubcommand((s) =>
+        s
+          .setName("list")
+          .setDescription("Chapters in one archive, newest first.")
+          .addStringOption((o) =>
+            o
+              .setName("archive")
+              .setDescription("Which record. Default: uploaded, the live mirror.")
+              .addChoices(
+                { name: "uploaded (live mirror)", value: "uploaded" },
+                { name: "edited", value: "edited" },
+                { name: "unavailable", value: "unavailable" },
+                { name: "deleted", value: "deleted" },
+              ),
+          )
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Only this extension.").setAutocomplete(true),
+          )
+          .addStringOption((o) => o.setName("series").setDescription("Only this MangaDex title id."))
+          .addStringOption((o) => o.setName("language").setDescription("Only this language code."))
+          .addStringOption((o) => o.setName("q").setDescription("Substring of title, number or id."))
+          .addIntegerOption((o) =>
+            o.setName("limit").setDescription("How many (1-25, default 10).").setMinValue(1).setMaxValue(25),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("collisions")
+          .setDescription("Chapters two uploads both claimed, awaiting a decision.")
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Only this extension.").setAutocomplete(true),
+          )
+          .addBooleanOption((o) =>
+            o.setName("include-acknowledged").setDescription("Include ones already dealt with."),
+          ),
+      ),
+    async run(ctx) {
+      if (ctx.options.subcommand() === "collisions") {
+        const result = await ctx.api.chapterCollisions(ctx.actor, {
+          extension: ctx.options.string("extension") ?? undefined,
+          includeAcknowledged: ctx.options.boolean("include-acknowledged") === true,
+          limit: 15,
+        });
+        const rows = Array.isArray(result.collisions) ? result.collisions : [];
+        if (rows.length === 0) {
+          return { text: "No collisions outstanding.", title: "Collisions", tone: "ok" };
+        }
+        const rendered = rows.slice(0, 15).map((row) => {
+          const r = row as Record<string, unknown>;
+          const where = [r["extension"], r["chapterNumber"]].filter(Boolean).join(" · ");
+          return `\`${String(r["mdChapterId"] ?? "?").slice(0, 8)}\` ${clip(where || "—", 60)}`;
+        });
+        return {
+          text: lines(rendered),
+          title: `Collisions — ${rows.length}`,
+          tone: "warn",
+          footer: "Acknowledge or resolve these from the dashboard; the bot cannot write to the catalogue.",
+        };
+      }
+
+      const archive = (ctx.options.string("archive") as ChapterArchive | null) ?? "uploaded";
+      const extension = ctx.options.string("extension");
+      const page = await ctx.api.chapters(ctx.actor, {
+        archive,
+        extension: extension ? requireExtensionName(extension) : undefined,
+        mdMangaId: ctx.options.string("series") ?? undefined,
+        language: ctx.options.string("language") ?? undefined,
+        search: ctx.options.string("q") ?? undefined,
+        limit: ctx.options.integer("limit") ?? 10,
+      });
+
+      if (page.chapters.length === 0) {
+        return { text: `Nothing in the ${archive} archive matched.`, title: "Chapters", tone: "info" };
+      }
+
+      const rendered = page.chapters.map((c) => {
+        const num = c.chapterNumber ? `**${c.chapterNumber}**` : "_no number_";
+        const title = c.chapterTitle ? ` ${clip(String(c.chapterTitle), 50)}` : "";
+        const lang = c.chapterLanguage ? ` \`${c.chapterLanguage}\`` : "";
+        return `${num}${title}${lang} · ${c.extension ?? "?"} · \`${String(c.mdChapterId ?? "?").slice(0, 8)}\``;
+      });
+
+      // The totals are global rather than filtered, which is the point: a
+      // narrow filter must not hide that an extension has three hundred
+      // chapters sitting in the unavailable archive.
+      const totals = page.totals
+        ? Object.entries(page.totals)
+            .map(([name, count]) => `${name} ${count}`)
+            .join(" · ")
+        : undefined;
+
+      return {
+        text: lines(rendered),
+        title: `Chapters — ${archive}${typeof page.total === "number" ? ` (${page.total} matched)` : ""}`,
+        tone: "info",
+        footer: totals ? `Across all archives: ${totals}` : undefined,
+      };
     },
   },
   {
