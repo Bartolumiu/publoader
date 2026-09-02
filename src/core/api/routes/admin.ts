@@ -1140,6 +1140,15 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           /** Exact, and the reason this endpoint exists. Also accepts a title link. */
           mdMangaId: z.string().trim().max(2048).optional(),
           shared: z.enum(["all", "only"]).default("all"),
+          /**
+           * Who made the mapping.
+           *
+           * `automatic` is the one worth asking for: a mapping nothing human
+           * looked at is the first thing to check when a series turns out to be
+           * wired to the wrong title, and until now the only way to gather them
+           * was to guess the source string into the search box.
+           */
+          madeBy: z.enum(["all", "automatic", "person"]).default("all"),
           paused: z.enum(["all", "only", "none"]).default("all"),
           limit: z.coerce.number().int().min(1).max(500).default(100),
           cursor: z.string().max(512).optional(),
@@ -1167,6 +1176,11 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         );
       }
       if (query.shared === "only") filter.push(Prisma.sql`t.md_manga_id IN ${SHARED_TITLES}`);
+      // The `auto:` prefix, not every source beginning with "auto": a title this
+      // service created after somebody pressed Approve is recorded as plain
+      // `auto`, and a person did choose that one.
+      if (query.madeBy === "automatic") filter.push(Prisma.sql`t.source LIKE 'auto:%'`);
+      if (query.madeBy === "person") filter.push(Prisma.sql`t.source NOT LIKE 'auto:%'`);
       // Paused is a moment in time, not a flag: a cooldown expires by itself.
       if (query.paused === "only") filter.push(Prisma.sql`t.recheck_after > now()`);
       if (query.paused === "none") filter.push(Prisma.sql`(t.recheck_after IS NULL OR t.recheck_after <= now())`);

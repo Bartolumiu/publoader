@@ -87,6 +87,34 @@ export const AUTO_MAP_BATCH = 20;
  */
 export const RECHECK_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
 
+/**
+ * How long automatic mappings are held before they are announced.
+ *
+ * The pass runs once per upload-queue pass — about every five seconds while the
+ * queue is idle — so announcing each pass that mapped something is, while a
+ * backlog drains, a message every few minutes for hours; and that buries the
+ * announcements the channel exists for. Announcing nothing was the previous
+ * answer, and it made a pass that silently wires uploads to titles the least
+ * visible thing the platform does.
+ *
+ * So: coalesce. Mappings accumulate and go out as one embed at most this often,
+ * which turns a drip into a digest without losing a row. The buffer is
+ * in-process — a restart drops pending lines rather than delaying a deploy —
+ * and the audit trail is what survives regardless.
+ */
+export const AUTO_MAP_ANNOUNCE_MS = 15 * 60 * 1000;
+
+/** The actor recorded for a mapping no person chose. */
+export const AUTO_MAP_ACTOR = "system:auto-map";
+
+/** How a match was made, for a person reading it in Discord. */
+const AUTO_MAP_EVIDENCE: Record<AutoMapVia, string> = {
+  engtl: "its official English link",
+  links: "one of its links",
+  description: "its description",
+  title: "an exact name match",
+};
+
 /** What one auto-map pass did, for the scheduler, the API and the CLI alike. */
 export interface AutoMapReport {
   considered: number;
@@ -254,6 +282,17 @@ export type ApplyResult =
 export class TitleService {
   private readonly audit: AuditLog;
 
+  /**
+   * Automatic mappings waiting to be announced, and when the last digest went.
+   *
+   * Deliberately not persisted: this is a convenience for the announcement
+   * channel, and a mapping's durable records — the map row, the audit entry —
+   * are written the moment it is made. Losing a buffered line to a restart
+   * costs a Discord message, not a fact.
+   */
+  private pendingAnnouncements: { row: UntrackedManga; mdMangaId: string; via: AutoMapVia }[] = [];
+  private lastAnnouncedAt = 0;
+
   constructor(
     private readonly prisma: PrismaClient,
     private readonly md: MdApi,
@@ -400,6 +439,7 @@ export class TitleService {
       const written = await this.writeMapping(row, match.id, AUTO_MAP_SOURCES[match.via]);
       if (written) {
         report.mapped.push({ row, mdMangaId: match.id, via: match.via });
+        await this.recordAutoMap(row, match.id, match.via);
       } else {
         // Already mapped elsewhere: not ours to repoint, and not worth
         // re-searching every pass either.
@@ -407,6 +447,8 @@ export class TitleService {
         report.unmatched++;
       }
     }
+
+    await this.flushAnnouncements();
 
     report.remaining = await this.prisma.untrackedManga.count({
       where: {
@@ -418,12 +460,12 @@ export class TitleService {
 
     // Deliberately not announced to Discord.
     //
-    // This drains a backlog thousands of rows deep, a batch per scheduler
-    // tick, so "one embed per pass that mapped something" is a message every
-    // few minutes for hours -- and it buries the announcements that do need
-    // reading, which is the announcement channel's whole job. The mappings are
-    // not lost: each is `auto:official-link` in the tracked map, on the
-    // series' own page, and in the audit log.
+    // Announced as a digest rather than per pass. This drains a backlog
+    // thousands of rows deep a batch at a time, so "one embed per pass that
+    // mapped something" is a message every few minutes for hours, and it buries
+    // the announcements the channel exists for; announcing nothing, which is
+    // what this did before, made the pass that silently wires uploads to titles
+    // the least visible thing here. See `flushAnnouncements`.
     return report;
   }
 
@@ -568,17 +610,18 @@ export class TitleService {
       const written = await this.writeMapping(row, match, TITLE_MATCH_SOURCE);
       if (written) {
         report.mapped.push({ row, mdMangaId: match, via: "title" });
+        await this.recordAutoMap(row, match, "title");
       } else {
         await this.markTitleChecked(row.id);
         report.unmatched++;
       }
     }
 
+    await this.flushAnnouncements();
     report.remaining = await this.prisma.untrackedManga.count({ where: due });
-    // Not announced to Discord, for the reason the link pass is not: this
-    // drains a queue thousands deep a batch at a time, and an embed per pass
-    // would bury the announcements that need reading. Each mapping is
-    // `auto:title-match` in the tracked map and in the audit log.
+    // Announced through the same digest as the link pass, and recorded the same
+    // way: `auto:title-match` in the tracked map, and an `untracked.automap.mapped`
+    // audit entry per mapping under the actor `system:auto-map`.
     return report;
   }
 
@@ -1008,6 +1051,77 @@ export class TitleService {
       });
       log.error({ err }, "title creation failed");
       return null;
+    }
+  }
+
+  /**
+   * Write down that a mapping was made by a machine, and queue it to be said.
+   *
+   * The audit entry is the part that matters and the part that was missing: the
+   * pass wired uploads to titles and left no record beyond a `source` string on
+   * the map row, which is current state and not history — it cannot answer WHEN
+   * a series was mapped, or which pass did it, and it is overwritten by the
+   * next repoint. (A comment here claimed these were "in the audit log". They
+   * were not.)
+   *
+   * The actor is `system:auto-map` rather than a person, because the whole
+   * point of finding one of these later is knowing that nobody looked at it.
+   */
+  private async recordAutoMap(row: UntrackedManga, mdMangaId: string, via: AutoMapVia): Promise<void> {
+    await this.audit.record(AUTO_MAP_ACTOR, "untracked.automap.mapped", `${row.extension}:${row.mangaId}`, {
+      mdMangaId,
+      mangaName: row.mangaName,
+      mangaUrl: row.mangaUrl,
+      mangaLanguage: row.mangaLanguage,
+      extension: row.extension,
+      // Which evidence it rested on. The three link places and the name pass
+      // are not equally strong, and this is the field somebody re-auditing a
+      // batch of automatic mappings will filter on.
+      via,
+      source: AUTO_MAP_SOURCES[via],
+    });
+    this.pendingAnnouncements.push({ row, mdMangaId, via });
+  }
+
+  /**
+   * Send the digest, if it is due and there is anything in it.
+   *
+   * Called at the end of a pass rather than per mapping, so a pass that maps
+   * twelve series produces one message rather than twelve. The clock starts at
+   * the first send, not at boot: a quiet platform announces its first mapping
+   * immediately, and only a busy one is throttled.
+   */
+  private async flushAnnouncements(): Promise<void> {
+    if (this.pendingAnnouncements.length === 0) return;
+    const now = Date.now();
+    if (this.lastAnnouncedAt !== 0 && now - this.lastAnnouncedAt < AUTO_MAP_ANNOUNCE_MS) return;
+
+    const pending = this.pendingAnnouncements;
+    this.pendingAnnouncements = [];
+    this.lastAnnouncedAt = now;
+
+    // Same 20-line batching as the creation announcement, for the same Discord
+    // limits — but the count in the heading is the whole digest, not the batch,
+    // so a hundred mappings do not read as five unrelated events.
+    for (let i = 0; i < pending.length; i += 20) {
+      const batch = pending.slice(i, i + 20);
+      const lines = batch.map(
+        ({ row, mdMangaId, via }) =>
+          `**[${row.mangaName}](https://mangadex.org/title/${mdMangaId})** ` +
+          `(${row.mangaLanguage}): [source](${row.mangaUrl}) · \`${row.extension}\` · ${AUTO_MAP_EVIDENCE[via]}`,
+      );
+      await this.notifier.send({
+        title:
+          `Auto-mapped ${pending.length} series onto existing MangaDex title` +
+          `${pending.length === 1 ? "" : "s"}` +
+          (pending.length > 20 ? ` (${i + 1}–${Math.min(i + 20, pending.length)})` : ""),
+        // Amber, not the green the creation announcement uses: nothing was
+        // published, and nobody reviewed these.
+        colour: "D9A12C",
+        description:
+          `${lines.join("\n")}\n\n_No titles were created. Nobody reviewed these; ` +
+          `they are recorded in the series map and the audit log._`,
+      });
     }
   }
 

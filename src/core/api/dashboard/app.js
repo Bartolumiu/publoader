@@ -127,6 +127,8 @@ const store = {
     trackedMdMangaId: "",
     trackedShared: "all",
     trackedPaused: "all",
+    /** Who made the mapping: "all", "automatic", or "person". */
+    trackedMadeBy: "all",
     trackedCursors: [],
     trackedSort: { column: null, dir: "asc" },
     untrackedState: "NEW",
@@ -11305,6 +11307,7 @@ VIEWS.tracked = () => {
     if (f.trackedNamespace !== "any") params.set("namespace", f.trackedNamespace);
     if (f.trackedMdMangaId) params.set("mdMangaId", f.trackedMdMangaId);
     if (f.trackedShared !== "all") params.set("shared", f.trackedShared);
+    if (f.trackedMadeBy !== "all") params.set("madeBy", f.trackedMadeBy);
     if (f.trackedPaused !== "all") params.set("paused", f.trackedPaused);
     if (f.trackedSort.column) {
       params.set("orderBy", f.trackedSort.column);
@@ -11419,6 +11422,14 @@ VIEWS.tracked = () => {
           ["none", "active only"],
           ["only", "paused only"],
         ]),
+        // The trail the auto-map leaves in the map itself. Sorted by Added,
+        // this is "what has the pass been doing", which is otherwise only
+        // answerable from the audit log.
+        picker("tracked-all-madeby", "Mapped by", "trackedMadeBy", [
+          ["all", "anyone"],
+          ["automatic", "the auto-map"],
+          ["person", "a person"],
+        ]),
       ),
     { reserve: 40, skeleton: () => el("span", { class: "dim small", text: "filters…" }) },
   );
@@ -11450,6 +11461,7 @@ VIEWS.tracked = () => {
               trackedMdMangaId: "",
               trackedShared: "all",
               trackedPaused: "all",
+              trackedMadeBy: "all",
             });
             search.value = "";
             titleInput.value = "";
@@ -13185,7 +13197,29 @@ function autoMapCard(queue) {
         strategy,
       ),
     ),
-    row(previewButton, commitButton),
+    row(
+      previewButton,
+      commitButton,
+      // Where the pass's own history lives. The card reports the batch it just
+      // ran; this is every mapping it has ever made, newest first — which is
+      // the question after "did that work", and covers the ones made
+      // automatically while nobody was looking at this page.
+      routeLink(routeTo("tracked", null, null), "See everything auto-mapped →", {
+        class: "button-link inline",
+        onclick: () =>
+          setFilter({
+            trackedMadeBy: "automatic",
+            trackedQuery: "",
+            trackedExtension: extension.value || "",
+            trackedNamespace: "any",
+            trackedMdMangaId: "",
+            trackedShared: "all",
+            trackedPaused: "all",
+            trackedCursors: [],
+            trackedSort: { column: "added", dir: "desc" },
+          }),
+      }),
+    ),
     results,
   );
 }
