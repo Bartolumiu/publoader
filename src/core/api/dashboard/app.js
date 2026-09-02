@@ -132,6 +132,10 @@ const store = {
     activityLimit: 100,
     /** Errors view: "without" | "with" | "only"; cleared entries hidden by default. */
     errorsCleared: "without",
+    /** The dead-letter queue reads the same three ways, and defaults the same. */
+    deadLetterCleared: "without",
+    /** As does quarantine; all three are views of the one failure feed. */
+    quarantineCleared: "without",
     auditQuery: "",
     auditActor: "",
     auditAction: "",
@@ -2347,7 +2351,29 @@ function renderSummary() {
     .reduce((sum, t) => sum + t.count, 0);
   const queueNode = $("sum-queue");
   queueNode.textContent = stats ? String(queued) : "-";
-  queueNode.className = `summary-n${stats && (stats.quarantined ?? 0) > 0 ? " bad" : ""}`;
+  /**
+   * Red for quarantine, not for depth: a deep queue is the system working,
+   * while a rejected envelope is someone's problem. It counts what is still
+   * outstanding rather than every quarantine on record, for the same reason the
+   * Errors badge does — a warning that cannot be cleared is one people learn to
+   * read past. `quarantined` is the fallback for a core too old to send
+   * `errorsOutstanding`.
+   */
+  const quarantineOutstanding = stats?.errorsOutstanding?.submissions ?? stats?.quarantined ?? 0;
+  queueNode.className = `summary-n${stats && quarantineOutstanding > 0 ? " bad" : ""}`;
+
+  // The strip's only link, and only while it leads somewhere this principal can
+  // open: an anchor that 403s on arrival is worse than a plain number.
+  const queueLink = $("sum-queue-link");
+  if (can("runs:read")) {
+    queueLink.setAttribute("href", routeTo("queues", null, "tasks"));
+    queueLink.removeAttribute("aria-disabled");
+    queueLink.title = "Open the upload queue";
+  } else {
+    queueLink.removeAttribute("href");
+    queueLink.setAttribute("aria-disabled", "true");
+    queueLink.removeAttribute("title");
+  }
 
   const run = data?.lastRun ?? null;
   $("sum-run").textContent = run
@@ -2859,14 +2885,75 @@ const OUTSTANDING_JOB_STATES = ["DEAD_LETTER", "RUNNING", "LEASED", "PENDING"];
  * disclosure. SUCCEEDED grows without bound and drowns the four numbers an
  * operator opens this page to read.
  */
-function outstandingJobsCard(jobs) {
+/**
+ * Quarantine as work outstanding rather than as a table count.
+ *
+ * `total` is how many submissions are quarantined and stays that; `outstanding`
+ * is how many nobody has cleared, and that is the number worth a red line. A
+ * card that kept reporting the total turned "I have dealt with these" into a
+ * permanent warning, which is exactly what the acknowledgements exist to stop.
+ * `null` means an older core with no `errorsOutstanding`, and the total stands.
+ */
+function quarantineCard(total, outstanding = null) {
+  const open = outstanding === null ? total : Math.min(total, outstanding);
+  const cleared = Math.max(0, total - open);
+  const link = routeLink(routeTo("errors", null, "quarantine"), "See what was held back →");
+
+  if (open > 0) {
+    return card(
+      "Held back",
+      el(
+        "div",
+        {},
+        el("p", { class: "error", text: `${open} set(s) of results were held back and not used.` }),
+        cleared > 0 ? el("p", { class: "dim small", text: `${cleared} more already cleared.` }) : null,
+        row(link),
+      ),
+    );
+  }
+  return card(
+    "Held back",
+    cleared > 0
+      ? el(
+          "div",
+          {},
+          el("p", { class: "dim", text: `Nothing held back now; ${cleared} cleared set(s) on record.` }),
+          row(link),
+        )
+      : el("p", { class: "dim", text: "Nothing has been held back." }),
+  );
+}
+
+function outstandingJobsCard(jobs, deadLetterOutstanding = null) {
   const entries = Object.entries(jobs).filter(([, count]) => count > 0);
+  /**
+   * A dead-lettered job an operator has cleared in the Errors feed is settled,
+   * not outstanding: it has been read and dealt with, and the row survives only
+   * because clearing hides rather than deletes. Counting it here is what made
+   * this tile keep reporting failures that had already been triaged, so the
+   * cleared ones move behind the disclosure with the rest of the settled work.
+   *
+   * `null` means the core is older than `errorsOutstanding` and the raw state
+   * count stands, which is the pre-existing behaviour rather than a zero.
+   */
+  const deadLetterTotal = jobs.DEAD_LETTER ?? 0;
+  const deadLetterCleared =
+    deadLetterOutstanding === null ? 0 : Math.max(0, deadLetterTotal - deadLetterOutstanding);
+  const openCount = ([state, count]) =>
+    state === "DEAD_LETTER" && deadLetterOutstanding !== null
+      ? Math.min(count, deadLetterOutstanding)
+      : count;
+
   const open = entries
     .filter(([state]) => OUTSTANDING_JOB_STATES.includes(state))
+    .map((entry) => [entry[0], openCount(entry)])
+    .filter(([, count]) => count > 0)
     .sort(
       (a, b) => OUTSTANDING_JOB_STATES.indexOf(a[0]) - OUTSTANDING_JOB_STATES.indexOf(b[0]),
     );
-  const settled = entries.filter(([state]) => !OUTSTANDING_JOB_STATES.includes(state));
+  const settled = entries
+    .filter(([state]) => !OUTSTANDING_JOB_STATES.includes(state))
+    .concat(deadLetterCleared > 0 ? [["DEAD_LETTER (cleared)", deadLetterCleared]] : []);
   const settledTotal = settled.reduce((sum, [, count]) => sum + count, 0);
 
   return card(
@@ -2888,7 +2975,11 @@ function outstandingJobsCard(jobs) {
                   ),
                 ),
               )
-            : emptyState("Nothing left to do; every job has finished."),
+            : emptyState(
+                deadLetterCleared > 0
+                  ? `Nothing left to do; ${deadLetterCleared} job(s) that gave up were cleared in Errors.`
+                  : "Nothing left to do; every job has finished.",
+              ),
           settled.length
             ? el(
                 "details",
@@ -3019,7 +3110,7 @@ VIEWS.overview = (route) => {
         el(
           "div",
           {},
-          outstandingJobsCard(data.jobs || {}),
+          outstandingJobsCard(data.jobs || {}, data.errorsOutstanding?.jobs ?? null),
           counts("Workers right now", Object.entries(data.workers || {}), "No worker has ever enrolled."),
           card(
             "Waiting to go to MangaDex",
@@ -3029,20 +3120,7 @@ VIEWS.overview = (route) => {
                 })
               : emptyState("Nothing has ever been queued for upload."),
           ),
-          card(
-            "Held back",
-            data.quarantined
-              ? el(
-                  "div",
-                  {},
-                  el("p", {
-                    class: "error",
-                    text: `${data.quarantined} set(s) of results were held back and not used.`,
-                  }),
-                  row(routeLink(routeTo("errors", null, "quarantine"), "See what was held back →")),
-                )
-              : el("p", { class: "dim", text: "Nothing has been held back." }),
-          ),
+          quarantineCard(data.quarantined ?? 0, data.errorsOutstanding?.submissions ?? null),
         ),
       { reserve: 320, skeleton: () => el("div", {}, skeletonGrid(4), skeletonTable(3, 3)) },
     ),
@@ -3161,39 +3239,96 @@ VIEWS.runs = (route) => {
   );
 };
 
+/**
+ * The dead-letter queue, on the same terms as the Errors feed: a job cleared
+ * there is hidden here too.
+ *
+ * The two lists are the same failures, so a queue that went on showing what the
+ * feed had accepted as dealt with made "cleared" mean two different things one
+ * click apart. Nothing is deleted — "Show" reaches every row, and Replay works
+ * on a cleared job exactly as before.
+ */
 function deadLetterPanel() {
-  const dead = new Resource("dead-letter", () => api("/dead-letter"));
+  const showing = store.filters.deadLetterCleared;
+  const dead = new Resource("dead-letter", () =>
+    api(`/dead-letter?cleared=${encodeURIComponent(store.filters.deadLetterCleared)}`),
+  );
   return card(
     "Dead letter",
     el("p", {
       class: "dim",
       text: "Jobs that exhausted their attempt budget. Replaying one gives it a fresh budget on the same segment.",
     }),
+    row(
+      el("label", { class: "inline", for: "dead-letter-cleared", text: "Show" }),
+      el(
+        "select",
+        {
+          id: "dead-letter-cleared",
+          onchange: (event) => {
+            setFilter({ deadLetterCleared: event.target.value });
+            void dead.load({ force: true });
+          },
+        },
+        [
+          ["without", "outstanding only"],
+          ["with", "outstanding and cleared"],
+          ["only", "cleared only"],
+        ].map(([value, text]) => el("option", { value, text, selected: value === showing })),
+      ),
+    ),
     live(
       [dead],
-      ({ jobs }) =>
-        table(
-          ["Extension", "Class", "Attempts", "Last error", "Updated", ""],
-          jobs.map((job) => [
-            job.extension,
-            chip(job.errorClass || "DEAD_LETTER"),
-            `${job.attempt}/${job.maxAttempts}`,
-            truncate(job.lastError, 120),
-            fmtTime(job.updatedAt),
-            [
-              routeLink(routeTo("runs", job.runId, null), "Open run", { class: "button-link inline" }),
-              gatedButton("runs:write", {
-                class: "primary",
-                text: "Replay",
-                onclick: (event) =>
-                  act("job.retry", () => api(`/jobs/${job.id}/retry`, { method: "POST", body: {} }), {
-                    button: event.currentTarget,
-                    refresh: [dead, summary],
-                  }),
-              }),
-            ],
-          ]),
-          { empty: "Nothing is dead-lettered." },
+      ({ jobs, clearedHidden }) =>
+        el(
+          "div",
+          {},
+          clearedHidden > 0 && showing === "without"
+            ? el("p", {
+                class: "dim small",
+                text: `${clearedHidden} cleared job(s) hidden. Switch "Show" to review or replay them.`,
+              })
+            : null,
+          table(
+            ["Extension", "Class", "Attempts", "Last error", "Updated", ""],
+            jobs.map((job) => [
+              job.extension,
+              el("div", {}, chip(job.errorClass || "DEAD_LETTER"), job.cleared ? chip("cleared") : null),
+              `${job.attempt}/${job.maxAttempts}`,
+              el(
+                "div",
+                {},
+                el("div", { text: truncate(job.lastError, 120) }),
+                job.cleared
+                  ? el("div", {
+                      class: "dim small",
+                      text:
+                        `cleared by ${job.cleared.by} ${ago(job.cleared.at)}` +
+                        (job.cleared.note ? `: ${job.cleared.note}` : ""),
+                    })
+                  : null,
+              ),
+              fmtTime(job.updatedAt),
+              [
+                routeLink(routeTo("runs", job.runId, null), "Open run", { class: "button-link inline" }),
+                gatedButton("runs:write", {
+                  class: "primary",
+                  text: "Replay",
+                  onclick: (event) =>
+                    act("job.retry", () => api(`/jobs/${job.id}/retry`, { method: "POST", body: {} }), {
+                      button: event.currentTarget,
+                      refresh: [dead, summary],
+                    }),
+                }),
+              ],
+            ]),
+            {
+              empty:
+                showing === "only"
+                  ? "No dead-lettered job has been cleared."
+                  : "Nothing is dead-lettered.",
+            },
+          ),
         ),
       { reserve: 200, skeleton: () => skeletonTable(4, 6) },
     ),
@@ -7877,28 +8012,75 @@ VIEWS.errors = (route) => {
   );
 };
 
+/** Quarantine, filtered the same three ways as the feed it is part of. */
 function quarantinePanel() {
-  const quarantine = new Resource("quarantine", () => api("/quarantine"));
+  const showing = store.filters.quarantineCleared;
+  const quarantine = new Resource("quarantine", () =>
+    api(`/quarantine?cleared=${encodeURIComponent(store.filters.quarantineCleared)}`),
+  );
   return card(
     "Results we held back",
     el("p", {
       class: "dim small",
       text:
         "Envelopes rejected by schema or policy validation. Repeat offenders from one worker are the signal " +
-        "to drain it.",
+        "to drain it. Clearing one in Failures hides it here too; the submission itself is untouched.",
     }),
+    row(
+      el("label", { class: "inline", for: "quarantine-cleared", text: "Show" }),
+      el(
+        "select",
+        {
+          id: "quarantine-cleared",
+          onchange: (event) => {
+            setFilter({ quarantineCleared: event.target.value });
+            void quarantine.load({ force: true });
+          },
+        },
+        [
+          ["without", "outstanding only"],
+          ["with", "outstanding and cleared"],
+          ["only", "cleared only"],
+        ].map(([value, text]) => el("option", { value, text, selected: value === showing })),
+      ),
+    ),
     live(
       [quarantine],
-      ({ quarantined }) =>
-        table(
-          ["Job", "Worker", "Reject reason", "Received"],
-          quarantined.map((item) => [
-            el("code", { text: item.jobId }),
-            el("code", { text: (item.workerId || "").slice(0, 8) }),
-            truncate(item.rejectReason, 240),
-            fmtTime(item.createdAt),
-          ]),
-          { empty: "Nothing has been held back." },
+      ({ quarantined, clearedHidden }) =>
+        el(
+          "div",
+          {},
+          clearedHidden > 0 && showing === "without"
+            ? el("p", {
+                class: "dim small",
+                text: `${clearedHidden} cleared submission(s) hidden. Switch "Show" to review them.`,
+              })
+            : null,
+          table(
+            ["Job", "Worker", "Reject reason", "Received"],
+            quarantined.map((item) => [
+              el("code", { text: item.jobId }),
+              el("code", { text: (item.workerId || "").slice(0, 8) }),
+              el(
+                "div",
+                {},
+                el("div", { text: truncate(item.rejectReason, 240) }),
+                item.cleared
+                  ? el("div", {
+                      class: "dim small",
+                      text:
+                        `cleared by ${item.cleared.by} ${ago(item.cleared.at)}` +
+                        (item.cleared.note ? `: ${item.cleared.note}` : ""),
+                    })
+                  : null,
+              ),
+              fmtTime(item.createdAt),
+            ]),
+            {
+              empty:
+                showing === "only" ? "Nothing has been cleared." : "Nothing has been held back.",
+            },
+          ),
         ),
       { reserve: 260, skeleton: () => skeletonTable(6, 4) },
     ),

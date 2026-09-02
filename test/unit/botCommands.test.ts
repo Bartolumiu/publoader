@@ -1994,3 +1994,508 @@ describe("/runs cancel", () => {
     expect(resolveSensitivity(runs, "cancel-all")).toBe("destructive");
   });
 });
+
+describe("/maps sync", () => {
+  it("never writes without confirmation, whatever the endpoint's own default is", async () => {
+    // `POST /maps/sync` defaults dryRun to FALSE — the one default in the admin
+    // API that acts rather than reports, because the scheduled job wants the
+    // write. A person typing a command does not.
+    const syncMaps = vi.fn().mockResolvedValue({ dryRun: true, added: 4, removed: 1 });
+    const reply = await invoke("maps", fakeApi({ syncMaps }), {}, "sync");
+    expect(syncMaps).toHaveBeenCalledTimes(1);
+    expect(syncMaps).toHaveBeenCalledWith("discord:ardax", { dryRun: true, extensions: [] });
+    expect(reply.text).toContain("Nothing written");
+    expect(reply.text).toContain("4 added");
+    expect(reply.footer).toContain("contributors read");
+  });
+
+  it("previews first, then writes, when confirmed", async () => {
+    const syncMaps = vi
+      .fn()
+      .mockResolvedValueOnce({ dryRun: true, added: 2 })
+      .mockResolvedValueOnce({ added: 2, removed: 0 });
+    const reply = await invoke("maps", fakeApi({ syncMaps }), { confirm: true }, "sync");
+    expect(syncMaps).toHaveBeenCalledTimes(2);
+    expect(syncMaps).toHaveBeenLastCalledWith("discord:ardax", { dryRun: false, extensions: [] });
+    expect(reply.title).toContain("written");
+    expect(reply.tone).toBe("ok");
+  });
+
+  it("scopes to one extension when named", async () => {
+    const syncMaps = vi.fn().mockResolvedValue({ dryRun: true, added: 0, removed: 0 });
+    await invoke("maps", fakeApi({ syncMaps }), { extension: "comikey" }, "sync");
+    expect(syncMaps).toHaveBeenCalledWith("discord:ardax", { dryRun: true, extensions: ["comikey"] });
+  });
+
+  it("says plainly when a sync would change nothing", async () => {
+    const syncMaps = vi.fn().mockResolvedValue({ dryRun: true, added: 0, removed: 0 });
+    const reply = await invoke("maps", fakeApi({ syncMaps }), {}, "sync");
+    expect(reply.text).toContain("0 added");
+  });
+
+  it("surfaces the shrink guard rather than reporting a clean write", async () => {
+    const syncMaps = vi
+      .fn()
+      .mockResolvedValueOnce({ dryRun: true, removed: 900 })
+      .mockResolvedValueOnce({ removed: 0, blocked: "shrink guard" });
+    const reply = await invoke("maps", fakeApi({ syncMaps }), { confirm: true }, "sync");
+    expect(reply.tone).toBe("warn");
+    expect(reply.footer).toContain("shrink guard");
+  });
+
+  it("is gated as destructive; it commits to a repository", () => {
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("maps")!, "sync")).toBe("destructive");
+  });
+});
+
+describe("/enrolments", () => {
+  const now = Date.now();
+  const rows = [
+    { id: "aaaaaaaa-1", trust: "TRUSTED", createdAt: "2026-07-01T00:00:00Z", note: "spare host" },
+    {
+      id: "bbbbbbbb-2",
+      trust: "COMMUNITY",
+      createdAt: "2026-07-01T00:00:00Z",
+      usedAt: "2026-07-02T00:00:00Z",
+      usedByWorkerName: "alpha",
+    },
+    {
+      id: "cccccccc-3",
+      trust: "COMMUNITY",
+      createdAt: "2026-07-01T00:00:00Z",
+      expiresAt: new Date(now - 1000).toISOString(),
+    },
+  ];
+
+  it("shows only what can still be redeemed, and warns that it can", async () => {
+    // An unused token is a live credential; listing it beside used ones buries
+    // the only row that matters.
+    const reply = await invoke(
+      "enrolments",
+      fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }) }),
+      {},
+      "list",
+    );
+    expect(reply.text).toContain("aaaaaaaa");
+    expect(reply.text).not.toContain("bbbbbbbb");
+    expect(reply.text).not.toContain("cccccccc");
+    expect(reply.tone).toBe("warn");
+    expect(reply.footer).toContain("Revoke");
+  });
+
+  it("includes the spent ones on request, labelled", async () => {
+    const reply = await invoke(
+      "enrolments",
+      fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }) }),
+      { all: true },
+      "list",
+    );
+    expect(reply.text).toContain("used by `alpha`");
+    expect(reply.text).toContain("expired");
+    expect(reply.footer).toBeUndefined();
+  });
+
+  it("is calm when there is nothing outstanding", async () => {
+    const reply = await invoke(
+      "enrolments",
+      fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: [rows[1]] }) }),
+      {},
+      "list",
+    );
+    expect(reply.tone).toBe("ok");
+    expect(reply.text).toContain("No outstanding");
+  });
+});
+
+describe("/extension-config", () => {
+  it("counts the overrides and says why it is read-only", async () => {
+    // An extension reads its overrides from its published bundle, so editing
+    // these rows changes nothing about what it collects. Saying so here is the
+    // difference between a useful view and a trap.
+    const extensionConfig = vi.fn().mockResolvedValue({
+      aliases: [1, 2, 3],
+      multiChapters: [1],
+      languages: [],
+    });
+    const reply = await invoke("extension-config", fakeApi({ extensionConfig }), { extension: "comikey" });
+    expect(extensionConfig).toHaveBeenCalledWith("discord:ardax", "comikey");
+    expect(fieldText(reply)).toContain("3");
+    expect(reply.footer).toContain("republish");
+  });
+});
+
+describe("/audit search", () => {
+  it("uses the plain feed when nothing is filtered", async () => {
+    const audit = vi.fn().mockResolvedValue({ events: [] });
+    const searchAudit = vi.fn();
+    await invoke("audit", fakeApi({ audit, searchAudit }), {});
+    expect(audit).toHaveBeenCalledWith("discord:ardax", 20);
+    expect(searchAudit).not.toHaveBeenCalled();
+  });
+
+  it("switches to search the moment any filter is given", async () => {
+    const audit = vi.fn();
+    const searchAudit = vi.fn().mockResolvedValue({ events: [] });
+    await invoke("audit", fakeApi({ audit, searchAudit }), { action: "run.cancel" });
+    expect(audit).not.toHaveBeenCalled();
+    expect(searchAudit).toHaveBeenCalledWith(
+      "discord:ardax",
+      expect.objectContaining({ action: "run.cancel", limit: 20 }),
+    );
+  });
+
+  it("distinguishes 'nothing matched' from 'nothing recorded'", async () => {
+    const empty = { events: [] };
+    const unfiltered = await invoke("audit", fakeApi({ audit: vi.fn().mockResolvedValue(empty) }), {});
+    expect(unfiltered.text).toContain("No audit events recorded");
+    const filtered = await invoke(
+      "audit",
+      fakeApi({ searchAudit: vi.fn().mockResolvedValue(empty) }),
+      { q: "nope" },
+    );
+    expect(filtered.text).toContain("Nothing matched");
+  });
+});
+
+describe("/chapters", () => {
+  const page = {
+    archive: "uploaded",
+    total: 2,
+    totals: { uploaded: 5000, unavailable: 312, deleted: 40 },
+    chapters: [
+      {
+        mdChapterId: "aaaaaaaa-1111-2222-3333-444444444444",
+        chapterNumber: "12.5",
+        chapterTitle: "A Long Chapter Title",
+        chapterLanguage: "en",
+        extension: "comikey",
+      },
+      { mdChapterId: "bbbbbbbb-1111-2222-3333-444444444444", extension: "omoi" },
+    ],
+  };
+
+  it("defaults to the live mirror rather than an archive", async () => {
+    const chapters = vi.fn().mockResolvedValue(page);
+    await invoke("chapters", fakeApi({ chapters }), {}, "list");
+    expect(chapters).toHaveBeenCalledWith("discord:ardax", expect.objectContaining({ archive: "uploaded" }));
+  });
+
+  it("renders a chapter with no number without pretending it has one", async () => {
+    const reply = await invoke("chapters", fakeApi({ chapters: vi.fn().mockResolvedValue(page) }), {}, "list");
+    expect(reply.text).toContain("**12.5**");
+    expect(reply.text).toContain("_no number_");
+    expect(reply.text).toContain("comikey");
+  });
+
+  it("shows global totals, so a narrow filter cannot hide a big archive", async () => {
+    // A filter that returns two rows must not leave the impression that there
+    // are two rows; 312 unavailable chapters is the thing worth noticing.
+    const reply = await invoke(
+      "chapters",
+      fakeApi({ chapters: vi.fn().mockResolvedValue(page) }),
+      { extension: "comikey" },
+      "list",
+    );
+    expect(reply.footer).toContain("unavailable 312");
+  });
+
+  it("says which archive came back empty", async () => {
+    const empty = { archive: "deleted", chapters: [] };
+    const reply = await invoke(
+      "chapters",
+      fakeApi({ chapters: vi.fn().mockResolvedValue(empty) }),
+      { archive: "deleted" },
+      "list",
+    );
+    expect(reply.text).toContain("deleted archive");
+  });
+
+  it("lists collisions and points writes at the dashboard", async () => {
+    // The bot cannot resolve one: every chapter write route refuses an
+    // api-token principal outright, so offering the action would be a lie.
+    const chapterCollisions = vi.fn().mockResolvedValue({
+      collisions: [{ mdChapterId: "cccccccc-1", extension: "k_manga", chapterNumber: "36.1" }],
+    });
+    const reply = await invoke("chapters", fakeApi({ chapterCollisions }), {}, "collisions");
+    expect(reply.text).toContain("k_manga");
+    expect(reply.tone).toBe("warn");
+    expect(reply.footer).toContain("dashboard");
+  });
+
+  it("is calm when there are no collisions", async () => {
+    const reply = await invoke(
+      "chapters",
+      fakeApi({ chapterCollisions: vi.fn().mockResolvedValue({ collisions: [] }) }),
+      {},
+      "collisions",
+    );
+    expect(reply.tone).toBe("ok");
+  });
+
+  it("is read-only; the catalogue is not writable through the bot", () => {
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("chapters")!, "list")).toBe("read");
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("chapters")!, "collisions")).toBe("read");
+  });
+});
+
+describe("/uploads priority, paused and scope", () => {
+  it("replaces the whole list and says so", async () => {
+    // The endpoint replaces rather than appends. Someone who means "also pause
+    // omoi" and sends only `omoi` has just resumed everything else, so the
+    // reply has to state what actually happened.
+    const setUploadPaused = vi.fn().mockResolvedValue({ ok: true, extensions: ["omoi"] });
+    const reply = await invoke("uploads", fakeApi({ setUploadPaused }), { extensions: "omoi" }, "paused");
+    expect(setUploadPaused).toHaveBeenCalledWith("discord:ardax", ["omoi"]);
+    expect(reply.footer).toContain("replaced the whole list");
+  });
+
+  it("treats an empty list as clearing, not as a mistake", async () => {
+    const setUploadPriority = vi.fn().mockResolvedValue({ ok: true, extensions: [] });
+    const reply = await invoke("uploads", fakeApi({ setUploadPriority }), {}, "priority");
+    expect(setUploadPriority).toHaveBeenCalledWith("discord:ardax", []);
+    expect(reply.text).toContain("empty");
+  });
+
+  it("splits and trims a comma-separated list", async () => {
+    const setUploadPriority = vi.fn().mockResolvedValue({ ok: true });
+    await invoke("uploads", fakeApi({ setUploadPriority }), { extensions: "comikey , omoi" }, "priority");
+    expect(setUploadPriority).toHaveBeenCalledWith("discord:ardax", ["comikey", "omoi"]);
+  });
+
+  it("explains what each budget scope means rather than echoing the word", async () => {
+    const setUploadBudgetScope = vi.fn().mockResolvedValue({ ok: true });
+    const perExtension = await invoke("uploads", fakeApi({ setUploadBudgetScope }), { scope: "extension" }, "scope");
+    expect(setUploadBudgetScope).toHaveBeenCalledWith("discord:ardax", "extension");
+    expect(perExtension.text).toContain("its own");
+    const global = await invoke("uploads", fakeApi({ setUploadBudgetScope }), { scope: "global" }, "scope");
+    expect(global.text).toContain("one pool");
+  });
+});
+
+describe("/notify", () => {
+  it("says which way round the setting is, both ways", async () => {
+    const on = await invoke(
+      "notify",
+      fakeApi({ webhookVerbosity: vi.fn().mockResolvedValue({ uploadSuccesses: true }) }),
+      {},
+      "show",
+    );
+    expect(on.text).toContain("**are** announced");
+    const off = await invoke(
+      "notify",
+      fakeApi({ webhookVerbosity: vi.fn().mockResolvedValue({ uploadSuccesses: false }) }),
+      {},
+      "show",
+    );
+    expect(off.text).toContain("Only failures");
+  });
+
+  it("carries false through, since it is the setting and not an omission", async () => {
+    const setWebhookVerbosity = vi.fn().mockResolvedValue({ ok: true, uploadSuccesses: false });
+    await invoke("notify", fakeApi({ setWebhookVerbosity }), { "upload-successes": false }, "set");
+    expect(setWebhookVerbosity).toHaveBeenCalledWith("discord:ardax", false);
+  });
+});
+
+describe("/enrolments revoke", () => {
+  const rows = [
+    { id: "aaaaaaaa-1111", trust: "TRUSTED", createdAt: "2026-07-01T00:00:00Z", note: "spare host" },
+    { id: "aaaaaaab-2222", trust: "COMMUNITY", createdAt: "2026-07-01T00:00:00Z" },
+  ];
+
+  it("matches on the prefix the listing actually showed", async () => {
+    // The list renders eight characters, so asking for a full uuid nobody was
+    // shown would be busywork.
+    const revokeEnrollToken = vi.fn().mockResolvedValue({ ok: true });
+    const api = fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }), revokeEnrollToken });
+    const reply = await invoke("enrolments", api, { id: "aaaaaaaa", confirm: true }, "revoke");
+    expect(revokeEnrollToken).toHaveBeenCalledWith("discord:ardax", "aaaaaaaa-1111");
+    expect(reply.tone).toBe("ok");
+  });
+
+  it("refuses an ambiguous prefix rather than revoking the wrong credential", async () => {
+    const revokeEnrollToken = vi.fn();
+    const api = fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }), revokeEnrollToken });
+    const reply = await invoke("enrolments", api, { id: "aaaaaaa", confirm: true }, "revoke");
+    expect(revokeEnrollToken).not.toHaveBeenCalled();
+    expect(reply.text).toContain("matches 2");
+  });
+
+  it("needs confirmation, and names what is being killed", async () => {
+    const revokeEnrollToken = vi.fn();
+    const api = fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }), revokeEnrollToken });
+    const reply = await invoke("enrolments", api, { id: "aaaaaaaa" }, "revoke");
+    expect(revokeEnrollToken).not.toHaveBeenCalled();
+    expect(reply.text).toContain("spare host");
+    expect(reply.text).toContain("can no longer enrol");
+  });
+
+  it("says plainly when nothing matches", async () => {
+    const api = fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }) });
+    const reply = await invoke("enrolments", api, { id: "zzzz", confirm: true }, "revoke");
+    expect(reply.text).toContain("No enrollment token");
+  });
+
+  it("is destructive; an unredeemed token is a credential", () => {
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("enrolments")!, "revoke")).toBe("destructive");
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("enrolments")!, "list")).toBe("read");
+  });
+});
+
+describe("/workers extensions", () => {
+  it("retargets a worker and says when it takes effect", async () => {
+    const setWorkerExtensions = vi.fn().mockResolvedValue({ ok: true });
+    const reply = await invoke(
+      "workers",
+      fakeApi({ setWorkerExtensions }),
+      { id: "worker-1", extensions: "comikey,omoi" },
+      "extensions",
+    );
+    expect(setWorkerExtensions).toHaveBeenCalledWith("discord:ardax", "worker-1", ["comikey", "omoi"]);
+    expect(reply.footer).toContain("next lease");
+  });
+
+  it("treats an empty list as idle rather than as a mistake", async () => {
+    const setWorkerExtensions = vi.fn().mockResolvedValue({ ok: true });
+    const reply = await invoke(
+      "workers",
+      fakeApi({ setWorkerExtensions }),
+      { id: "worker-1", extensions: "" },
+      "extensions",
+    );
+    expect(setWorkerExtensions).toHaveBeenCalledWith("discord:ardax", "worker-1", []);
+    expect(reply.text).toContain("no jobs at all");
+  });
+});
+
+describe("/queue show and reorder", () => {
+  it("shows a task with its last error, and flags a dead one", async () => {
+    const uploadTask = vi.fn().mockResolvedValue({
+      id: "11111111-2222",
+      kind: "UPLOAD",
+      state: "DEAD_LETTER",
+      attempts: 5,
+      lastError: "MangaDex 503",
+      chapter: { chapterNumber: "12", chapterTitle: "Some Title", chapterLanguage: "en" },
+    });
+    const reply = await invoke("queue", fakeApi({ uploadTask }), { id: "11111111-2222" }, "show");
+    const rendered = fieldText(reply);
+    expect(rendered).toContain("DEAD_LETTER");
+    expect(rendered).toContain("MangaDex 503");
+    expect(rendered).toContain("Some Title");
+    expect(reply.tone).toBe("warn");
+  });
+
+  it("refuses defer without a delay, rather than sending a request that 400s", async () => {
+    // The endpoint rejects each of these; catching it here names which half is
+    // missing instead of relaying a validation error.
+    const reorderQueue = vi.fn();
+    const missing = await invoke("queue", fakeApi({ reorderQueue }), { id: "t1", mode: "defer" }, "reorder");
+    expect(reorderQueue).not.toHaveBeenCalled();
+    expect(missing.text).toContain("needs `defer-seconds`");
+  });
+
+  it("refuses a delay without defer, which the endpoint also rejects", async () => {
+    const reorderQueue = vi.fn();
+    const stray = await invoke(
+      "queue",
+      fakeApi({ reorderQueue }),
+      { id: "t1", mode: "front", "defer-seconds": 60 },
+      "reorder",
+    );
+    expect(reorderQueue).not.toHaveBeenCalled();
+    expect(stray.text).toContain("only applies");
+  });
+
+  it("moves a task, and omits deferSeconds when it does not apply", async () => {
+    const reorderQueue = vi.fn().mockResolvedValue({ moved: 1 });
+    await invoke("queue", fakeApi({ reorderQueue }), { id: "t1", mode: "front" }, "reorder");
+    expect(reorderQueue).toHaveBeenCalledWith("discord:ardax", ["t1"], "front", undefined);
+    await invoke("queue", fakeApi({ reorderQueue }), { id: "t1", mode: "defer", "defer-seconds": 900 }, "reorder");
+    expect(reorderQueue).toHaveBeenLastCalledWith("discord:ardax", ["t1"], "defer", 900);
+  });
+});
+
+describe("/runs chapters", () => {
+  it("counts rather than lists, and says so", async () => {
+    // A run can find thousands; a chat window is the wrong place to page them.
+    const runChapterSummary = vi.fn().mockResolvedValue({ uploaded: 40, skipped: 3, failed: 1, runId: "r1" });
+    const reply = await invoke("runs", fakeApi({ runChapterSummary }), { id: "r1" }, "chapters");
+    const rendered = fieldText(reply);
+    expect(rendered).toContain("uploaded: 40");
+    expect(rendered).not.toContain("runId");
+    expect(reply.footer).toContain("Counts only");
+  });
+
+  it("says plainly when a run recorded nothing", async () => {
+    const reply = await invoke(
+      "runs",
+      fakeApi({ runChapterSummary: vi.fn().mockResolvedValue({}) }),
+      { id: "r1" },
+      "chapters",
+    );
+    expect(reply.text).toContain("no chapters");
+  });
+});
+
+describe("/untracked unskip", () => {
+  it("counts before restoring, and restores nothing unconfirmed", async () => {
+    const unskipUntracked = vi.fn().mockResolvedValue({ dryRun: true, matched: 12 });
+    const reply = await invoke("untracked", fakeApi({ unskipUntracked }), { extension: "omoi" }, "unskip");
+    expect(unskipUntracked).toHaveBeenCalledTimes(1);
+    expect(unskipUntracked).toHaveBeenCalledWith("discord:ardax", { extension: "omoi", dryRun: true });
+    expect(reply.text).toContain("**12**");
+    expect(reply.tone).toBe("warn");
+  });
+
+  it("restores when confirmed, having previewed first", async () => {
+    const unskipUntracked = vi
+      .fn()
+      .mockResolvedValueOnce({ dryRun: true, matched: 12 })
+      .mockResolvedValueOnce({ restored: 12 });
+    const reply = await invoke("untracked", fakeApi({ unskipUntracked }), { confirm: true }, "unskip");
+    expect(unskipUntracked).toHaveBeenCalledTimes(2);
+    expect(unskipUntracked).toHaveBeenLastCalledWith("discord:ardax", { extension: undefined, dryRun: false });
+    expect(reply.text).toContain("Restored **12**");
+  });
+
+  it("stops at the count when nothing is skipped", async () => {
+    const unskipUntracked = vi.fn().mockResolvedValue({ dryRun: true, matched: 0 });
+    const reply = await invoke("untracked", fakeApi({ unskipUntracked }), { confirm: true }, "unskip");
+    expect(unskipUntracked).toHaveBeenCalledTimes(1);
+    expect(reply.text).toContain("Nothing is skipped");
+  });
+});
+
+describe("/bundles", () => {
+  it("shows the sha alongside the version, since that is what a run records", async () => {
+    const bundleVersions = vi.fn().mockResolvedValue({
+      extension: "comikey",
+      versions: [
+        { version: "1.4.0", sha256: "abcdef0123456789", publishedAt: "2026-09-01T10:00:00Z" },
+        { version: "1.3.1", sha256: "0123456789abcdef", publishedAt: "2026-08-31T10:00:00Z", yanked: true },
+      ],
+    });
+    const reply = await invoke("bundles", fakeApi({ bundleVersions }), { extension: "comikey" }, "versions");
+    expect(reply.text).toContain("1.4.0");
+    expect(reply.text).toContain("abcdef012345");
+    expect(reply.text).toContain("yanked");
+  });
+
+  it("says an extension has none rather than rendering an empty list", async () => {
+    const reply = await invoke(
+      "bundles",
+      fakeApi({ bundleVersions: vi.fn().mockResolvedValue({ extension: "omoi", versions: [] }) }),
+      { extension: "omoi" },
+      "versions",
+    );
+    expect(reply.text).toContain("no published bundles");
+  });
+
+  it("reports the GitHub publisher, and warns when it is not ok", async () => {
+    const githubStatus = vi.fn().mockResolvedValue({ ok: false, repo: "publoader/extensions", configured: true });
+    const reply = await invoke("bundles", fakeApi({ githubStatus }), {}, "github");
+    expect(fieldText(reply)).toContain("publoader/extensions");
+    expect(reply.tone).toBe("warn");
+  });
+});

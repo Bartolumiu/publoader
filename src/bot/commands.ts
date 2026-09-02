@@ -35,8 +35,10 @@ import {
   type TrackedEntry,
   type UntrackedEntry,
   type UntrackedState,
+  type ChapterArchive,
   type FetchThrottlePatch,
   type FetchThrottleValues,
+  type MapSyncReport,
   type UploadSchedulePatch,
   type UploadScheduleValues,
   type UploadTaskKind,
@@ -729,6 +731,17 @@ function describeFilter(filter: {
   return parts.length > 0 ? ` (${parts.join(", ")})` : " — **the whole queue**, no filter given";
 }
 
+/** A sync report as a sentence, saying "nothing" plainly when nothing moved. */
+function describeMapSync(report: MapSyncReport): string {
+  const parts: string[] = [];
+  if (typeof report.added === "number") parts.push(`${report.added} added`);
+  if (typeof report.removed === "number") parts.push(`${report.removed} removed`);
+  if (parts.length === 0 && typeof report.changed === "number") parts.push(`${report.changed} changed`);
+  const scope = report.extensions?.length ? ` across ${report.extensions.join(", ")}` : "";
+  if (parts.length === 0) return `No differences${scope}.`;
+  return `${parts.join(", ")}${scope}.`;
+}
+
 /** Pacing in words, skipping whatever is not set rather than printing nulls. */
 function describeUploadValues(v: UploadScheduleValues | undefined): string {
   if (!v) return "_default_";
@@ -1193,7 +1206,7 @@ const commands: BotCommand[] = [
   {
     name: "runs",
     description: "Recent runs, one run in detail, or stopping one that is stuck.",
-    sensitivity: { recent: "read", show: "read", cancel: "destructive", "cancel-all": "destructive" },
+    sensitivity: { recent: "read", show: "read", chapters: "read", cancel: "destructive", "cancel-all": "destructive" },
     ephemeral: false,
     builder: new SlashCommandBuilder()
       .setName("runs")
@@ -1213,6 +1226,12 @@ const commands: BotCommand[] = [
         s
           .setName("show")
           .setDescription("One run with every job, attempt count and error.")
+          .addStringOption((o) => o.setName("id").setDescription("Run id.").setRequired(true)),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("chapters")
+          .setDescription("What one run found, counted by outcome.")
           .addStringOption((o) => o.setName("id").setDescription("Run id.").setRequired(true)),
       )
       .addSubcommand((s) =>
@@ -1237,6 +1256,25 @@ const commands: BotCommand[] = [
       ),
     async run(ctx) {
       const sub = ctx.options.subcommand();
+
+      if (sub === "chapters") {
+        const summary = await ctx.api.runChapterSummary(ctx.actor, requireString(ctx.options, "id"));
+        const counts = Object.entries(summary)
+          .filter(([, v]) => typeof v === "number")
+          .map(([k, v]) => ({ name: k, value: String(v), inline: true }));
+        if (counts.length === 0) {
+          return { text: "That run recorded no chapters.", title: "Run chapters", tone: "info" };
+        }
+        return {
+          text: "",
+          title: "Run chapters",
+          tone: "info",
+          fields: counts.slice(0, 20),
+          // Counted rather than listed: a run can find thousands, and a
+          // chat window is the wrong place to page through them.
+          footer: "Counts only. The dashboard lists the rows behind them.",
+        };
+      }
 
       if (sub === "cancel") {
         const id = requireString(ctx.options, "id");
@@ -1343,24 +1381,47 @@ const commands: BotCommand[] = [
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("dead-letter")
-      .setDescription("Jobs that exhausted retries or hit a permanent error."),
+      .setDescription("Jobs that exhausted retries or hit a permanent error.")
+      .addStringOption((o) =>
+        o
+          .setName("show")
+          .setDescription("Which entries to list (default: outstanding only).")
+          .addChoices(
+            { name: "outstanding only", value: "without" },
+            { name: "outstanding and cleared", value: "with" },
+            { name: "cleared only", value: "only" },
+          ),
+      ),
     async run(ctx) {
-      const { jobs } = await ctx.api.deadLetter(ctx.actor);
-      if (jobs.length === 0) return { text: ":green_circle: Dead-letter queue is empty." };
+      // Cleared jobs are hidden by default, exactly as in `/errors list`: the
+      // two commands list the same failures and must agree on what is settled.
+      const show = ctx.options.string("show");
+      const cleared: ErrorClearedFilter = show === "with" || show === "only" ? show : "without";
+      const { jobs, clearedHidden } = await ctx.api.deadLetter(ctx.actor, cleared);
+      if (jobs.length === 0) {
+        if (cleared === "only") return { text: ":person_shrugging: No dead-lettered job has been cleared." };
+        return {
+          text:
+            clearedHidden > 0
+              ? `:green_circle: Nothing outstanding. ${clearedHidden} cleared job(s) hidden; \`/dead-letter show:cleared only\` to review.`
+              : ":green_circle: Dead-letter queue is empty.",
+        };
+      }
       const rendered = jobs
         .slice(0, 15)
         .map(
           (j) =>
             `• \`${j.id.slice(0, 8)}\` ${j.extension ?? "?"} attempt ${j.attempt} ${shortTime(j.updatedAt)}` +
+            (j.cleared ? ` _(cleared by ${j.cleared.by})_` : "") +
             (j.lastError ? `\n   \`${j.lastError.slice(0, 160)}\`` : ""),
         );
       if (jobs.length > 15) rendered.push(`…and ${jobs.length - 15} more`);
-      return {
-        text: lines([
-          `**${jobs.length} dead-lettered job(s)**: replay one with \`/jobs retry id:<id>\``,
-          ...rendered,
-        ]),
-      };
+      const heading =
+        cleared === "only"
+          ? `**${jobs.length} cleared dead-lettered job(s)**`
+          : `**${jobs.length} dead-lettered job(s)**: replay one with \`/jobs retry id:<id>\`` +
+            (clearedHidden > 0 && cleared === "without" ? ` · ${clearedHidden} cleared and hidden` : "");
+      return { text: lines([heading, ...rendered]) };
     },
   },
   {
@@ -1370,24 +1431,45 @@ const commands: BotCommand[] = [
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("quarantine")
-      .setDescription("Result envelopes rejected by schema or policy validation."),
+      .setDescription("Result envelopes rejected by schema or policy validation.")
+      .addStringOption((o) =>
+        o
+          .setName("show")
+          .setDescription("Which entries to list (default: outstanding only).")
+          .addChoices(
+            { name: "outstanding only", value: "without" },
+            { name: "outstanding and cleared", value: "with" },
+            { name: "cleared only", value: "only" },
+          ),
+      ),
     async run(ctx) {
-      const { quarantined } = await ctx.api.quarantine(ctx.actor);
-      if (quarantined.length === 0) return { text: ":green_circle: Nothing quarantined." };
+      const show = ctx.options.string("show");
+      const cleared: ErrorClearedFilter = show === "with" || show === "only" ? show : "without";
+      const { quarantined, clearedHidden } = await ctx.api.quarantine(ctx.actor, cleared);
+      if (quarantined.length === 0) {
+        if (cleared === "only") return { text: ":person_shrugging: Nothing quarantined has been cleared." };
+        return {
+          text:
+            clearedHidden > 0
+              ? `:green_circle: Nothing outstanding. ${clearedHidden} cleared submission(s) hidden; \`/quarantine show:cleared only\` to review.`
+              : ":green_circle: Nothing quarantined.",
+        };
+      }
       const rendered = quarantined
         .slice(0, 15)
         .map(
           (q) =>
             `• job \`${q.jobId.slice(0, 8)}\` worker \`${q.workerName ?? (q.workerId ?? "?").slice(0, 8)}\` ` +
-            `${shortTime(q.createdAt)}; \`${(q.rejectReason ?? "no reason recorded").slice(0, 140)}\``,
+            `${shortTime(q.createdAt)}; \`${(q.rejectReason ?? "no reason recorded").slice(0, 140)}\`` +
+            (q.cleared ? ` _(cleared by ${q.cleared.by})_` : ""),
         );
       if (quarantined.length > 15) rendered.push(`…and ${quarantined.length - 15} more`);
-      return {
-        text: lines([
-          `:warning: **${quarantined.length} quarantined submission(s)**: a worker submitting these repeatedly should be drained.`,
-          ...rendered,
-        ]),
-      };
+      const heading =
+        cleared === "only"
+          ? `**${quarantined.length} cleared submission(s)**`
+          : `:warning: **${quarantined.length} quarantined submission(s)**: a worker submitting these repeatedly should be drained.` +
+            (clearedHidden > 0 && cleared === "without" ? ` · ${clearedHidden} cleared and hidden` : "");
+      return { text: lines([heading, ...rendered]) };
     },
   },
   {
@@ -1404,6 +1486,8 @@ const commands: BotCommand[] = [
       "requeue-stale": "mutate",
       purge: "destructive",
       restagger: "mutate",
+      show: "read",
+      reorder: "mutate",
     },
     ephemeral: true,
     builder: new SlashCommandBuilder()
@@ -1453,6 +1537,36 @@ const commands: BotCommand[] = [
           .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true))
           .addBooleanOption((o) =>
             o.setName("confirm").setDescription("Required: the chapter will never be uploaded."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("show")
+          .setDescription("One upload task in full: state, attempts, and the chapter behind it.")
+          .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true)),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("reorder")
+          .setDescription("Move a task to the front, the back, or later.")
+          .addStringOption((o) => o.setName("id").setDescription("Upload-task id.").setRequired(true))
+          .addStringOption((o) =>
+            o
+              .setName("mode")
+              .setDescription("Where to move it.")
+              .setRequired(true)
+              .addChoices(
+                { name: "front — go next", value: "front" },
+                { name: "back — go last", value: "back" },
+                { name: "defer — push back by a delay", value: "defer" },
+              ),
+          )
+          .addIntegerOption((o) =>
+            o
+              .setName("defer-seconds")
+              .setDescription("Only for mode:defer. How long to push it back.")
+              .setMinValue(1)
+              .setMaxValue(2592000),
           ),
       )
       .addSubcommand((s) =>
@@ -1548,6 +1662,61 @@ const commands: BotCommand[] = [
           ]),
         };
       }
+      if (sub === "show") {
+        const task = await ctx.api.uploadTask(ctx.actor, requireString(ctx.options, "id"));
+        const at = (key: string): string => {
+          const value = task[key];
+          return typeof value === "string" ? value : "—";
+        };
+        const chapter = task["chapter"] as Record<string, unknown> | undefined;
+        return {
+          text: "",
+          title: `Task ${String(task["id"] ?? "?").slice(0, 8)}`,
+          tone: at("state") === "DEAD_LETTER" || at("state") === "FAILED" ? "warn" : "info",
+          fields: [
+            { name: "Kind", value: at("kind"), inline: true },
+            { name: "State", value: at("state"), inline: true },
+            { name: "Attempts", value: String(task["attempts"] ?? 0), inline: true },
+            {
+              name: "Chapter",
+              value: chapter
+                ? clip(
+                    [chapter["chapterNumber"], chapter["chapterTitle"], chapter["chapterLanguage"]]
+                      .filter(Boolean)
+                      .join(" · "),
+                    200,
+                  )
+                : "—",
+            },
+            { name: "Last error", value: clip(at("lastError"), 400) },
+          ],
+        };
+      }
+
+      if (sub === "reorder") {
+        const id = requireString(ctx.options, "id");
+        const mode = (ctx.options.string("mode") ?? "back") as "front" | "back" | "defer";
+        const deferSeconds = ctx.options.integer("defer-seconds");
+        // The endpoint refuses `deferSeconds` without `defer`, and `defer`
+        // without it, rather than ignoring either — so say which is missing
+        // here instead of forwarding a request that will only come back 400.
+        if (mode === "defer" && deferSeconds === null) {
+          return { text: "`defer` needs `defer-seconds`.", tone: "warn" };
+        }
+        if (mode !== "defer" && deferSeconds !== null) {
+          return { text: "`defer-seconds` only applies to `mode: defer`.", tone: "warn" };
+        }
+        await ctx.api.reorderQueue(ctx.actor, [id], mode, deferSeconds ?? undefined);
+        return {
+          text:
+            mode === "defer"
+              ? `\`${id}\` pushed back by ${deferSeconds}s.`
+              : `\`${id}\` moved to the ${mode} of the queue.`,
+          title: "Queue reordered",
+          tone: "ok",
+        };
+      }
+
       if (sub === "purge") {
         const filter = {
           kind: (ctx.options.string("kind") as UploadTaskKind | null) ?? undefined,
@@ -1604,6 +1773,8 @@ const commands: BotCommand[] = [
         };
       }
       const id = requireString(ctx.options, "id");
+
+
       if (sub === "retry") {
         await ctx.api.retryUploadTask(ctx.actor, id);
         return { text: `:arrows_counterclockwise: Upload task \`${id}\` requeued with a fresh attempt budget.` };
@@ -1809,7 +1980,7 @@ const commands: BotCommand[] = [
   {
     name: "workers",
     description: "Fleet inventory and worker lifecycle.",
-    sensitivity: { list: "read", drain: "mutate", activate: "mutate", revoke: "destructive" },
+    sensitivity: { list: "read", drain: "mutate", activate: "mutate", revoke: "destructive", extensions: "mutate" },
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("workers")
@@ -1835,6 +2006,18 @@ const commands: BotCommand[] = [
           .addBooleanOption((o) =>
             o.setName("confirm").setDescription("Required: revoking cannot be undone; the host must re-enroll."),
           ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("extensions")
+          .setDescription("Retarget which extensions a worker accepts jobs for.")
+          .addStringOption((o) => o.setName("id").setDescription("Worker id.").setRequired(true))
+          .addStringOption((o) =>
+            o
+              .setName("extensions")
+              .setDescription("Comma-separated names. Empty means it takes none.")
+              .setRequired(true),
+          ),
       ),
     async run(ctx) {
       const sub = ctx.options.subcommand();
@@ -1851,6 +2034,28 @@ const commands: BotCommand[] = [
         return { text: lines([`**${workers.length} worker(s)**`, ...rendered]) };
       }
       const id = requireString(ctx.options, "id");
+
+      if (sub === "extensions") {
+        const raw = ctx.options.string("extensions") ?? "";
+        const names = raw
+          .split(",")
+          .map((n) => n.trim())
+          .filter(Boolean)
+          .map(requireExtensionName);
+        await ctx.api.setWorkerExtensions(ctx.actor, id, names);
+        return {
+          text:
+            names.length > 0
+              ? `\`${id}\` now takes jobs for ${names.map((n) => `\`${n}\``).join(", ")}.`
+              : `\`${id}\` now takes no jobs at all; it stays enrolled but idle.`,
+          title: "Worker retargeted",
+          tone: "ok",
+          // No re-enrolment and no restart: the worker reads this on its next
+          // lease. Worth saying, because "did that take?" is the next question.
+          footer: "Applies on the worker's next lease; nothing to restart.",
+        };
+      }
+
       if (sub === "revoke" && ctx.options.boolean("confirm") !== true) {
         return {
           text:
@@ -2074,6 +2279,7 @@ const commands: BotCommand[] = [
       automap: "mutate",
       approve: "destructive",
       skip: "mutate",
+      unskip: "mutate",
     },
     ephemeral: true,
     builder: new SlashCommandBuilder()
@@ -2148,6 +2354,17 @@ const commands: BotCommand[] = [
           .addStringOption((o) => untrackedIdOption(o).setRequired(true))
           .addBooleanOption((o) =>
             o.setName("confirm").setDescription("Required: this creates a real MangaDex title and cannot be undone."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("unskip")
+          .setDescription("Put skipped series back in the queue. Counts first unless confirmed.")
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Only this extension.").setAutocomplete(true),
+          )
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Required to restore. Without it you get a count."),
           ),
       )
       .addSubcommand((s) =>
@@ -2253,7 +2470,34 @@ const commands: BotCommand[] = [
         };
       }
 
+      if (sub === "unskip") {
+        const extension = ctx.options.string("extension") ?? undefined;
+        const scoped = extension ? requireExtensionName(extension) : undefined;
+        const preview = await ctx.api.unskipUntracked(ctx.actor, { extension: scoped, dryRun: true });
+        const matched = preview.matched ?? 0;
+        if (matched === 0) {
+          return { text: "Nothing is skipped that matches.", title: "Unskip", tone: "info" };
+        }
+        if (ctx.options.boolean("confirm") !== true) {
+          return {
+            text: `That would put **${matched}** skipped series back in the queue${
+              scoped ? ` for \`${scoped}\`` : ""
+            }.`,
+            title: "Unskip — nothing restored yet",
+            tone: "warn",
+            footer: "Re-issue with `confirm: true`. They will be considered for creation again.",
+          };
+        }
+        const result = await ctx.api.unskipUntracked(ctx.actor, { extension: scoped, dryRun: false });
+        return {
+          text: `Restored **${result.restored ?? matched}** series to the untracked queue.`,
+          title: "Unskipped",
+          tone: "ok",
+        };
+      }
+
       const id = requireString(ctx.options, "id");
+
       if (sub === "skip") {
         await ctx.api.skipUntracked(ctx.actor, id);
         return { text: `:no_bell: \`${id}\` marked SKIPPED; no title will be created for it.` };
@@ -2814,16 +3058,45 @@ const commands: BotCommand[] = [
     builder: new SlashCommandBuilder()
       .setName("audit")
       .setDescription("Who did what to the platform, most recent first.")
+      .addStringOption((o) => o.setName("actor").setDescription("Only this actor, e.g. discord:xunder."))
+      .addStringOption((o) => o.setName("action").setDescription("Only this action, e.g. run.cancel."))
+      .addStringOption((o) => o.setName("subject").setDescription("Only this subject: an id, a name."))
+      .addStringOption((o) => o.setName("q").setDescription("Substring across the whole entry."))
       .addIntegerOption((o) =>
         o.setName("limit").setDescription("How many events (1-50, default 20).").setMinValue(1).setMaxValue(50),
       ),
     async run(ctx) {
-      const { events } = await ctx.api.audit(ctx.actor, ctx.options.integer("limit") ?? 20);
-      if (events.length === 0) return { text: "No audit events recorded." };
+      const limit = ctx.options.integer("limit") ?? 20;
+      const filter = {
+        actor: ctx.options.string("actor") ?? undefined,
+        action: ctx.options.string("action") ?? undefined,
+        subject: ctx.options.string("subject") ?? undefined,
+        q: ctx.options.string("q") ?? undefined,
+      };
+      const filtered = Object.values(filter).some((v) => v !== undefined);
+
+      // Two endpoints, because they answer different questions: the plain feed
+      // is "what just happened", the search is "when did X happen". Sending an
+      // unfiltered search would work and would be slower for the common case.
+      const { events } = filtered
+        ? await ctx.api.searchAudit(ctx.actor, { ...filter, limit })
+        : await ctx.api.audit(ctx.actor, limit);
+
+      if (events.length === 0) {
+        return {
+          text: filtered ? "Nothing matched." : "No audit events recorded.",
+          title: "Audit",
+          tone: "info",
+        };
+      }
       const rendered = events.map(
-        (e) => `• \`${shortTime(e.createdAt)}\` **${e.action}** ${e.target ? `\`${e.target}\` ` : ""}; ${e.actor}`,
+        (e) => `\`${shortTime(e.createdAt)}\` **${e.action}** ${e.target ? `\`${e.target}\` ` : ""}· ${e.actor}`,
       );
-      return { text: lines([`**${events.length} audit event(s)**`, ...rendered]) };
+      return {
+        text: lines(rendered),
+        title: filtered ? `Audit — ${events.length} match(es)` : `Audit — last ${events.length}`,
+        tone: "info",
+      };
     },
   },
   {
@@ -3140,9 +3413,396 @@ const commands: BotCommand[] = [
     },
   },
   {
+    name: "bundles",
+    description: "Published versions of an extension, and the GitHub publisher's state.",
+    sensitivity: { versions: "read", github: "read" },
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("bundles")
+      .setDescription("Published versions of an extension, and the GitHub publisher's state.")
+      .addSubcommand((s) =>
+        s
+          .setName("versions")
+          .setDescription("Every published version of one extension, newest first.")
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
+          ),
+      )
+      .addSubcommand((s) =>
+        s.setName("github").setDescription("Whether the GitHub publisher is configured and reachable.")),
+    async run(ctx) {
+      if (ctx.options.subcommand() === "github") {
+        const status = await ctx.api.githubStatus(ctx.actor);
+        const entries = Object.entries(status)
+          .filter(([, v]) => typeof v === "string" || typeof v === "number" || typeof v === "boolean")
+          .slice(0, 10)
+          .map(([k, v]) => ({ name: k, value: String(v), inline: true }));
+        return {
+          text: entries.length === 0 ? "The publisher returned nothing to report." : "",
+          title: "GitHub publisher",
+          tone: status["ok"] === false ? "warn" : "info",
+          fields: entries,
+        };
+      }
+
+      const extension = requireExtensionName(requireString(ctx.options, "extension"));
+      const { versions } = await ctx.api.bundleVersions(ctx.actor, extension);
+      if (versions.length === 0) {
+        return { text: `\`${extension}\` has no published bundles.`, title: "Bundles", tone: "info" };
+      }
+      const rendered = versions.slice(0, 15).map((v) => {
+        // The sha is what a run records, so it is the thing that makes a
+        // surprising result a week old diagnosable; the version alone is not.
+        const sha = v.sha256 ? ` \`${String(v.sha256).slice(0, 12)}\`` : "";
+        const yanked = v.yanked ? " — **yanked**" : "";
+        return `**${v.version ?? "?"}**${sha} · ${shortTime(v.publishedAt ?? null)}${yanked}`;
+      });
+      return {
+        text: lines(rendered),
+        title: `${extension} — ${versions.length} version(s)`,
+        tone: "info",
+      };
+    },
+  },
+  {
+    name: "notify",
+    description: "How chatty the upload webhooks are.",
+    sensitivity: { show: "read", set: "mutate" },
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("notify")
+      .setDescription("How chatty the upload webhooks are.")
+      .addSubcommand((s) => s.setName("show").setDescription("Whether successful uploads are announced."))
+      .addSubcommand((s) =>
+        s
+          .setName("set")
+          .setDescription("Announce every successful upload, or only failures.")
+          .addBooleanOption((o) =>
+            o
+              .setName("upload-successes")
+              .setDescription("On: a message per upload. Off: failures only.")
+              .setRequired(true),
+          ),
+      ),
+    async run(ctx) {
+      if (ctx.options.subcommand() === "set") {
+        const on = ctx.options.boolean("upload-successes") === true;
+        await ctx.api.setWebhookVerbosity(ctx.actor, on);
+        return {
+          text: on
+            ? "Successful uploads will be announced to the webhooks."
+            : "Only failures will be announced. Successful uploads go unmentioned.",
+          title: "Webhook verbosity",
+          tone: "ok",
+        };
+      }
+      const { uploadSuccesses } = await ctx.api.webhookVerbosity(ctx.actor);
+      return {
+        text: uploadSuccesses
+          ? "Successful uploads **are** announced."
+          : "Only failures are announced; successful uploads are silent.",
+        title: "Webhook verbosity",
+        tone: "info",
+      };
+    },
+  },
+  {
+    name: "chapters",
+    description: "What this platform has on MangaDex, and where two uploads collided.",
+    // Read-only on purpose. Every chapter *write* route refuses an api-token
+    // principal outright (`requireAdminRole`), whatever scope it holds and
+    // whoever it is acting for: deleting a chapter on MangaDex cannot be undone,
+    // so it happens from the dashboard, by a person, never through the bot.
+    sensitivity: "read",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("chapters")
+      .setDescription("What this platform has on MangaDex, and where two uploads collided.")
+      .addSubcommand((s) =>
+        s
+          .setName("list")
+          .setDescription("Chapters in one archive, newest first.")
+          .addStringOption((o) =>
+            o
+              .setName("archive")
+              .setDescription("Which record. Default: uploaded, the live mirror.")
+              .addChoices(
+                { name: "uploaded (live mirror)", value: "uploaded" },
+                { name: "edited", value: "edited" },
+                { name: "unavailable", value: "unavailable" },
+                { name: "deleted", value: "deleted" },
+              ),
+          )
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Only this extension.").setAutocomplete(true),
+          )
+          .addStringOption((o) => o.setName("series").setDescription("Only this MangaDex title id."))
+          .addStringOption((o) => o.setName("language").setDescription("Only this language code."))
+          .addStringOption((o) => o.setName("q").setDescription("Substring of title, number or id."))
+          .addIntegerOption((o) =>
+            o.setName("limit").setDescription("How many (1-25, default 10).").setMinValue(1).setMaxValue(25),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("collisions")
+          .setDescription("Chapters two uploads both claimed, awaiting a decision.")
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Only this extension.").setAutocomplete(true),
+          )
+          .addBooleanOption((o) =>
+            o.setName("include-acknowledged").setDescription("Include ones already dealt with."),
+          ),
+      ),
+    async run(ctx) {
+      if (ctx.options.subcommand() === "collisions") {
+        const result = await ctx.api.chapterCollisions(ctx.actor, {
+          extension: ctx.options.string("extension") ?? undefined,
+          includeAcknowledged: ctx.options.boolean("include-acknowledged") === true,
+          limit: 15,
+        });
+        const rows = Array.isArray(result.collisions) ? result.collisions : [];
+        if (rows.length === 0) {
+          return { text: "No collisions outstanding.", title: "Collisions", tone: "ok" };
+        }
+        const rendered = rows.slice(0, 15).map((row) => {
+          const r = row as Record<string, unknown>;
+          const where = [r["extension"], r["chapterNumber"]].filter(Boolean).join(" · ");
+          return `\`${String(r["mdChapterId"] ?? "?").slice(0, 8)}\` ${clip(where || "—", 60)}`;
+        });
+        return {
+          text: lines(rendered),
+          title: `Collisions — ${rows.length}`,
+          tone: "warn",
+          footer: "Acknowledge or resolve these from the dashboard; the bot cannot write to the catalogue.",
+        };
+      }
+
+      const archive = (ctx.options.string("archive") as ChapterArchive | null) ?? "uploaded";
+      const extension = ctx.options.string("extension");
+      const page = await ctx.api.chapters(ctx.actor, {
+        archive,
+        extension: extension ? requireExtensionName(extension) : undefined,
+        mdMangaId: ctx.options.string("series") ?? undefined,
+        language: ctx.options.string("language") ?? undefined,
+        search: ctx.options.string("q") ?? undefined,
+        limit: ctx.options.integer("limit") ?? 10,
+      });
+
+      if (page.chapters.length === 0) {
+        return { text: `Nothing in the ${archive} archive matched.`, title: "Chapters", tone: "info" };
+      }
+
+      const rendered = page.chapters.map((c) => {
+        const num = c.chapterNumber ? `**${c.chapterNumber}**` : "_no number_";
+        const title = c.chapterTitle ? ` ${clip(String(c.chapterTitle), 50)}` : "";
+        const lang = c.chapterLanguage ? ` \`${c.chapterLanguage}\`` : "";
+        return `${num}${title}${lang} · ${c.extension ?? "?"} · \`${String(c.mdChapterId ?? "?").slice(0, 8)}\``;
+      });
+
+      // The totals are global rather than filtered, which is the point: a
+      // narrow filter must not hide that an extension has three hundred
+      // chapters sitting in the unavailable archive.
+      const totals = page.totals
+        ? Object.entries(page.totals)
+            .map(([name, count]) => `${name} ${count}`)
+            .join(" · ")
+        : undefined;
+
+      return {
+        text: lines(rendered),
+        title: `Chapters — ${archive}${typeof page.total === "number" ? ` (${page.total} matched)` : ""}`,
+        tone: "info",
+        footer: totals ? `Across all archives: ${totals}` : undefined,
+      };
+    },
+  },
+  {
+    name: "maps",
+    description: "Push the series map to the git repository contributors read.",
+    sensitivity: { sync: "destructive" },
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("maps")
+      .setDescription("Push the series map to the git repository contributors read.")
+      .addSubcommand((s) =>
+        s
+          .setName("sync")
+          .setDescription("Report what would change; pass confirm to actually write.")
+          .addStringOption((o) =>
+            o
+              .setName("extension")
+              .setDescription("Only this extension. Omit for all of them.")
+              .setAutocomplete(true),
+          )
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Required to write. Without it this only reports."),
+          ),
+      ),
+    async run(ctx) {
+      const extension = ctx.options.string("extension");
+      const extensions = extension ? [requireExtensionName(extension)] : [];
+      const confirmed = ctx.options.boolean("confirm") === true;
+
+      // The endpoint defaults `dryRun` to FALSE — the one default in the admin
+      // API that acts rather than reports, because a scheduled job wants the
+      // write. A person typing a command does not, so the default is inverted
+      // here: `/maps sync` on its own can only ever report.
+      const preview = await ctx.api.syncMaps(ctx.actor, { dryRun: true, extensions });
+      const summary = describeMapSync(preview);
+
+      if (!confirmed) {
+        return {
+          text: `Nothing written. ${summary}`,
+          title: "Map sync — dry run",
+          tone: "info",
+          footer: "Re-issue with `confirm: true` to write. This commits to a repository contributors read.",
+        };
+      }
+
+      const report = await ctx.api.syncMaps(ctx.actor, { dryRun: false, extensions });
+      return {
+        text: describeMapSync(report),
+        title: "Map sync written",
+        tone: report.blocked ? "warn" : "ok",
+        footer: report.blocked
+          ? "The shrink guard refused part of this; a large removal needs `force`, which is deliberately not exposed here."
+          : undefined,
+      };
+    },
+  },
+  {
+    name: "enrolments",
+    description: "Worker enrollment tokens: which are outstanding, used or expired.",
+    // Revoking is destructive: an unredeemed token is a credential, and taking
+    // it back cannot be undone from here.
+    sensitivity: { list: "read", revoke: "destructive" },
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("enrolments")
+      .setDescription("Worker enrollment tokens: which are outstanding, used or expired.")
+      .addSubcommand((s) =>
+        s
+          .setName("list")
+          .setDescription("Enrollment tokens. Outstanding only unless you ask for all.")
+          .addBooleanOption((o) =>
+            o.setName("all").setDescription("Include used, revoked and expired ones."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("revoke")
+          .setDescription("Kill an unredeemed enrollment token.")
+          .addStringOption((o) =>
+            o.setName("id").setDescription("Token id, or its first few characters.").setRequired(true),
+          )
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Required: whoever was sent it can no longer enrol."),
+          ),
+      ),
+    async run(ctx) {
+      const { tokens } = await ctx.api.enrollTokens(ctx.actor);
+
+      if (ctx.options.subcommand() === "revoke") {
+        const needle = requireString(ctx.options, "id");
+        // Matched by prefix because the listing shows a prefix; asking for a
+        // full uuid that was never displayed would be busywork.
+        const matches = tokens.filter((t) => t.id.startsWith(needle));
+        if (matches.length === 0) return { text: `No enrollment token starts with \`${needle}\`.`, tone: "warn" };
+        if (matches.length > 1) {
+          return {
+            text: `\`${needle}\` matches ${matches.length} tokens. Give more characters.`,
+            tone: "warn",
+          };
+        }
+        const target = matches[0]!;
+        if (ctx.options.boolean("confirm") !== true) {
+          return {
+            text: `This kills \`${target.id.slice(0, 8)}\` (${target.trust}${target.note ? ` · ${clip(target.note, 40)}` : ""}). Whoever was sent it can no longer enrol.\nRe-issue with \`confirm: true\`.`,
+            tone: "warn",
+          };
+        }
+        await ctx.api.revokeEnrollToken(ctx.actor, target.id);
+        return { text: `Enrollment token \`${target.id.slice(0, 8)}\` revoked.`, title: "Revoked", tone: "ok" };
+      }
+
+      const showAll = ctx.options.boolean("all") === true;
+      const now = Date.now();
+      const outstanding = tokens.filter(
+        (t) =>
+          !t.usedAt &&
+          !t.revoked &&
+          (!t.expiresAt || new Date(t.expiresAt).getTime() > now),
+      );
+      const shown = showAll ? tokens.slice(0, 20) : outstanding.slice(0, 20);
+
+      if (shown.length === 0) {
+        return {
+          text: showAll ? "No enrollment tokens have ever been minted." : "No outstanding enrollment tokens.",
+          title: "Enrolments",
+          tone: "ok",
+        };
+      }
+
+      const rendered = shown.map((t) => {
+        const state = t.revoked
+          ? "revoked"
+          : t.usedAt
+            ? `used by \`${t.usedByWorkerName ?? "?"}\``
+            : t.expiresAt && new Date(t.expiresAt).getTime() <= now
+              ? "expired"
+              : "outstanding";
+        return `\`${t.id.slice(0, 8)}\` ${t.trust} — ${state}${t.note ? ` · ${clip(t.note, 40)}` : ""}`;
+      });
+      return {
+        text: lines(rendered),
+        title: showAll ? "Enrolments" : `Outstanding enrolments — ${outstanding.length}`,
+        // An unused token is a credential someone can still redeem.
+        tone: outstanding.length > 0 && !showAll ? "warn" : "info",
+        footer:
+          outstanding.length > 0 && !showAll
+            ? "Each outstanding token still enrols a worker. Revoke any you did not hand out."
+            : undefined,
+      };
+    },
+  },
+  {
+    name: "extension-config",
+    description: "The stored overrides for one extension: aliases, languages, multi-chapters.",
+    sensitivity: "read",
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("extension-config")
+      .setDescription("The stored overrides for one extension: aliases, languages, multi-chapters.")
+      .addStringOption((o) =>
+        o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
+      ),
+    async run(ctx) {
+      const extension = requireExtensionName(requireString(ctx.options, "extension"));
+      const config = await ctx.api.extensionConfig(ctx.actor, extension);
+      const count = (value: unknown): string => (Array.isArray(value) ? String(value.length) : "0");
+      return {
+        text: "",
+        title: `Config — ${extension}`,
+        tone: "info",
+        fields: [
+          { name: "Chapter aliases", value: count(config.aliases), inline: true },
+          { name: "Multi-chapters", value: count(config.multiChapters), inline: true },
+          { name: "Language maps", value: count(config.languages), inline: true },
+        ],
+        // Worth saying here rather than letting someone discover it: the stored
+        // overrides are read from the published bundle at run time, so editing
+        // these rows does not change what an extension collects. Republishing
+        // does.
+        footer:
+          "Read-only here. An extension reads its overrides from its published bundle, so changing these rows does not change what it collects — republish instead.",
+      };
+    },
+  },
+  {
     name: "uploads",
     description: "How fast chapters go out: daily budget, interval and spacing.",
-    sensitivity: { show: "read", set: "mutate", clear: "mutate" },
+    sensitivity: { show: "read", set: "mutate", clear: "mutate", priority: "mutate", paused: "mutate", scope: "mutate" },
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("uploads")
@@ -3188,9 +3848,81 @@ const commands: BotCommand[] = [
           .addStringOption((o) =>
             o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
           ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("priority")
+          .setDescription("Which extensions jump the upload queue. Replaces the whole list.")
+          .addStringOption((o) =>
+            o.setName("extensions").setDescription("Comma-separated names. Empty clears the list."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("paused")
+          .setDescription("Which extensions upload nothing at all. Replaces the whole list.")
+          .addStringOption((o) =>
+            o.setName("extensions").setDescription("Comma-separated names. Empty resumes all of them."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("scope")
+          .setDescription("Whether the daily budget is one pool or one per extension.")
+          .addStringOption((o) =>
+            o
+              .setName("scope")
+              .setDescription("global: one shared budget. extension: one each.")
+              .setRequired(true)
+              .addChoices(
+                { name: "global — one shared daily budget", value: "global" },
+                { name: "extension — a budget each", value: "extension" },
+              ),
+          ),
       ),
     async run(ctx) {
       const sub = ctx.options.subcommand();
+
+      // These three replace a whole list rather than adding to one, which is
+      // worth restating in the reply: an operator who means "also pause omoi"
+      // and sends only `omoi` has just resumed everything else.
+      if (sub === "priority" || sub === "paused") {
+        const raw = ctx.options.string("extensions") ?? "";
+        const names = raw
+          .split(",")
+          .map((n) => n.trim())
+          .filter(Boolean)
+          .map(requireExtensionName);
+        const result =
+          sub === "priority"
+            ? await ctx.api.setUploadPriority(ctx.actor, names)
+            : await ctx.api.setUploadPaused(ctx.actor, names);
+        const applied = result.extensions ?? names;
+        const label = sub === "priority" ? "Priority" : "Paused";
+        return {
+          text:
+            applied.length > 0
+              ? `**${label}** is now: ${applied.map((n) => `\`${n}\``).join(", ")}.`
+              : `**${label}** is now empty.`,
+          title: `Upload ${sub}`,
+          tone: "ok",
+          footer: "This replaced the whole list; anything not named above is no longer " +
+            (sub === "priority" ? "prioritised." : "paused."),
+        };
+      }
+
+      if (sub === "scope") {
+        const scope = ctx.options.string("scope") === "extension" ? "extension" : "global";
+        await ctx.api.setUploadBudgetScope(ctx.actor, scope);
+        return {
+          text:
+            scope === "global"
+              ? "The daily budget is now **one pool shared by every extension**."
+              : "Every extension now gets **its own** daily budget.",
+          title: "Budget scope",
+          tone: "ok",
+        };
+      }
 
       if (sub === "show") {
         const view = await ctx.api.uploadSchedule(ctx.actor);

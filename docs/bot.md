@@ -282,6 +282,24 @@ channel they are standing in. The trade is real and worth stating plainly — a
 `users:admin` token can grant Discord users everything that token itself holds,
 so scope `BOT_API_TOKEN` accordingly.
 
+### What the bot deliberately cannot do
+
+Two ceilings, both by construction rather than omission, and neither is a gap
+waiting to be closed.
+
+**Nothing owner-gated.** Account administration, role changes and token minting
+sit behind `requireOwner`. A scoped API token is pinned to `ADMIN` in `auth.ts`,
+and acting on someone's behalf caps an impersonated OWNER at `ADMIN` for exactly
+this reason. So no arrangement of scopes reaches them from Discord.
+
+**No writes to the published catalogue.** Every chapter write route —
+`PATCH /chapters/:id`, the four `bulk/*` verbs, `unavailable`, `recard` — is
+guarded by `requireAdminRole`, which refuses an api-token principal *outright*,
+whatever scope it holds and whoever it is acting for. Deleting a chapter on
+MangaDex cannot be undone, and the platform's answer is that it happens from the
+dashboard, by a person, never through a bot credential. `/chapters` is therefore
+read-only, and says so where a write would otherwise be the obvious next step.
+
 ### Asking the bot why, when nothing works
 
 **@mention the bot** and it answers with the three gates as they apply to you,
@@ -328,6 +346,24 @@ DMs are closed the bot falls back to the ephemeral reply and says so.
 | `/status` | read | `stats:read` (+ `workers:read` for the fleet section) | Pause state, job counts by state, upload-task depths, worker fleet with heartbeat age. |
 | `/ping` | read | `stats:read` | Whether the admin API answers, and how fast. |
 | `/stats` | read | `stats:read` | Alias for `/status`, kept from the legacy bot. |
+| `/queue show <id>` | read | `runs:read` | One upload task in full: state, attempts, the chapter behind it, and the last error. |
+| `/queue reorder <id> <mode> [defer-seconds]` | mutate | `runs:write` | Move a task to the front, the back, or later. `defer` needs a delay and the others refuse one; both are caught here rather than relayed as a 400. |
+| `/runs chapters <id>` | read | `runs:read` | What one run found, counted by outcome. Counts only — the dashboard lists the rows. |
+| `/untracked unskip [extension] [confirm]` | mutate | `untracked:write` | Put skipped series back in the queue. Counts first, always. |
+| `/bundles versions <extension>` | read | `bundles:read` | Every published version, with the sha a run records — the version alone will not make a surprising result diagnosable a week later. |
+| `/bundles github` | read | `bundles:read` | Whether the GitHub publisher is configured and reachable. |
+| `/uploads priority [extensions]` | mutate | `settings:write` | Which extensions jump the upload queue. **Replaces** the whole list; anything not named is no longer prioritised. |
+| `/uploads paused [extensions]` | mutate | `settings:write` | Which extensions upload nothing. Replaces the whole list. |
+| `/uploads scope <scope>` | mutate | `settings:write` | Whether the daily budget is one shared pool or one per extension. |
+| `/notify show` / `/notify set <upload-successes>` | read / mutate | `settings:read` / `settings:write` | Whether successful uploads are announced to the webhooks, or only failures. |
+| `/enrolments revoke <id> [confirm]` | destructive | `enroll:write` | Kill an unredeemed enrollment token. Matched on the id prefix the listing shows; an ambiguous prefix is refused. |
+| `/workers extensions <id> <extensions>` | mutate | `workers:write` | Retarget which extensions a worker accepts. Applies on its next lease; nothing to restart. |
+| `/chapters list [archive] [extension] [series] [language] [q] [limit]` | read | `chapters:read` | What the platform has on MangaDex, by archive. Totals are global rather than filtered, so a narrow filter cannot hide a large archive. |
+| `/chapters collisions [extension] [include-acknowledged]` | read | `chapters:read` | Chapters two uploads both claimed. Resolving one is a dashboard action; see below. |
+| `/maps sync [extension] [confirm]` | destructive | `tracked:write` | Push the series map to its git repository. **Always a dry run without `confirm`**, inverting the endpoint's own default — that default exists for the scheduled job, not for a person typing a command. |
+| `/enrolments [all]` | read | `workers:read` | Worker enrollment tokens. Outstanding ones only by default, because an unused token is still a live credential. |
+| `/extension-config <extension>` | read | `extensions:read` | Stored overrides for one extension. Read-only: an extension reads its overrides from its published bundle, so editing these rows changes nothing — republish instead. |
+| `/audit [actor] [action] [subject] [q] [limit]` | read | `audit:read` | The audit trail. With no filter it is the recent feed; any filter switches it to a search over the whole log. |
 | `/queue purge [kind] [state] [extension] [q] [confirm]` | destructive | `runs:write` | Delete queued tasks matching a filter. Always counts first, even when confirmed; an unfiltered purge says so in the confirmation. |
 | `/queue restagger <gap-seconds> [kind]` | mutate | `runs:write` | Re-space pending tasks so they go out a fixed gap apart. |
 | `/runs cancel <id> [confirm]` | destructive | `runs:write` | Stop one run and its queued jobs. |
@@ -355,8 +391,8 @@ DMs are closed the bot falls back to the ephemeral reply and says so.
 | `/runs show <id>` | read | `runs:read` | One run with every job, attempt count, segment and last error. |
 | `/jobs cancel <id>` | mutate | `runs:write` | Cancel one job. |
 | `/jobs retry <id>` | mutate | `runs:write` | Replay a dead-lettered job. |
-| `/dead-letter` | read | `runs:read` | Jobs that exhausted retries or hit a permanent error. |
-| `/quarantine` | read | `runs:read` | Result envelopes rejected by schema or policy validation; the signal a worker is misbehaving. |
+| `/dead-letter [show]` | read | `runs:read` | Jobs that exhausted retries or hit a permanent error. Anything cleared in `/errors clear` is hidden and counted, as it is there; `show` includes them or lists only them. |
+| `/quarantine [show]` | read | `runs:read` | Result envelopes rejected by schema or policy validation; the signal a worker is misbehaving. Cleared entries are hidden by default, as above. |
 | `/errors list [limit] [show]` | read | `runs:read` | One merged feed of everything that recently failed: dead-lettered jobs, failed upload tasks, quarantined submissions. The closest thing to the legacy `/logs`. Entries somebody has cleared are hidden by default and counted; `show` switches to including them or to only them. Each row prints the first eight characters of its id, which is what `clear` takes. |
 | `/errors clear [id] [all] [note]` | mutate | `runs:write` | Mark failures as read and dealt with so they leave the list. `id` is a full id or a leading prefix; `all: true` clears everything outstanding. Nothing is deleted; the jobs, tasks and submissions keep their state, and anything that fails again comes back on its own. `note` records why, for whoever reviews cleared entries later. |
 | `/errors restore [id] [all]` | mutate | `runs:write` | Put cleared entries back in the list: the undo, and the way to re-open something that turned out not to be fixed. |

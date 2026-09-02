@@ -1,6 +1,7 @@
 import { JobState, ResultState, RunState, UploadTaskKind, UploadTaskState, WorkerStatus } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
 import { metrics } from "../../metrics.js";
+import { countOutstandingErrors } from "./errorFeed.js";
 
 /**
  * The database-derived gauges: queue depths, backlog ages, table growth.
@@ -38,24 +39,35 @@ export async function collectInventoryMetrics(
   prisma: PrismaClient,
   now: Date = new Date(),
 ): Promise<void> {
-  const [jobStates, workerStates, runStates, resultStates, uploadTasks, oldestPending, oldestIngesting] =
-    await Promise.all([
-      prisma.job.groupBy({ by: ["state"], _count: true }),
-      prisma.worker.groupBy({ by: ["status"], _count: true }),
-      prisma.run.groupBy({ by: ["state"], _count: true }),
-      prisma.resultSubmission.groupBy({ by: ["state"], _count: true }),
-      prisma.uploadTask.groupBy({ by: ["kind", "state"], _count: true }),
-      // "Due" matters: a job whose notBefore is in the future is waiting on
-      // backoff by design and is not a backlog.
-      prisma.job.aggregate({
-        _min: { createdAt: true },
-        where: { state: JobState.PENDING, notBefore: { lte: now } },
-      }),
-      prisma.run.aggregate({
-        _min: { updatedAt: true },
-        where: { state: RunState.INGESTING },
-      }),
-    ]);
+  const [
+    jobStates,
+    workerStates,
+    runStates,
+    resultStates,
+    uploadTasks,
+    oldestPending,
+    oldestIngesting,
+    outstandingErrors,
+  ] = await Promise.all([
+    prisma.job.groupBy({ by: ["state"], _count: true }),
+    prisma.worker.groupBy({ by: ["status"], _count: true }),
+    prisma.run.groupBy({ by: ["state"], _count: true }),
+    prisma.resultSubmission.groupBy({ by: ["state"], _count: true }),
+    prisma.uploadTask.groupBy({ by: ["kind", "state"], _count: true }),
+    // "Due" matters: a job whose notBefore is in the future is waiting on
+    // backoff by design and is not a backlog.
+    prisma.job.aggregate({
+      _min: { createdAt: true },
+      where: { state: JobState.PENDING, notBefore: { lte: now } },
+    }),
+    prisma.run.aggregate({
+      _min: { updatedAt: true },
+      where: { state: RunState.INGESTING },
+    }),
+    // The acknowledgement-aware counts, so the dead-letter depth has an
+    // alertable twin an operator can actually drive back to zero.
+    countOutstandingErrors(prisma),
+  ]);
 
   metrics.jobQueueDepth.reset();
   for (const state of Object.values(JobState)) metrics.jobQueueDepth.set({ state }, 0);
@@ -65,6 +77,7 @@ export async function collectInventoryMetrics(
     if (row.state === JobState.DEAD_LETTER) deadLetter = row._count;
   }
   metrics.deadLetterJobs.set(deadLetter);
+  metrics.deadLetterJobsOutstanding.set(outstandingErrors.jobs);
 
   metrics.workersByStatus.reset();
   for (const status of Object.values(WorkerStatus)) metrics.workersByStatus.set({ status }, 0);

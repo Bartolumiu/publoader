@@ -570,6 +570,34 @@ body.nav-collapsed .sidebar-head {
   border-right: none;
 }
 
+/* A reading that is also a destination. It must still read as part of the strip
+   rather than as a button, so it takes no link colour and no underline: the
+   affordance is the hover ground and the pointer, and the focus ring for the
+   keyboard. Without an href (the principal cannot open Queues) it falls back to
+   an ordinary cell. */
+a.summary-link {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+a.summary-link:hover,
+a.summary-link:focus-visible {
+  /* One step up from the rail the strip sits on: enough to read as a target,
+     not enough to become a fifth surface. */
+  background: var(--panel);
+}
+
+a.summary-link:hover .summary-k {
+  color: var(--dim);
+}
+
+a.summary-link:not([href]) {
+  cursor: default;
+  background: none;
+}
+
 /* The run/pause lamp sits in a cell of its own so it gets the same gutters as
    a reading, but it is a lamp rather than a number and needs no width floor. */
 .summary-item.lamp {

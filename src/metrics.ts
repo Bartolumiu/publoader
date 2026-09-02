@@ -71,6 +71,19 @@ export const metrics = {
    * and unlabelled so the series is always present for alerting even at zero.
    */
   deadLetterJobs: g("publoader_dead_letter_jobs", "Jobs currently in DEAD_LETTER"),
+  /**
+   * The same depth minus what an operator has acknowledged in the error feed.
+   *
+   * The gauge above is the state of the table and stays that way; this one is
+   * the to-do list, and it is the one worth paging on. A backlog of failures
+   * that have been read, understood and dealt with (an upstream outage, a bundle
+   * since replaced) holds the raw gauge above zero forever, and an alert that
+   * can never clear is an alert people silence.
+   */
+  deadLetterJobsOutstanding: g(
+    "publoader_dead_letter_jobs_outstanding",
+    "Jobs in DEAD_LETTER that nobody has cleared in the error feed",
+  ),
   oldestPendingJobAgeSeconds: g(
     "publoader_oldest_pending_job_age_seconds",
     "Age of the oldest PENDING job that is already due (0 when the queue is empty)",

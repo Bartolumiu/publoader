@@ -157,6 +157,14 @@ function ago(iso: unknown): string {
 
 // ------------------------------------------------------------------ commands
 
+/**
+ * What `--cleared` accepts, mapped straight onto the API's query parameter.
+ *
+ * Shared by `errors` and `dead-letter`: they list the same failures, so an
+ * acknowledgement has to mean the same thing in both.
+ */
+const CLEARED_FILTERS = ["without", "with", "only"] as const;
+
 const program = new Command();
 program
   .name("publoader-admin")
@@ -337,8 +345,18 @@ jobs
 program
   .command("dead-letter")
   .description("jobs that exhausted retries or hit a permanent error")
-  .action(async () => {
-    const res = await api<{ jobs: Record<string, unknown>[] }>("/api/v1/admin/dead-letter");
+  // Same three views as `padmin errors`, and the same default: a job cleared
+  // there is already dealt with, and repeating it here is what made "cleared"
+  // fail to mean cleared.
+  .option(`--cleared <${CLEARED_FILTERS.join("|")}>`, "hide cleared jobs (default), include them, or show only them", "without")
+  .action(async (opts: { cleared: string }) => {
+    if (!CLEARED_FILTERS.includes(opts.cleared as (typeof CLEARED_FILTERS)[number])) {
+      fail(`--cleared must be one of ${CLEARED_FILTERS.join(", ")}`);
+    }
+    const res = await api<{ jobs: Record<string, unknown>[]; clearedHidden: number }>(
+      "/api/v1/admin/dead-letter",
+      { query: { cleared: opts.cleared } },
+    );
     table(res.jobs, [
       { header: "ID", get: (j) => j["id"] },
       { header: "EXTENSION", get: (j) => j["extension"] },
@@ -347,15 +365,27 @@ program
       { header: "CLASS", get: (j) => j["errorClass"] },
       { header: "WHEN", get: (j) => ago(j["updatedAt"]) },
       { header: "ERROR", get: (j) => String(j["lastError"] ?? "").slice(0, 80) || "-" },
-    ], "dead-letter queue is empty");
+    ], opts.cleared === "only" ? "no dead-lettered job has been cleared" : "dead-letter queue is empty");
+    if (opts.cleared === "without" && res.clearedHidden > 0) {
+      console.log("");
+      console.log(
+        `${res.clearedHidden} cleared job(s) hidden; ` +
+          "`padmin dead-letter --cleared only` to review, `errors restore` to un-clear.",
+      );
+    }
   });
 
 program
   .command("quarantine")
   .description("result envelopes rejected by schema or policy validation")
-  .action(async () => {
-    const res = await api<{ quarantined: Record<string, unknown>[] }>(
+  .option(`--cleared <${CLEARED_FILTERS.join("|")}>`, "hide cleared submissions (default), include them, or show only them", "without")
+  .action(async (opts: { cleared: string }) => {
+    if (!CLEARED_FILTERS.includes(opts.cleared as (typeof CLEARED_FILTERS)[number])) {
+      fail(`--cleared must be one of ${CLEARED_FILTERS.join(", ")}`);
+    }
+    const res = await api<{ quarantined: Record<string, unknown>[]; clearedHidden: number }>(
       "/api/v1/admin/quarantine",
+      { query: { cleared: opts.cleared } },
     );
     table(res.quarantined, [
       { header: "ID", get: (q) => q["id"] },
@@ -363,7 +393,14 @@ program
       { header: "WORKER", get: (q) => q["workerId"] },
       { header: "WHEN", get: (q) => ago(q["createdAt"]) },
       { header: "REASON", get: (q) => String(q["rejectReason"] ?? "").slice(0, 90) || "-" },
-    ], "nothing quarantined");
+    ], opts.cleared === "only" ? "nothing quarantined has been cleared" : "nothing quarantined");
+    if (opts.cleared === "without" && res.clearedHidden > 0) {
+      console.log("");
+      console.log(
+        `${res.clearedHidden} cleared submission(s) hidden; ` +
+          "`padmin quarantine --cleared only` to review, `errors restore` to un-clear.",
+      );
+    }
   });
 
 // ---- pause / resume ----
@@ -2194,8 +2231,6 @@ queues
 
 // ---- merged error feed ----
 
-/** What `--cleared` accepts, mapped straight onto the API's query parameter. */
-const CLEARED_FILTERS = ["without", "with", "only"] as const;
 
 type ErrorEntry = {
   at: string;

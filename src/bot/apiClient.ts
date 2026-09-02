@@ -215,6 +215,8 @@ export interface QuarantineEntry {
   workerName?: string | null;
   rejectReason: string | null;
   createdAt: string;
+  /** Present only when this quarantine has been acknowledged in the error feed. */
+  cleared?: { at: string; by: string; note: string | null };
 }
 
 export interface UntrackedEntry {
@@ -581,6 +583,89 @@ interface RequestSpec {
   timeoutMs?: number;
 }
 
+/** One published version of an extension. */
+export interface BundleVersion {
+  version?: string;
+  sha256?: string;
+  publishedAt?: string;
+  publishedBy?: string | null;
+  yanked?: boolean;
+  [key: string]: unknown;
+}
+
+/** Which record of a chapter to read: the live mirror, or an archive. */
+export const CHAPTER_ARCHIVES = ["uploaded", "edited", "unavailable", "deleted"] as const;
+export type ChapterArchive = (typeof CHAPTER_ARCHIVES)[number];
+
+export interface ChapterQuery {
+  archive?: ChapterArchive;
+  extension?: string;
+  language?: string;
+  mdMangaId?: string;
+  search?: string;
+  limit?: number;
+}
+
+export interface ChapterRow {
+  mdChapterId?: string | null;
+  chapterNumber?: string | null;
+  chapterTitle?: string | null;
+  chapterLanguage?: string | null;
+  extension?: string | null;
+  mdMangaId?: string | null;
+  at?: string | null;
+  [key: string]: unknown;
+}
+
+export interface ChapterPage {
+  archive: string;
+  chapters: ChapterRow[];
+  total?: number;
+  /** Global counts per archive, so a narrow filter cannot hide the picture. */
+  totals?: Record<string, number>;
+  nextCursor?: string | null;
+}
+
+/** What a map sync did, or would have done. */
+export interface MapSyncReport {
+  dryRun?: boolean;
+  changed?: number;
+  added?: number;
+  removed?: number;
+  extensions?: string[];
+  /** Set when the shrink guard refused a suspiciously large removal. */
+  blocked?: string | null;
+  [key: string]: unknown;
+}
+
+export interface AuditSearchQuery {
+  q?: string;
+  actor?: string;
+  action?: string;
+  subject?: string;
+  limit?: number;
+}
+
+export interface EnrollTokenRow {
+  id: string;
+  trust: string;
+  note?: string | null;
+  createdAt: string;
+  expiresAt?: string | null;
+  usedAt?: string | null;
+  usedByWorkerName?: string | null;
+  revoked?: boolean;
+}
+
+export interface ExtensionConfigView {
+  extension?: string;
+  aliases?: unknown[];
+  multiChapters?: unknown[];
+  languages?: unknown[];
+  overrideOptions?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
 export interface QueuePurgeBody {
   kind?: UploadTaskKind;
   state?: UploadTaskState;
@@ -851,6 +936,174 @@ export class AdminApiClient {
     });
   }
 
+  // ---- the published catalogue, read-only ----
+
+  /**
+   * What this platform has on MangaDex, by archive.
+   *
+   * Read only, and deliberately so: every chapter *write* route is guarded by
+   * `requireAdminRole`, which refuses an api-token principal outright — no
+   * scope and no impersonated role gets past it. Deleting a chapter on
+   * MangaDex is irreversible, and the platform's answer is that it happens from
+   * the dashboard by a person, never through a bot's credential.
+   */
+  chapters(actor: string, query: ChapterQuery): Promise<ChapterPage> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/chapters",
+      scope: "chapters:read",
+      actor,
+      query: {
+        archive: query.archive,
+        extension: query.extension,
+        language: query.language,
+        mdMangaId: query.mdMangaId,
+        search: query.search,
+        limit: query.limit,
+      },
+    });
+  }
+
+  chapterCollisions(
+    actor: string,
+    query: { extension?: string; includeAcknowledged?: boolean; limit?: number },
+  ): Promise<{ collisions?: unknown[]; total?: number; [key: string]: unknown }> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/chapters/collisions",
+      scope: "chapters:read",
+      actor,
+      query: {
+        extension: query.extension,
+        includeAcknowledged: query.includeAcknowledged ? "true" : undefined,
+        limit: query.limit,
+      },
+    });
+  }
+
+  // ---- the series map, the audit log, and pending enrolments ----
+
+  /**
+   * Push the series map to its git repository.
+   *
+   * The endpoint defaults `dryRun` to **false**, which is the one default in
+   * the admin API that acts rather than reports. Every caller here passes it
+   * explicitly for that reason; see the `/maps sync` command, which inverts the
+   * default so a bare invocation cannot write.
+   */
+  syncMaps(actor: string, opts: { dryRun: boolean; extensions?: string[] }): Promise<MapSyncReport> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/maps/sync",
+      scope: "tracked:write",
+      actor,
+      json: { dryRun: opts.dryRun, extensions: opts.extensions ?? [] },
+    });
+  }
+
+  searchAudit(actor: string, query: AuditSearchQuery): Promise<{ events: AuditEntry[]; total?: number }> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/audit/search",
+      scope: "audit:read",
+      actor,
+      query: {
+        q: query.q,
+        actor: query.actor,
+        action: query.action,
+        subject: query.subject,
+        limit: query.limit,
+      },
+    });
+  }
+
+  enrollTokens(actor: string): Promise<{ tokens: EnrollTokenRow[] }> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/enroll-tokens",
+      scope: "workers:read",
+      actor,
+    });
+  }
+
+  extensionConfig(actor: string, extension: string): Promise<ExtensionConfigView> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/admin/extensions/${encodeURIComponent(extension)}/config`,
+      scope: "extensions:read",
+      actor,
+    });
+  }
+
+  // ---- one task, one run, one extension's history ----
+
+  uploadTask(actor: string, id: string): Promise<Record<string, unknown>> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/admin/queues/tasks/${encodeURIComponent(id)}`,
+      scope: "runs:read",
+      actor,
+    });
+  }
+
+  /** Move tasks within the queue: to the front, to the back, or later. */
+  reorderQueue(
+    actor: string,
+    ids: string[],
+    mode: "front" | "back" | "defer",
+    deferSeconds?: number,
+  ): Promise<{ moved?: number }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/queues/reorder",
+      scope: "runs:write",
+      actor,
+      json: mode === "defer" ? { ids, mode, deferSeconds } : { ids, mode },
+    });
+  }
+
+  /** What one run found, counted rather than listed. */
+  runChapterSummary(actor: string, runId: string): Promise<Record<string, unknown>> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/admin/runs/${encodeURIComponent(runId)}/chapters/summary`,
+      scope: "runs:read",
+      actor,
+    });
+  }
+
+  /** Put skipped untracked series back in the queue. Dry run by default. */
+  unskipUntracked(
+    actor: string,
+    opts: { extension?: string; dryRun: boolean },
+  ): Promise<{ dryRun?: boolean; matched?: number; restored?: number }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/untracked/unskip",
+      scope: "untracked:write",
+      actor,
+      json: { extension: opts.extension, dryRun: opts.dryRun },
+    });
+  }
+
+  bundleVersions(actor: string, extension: string): Promise<{ extension: string; versions: BundleVersion[] }> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/admin/bundles/${encodeURIComponent(extension)}/versions`,
+      scope: "bundles:read",
+      actor,
+    });
+  }
+
+  githubStatus(actor: string): Promise<Record<string, unknown>> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/sysops/github/status",
+      scope: "bundles:read",
+      actor,
+    });
+  }
+
   // ---- clearing up after an incident ----
 
   /**
@@ -937,6 +1190,78 @@ export class AdminApiClient {
       scope: "settings:write",
       actor,
       json: patch,
+    });
+  }
+
+  /** Which extensions jump the upload queue. Replaces the whole list. */
+  setUploadPriority(actor: string, extensions: string[]): Promise<{ ok: boolean; extensions?: string[] }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/upload-schedule/priority",
+      scope: "settings:write",
+      actor,
+      json: { extensions },
+    });
+  }
+
+  /** Extensions held out of uploading entirely. Replaces the whole list. */
+  setUploadPaused(actor: string, extensions: string[]): Promise<{ ok: boolean; extensions?: string[] }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/upload-schedule/paused",
+      scope: "settings:write",
+      actor,
+      json: { extensions },
+    });
+  }
+
+  /** Whether `perDay` is one platform-wide pool or one budget per extension. */
+  setUploadBudgetScope(actor: string, scope: "global" | "extension"): Promise<{ ok: boolean; scope?: string }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/upload-schedule/scope",
+      scope: "settings:write",
+      actor,
+      json: { scope },
+    });
+  }
+
+  webhookVerbosity(actor: string): Promise<{ uploadSuccesses: boolean }> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/webhook-verbosity",
+      scope: "settings:read",
+      actor,
+    });
+  }
+
+  setWebhookVerbosity(actor: string, uploadSuccesses: boolean): Promise<{ ok: boolean; uploadSuccesses: boolean }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/webhook-verbosity",
+      scope: "settings:write",
+      actor,
+      json: { uploadSuccesses },
+    });
+  }
+
+  revokeEnrollToken(actor: string, id: string): Promise<{ ok: boolean }> {
+    return this.request({
+      method: "POST",
+      path: `/api/v1/admin/enroll-tokens/${encodeURIComponent(id)}/revoke`,
+      scope: "enroll:write",
+      actor,
+    });
+  }
+
+  /** Retarget which extensions a worker will accept jobs for. */
+  setWorkerExtensions(actor: string, workerId: string, extensions: string[]): Promise<{ ok: boolean }> {
+    return this.request({
+      method: "PUT",
+      path: `/api/v1/admin/workers/${encodeURIComponent(workerId)}/extensions`,
+      scope: "workers:write",
+      actor,
+      json: { extensions },
     });
   }
 
@@ -1351,21 +1676,35 @@ export class AdminApiClient {
     });
   }
 
-  deadLetter(actor: string): Promise<{ jobs: JobSummary[] }> {
+  /**
+   * The dead-letter queue. Cleared jobs are hidden by default and counted in
+   * `clearedHidden`, on the same terms as `errors` above: the two list the same
+   * failures, so an acknowledgement means the same thing in both.
+   */
+  deadLetter(
+    actor: string,
+    cleared: ErrorClearedFilter = "without",
+  ): Promise<{ jobs: (JobSummary & { cleared?: { at: string; by: string; note: string | null } })[]; clearedHidden: number }> {
     return this.request({
       method: "GET",
       path: "/api/v1/admin/dead-letter",
       scope: "runs:read",
       actor,
+      query: { cleared },
     });
   }
 
-  quarantine(actor: string): Promise<{ quarantined: QuarantineEntry[] }> {
+  /** Quarantined submissions, cleared ones hidden by default. See `deadLetter`. */
+  quarantine(
+    actor: string,
+    cleared: ErrorClearedFilter = "without",
+  ): Promise<{ quarantined: QuarantineEntry[]; clearedHidden: number }> {
     return this.request({
       method: "GET",
       path: "/api/v1/admin/quarantine",
       scope: "runs:read",
       actor,
+      query: { cleared },
     });
   }
 
