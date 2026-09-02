@@ -624,9 +624,10 @@ padmin jobs cancel <jobId>
 ```
 
 **A job stuck in `LEASED` or `RUNNING`** is not stuck; it holds a lease that
-expires. The sweeper (`SWEEP_INTERVAL_SECONDS`, default 30) requeues it once
+expires. The sweep runs inside the scheduler's own tick
+(`SCHEDULER_INTERVAL_SECONDS`, default 30) and requeues the job once
 `leaseExpiresAt` passes. If you see a job whose `LEASE EXPIRES` is in the past
-and it has not moved after two sweep intervals, the scheduler is not running:
+and it has not moved after two ticks, the scheduler is not running:
 
 ```bash
 docker compose ps core-scheduler

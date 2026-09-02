@@ -74,8 +74,8 @@ What comes up (`docker/dev/docker-compose.yml`):
 
 Dev-specific tuning, so failure modes are observable within a test's patience
 rather than after five minutes: `LEASE_TTL_SECONDS=30`,
-`SWEEP_INTERVAL_SECONDS=5`, `SCHEDULER_INTERVAL_SECONDS=5`,
-`MANGADEX_RATELIMIT_MS=0`.
+`SCHEDULER_INTERVAL_SECONDS=5`, `MANGADEX_RATELIMIT_MS=0`. The expired-lease
+sweep runs inside the scheduler tick, so that one interval sets both.
 
 The container hardening (`read_only`, `cap_drop: ALL`, non-root) is **identical to
 production on purpose**: a container that only works when writable should fail on

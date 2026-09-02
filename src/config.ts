@@ -73,7 +73,6 @@ const ConfigSchema = z.object({
 
   // Lease/queue tuning
   leaseTtlSeconds: z.coerce.number().int().min(30).default(300),
-  sweepIntervalSeconds: z.coerce.number().int().min(5).default(30),
   schedulerIntervalSeconds: z.coerce.number().int().min(5).default(30),
   retryBaseSeconds: z.coerce.number().int().min(1).default(60),
   retryMaxSeconds: z.coerce.number().int().min(60).default(3600),
@@ -256,7 +255,6 @@ export function loadConfig(overrides: Partial<Record<string, string>> = {}): Con
     logRetentionDays: get("LOG_RETENTION_DAYS"),
     logMaxRows: get("LOG_MAX_ROWS"),
     leaseTtlSeconds: get("LEASE_TTL_SECONDS"),
-    sweepIntervalSeconds: get("SWEEP_INTERVAL_SECONDS"),
     schedulerIntervalSeconds: get("SCHEDULER_INTERVAL_SECONDS"),
     retryBaseSeconds: get("RETRY_BASE_SECONDS"),
     retryMaxSeconds: get("RETRY_MAX_SECONDS"),

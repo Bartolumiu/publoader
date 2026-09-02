@@ -75,7 +75,7 @@ export function isAutomaticSource(source: string | null | undefined): boolean {
 export const TITLE_MATCH_SOURCE = "auto:title-match";
 
 /** How many rows one auto-map pass searches MangaDex for. */
-const AUTO_MAP_BATCH = 20;
+export const AUTO_MAP_BATCH = 20;
 
 /**
  * How long a checked row waits before being checked again.
@@ -85,7 +85,7 @@ const AUTO_MAP_BATCH = 20;
  * so the cost of being wrong here is small; never re-checking means a series
  * stays in the queue forever after one early miss.
  */
-const RECHECK_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
+export const RECHECK_AFTER_MS = 14 * 24 * 60 * 60 * 1000;
 
 /** What one auto-map pass did, for the scheduler, the API and the CLI alike. */
 export interface AutoMapReport {

@@ -1983,6 +1983,7 @@ const NAV = [
     scope: "settings:read",
     tabs: [
       ["schema", "Database"],
+      ["scheduled", "Scheduled work"],
       ["mangadex", "MangaDex"],
       ["cards", "Unavailable cards"],
       ["backup", "Backup"],
@@ -13952,7 +13953,120 @@ function auditDetail(id) {
 
 // --------------------------------------------------------------------- system
 
+/**
+ * What this platform does to itself, on a clock.
+ *
+ * WHY IT EXISTS. There is no cron here and no job table: everything periodic is
+ * a loop that sleeps at the bottom, or a `setInterval`. So "what runs on its
+ * own, how often, and did it" was answerable only by reading source — and the
+ * jobs that matter most are the least visible, because a pass that mapped
+ * nothing and a pass that never ran look identical from outside.
+ *
+ * It refuses to invent the part it does not know. Three of these write a
+ * timestamp somewhere; the rest write nothing at all, and this says so in words
+ * rather than showing a blank that reads as "never". Where a job records itself
+ * per row instead of per pass — the auto-map does — the row-level facts are
+ * shown as what they are: how far it has got, and how much is in front of it.
+ */
+function scheduledWorkPanel() {
+  const tasks = new Resource("system-tasks", () => api("/system/tasks"));
+
+  /** "every 30s", "every 15m", "every 7d" — whichever reads smallest. */
+  const cadence = (task) => {
+    if (task.cadence) return task.cadence;
+    const seconds = task.everySeconds;
+    if (!seconds) return "not scheduled";
+    if (seconds < 60) return `every ${seconds}s`;
+    if (seconds < 3600) return `every ${Math.round(seconds / 60)}m`;
+    if (seconds < 86400) return `every ${Math.round(seconds / 3600)}h`;
+    return `every ${Math.round(seconds / 86400)}d`;
+  };
+
+  const lastRun = (task) => {
+    if (task.lastRunKnown) {
+      return task.lastRun
+        ? el("span", {}, ago(task.lastRun), el("div", { class: "dim small", text: fmtTime(task.lastRun) }))
+        : el("span", { class: "dim", text: "no record yet" });
+    }
+    // The honest answer, and the useful one: not "never", which is what a blank
+    // cell would be read as.
+    return el("span", { class: "dim small", text: "not recorded" });
+  };
+
+  const progress = (task) => {
+    if (!task.progress) return "";
+    const parts = [];
+    if (task.progress.rowsDue != null) {
+      parts.push(el("div", { text: `${task.progress.rowsDue.toLocaleString()} row(s) still to check` }));
+    }
+    if (task.progress.newestRowChecked) {
+      parts.push(el("div", { class: "dim small", text: `newest row checked ${ago(task.progress.newestRowChecked)}` }));
+    } else if (task.progress.newestRowChecked === null && task.progress.rowsDue != null) {
+      parts.push(el("div", { class: "dim small", text: "no row has been checked yet" }));
+    }
+    if (task.batch) {
+      parts.push(el("div", { class: "dim small", text: `${task.batch} row(s) a pass` }));
+    }
+    return parts;
+  };
+
+  return el(
+    "div",
+    {},
+    card(
+      "Scheduled work",
+      el("p", {
+        class: "dim small",
+        text:
+          "The passes this platform runs on its own, separately from extension runs. Most of them keep no " +
+          "record of having run — that is said here rather than shown as a blank — so where a job tracks its " +
+          "progress another way, that is what is reported instead.",
+      }),
+      live(
+        [tasks],
+        (data) =>
+          el(
+            "div",
+            {},
+            data.paused
+              ? el("div", {
+                  class: "banner",
+                  text:
+                    "The platform is paused. Everything below that runs in the scheduler, processor or " +
+                    "uploader is stopped, including the auto-map; the timers themselves keep ticking.",
+                })
+              : null,
+            table(
+              ["Task", "Runs", "Interval set by", "Last run", "Progress"],
+              data.tasks.map((task) => [
+                el(
+                  "div",
+                  {},
+                  el("div", {}, el("strong", { text: task.name }), task.enabled ? null : el("span", { class: "chip warn", text: "off" })),
+                  el("div", { class: "dim small", text: task.what }),
+                  task.note ? el("div", { class: "dim small", text: task.note }) : null,
+                ),
+                el(
+                  "div",
+                  {},
+                  el("div", { text: cadence(task) }),
+                  el("div", { class: "dim small", text: task.service === "none" ? "on demand" : task.service }),
+                ),
+                el("span", { class: "dim small", text: task.configuredBy }),
+                lastRun(task),
+                progress(task),
+              ]),
+              { empty: "Nothing periodic is registered, which should not happen." },
+            ),
+          ),
+        { reserve: 300, skeleton: () => skeletonTable(5, 8) },
+      ),
+    ),
+  );
+}
+
 VIEWS.system = (route) => {
+  if (route.tab === "scheduled") return scheduledWorkPanel();
   if (route.tab === "mangadex") return mangadexPanel();
   if (route.tab === "cards") return unavailableCardsPanel();
   if (route.tab === "backup") return backupPanel();
