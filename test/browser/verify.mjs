@@ -90,7 +90,7 @@ const stray = await page.eval(`return {
   strayNull: /(^|\\s)(null|undefined|NaN)(\\s|$)/.test(document.getElementById("app").textContent) };`);
 console.log("stray placeholder scan:", JSON.stringify(stray));
 ok("no literal null/undefined/NaN painted anywhere in the shell", !stray.strayNull, stray.head);
-ok("sidebar is grouped", nav.groups.join(",") === "Work,Catalogue,Fleet,Admin", nav.groups.join(","));
+ok("sidebar is grouped", nav.groups.join(",") === "Work,Library,Machines,Admin", nav.groups.join(","));
 // 13 built into app.js plus the two that live in their own modules.
 ok("an owner sees every destination", nav.items.length === 18, `${nav.items.length} items`);
 ok(
@@ -116,7 +116,7 @@ console.log("\n=== 3. a deep link restores the sidebar item AND the tab ===");
 for (const [hash, wantNav, wantTab] of [
   ["#/system/backup", "System", "Backup"],
   ["#/workers/enrolment", "Workers", "Enrolment"],
-  ["#/queues/depth", "Queues", "Depth"],
+  ["#/queues/depth", "Queues", "Backlog"],
   ["#/users/sessions", "Users", "Sessions"],
 ]) {
   await page.goto(`${O}/${hash}`, 1800);

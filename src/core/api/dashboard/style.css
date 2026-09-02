@@ -1151,14 +1151,10 @@ input[type="search"] {
   margin-top: 0;
 }
 
-/* `auto-fill`, not `auto-fit`. A gauge is a fixed size on a panel: the eye
-   learns where a reading sits and how big it is, and compares it against the
-   one beside it. `auto-fit` collapses the empty tracks, so the same readout was
-   drawn 200px wide when it had three neighbours and 1100px wide when it had
-   none — one worker ACTIVE stretched across the whole faceplate, reading as a
-   different and more important instrument than the same number in a full row.
-   `auto-fill` keeps the tracks, so a lone reading stays the size it always is
-   and the rest of the row is simply empty deck. */
+/* `auto-fill`, not `auto-fit`. A gauge is a fixed size on a panel. `auto-fit`
+   collapses the empty tracks, so one worker ACTIVE stretched across the whole
+   faceplate and read as a bigger instrument than the same number in a full
+   row. `auto-fill` keeps the tracks, so a lone reading stays its own size. */
 .grid {
   display: grid;
   gap: 8px;
@@ -2450,11 +2446,8 @@ th.sorted .sort-mark {
     flex: 1 0 100%;
   }
 
-  /* Density is the point on a desk, but a thumb is not a mouse pointer: 26-28px
-     is comfortable to click and awkward to tap, and these are the only controls
-     for sorting and paging once the header row is gone. Raised to the 40px the
-     rest of the phone layout already uses, which costs nothing — the sortbar
-     and pager are one row each, not a column of rows whose spacing accumulates. */
+  /* A thumb is not a pointer. 26-28px is fine to click and awkward to tap, and
+     once the header row is gone these are the only sort and page controls. */
   .table-sortbar select,
   .table-sortbar .sort-dir,
   .page-n,

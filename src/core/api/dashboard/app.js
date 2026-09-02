@@ -1180,7 +1180,53 @@ const STATE_TONE = {
   OWNER: "busy",
 };
 
-const chip = (value) => el("span", { class: `chip ${STATE_TONE[value] || ""}`.trim(), text: value ?? "-" });
+/**
+ * What each state token means, for a reader who has not seen the schema.
+ *
+ * The tokens stay on screen as they are: they are what the CLI prints, what the
+ * bot answers with and what an operator greps the logs for, so translating them
+ * here would leave two names for one thing. The sentence rides along as the
+ * chip's title instead. Not `aria-label`, which would replace the token a
+ * reader can see with a sentence they cannot.
+ */
+const STATE_MEANING = {
+  PENDING: "Waiting its turn. Nothing has gone wrong.",
+  USED: "Already used once, and cannot be used again.",
+  EXPIRED: "Ran out of time before it was used.",
+  REVOKED: "Switched off by hand before it expired.",
+  PROCESSED: "Finished.",
+  SUCCEEDED: "Finished, and it worked.",
+  COMMITTED: "Saved for good.",
+  DONE: "Finished, and nothing more will happen to it.",
+  ACTIVE: "Working normally right now.",
+  TRACKED: "Matched to a title on MangaDex.",
+  CREATED: "Made, but not started yet.",
+  FAILED: "Did not work. It will be tried again if it has attempts left.",
+  DEAD_LETTER: "Tried the maximum number of times and gave up. It needs a person.",
+  QUARANTINED: "Held back because it did not look right, so it was not used.",
+  CANCELLED: "Stopped on purpose before it finished.",
+  SKIPPED: "Passed over on purpose. Nothing went wrong.",
+  DRAINED: "Being taken out of service; it finishes what it holds and takes nothing new.",
+  EXECUTING: "Running right now.",
+  INGESTING: "Its results are being read in right now.",
+  RUNNING: "Running right now.",
+  LEASED: "A worker has picked it up and is on it now.",
+  CREATING: "Being made right now.",
+  enabled: "Switched on, and allowed to run.",
+  disabled: "Switched off. It will not run until it is enabled again.",
+  approved: "Allowed to sign in.",
+  pending: "Waiting for somebody to approve it.",
+  OWNER: "May do everything, including managing accounts and credentials.",
+};
+
+const chip = (value) => {
+  const meaning = STATE_MEANING[value];
+  return el("span", {
+    class: `chip ${STATE_TONE[value] || ""}`.trim(),
+    text: value ?? "-",
+    ...(meaning ? { title: meaning } : {}),
+  });
+};
 
 function fmtTime(value) {
   if (!value) return "-";
@@ -1659,14 +1705,9 @@ function live(resources, render, { reserve = 0, skeleton } = {}) {
     const loading = resources.some((r) => r.status === "loading" || r.status === "idle");
     const failed = resources.find((r) => r.status === "error");
     host.dataset.refreshing = String(resources.some((r) => r.status === "refreshing"));
-    /*
-     * The reserved height is scaffolding for the wait, not a floor for the
-     * result. It was neither: `--reserve` was a permanent min-height, so a
-     * region that reserved 150px for a table kept 150px after answering with
-     * one line, and every page carried a column of dead deck under its short
-     * cards. Released once there is something real to measure; a redraw from
-     * a refresh keeps the content up, so there is nothing left to jump.
-     */
+    // The reserved height is scaffolding for the wait, not a floor for the
+    // result: held after the answer lands, it was blank deck under every short
+    // card. Released once there is something real to measure.
     host.dataset.loaded = String(!loading && !failed);
     if (failed) return setChildren(host, errorState(failed));
     if (loading) return setChildren(host, skeleton ? skeleton() : skeletonTable());
@@ -1725,7 +1766,7 @@ const NAV = [
       ["platform", "Platform"],
       ["mangadex", "MangaDex"],
     ],
-    blurb: "Platform state, queue depths and the upload side's session.",
+    blurb: "Is everything running, how much is waiting, and are we still signed in to MangaDex.",
   },
   {
     id: "runs",
@@ -1736,9 +1777,9 @@ const NAV = [
     param: true,
     tabs: [
       ["recent", "Recent"],
-      ["dead-letter", "Dead letter"],
+      ["dead-letter", "Gave up"],
     ],
-    blurb: "Scrape runs and the jobs they fanned out into.",
+    blurb: "Every check we made on a publisher for new chapters, and how it went.",
   },
   {
     id: "queues",
@@ -1753,9 +1794,9 @@ const NAV = [
     tabs: [
       ["chapters", "Chapters"],
       ["tasks", "Tasks"],
-      ["depth", "Depth"],
+      ["depth", "Backlog"],
     ],
-    blurb: "What is about to be sent to MangaDex, and the durable rows behind it.",
+    blurb: "Chapters waiting to go to MangaDex, in the order they will go.",
   },
   {
     id: "activity",
@@ -1763,7 +1804,7 @@ const NAV = [
     group: "Work",
     icon: "activity",
     scope: "runs:read",
-    blurb: "Runs, jobs, upload tasks, quarantine and audit in one timeline.",
+    blurb: "Everything that has happened lately, in one list.",
   },
   {
     id: "errors",
@@ -1773,9 +1814,9 @@ const NAV = [
     scope: "runs:read",
     tabs: [
       ["failures", "Failures"],
-      ["quarantine", "Quarantine"],
+      ["quarantine", "Held back"],
     ],
-    blurb: "Everything that failed, newest first.",
+    blurb: "Everything that went wrong. Start here when something looks stuck.",
   },
   {
     id: "logs",
@@ -1786,12 +1827,12 @@ const NAV = [
     // Errors is the curated view of what broke. This is the uncurated one, and
     // it exists because the line that explains an incident is usually not an
     // error: what a check concluded, which titles were skipped and why.
-    blurb: "Raw log lines from the core services, newest first.",
+    blurb: "Everything the software wrote, not just the failures. More detail than Errors.",
   },
   {
     id: "extensions",
     label: "Extensions",
-    group: "Catalogue",
+    group: "Library",
     icon: "extensions",
     scope: "extensions:read",
     param: true,
@@ -1807,7 +1848,7 @@ const NAV = [
       ["config", "Config"],
       ["versions", "Versions"],
     ],
-    blurb: "Every extension, its release state, and the defaults they fall back on.",
+    blurb: "The publishers we read from. One extension reads one publisher's site.",
   },
   // Its own `chapters:read` rather than `runs:read`: reading this destination
   // is reading the public catalogue, and the three actions it offers end in a
@@ -1816,7 +1857,7 @@ const NAV = [
   {
     id: "chapters",
     label: "Chapters",
-    group: "Catalogue",
+    group: "Library",
     icon: "chapters",
     scope: "chapters:read",
     param: true,
@@ -1828,36 +1869,36 @@ const NAV = [
       ["deleted", "Deleted"],
       ["edited", "Edited"],
     ],
-    blurb: "Every chapter this platform has published, and what has happened to it since.",
+    blurb: "Every chapter we have put on MangaDex, and what happened to it since.",
   },
   {
     id: "tracked",
     label: "Tracked",
-    group: "Catalogue",
+    group: "Library",
     icon: "tracked",
     scope: "tracked:read",
-    blurb: "The series map across every extension.",
+    blurb: "Which series on a publisher's site goes with which MangaDex title.",
   },
   {
     id: "untracked",
     label: "Untracked",
-    group: "Catalogue",
+    group: "Library",
     icon: "untracked",
     scope: "untracked:read",
     param: true,
-    blurb: "Series the scrapers found that MangaDex does not have yet.",
+    blurb: "Series we found that are not matched to a MangaDex title yet.",
   },
   {
     id: "workers",
     label: "Workers",
-    group: "Fleet",
+    group: "Machines",
     icon: "workers",
     scope: "workers:read",
     tabs: [
       ["fleet", "Fleet"],
       ["enrolment", "Enrolment"],
     ],
-    blurb: "The hosts that run extensions, and how to add one.",
+    blurb: "The computers that read the publishers' sites, and how to add one.",
   },
   // Account administration and credential minting are the two things an ADMIN
   // cannot do, and they need the OWNER role rather than a scope: a wildcard api
@@ -1873,7 +1914,7 @@ const NAV = [
       ["sessions", "Sessions"],
       ["signups", "Signups"],
     ],
-    blurb: "Operator accounts, their roles and their live sessions.",
+    blurb: "Who can sign in, what they may do, and who is signed in now.",
   },
   {
     id: "tokens",
@@ -1885,7 +1926,7 @@ const NAV = [
       ["issued", "Issued"],
       ["mint", "Mint"],
     ],
-    blurb: "Scoped per-client credentials.",
+    blurb: "Passwords for other programs, not for people. Each is limited to what that program needs.",
   },
   {
     id: "permissions",
@@ -1893,7 +1934,7 @@ const NAV = [
     group: "Admin",
     icon: "permissions",
     owner: true,
-    blurb: "What each role may do on this deployment.",
+    blurb: "What each kind of account is allowed to do.",
   },
   {
     id: "audit",
@@ -1902,7 +1943,7 @@ const NAV = [
     icon: "audit",
     scope: "audit:read",
     param: true,
-    blurb: "Who did what, and with which arguments.",
+    blurb: "A permanent record of every change, and exactly what changed.",
   },
   {
     id: "system",
@@ -1911,12 +1952,12 @@ const NAV = [
     icon: "system",
     scope: "settings:read",
     tabs: [
-      ["schema", "Schema"],
+      ["schema", "Database"],
       ["mangadex", "MangaDex"],
       ["cards", "Unavailable cards"],
       ["backup", "Backup"],
     ],
-    blurb: "The things that used to need a shell on the host.",
+    blurb: "Housekeeping that used to need commands typed on the server.",
   },
   // Two views that live in their own ES modules (dashboard/sysops.js and
   // dashboard/docs.js). They are loaded on demand, see `lazyView`, so this
@@ -1927,7 +1968,7 @@ const NAV = [
     group: "Admin",
     icon: "system",
     scope: "bundles:read",
-    blurb: "Fetch extension code from GitHub, install a bundle, restart a service.",
+    blurb: "Update the code we run, and restart a part of the system.",
     module: "/dash/sysops.js",
     export: "viewSysops",
   },
@@ -1937,7 +1978,7 @@ const NAV = [
     group: "Admin",
     icon: "audit",
     scope: "stats:read",
-    blurb: "The operator handbook that ships with this build.",
+    blurb: "The full handbook for this system, written out in detail.",
     module: "/dash/docs.js",
     export: "viewDocs",
   },
@@ -2474,16 +2515,11 @@ function renderTabs(entry) {
   const param = store.route.param;
   /*
    * Whose tabs are these? For most sections they are sections of the list, so a
-   * detail view (`#/audit/<id>`) must not offer them: they are not parts of the
-   * thing being read, and clicking one would navigate away from it.
-   *
-   * A `tabsForParam` section is the mirror image. Its tabs are sections of ONE
-   * extension, so they mean something only once an extension is named, and on
-   * the bare list they were not merely out of place but dead: `#/extensions`
-   * has no param, so `resolveRoute` blanks the tab, and `#/extensions/config`
-   * canonicalises straight back to `#/extensions`. Five tabs that bounced you
-   * where you already were. Reading `tabsForParam` here is what keeps this
-   * agreeing with `resolveRoute`, which has always honoured it.
+   * detail view (`#/audit/<id>`) must not offer them. A `tabsForParam` section
+   * is the mirror image: its tabs are sections of ONE extension, so on the bare
+   * list they were dead — `resolveRoute` blanks the tab with no param, and
+   * `#/extensions/config` canonicalises back to `#/extensions`. Reading
+   * `tabsForParam` here is what keeps this agreeing with `resolveRoute`.
    */
   const wanted = entry?.tabsForParam ? Boolean(param) : !param;
   if (!tabs.length || !wanted) {
@@ -7883,16 +7919,11 @@ VIEWS.extensions = (route) => {
   );
 
   /*
-   * The index leads, and the platform-wide defaults follow it.
-   *
-   * This page used to open with three settings cards and keep the list of
-   * extensions at the bottom under the heading "Published bundles". That put
-   * the section's own subject last and named it after one of its columns, and
-   * it left the per-extension Priority and Paused controls stranded inside the
-   * global "Release pacing" card as two checkbox grids: extension-scoped state,
-   * drawn on the platform-wide surface, where an operator scanning one
-   * extension could not see it and an operator editing the global had to step
-   * over it. Both now live on the extension's own row.
+   * The index leads; the platform-wide defaults follow it. This page used to
+   * open with three settings cards and keep the extensions at the bottom under
+   * "Published bundles", naming the section after one of its columns; and
+   * Priority and Paused, which belong to one extension, sat in the global
+   * pacing card as two checkbox grids. Both are now columns on the row.
    */
   return el(
     "div",
