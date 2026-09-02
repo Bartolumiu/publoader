@@ -1219,8 +1219,21 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
             fileSize: file.data.length,
           }));
         },
-        commitUploadSession: async () => {
+        commitUploadSession: async (
+          _session: string,
+          draft: {
+            volume: string | null;
+            chapter: string | null;
+            title: string | null;
+            translatedLanguage: string;
+            externalUrl: string | null;
+          },
+        ) => {
           calls.push("commitUploadSession");
+          // The repoint travels in the commit body, so what the commit carried
+          // is the thing worth recording: the card and the externalUrl have to
+          // be one write, not a write followed by a PUT that strips the page.
+          calls.push(`commitExternalUrl:${draft.externalUrl ?? "cleared"}`);
           carded = true;
           return { id: uuid(1), attributes: { version: 4 } };
         },
@@ -1303,7 +1316,16 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
       // One page: the card itself, replacing whatever was there.
       expect(calls).toContain("uploadImages:1");
       expect(calls).toContain("commitUploadSession");
-      expect(calls).toContain("editChapter");
+      // The repoint rides in the commit, and there is NO trailing PUT.
+      //
+      // It used to be a separate editChapter immediately after the commit, and
+      // that call is the best explanation for 98 of 101 cards in one sweep
+      // being committed and then not existing: MangaDex attaches the page
+      // synchronously, the PUT lands a second later on a chapter that now has
+      // one, and the page does not survive it. Asserting the ABSENCE of the
+      // call is the point of this test now -- a card and its url are one write.
+      expect(calls).toContain("commitExternalUrl:https://publisher.example/series");
+      expect(calls).not.toContain("editChapter");
       const archived = await prisma.unavailableChapter.findUniqueOrThrow({
         where: { mdChapterId: uuid(1) },
       });

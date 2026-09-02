@@ -35,13 +35,19 @@ const IMAGE_BATCH_SIZE = 10;
 /**
  * How hard to look for the card before deciding it did not land.
  *
- * Only reached when the commit echoed nothing useful; the echo is checked
- * first and does not lag. This is the fallback, and it is generous on purpose:
- * three attempts two seconds apart was NOT enough, and every premature verdict
- * failed a task whose commit had worked, which then retried and uploaded
- * another card. Twenty seconds of waiting is far cheaper than that.
+ * This is now the ONLY thing that decides a card, first or re-card, so it has
+ * to be generous: nothing cheaper corroborates it, and every premature verdict
+ * fails a task whose commit had worked, which then retries and uploads another
+ * card. Three attempts two seconds apart was not enough.
+ *
+ * Eight attempts covers thirty-five seconds of lag. The number comes from a
+ * measurement rather than a guess: on 2026-09-02 a card committed at 21:14:14
+ * was not visible to `GET /chapter/{id}` until 21:14:29, so a real, working
+ * write took about fifteen seconds to surface. Five attempts covered twenty,
+ * which is a margin of one read over observed behaviour, and being wrong in
+ * that direction now costs a false failure rather than a slow success.
  */
-const CARD_CONFIRM_ATTEMPTS = 5;
+const CARD_CONFIRM_ATTEMPTS = 8;
 const CARD_CONFIRM_DELAY_MS = 5_000;
 
 /** Failure that should send the task back to the queue with its message intact. */
@@ -741,10 +747,6 @@ export class UploadTaskWorkers {
       return;
     }
 
-    const groups = detail.relationships
-      .filter((rel) => rel.type === "scanlation_group")
-      .map((rel) => rel.id);
-
     try {
       const card = await generateChapterCard(
         unavailableCardOptions({
@@ -769,6 +771,32 @@ export class UploadTaskWorkers {
         const pageId = await this.uploadCard(session.id, card, log);
         if (!pageId) throw new TaskError(`couldn't upload the chapter card for ${mdChapterId}`);
 
+        // The repoint goes in the COMMIT, and used to be a PUT /chapter of its
+        // own immediately afterwards. That ordering is the best explanation for
+        // 98 of 101 cards being committed and then not existing: MangaDex
+        // attaches the page synchronously, the PUT lands a second or two later
+        // on a chapter that now has one, and the page does not survive it.
+        //
+        // The evidence is the commit echo, which sorts the outcome almost
+        // perfectly the WRONG way round. Across 113 cards in one sweep:
+        //
+        //   echoed `resultingPages: 1`  ->  98 lost, 3 kept
+        //   echoed `resultingPages: 0`  ->   0 lost, 12 kept
+        //
+        // Reading that as attachment timing rather than as a broken echo makes
+        // it ordinary: echo 1 means the page was attached before the PUT, so
+        // the PUT had something to strip; echo 0 means it had not attached yet,
+        // so the PUT hit a page-less chapter and the page appeared afterwards
+        // and survived. The three that echoed 1 and survived are the same race
+        // finishing the other way. It also explains the ~15s some cards took to
+        // become visible: they were landing after the PUT, not lagging a read.
+        //
+        // Folding the url into the commit makes the card and the repoint one
+        // write, with nothing running between it and the confirmation below.
+        // The commit body already carried a non-null `externalUrl` alongside a
+        // page and MangaDex accepted it, so this is the same shape with a
+        // different value, not a new thing to be allowed.
+        const replacementUrl = resolveReplacementUrl(attrs.externalUrl, chapter);
         const committed = await md.commitUploadSession(
           session.id,
           {
@@ -776,39 +804,14 @@ export class UploadTaskWorkers {
             chapter: attrs.chapter,
             title: attrs.title,
             translatedLanguage: attrs.translatedLanguage,
-            externalUrl: attrs.externalUrl,
+            externalUrl: replacementUrl,
           },
           [pageId],
         );
 
-        // The commit bumps the version and PUT /chapter needs the current one.
-        // Both readings below can lag the write that just happened — the echo
-        // may predate the bump, the refetch may be served from MangaDex's
-        // cache — so this is a best guess; `editChapter` corrects it from the
-        // 409 rather than failing the task.
-        let version = committed?.attributes?.version ?? null;
-        if (version === null) {
-          const refetched = await md.chapterById(mdChapterId);
-          version = refetched?.attributes.version ?? attrs.version;
-        }
-
-        const replacementUrl = resolveReplacementUrl(attrs.externalUrl, chapter);
-        const edited = await md.editChapter(mdChapterId, {
-          volume: attrs.volume,
-          chapter: attrs.chapter,
-          title: attrs.title,
-          translatedLanguage: attrs.translatedLanguage,
-          groups,
-          externalUrl: replacementUrl,
-          version,
-        });
-        if (!edited) {
-          throw new TaskError(`couldn't repoint externalUrl for chapter ${mdChapterId}`);
-        }
-
-        // Two successful calls do not add up to a card on the chapter. A commit
+        // A successful call does not add up to a card on the chapter. A commit
         // that changes nothing returns 200 exactly like one that works, so the
-        // chapter is asked what happened rather than inferred from the calls.
+        // chapter is asked what happened rather than inferred from the call.
         // Without this a re-card sweep over thousands of chapters would report
         // every one of them regenerated and change none.
         await this.confirmCardLanded(
@@ -865,6 +868,37 @@ export class UploadTaskWorkers {
    * cache that lags its own writes, so the first read after a commit can still
    * show the old state; failing on that would turn working re-cards into
    * dead-lettered tasks.
+   *
+   * The commit's own echo is NOT accepted as proof, and used to be. It was
+   * taken as the write path's answer, on the reasoning that it cannot lag the
+   * way a cached read can. It does not lag; it is simply not about the chapter.
+   * Two batches from one sweep on 2026-09-02 say so exactly:
+   *
+   *  - 19:38, the echo reported `resultingPages: 1`. That took the fast path
+   *    and returned 1.9 seconds after the commit without reading anything. Those
+   *    chapters are `pages: 0` on MangaDex now: the card never landed, and 84 of
+   *    the 100 newest rows in the unavailable archive are in that state, every
+   *    one of them archived as done.
+   *  - 21:14, the echo reported `resultingPages: 0` for the SAME operation. The
+   *    fast path could not fire, the read loop ran for about fifteen seconds,
+   *    found the page, and passed. Those chapters are `pages: 1` now.
+   *
+   * So the echo claimed a page where none landed and claimed none where one
+   * did, and the read was right both times. It used to be captured BEFORE the
+   * trailing `editChapter`, so even an accurate echo described the chapter one
+   * write short of the state being checked. That write is now folded into the
+   * commit; the echo is kept only to say what MangaDex claimed, in the error.
+   *
+   * RE-CARDS ARE CONFIRMED TOO, and were not. They returned the moment the
+   * commit came back, on the reasoning that a re-card which quietly fails leaves
+   * the OLD card in place rather than a live chapter looking dead, and that
+   * reading is what made a 2,425 chapter sweep take days. Both halves have since
+   * turned out to be wrong. `force` runs this same function, so a re-card was
+   * committed and then hit by the same trailing PUT -- which does not leave the
+   * old card in place, it takes the page off and leaves a live-looking chapter
+   * with nothing on it, reported as success. And the read is not expensive: the
+   * uploader measures at roughly 3% busy, so the wait is time it has nothing
+   * else to do with.
    */
   private async confirmCardLanded(
     mdChapterId: string,
@@ -872,38 +906,6 @@ export class UploadTaskWorkers {
     committed: { attributes?: { version?: number; pages?: number } } | null,
     log: Logger,
   ): Promise<void> {
-    // The commit's own echo first, because it cannot lag: it is the write
-    // path's answer, where `GET /chapter/{id}` is served from a cache that can
-    // still show the pre-commit chapter seconds afterwards. Trusting only the
-    // read failed tasks whose commit had plainly worked -- a chapter reported
-    // as `pages 0 -> 0, version 2 -> 2` was sitting at pages 1, version 3 by
-    // the time anyone looked. Each of those retried and re-uploaded another
-    // card.
-    const echo = committed?.attributes;
-    if (echo) {
-      const echoedAPage = before.pages === 0 && (echo.pages ?? 0) > 0;
-      const echoedAWrite = before.pages > 0 && (echo.version ?? 0) > before.version;
-      if (echoedAPage || echoedAWrite) return;
-    }
-
-    // Re-cards stop here. The echo above is free; the read below is not, and
-    // for a re-card it cannot take the fast path at all: the page count stays
-    // at one, and MangaDex's commit echo reports a STALE version (it said 7
-    // for a chapter that had reached 13). So every re-card fell through to the
-    // read loop and sat out MangaDex's cache -- 15 to 20 seconds of sleeping,
-    // which was two thirds of the time a re-card took and the reason a 2,425
-    // chapter sweep was measured in days.
-    //
-    // What that bought was small. A re-card replaces an image on a chapter
-    // already carded, so a silent failure leaves the OLD card in place rather
-    // than a live chapter looking dead. The dangerous direction -- a card that
-    // never landed on a live chapter -- is the first-card case, which keeps its
-    // confirmation because the echoed page count settles it without waiting.
-    if (before.pages > 0) {
-      log.info({ mdChapterId }, "re-card committed; not waiting on the read to confirm it");
-      return;
-    }
-
     let pages: number | null = null;
     let version: number | null = null;
 
@@ -920,13 +922,35 @@ export class UploadTaskWorkers {
 
       const gainedAPage = before.pages === 0 && (pages ?? 0) > 0;
       const commitDidWork = before.pages > 0 && version !== null && version > before.version;
-      if (gainedAPage || commitDidWork) return;
+      if (gainedAPage || commitDidWork) {
+        // The success is logged, and was not. A card that landed used to write
+        // nothing of its own, so the only evidence it worked was the absence of
+        // a failure -- which is precisely what the silent-success bug looked
+        // like from the outside, and why it survived a sweep of 3,756 chapters.
+        //
+        // `attempt` is the useful half. The retry line above is debug and
+        // production keeps nothing below info, so without this the number of
+        // reads a card needed is unrecoverable. It separates two futures: cards
+        // confirming on the first read means the page is attached by the time
+        // the commit returns, and cards still needing several means MangaDex
+        // attaches asynchronously and the old trailing PUT was destroying a
+        // result that had not arrived yet.
+        log.info({ mdChapterId, attempt, pages, version }, "card confirmed on the chapter");
+        return;
+      }
     }
 
+    // What the commit claimed goes in the message. It is not evidence, but when
+    // it disagrees with the read -- which is the common case for this failure --
+    // that disagreement is the single most useful thing an operator can be told,
+    // because it distinguishes "MangaDex refused the page" from "MangaDex
+    // accepted the page and then did not keep it".
+    const echoedPages = committed?.attributes?.pages;
     throw new TaskError(
       `the card did not land on chapter ${mdChapterId}: pages ${before.pages} -> ` +
         `${pages === null ? "unknown" : pages}, version ${before.version} -> ` +
-        `${version === null ? "unknown" : version}`,
+        `${version === null ? "unknown" : version}` +
+        `, commit echoed ${echoedPages === undefined ? "nothing" : `pages ${echoedPages}`}`,
     );
   }
 
