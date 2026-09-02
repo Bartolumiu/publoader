@@ -35,10 +35,10 @@ const IMAGE_BATCH_SIZE = 10;
 /**
  * How hard to look for the card before deciding it did not land.
  *
- * This is now the ONLY thing that decides a first card, so it has to be
- * generous: nothing cheaper corroborates it, and every premature verdict fails
- * a task whose commit had worked, which then retries and uploads another card.
- * Three attempts two seconds apart was not enough.
+ * This is now the ONLY thing that decides a card, first or re-card, so it has
+ * to be generous: nothing cheaper corroborates it, and every premature verdict
+ * fails a task whose commit had worked, which then retries and uploads another
+ * card. Three attempts two seconds apart was not enough.
  *
  * Eight attempts covers thirty-five seconds of lag. The number comes from a
  * measurement rather than a guess: on 2026-09-02 a card committed at 21:14:14
@@ -747,10 +747,6 @@ export class UploadTaskWorkers {
       return;
     }
 
-    const groups = detail.relationships
-      .filter((rel) => rel.type === "scanlation_group")
-      .map((rel) => rel.id);
-
     try {
       const card = await generateChapterCard(
         unavailableCardOptions({
@@ -775,6 +771,32 @@ export class UploadTaskWorkers {
         const pageId = await this.uploadCard(session.id, card, log);
         if (!pageId) throw new TaskError(`couldn't upload the chapter card for ${mdChapterId}`);
 
+        // The repoint goes in the COMMIT, and used to be a PUT /chapter of its
+        // own immediately afterwards. That ordering is the best explanation for
+        // 98 of 101 cards being committed and then not existing: MangaDex
+        // attaches the page synchronously, the PUT lands a second or two later
+        // on a chapter that now has one, and the page does not survive it.
+        //
+        // The evidence is the commit echo, which sorts the outcome almost
+        // perfectly the WRONG way round. Across 113 cards in one sweep:
+        //
+        //   echoed `resultingPages: 1`  ->  98 lost, 3 kept
+        //   echoed `resultingPages: 0`  ->   0 lost, 12 kept
+        //
+        // Reading that as attachment timing rather than as a broken echo makes
+        // it ordinary: echo 1 means the page was attached before the PUT, so
+        // the PUT had something to strip; echo 0 means it had not attached yet,
+        // so the PUT hit a page-less chapter and the page appeared afterwards
+        // and survived. The three that echoed 1 and survived are the same race
+        // finishing the other way. It also explains the ~15s some cards took to
+        // become visible: they were landing after the PUT, not lagging a read.
+        //
+        // Folding the url into the commit makes the card and the repoint one
+        // write, with nothing running between it and the confirmation below.
+        // The commit body already carried a non-null `externalUrl` alongside a
+        // page and MangaDex accepted it, so this is the same shape with a
+        // different value, not a new thing to be allowed.
+        const replacementUrl = resolveReplacementUrl(attrs.externalUrl, chapter);
         const committed = await md.commitUploadSession(
           session.id,
           {
@@ -782,39 +804,14 @@ export class UploadTaskWorkers {
             chapter: attrs.chapter,
             title: attrs.title,
             translatedLanguage: attrs.translatedLanguage,
-            externalUrl: attrs.externalUrl,
+            externalUrl: replacementUrl,
           },
           [pageId],
         );
 
-        // The commit bumps the version and PUT /chapter needs the current one.
-        // Both readings below can lag the write that just happened — the echo
-        // may predate the bump, the refetch may be served from MangaDex's
-        // cache — so this is a best guess; `editChapter` corrects it from the
-        // 409 rather than failing the task.
-        let version = committed?.attributes?.version ?? null;
-        if (version === null) {
-          const refetched = await md.chapterById(mdChapterId);
-          version = refetched?.attributes.version ?? attrs.version;
-        }
-
-        const replacementUrl = resolveReplacementUrl(attrs.externalUrl, chapter);
-        const edited = await md.editChapter(mdChapterId, {
-          volume: attrs.volume,
-          chapter: attrs.chapter,
-          title: attrs.title,
-          translatedLanguage: attrs.translatedLanguage,
-          groups,
-          externalUrl: replacementUrl,
-          version,
-        });
-        if (!edited) {
-          throw new TaskError(`couldn't repoint externalUrl for chapter ${mdChapterId}`);
-        }
-
-        // Two successful calls do not add up to a card on the chapter. A commit
+        // A successful call does not add up to a card on the chapter. A commit
         // that changes nothing returns 200 exactly like one that works, so the
-        // chapter is asked what happened rather than inferred from the calls.
+        // chapter is asked what happened rather than inferred from the call.
         // Without this a re-card sweep over thousands of chapters would report
         // every one of them regenerated and change none.
         await this.confirmCardLanded(
@@ -887,10 +884,21 @@ export class UploadTaskWorkers {
    *    found the page, and passed. Those chapters are `pages: 1` now.
    *
    * So the echo claimed a page where none landed and claimed none where one
-   * did, and the read was right both times. It is also captured BEFORE
-   * `editChapter` performs the last write of the operation, so even an accurate
-   * echo would describe the chapter one write short of the state being checked.
-   * It is kept only to say what MangaDex claimed, in the error.
+   * did, and the read was right both times. It used to be captured BEFORE the
+   * trailing `editChapter`, so even an accurate echo described the chapter one
+   * write short of the state being checked. That write is now folded into the
+   * commit; the echo is kept only to say what MangaDex claimed, in the error.
+   *
+   * RE-CARDS ARE CONFIRMED TOO, and were not. They returned the moment the
+   * commit came back, on the reasoning that a re-card which quietly fails leaves
+   * the OLD card in place rather than a live chapter looking dead, and that
+   * reading is what made a 2,425 chapter sweep take days. Both halves have since
+   * turned out to be wrong. `force` runs this same function, so a re-card was
+   * committed and then hit by the same trailing PUT -- which does not leave the
+   * old card in place, it takes the page off and leaves a live-looking chapter
+   * with nothing on it, reported as success. And the read is not expensive: the
+   * uploader measures at roughly 3% busy, so the wait is time it has nothing
+   * else to do with.
    */
   private async confirmCardLanded(
     mdChapterId: string,
@@ -898,24 +906,6 @@ export class UploadTaskWorkers {
     committed: { attributes?: { version?: number; pages?: number } } | null,
     log: Logger,
   ): Promise<void> {
-    // Re-cards stop here, and the reasoning is unchanged by the above: for a
-    // re-card the page count stays at one either way, and the echoed version is
-    // STALE (it said 7 for a chapter that had reached 13), so nothing cheap can
-    // settle it. Every re-card therefore fell through to the read loop and sat
-    // out MangaDex's cache -- 15 to 20 seconds of sleeping, two thirds of the
-    // time a re-card took, and the reason a 2,425 chapter sweep was measured in
-    // days.
-    //
-    // What that buys is small. A re-card replaces an image on a chapter already
-    // carded, so a silent failure leaves the OLD card in place rather than a
-    // live chapter looking dead. The dangerous direction -- a card that never
-    // landed on a live chapter -- is the first-card case, and that one now
-    // always reads.
-    if (before.pages > 0) {
-      log.info({ mdChapterId }, "re-card committed; not waiting on the read to confirm it");
-      return;
-    }
-
     let pages: number | null = null;
     let version: number | null = null;
 

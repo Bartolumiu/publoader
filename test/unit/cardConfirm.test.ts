@@ -97,15 +97,29 @@ describe("confirmCardLanded", () => {
     );
   });
 
-  it("returns a re-card immediately without spending a read on it", async () => {
-    // Unchanged behaviour, and deliberate: a re-card that quietly fails leaves
-    // the OLD card in place, not a live chapter looking dead, and reading here
-    // is what made a 2,425 chapter sweep take days.
-    const { workers, chapterById } = workersReading([]);
+  it("confirms a re-card from the version, rather than returning on the commit", async () => {
+    // Re-cards used to return the moment the commit came back. `force` runs the
+    // same path as a first card, so they were exposed to the same defect and
+    // reported success just as confidently.
+    const versions = [7, 7, 8];
+    const chapterById = vi.fn(async () => ({
+      attributes: { pages: 1, version: versions.shift() ?? 8 },
+    }));
+    const workers = new UploadTaskWorkers({ md: { chapterById } } as unknown as TaskWorkerDeps);
 
     await expect(
       confirm(workers, { pages: 1, version: 7 }, { attributes: { version: 7 } }),
     ).resolves.toBeUndefined();
-    expect(chapterById).not.toHaveBeenCalled();
+    expect(chapterById).toHaveBeenCalledTimes(3);
+  });
+
+  it("fails a re-card whose version never moves, which is a commit that did nothing", async () => {
+    const chapterById = vi.fn(async () => ({ attributes: { pages: 1, version: 7 } }));
+    const workers = new UploadTaskWorkers({ md: { chapterById } } as unknown as TaskWorkerDeps);
+
+    await expect(
+      confirm(workers, { pages: 1, version: 7 }, { attributes: { version: 7 } }),
+    ).rejects.toThrow(/did not land/);
+    expect(chapterById).toHaveBeenCalledTimes(8);
   });
 });
