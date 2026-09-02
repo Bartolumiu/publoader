@@ -581,6 +581,39 @@ interface RequestSpec {
   timeoutMs?: number;
 }
 
+/** Which record of a chapter to read: the live mirror, or an archive. */
+export const CHAPTER_ARCHIVES = ["uploaded", "edited", "unavailable", "deleted"] as const;
+export type ChapterArchive = (typeof CHAPTER_ARCHIVES)[number];
+
+export interface ChapterQuery {
+  archive?: ChapterArchive;
+  extension?: string;
+  language?: string;
+  mdMangaId?: string;
+  search?: string;
+  limit?: number;
+}
+
+export interface ChapterRow {
+  mdChapterId?: string | null;
+  chapterNumber?: string | null;
+  chapterTitle?: string | null;
+  chapterLanguage?: string | null;
+  extension?: string | null;
+  mdMangaId?: string | null;
+  at?: string | null;
+  [key: string]: unknown;
+}
+
+export interface ChapterPage {
+  archive: string;
+  chapters: ChapterRow[];
+  total?: number;
+  /** Global counts per archive, so a narrow filter cannot hide the picture. */
+  totals?: Record<string, number>;
+  nextCursor?: string | null;
+}
+
 /** What a map sync did, or would have done. */
 export interface MapSyncReport {
   dryRun?: boolean;
@@ -888,6 +921,51 @@ export class AdminApiClient {
       path: "/api/v1/admin/discord/authz",
       scope: "users:admin",
       actor,
+    });
+  }
+
+  // ---- the published catalogue, read-only ----
+
+  /**
+   * What this platform has on MangaDex, by archive.
+   *
+   * Read only, and deliberately so: every chapter *write* route is guarded by
+   * `requireAdminRole`, which refuses an api-token principal outright — no
+   * scope and no impersonated role gets past it. Deleting a chapter on
+   * MangaDex is irreversible, and the platform's answer is that it happens from
+   * the dashboard by a person, never through a bot's credential.
+   */
+  chapters(actor: string, query: ChapterQuery): Promise<ChapterPage> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/chapters",
+      scope: "chapters:read",
+      actor,
+      query: {
+        archive: query.archive,
+        extension: query.extension,
+        language: query.language,
+        mdMangaId: query.mdMangaId,
+        search: query.search,
+        limit: query.limit,
+      },
+    });
+  }
+
+  chapterCollisions(
+    actor: string,
+    query: { extension?: string; includeAcknowledged?: boolean; limit?: number },
+  ): Promise<{ collisions?: unknown[]; total?: number; [key: string]: unknown }> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/chapters/collisions",
+      scope: "chapters:read",
+      actor,
+      query: {
+        extension: query.extension,
+        includeAcknowledged: query.includeAcknowledged ? "true" : undefined,
+        limit: query.limit,
+      },
     });
   }
 

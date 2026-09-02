@@ -282,6 +282,24 @@ channel they are standing in. The trade is real and worth stating plainly — a
 `users:admin` token can grant Discord users everything that token itself holds,
 so scope `BOT_API_TOKEN` accordingly.
 
+### What the bot deliberately cannot do
+
+Two ceilings, both by construction rather than omission, and neither is a gap
+waiting to be closed.
+
+**Nothing owner-gated.** Account administration, role changes and token minting
+sit behind `requireOwner`. A scoped API token is pinned to `ADMIN` in `auth.ts`,
+and acting on someone's behalf caps an impersonated OWNER at `ADMIN` for exactly
+this reason. So no arrangement of scopes reaches them from Discord.
+
+**No writes to the published catalogue.** Every chapter write route —
+`PATCH /chapters/:id`, the four `bulk/*` verbs, `unavailable`, `recard` — is
+guarded by `requireAdminRole`, which refuses an api-token principal *outright*,
+whatever scope it holds and whoever it is acting for. Deleting a chapter on
+MangaDex cannot be undone, and the platform's answer is that it happens from the
+dashboard, by a person, never through a bot credential. `/chapters` is therefore
+read-only, and says so where a write would otherwise be the obvious next step.
+
 ### Asking the bot why, when nothing works
 
 **@mention the bot** and it answers with the three gates as they apply to you,
@@ -328,6 +346,8 @@ DMs are closed the bot falls back to the ephemeral reply and says so.
 | `/status` | read | `stats:read` (+ `workers:read` for the fleet section) | Pause state, job counts by state, upload-task depths, worker fleet with heartbeat age. |
 | `/ping` | read | `stats:read` | Whether the admin API answers, and how fast. |
 | `/stats` | read | `stats:read` | Alias for `/status`, kept from the legacy bot. |
+| `/chapters list [archive] [extension] [series] [language] [q] [limit]` | read | `chapters:read` | What the platform has on MangaDex, by archive. Totals are global rather than filtered, so a narrow filter cannot hide a large archive. |
+| `/chapters collisions [extension] [include-acknowledged]` | read | `chapters:read` | Chapters two uploads both claimed. Resolving one is a dashboard action; see below. |
 | `/maps sync [extension] [confirm]` | destructive | `tracked:write` | Push the series map to its git repository. **Always a dry run without `confirm`**, inverting the endpoint's own default — that default exists for the scheduled job, not for a person typing a command. |
 | `/enrolments [all]` | read | `workers:read` | Worker enrollment tokens. Outstanding ones only by default, because an unused token is still a live credential. |
 | `/extension-config <extension>` | read | `extensions:read` | Stored overrides for one extension. Read-only: an extension reads its overrides from its published bundle, so editing these rows changes nothing — republish instead. |

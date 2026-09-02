@@ -2148,3 +2148,84 @@ describe("/audit search", () => {
     expect(filtered.text).toContain("Nothing matched");
   });
 });
+
+describe("/chapters", () => {
+  const page = {
+    archive: "uploaded",
+    total: 2,
+    totals: { uploaded: 5000, unavailable: 312, deleted: 40 },
+    chapters: [
+      {
+        mdChapterId: "aaaaaaaa-1111-2222-3333-444444444444",
+        chapterNumber: "12.5",
+        chapterTitle: "A Long Chapter Title",
+        chapterLanguage: "en",
+        extension: "comikey",
+      },
+      { mdChapterId: "bbbbbbbb-1111-2222-3333-444444444444", extension: "omoi" },
+    ],
+  };
+
+  it("defaults to the live mirror rather than an archive", async () => {
+    const chapters = vi.fn().mockResolvedValue(page);
+    await invoke("chapters", fakeApi({ chapters }), {}, "list");
+    expect(chapters).toHaveBeenCalledWith("discord:ardax", expect.objectContaining({ archive: "uploaded" }));
+  });
+
+  it("renders a chapter with no number without pretending it has one", async () => {
+    const reply = await invoke("chapters", fakeApi({ chapters: vi.fn().mockResolvedValue(page) }), {}, "list");
+    expect(reply.text).toContain("**12.5**");
+    expect(reply.text).toContain("_no number_");
+    expect(reply.text).toContain("comikey");
+  });
+
+  it("shows global totals, so a narrow filter cannot hide a big archive", async () => {
+    // A filter that returns two rows must not leave the impression that there
+    // are two rows; 312 unavailable chapters is the thing worth noticing.
+    const reply = await invoke(
+      "chapters",
+      fakeApi({ chapters: vi.fn().mockResolvedValue(page) }),
+      { extension: "comikey" },
+      "list",
+    );
+    expect(reply.footer).toContain("unavailable 312");
+  });
+
+  it("says which archive came back empty", async () => {
+    const empty = { archive: "deleted", chapters: [] };
+    const reply = await invoke(
+      "chapters",
+      fakeApi({ chapters: vi.fn().mockResolvedValue(empty) }),
+      { archive: "deleted" },
+      "list",
+    );
+    expect(reply.text).toContain("deleted archive");
+  });
+
+  it("lists collisions and points writes at the dashboard", async () => {
+    // The bot cannot resolve one: every chapter write route refuses an
+    // api-token principal outright, so offering the action would be a lie.
+    const chapterCollisions = vi.fn().mockResolvedValue({
+      collisions: [{ mdChapterId: "cccccccc-1", extension: "k_manga", chapterNumber: "36.1" }],
+    });
+    const reply = await invoke("chapters", fakeApi({ chapterCollisions }), {}, "collisions");
+    expect(reply.text).toContain("k_manga");
+    expect(reply.tone).toBe("warn");
+    expect(reply.footer).toContain("dashboard");
+  });
+
+  it("is calm when there are no collisions", async () => {
+    const reply = await invoke(
+      "chapters",
+      fakeApi({ chapterCollisions: vi.fn().mockResolvedValue({ collisions: [] }) }),
+      {},
+      "collisions",
+    );
+    expect(reply.tone).toBe("ok");
+  });
+
+  it("is read-only; the catalogue is not writable through the bot", () => {
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("chapters")!, "list")).toBe("read");
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("chapters")!, "collisions")).toBe("read");
+  });
+});
