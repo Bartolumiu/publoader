@@ -44,6 +44,8 @@ import {
   type ReplyTone,
 } from "./commands.js";
 import type { Logger } from "../logging.js";
+import { MANGADEX_LANGUAGES } from "../contracts/languages.js";
+import { SCOPES } from "../core/api/scopes.js";
 
 /**
  * Exit code for "restarting will not help"; a bad token, or a bot the guild
@@ -261,6 +263,50 @@ export function buildErrorEmbed(commandName: string, detail: string): EmbedBuild
     title: `/${commandName} failed`,
     tone: "error",
   });
+}
+
+/**
+ * Autocomplete choices for an option that holds a comma-separated *list*.
+ *
+ * Discord returns one value per option, so a list field cannot be
+ * multi-selected — but it can be built a pick at a time: every suggestion is
+ * the list as typed so far with one more name appended, so choosing repeatedly
+ * grows the field instead of replacing it.
+ *
+ * Pure, so the fiddly parts are tested rather than trusted: where the boundary
+ * falls between "settled" and "still being typed", not re-offering something
+ * already in the list, and Discord's 100-character cap on a choice value —
+ * which rejects the whole response rather than the one entry that broke it.
+ */
+export function listAppendChoices(
+  raw: string,
+  candidates: readonly string[],
+  opts: { emptyLabel?: string } = {},
+): { name: string; value: string }[] {
+  const lastComma = raw.lastIndexOf(",");
+  const settled = lastComma >= 0 ? raw.slice(0, lastComma + 1) : "";
+  const fragment = raw.slice(lastComma + 1).trim().toLowerCase();
+  const already = new Set(
+    settled
+      .split(",")
+      .map((part) => part.trim().toLowerCase())
+      .filter(Boolean),
+  );
+
+  const choices: { name: string; value: string }[] = [];
+  // Clearing the list is a real instruction on every option that uses this, and
+  // an empty box is hard to discover as one; offer it explicitly.
+  if (opts.emptyLabel && raw.trim() === "") choices.push({ name: opts.emptyLabel, value: "" });
+
+  for (const candidate of candidates) {
+    if (already.has(candidate.toLowerCase())) continue;
+    if (fragment && !candidate.toLowerCase().includes(fragment)) continue;
+    const value = settled ? `${settled} ${candidate}` : candidate;
+    if (value.length > 100) continue;
+    choices.push({ name: value.length > 90 ? `…${value.slice(-89)}` : value, value });
+    if (choices.length >= 25) break;
+  }
+  return choices;
 }
 
 export class FatalBotConfigError extends Error {
@@ -918,10 +964,59 @@ export class PubloaderBot {
       await this.respondWithLogServices(interaction, needle);
       return;
     }
-    // `id` is a row id on several commands; only the untracked queue can offer
-    // suggestions for one, and answering the others from it would be wrong.
-    if (focused.name === "id" && interaction.commandName === "untracked") {
-      await this.respondWithUntracked(interaction, needle);
+    // `id` means a different row on each command, so it dispatches on the
+    // command rather than being answered from one source. Anything the
+    // platform can enumerate is offered; anything it cannot is left free.
+    if (focused.name === "id") {
+      switch (interaction.commandName) {
+        case "untracked":
+          await this.respondWithUntracked(interaction, needle);
+          return;
+        case "workers":
+          await this.respondWithWorkerIds(interaction, needle);
+          return;
+        case "runs":
+          await this.respondWithRunIds(interaction, needle);
+          return;
+        case "enrolments":
+          await this.respondWithEnrolmentIds(interaction, needle);
+          return;
+        case "queue":
+          await this.respondWithTaskIds(interaction, needle);
+          return;
+        case "errors":
+          await this.respondWithErrorIds(interaction, needle);
+          return;
+        default:
+          await interaction.respond([]).catch(() => undefined);
+          return;
+      }
+    }
+    if (focused.name === "language") {
+      const lowered = needle.trim().toLowerCase();
+      await interaction
+        .respond(
+          MANGADEX_LANGUAGES.filter((code) => !lowered || code.toLowerCase().startsWith(lowered))
+            .slice(0, 25)
+            .map((code) => ({ name: code, value: code })),
+        )
+        .catch(() => undefined);
+      return;
+    }
+    if (focused.name === "scopes" || focused.name === "grant" || focused.name === "deny") {
+      await interaction.respond(listAppendChoices(needle, SCOPES)).catch(() => undefined);
+      return;
+    }
+    if (focused.name === "extensions") {
+      let names: string[] = [];
+      try {
+        names = await this.extensionNames();
+      } catch (err) {
+        this.log.debug({ err }, "autocomplete could not list extensions");
+      }
+      await interaction
+        .respond(listAppendChoices(needle, names, { emptyLabel: "(none — clear the list)" }))
+        .catch(() => undefined);
       return;
     }
     if (focused.name !== "extension") {
@@ -939,6 +1034,119 @@ export class PubloaderBot {
       .filter((n) => !lowered || n.toLowerCase().includes(lowered))
       .slice(0, 25)
       .map((n) => ({ name: n, value: n }));
+    await interaction.respond(choices).catch(() => undefined);
+  }
+
+
+  /**
+   * Enrolled workers. The value is the id because that is what the endpoints
+   * take, but the label leads with the name: an operator knows which host they
+   * mean and not which uuid it was given.
+   */
+  private async respondWithWorkerIds(interaction: AutocompleteInteraction, needle: string): Promise<void> {
+    let choices: { name: string; value: string }[] = [];
+    try {
+      const { workers } = await this.apiFor(interaction.user.id).workers(actorFor(interaction.user.username));
+      const query = needle.trim().toLowerCase();
+      choices = workers
+        .filter((w) => !query || w.name.toLowerCase().includes(query) || w.id.startsWith(query))
+        .slice(0, 25)
+        .map((w) => ({ name: `${w.name} — ${w.status}`.slice(0, 100), value: w.id }));
+    } catch (err) {
+      this.log.debug({ err }, "autocomplete could not list workers");
+    }
+    await interaction.respond(choices).catch(() => undefined);
+  }
+
+  /** Recent runs, newest first, labelled by what they were. */
+  private async respondWithRunIds(interaction: AutocompleteInteraction, needle: string): Promise<void> {
+    let choices: { name: string; value: string }[] = [];
+    try {
+      const { runs } = await this.apiFor(interaction.user.id).listRuns(actorFor(interaction.user.username), {
+        limit: 25,
+      });
+      const query = needle.trim().toLowerCase();
+      choices = runs
+        .filter((r) => !query || r.id.startsWith(query) || (r.extension ?? "").toLowerCase().includes(query))
+        .slice(0, 25)
+        .map((r) => ({
+          name: `${r.extension ?? "?"} · ${r.state ?? "?"} · ${r.id.slice(0, 8)}`.slice(0, 100),
+          value: r.id,
+        }));
+    } catch (err) {
+      this.log.debug({ err }, "autocomplete could not list runs");
+    }
+    await interaction.respond(choices).catch(() => undefined);
+  }
+
+  /**
+   * Enrollment tokens that can still be revoked. Spent and revoked ones are
+   * left out: offering them is offering a no-op.
+   */
+  private async respondWithEnrolmentIds(interaction: AutocompleteInteraction, needle: string): Promise<void> {
+    let choices: { name: string; value: string }[] = [];
+    try {
+      const { tokens } = await this.apiFor(interaction.user.id).enrollTokens(actorFor(interaction.user.username));
+      const now = Date.now();
+      const query = needle.trim().toLowerCase();
+      choices = tokens
+        .filter((t) => !t.usedAt && !t.revoked && (!t.expiresAt || new Date(t.expiresAt).getTime() > now))
+        .filter((t) => !query || t.id.startsWith(query) || (t.note ?? "").toLowerCase().includes(query))
+        .slice(0, 25)
+        .map((t) => ({ name: `${t.trust}${t.note ? ` · ${t.note}` : ""}`.slice(0, 100), value: t.id }));
+    } catch (err) {
+      this.log.debug({ err }, "autocomplete could not list enrollment tokens");
+    }
+    await interaction.respond(choices).catch(() => undefined);
+  }
+
+  /**
+   * Upload tasks, labelled by what they are rather than by their uuid. Failed
+   * and dead-lettered ones first: those are what `/queue retry` and `/queue
+   * cancel` exist for, and a list led by healthy PENDING rows buries them.
+   */
+  private async respondWithTaskIds(interaction: AutocompleteInteraction, needle: string): Promise<void> {
+    let choices: { name: string; value: string }[] = [];
+    try {
+      const { tasks } = await this.apiFor(interaction.user.id).uploadTasks(actorFor(interaction.user.username), {
+        limit: 50,
+      });
+      const rank = (state: string): number => (state === "DEAD_LETTER" ? 0 : state === "FAILED" ? 1 : 2);
+      const query = needle.trim().toLowerCase();
+      choices = tasks
+        .filter((t) => !query || t.id.startsWith(query) || (t.dedupeKey ?? "").toLowerCase().includes(query))
+        .sort((a, b) => rank(a.state) - rank(b.state))
+        .slice(0, 25)
+        .map((t) => ({
+          name: `${t.state} · ${t.kind} · ${t.dedupeKey ?? t.id.slice(0, 8)}`.slice(0, 100),
+          value: t.id,
+        }));
+    } catch (err) {
+      this.log.debug({ err }, "autocomplete could not list upload tasks");
+    }
+    await interaction.respond(choices).catch(() => undefined);
+  }
+
+  /** Outstanding failures, which is what `/errors clear` and `restore` take. */
+  private async respondWithErrorIds(interaction: AutocompleteInteraction, needle: string): Promise<void> {
+    let choices: { name: string; value: string }[] = [];
+    try {
+      const sub = interaction.options.getSubcommand(false);
+      // `restore` acts on cleared entries; offering outstanding ones there
+      // would suggest exactly the rows it cannot act on.
+      const { errors } = await this.apiFor(interaction.user.id).errors(
+        actorFor(interaction.user.username),
+        50,
+        sub === "restore" ? "only" : "without",
+      );
+      const query = needle.trim().toLowerCase();
+      choices = errors
+        .filter((e) => !query || e.id.startsWith(query) || (e.subject ?? "").toLowerCase().includes(query))
+        .slice(0, 25)
+        .map((e) => ({ name: `${e.kind} · ${e.subject ?? e.id.slice(0, 8)}`.slice(0, 100), value: e.id }));
+    } catch (err) {
+      this.log.debug({ err }, "autocomplete could not list errors");
+    }
     await interaction.respond(choices).catch(() => undefined);
   }
 
