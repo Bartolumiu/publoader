@@ -35,13 +35,19 @@ const IMAGE_BATCH_SIZE = 10;
 /**
  * How hard to look for the card before deciding it did not land.
  *
- * Only reached when the commit echoed nothing useful; the echo is checked
- * first and does not lag. This is the fallback, and it is generous on purpose:
- * three attempts two seconds apart was NOT enough, and every premature verdict
- * failed a task whose commit had worked, which then retried and uploaded
- * another card. Twenty seconds of waiting is far cheaper than that.
+ * This is now the ONLY thing that decides a first card, so it has to be
+ * generous: nothing cheaper corroborates it, and every premature verdict fails
+ * a task whose commit had worked, which then retries and uploads another card.
+ * Three attempts two seconds apart was not enough.
+ *
+ * Eight attempts covers thirty-five seconds of lag. The number comes from a
+ * measurement rather than a guess: on 2026-09-02 a card committed at 21:14:14
+ * was not visible to `GET /chapter/{id}` until 21:14:29, so a real, working
+ * write took about fifteen seconds to surface. Five attempts covered twenty,
+ * which is a margin of one read over observed behaviour, and being wrong in
+ * that direction now costs a false failure rather than a slow success.
  */
-const CARD_CONFIRM_ATTEMPTS = 5;
+const CARD_CONFIRM_ATTEMPTS = 8;
 const CARD_CONFIRM_DELAY_MS = 5_000;
 
 /** Failure that should send the task back to the queue with its message intact. */
@@ -865,6 +871,26 @@ export class UploadTaskWorkers {
    * cache that lags its own writes, so the first read after a commit can still
    * show the old state; failing on that would turn working re-cards into
    * dead-lettered tasks.
+   *
+   * The commit's own echo is NOT accepted as proof, and used to be. It was
+   * taken as the write path's answer, on the reasoning that it cannot lag the
+   * way a cached read can. It does not lag; it is simply not about the chapter.
+   * Two batches from one sweep on 2026-09-02 say so exactly:
+   *
+   *  - 19:38, the echo reported `resultingPages: 1`. That took the fast path
+   *    and returned 1.9 seconds after the commit without reading anything. Those
+   *    chapters are `pages: 0` on MangaDex now: the card never landed, and 84 of
+   *    the 100 newest rows in the unavailable archive are in that state, every
+   *    one of them archived as done.
+   *  - 21:14, the echo reported `resultingPages: 0` for the SAME operation. The
+   *    fast path could not fire, the read loop ran for about fifteen seconds,
+   *    found the page, and passed. Those chapters are `pages: 1` now.
+   *
+   * So the echo claimed a page where none landed and claimed none where one
+   * did, and the read was right both times. It is also captured BEFORE
+   * `editChapter` performs the last write of the operation, so even an accurate
+   * echo would describe the chapter one write short of the state being checked.
+   * It is kept only to say what MangaDex claimed, in the error.
    */
   private async confirmCardLanded(
     mdChapterId: string,
@@ -872,33 +898,19 @@ export class UploadTaskWorkers {
     committed: { attributes?: { version?: number; pages?: number } } | null,
     log: Logger,
   ): Promise<void> {
-    // The commit's own echo first, because it cannot lag: it is the write
-    // path's answer, where `GET /chapter/{id}` is served from a cache that can
-    // still show the pre-commit chapter seconds afterwards. Trusting only the
-    // read failed tasks whose commit had plainly worked -- a chapter reported
-    // as `pages 0 -> 0, version 2 -> 2` was sitting at pages 1, version 3 by
-    // the time anyone looked. Each of those retried and re-uploaded another
-    // card.
-    const echo = committed?.attributes;
-    if (echo) {
-      const echoedAPage = before.pages === 0 && (echo.pages ?? 0) > 0;
-      const echoedAWrite = before.pages > 0 && (echo.version ?? 0) > before.version;
-      if (echoedAPage || echoedAWrite) return;
-    }
-
-    // Re-cards stop here. The echo above is free; the read below is not, and
-    // for a re-card it cannot take the fast path at all: the page count stays
-    // at one, and MangaDex's commit echo reports a STALE version (it said 7
-    // for a chapter that had reached 13). So every re-card fell through to the
-    // read loop and sat out MangaDex's cache -- 15 to 20 seconds of sleeping,
-    // which was two thirds of the time a re-card took and the reason a 2,425
-    // chapter sweep was measured in days.
+    // Re-cards stop here, and the reasoning is unchanged by the above: for a
+    // re-card the page count stays at one either way, and the echoed version is
+    // STALE (it said 7 for a chapter that had reached 13), so nothing cheap can
+    // settle it. Every re-card therefore fell through to the read loop and sat
+    // out MangaDex's cache -- 15 to 20 seconds of sleeping, two thirds of the
+    // time a re-card took, and the reason a 2,425 chapter sweep was measured in
+    // days.
     //
-    // What that bought was small. A re-card replaces an image on a chapter
-    // already carded, so a silent failure leaves the OLD card in place rather
-    // than a live chapter looking dead. The dangerous direction -- a card that
-    // never landed on a live chapter -- is the first-card case, which keeps its
-    // confirmation because the echoed page count settles it without waiting.
+    // What that buys is small. A re-card replaces an image on a chapter already
+    // carded, so a silent failure leaves the OLD card in place rather than a
+    // live chapter looking dead. The dangerous direction -- a card that never
+    // landed on a live chapter -- is the first-card case, and that one now
+    // always reads.
     if (before.pages > 0) {
       log.info({ mdChapterId }, "re-card committed; not waiting on the read to confirm it");
       return;
@@ -923,10 +935,17 @@ export class UploadTaskWorkers {
       if (gainedAPage || commitDidWork) return;
     }
 
+    // What the commit claimed goes in the message. It is not evidence, but when
+    // it disagrees with the read -- which is the common case for this failure --
+    // that disagreement is the single most useful thing an operator can be told,
+    // because it distinguishes "MangaDex refused the page" from "MangaDex
+    // accepted the page and then did not keep it".
+    const echoedPages = committed?.attributes?.pages;
     throw new TaskError(
       `the card did not land on chapter ${mdChapterId}: pages ${before.pages} -> ` +
         `${pages === null ? "unknown" : pages}, version ${before.version} -> ` +
-        `${version === null ? "unknown" : version}`,
+        `${version === null ? "unknown" : version}` +
+        `, commit echoed ${echoedPages === undefined ? "nothing" : `pages ${echoedPages}`}`,
     );
   }
 
