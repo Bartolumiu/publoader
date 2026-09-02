@@ -91,7 +91,7 @@ export class AuthzSource {
    * change: guild-scoped slash commands are registered per guild, so widening
    * the guild list means nothing until the commands are re-registered.
    */
-  async refresh(): Promise<{ changed: boolean; guildsChanged: boolean }> {
+  async refresh(): Promise<{ changed: boolean; guildsChanged: boolean; firstLoad: boolean }> {
     const before = this.current;
     let view;
     try {
@@ -107,7 +107,7 @@ export class AuthzSource {
           ? "could not refresh Discord allowlists; keeping the ones already in force"
           : "could not read Discord allowlists; running on the environment until the API answers",
       );
-      return { changed: false, guildsChanged: false };
+      return { changed: false, guildsChanged: false, firstLoad: false };
     }
 
     // The mode is the control plane's answer regardless of whether any list has
@@ -126,15 +126,23 @@ export class AuthzSource {
     if (changed || first) {
       this.log.info({ origin, authz: describeAuthz(next) }, "Discord allowlists in force");
     }
-    return { changed, guildsChanged };
+    return { changed, guildsChanged, firstLoad: first };
   }
 
-  /** Begin polling. `onChange` fires only when something actually differed. */
-  start(onChange?: (result: { guildsChanged: boolean }) => void): void {
+  /**
+   * Begin polling.
+   *
+   * `onChange` fires when something differed *and* on the first successful
+   * load. That first call matters: when the control plane is unreachable at
+   * boot the bot starts on its environment, and the pinned guilds only arrive
+   * once a refresh finally succeeds — with nothing to compare against, that is
+   * not a "change", but it is exactly the moment the caller needs to act on.
+   */
+  start(onChange?: (result: { guildsChanged: boolean; firstLoad: boolean }) => void): void {
     if (this.timer) return;
     this.timer = setInterval(() => {
       void this.refresh().then((result) => {
-        if (result.changed) onChange?.(result);
+        if (result.changed || result.firstLoad) onChange?.(result);
       });
     }, this.refreshMs);
     // A refresh timer must never be the reason the process cannot exit.

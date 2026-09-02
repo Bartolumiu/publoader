@@ -405,8 +405,11 @@ export class PubloaderBot {
     // interaction is judged against the current config rather than against the
     // environment the container happened to be started with.
     await this.authzSource.refresh();
-    this.authzSource.start(({ guildsChanged }) => {
-      if (guildsChanged) void this.registerCommands();
+    this.authzSource.start(({ guildsChanged, firstLoad }) => {
+      // `firstLoad` covers the cold start: the control plane was unreachable at
+      // boot, registration was deferred rather than guessed, and this is the
+      // moment the real config finally arrived.
+      if (guildsChanged || firstLoad) void this.registerCommands();
     });
     try {
       await this.client.login(this.discordToken);
@@ -439,6 +442,18 @@ export class PubloaderBot {
    * *removed* keeps its copy until they are withdrawn.
    */
   private async registerCommands(): Promise<void> {
+    // Registering globally is a decision, not a default. Doing it because the
+    // config could not be read yet is a guess — and an expensive one, because
+    // Discord shows a guild the union of its own commands and the global set,
+    // so a guessed global registration duplicates every command in every guild
+    // and nothing about the guild registrations later undoes it. Wait for the
+    // first successful refresh instead; `start()` re-runs this when it lands.
+    if (!this.authzSource.loaded && this.authz.guildIds.size === 0) {
+      this.log.warn(
+        "deferring slash-command registration: the control plane has not answered yet and no guild is pinned in the environment, so registering now would mean guessing global",
+      );
+      return;
+    }
     const body = ALL_COMMANDS.map((c) => c.builder.toJSON());
     try {
       const guildIds = [...this.authz.guildIds];
@@ -486,6 +501,7 @@ export class PubloaderBot {
         );
       }
       await this.withdrawStaleGuildCommands(this.authz.guildIds);
+      if (this.authz.guildIds.size > 0) await this.withdrawGlobalCommands();
     } catch (err) {
       this.log.error({ err }, "failed to register slash commands");
     }
@@ -508,6 +524,43 @@ export class PubloaderBot {
    * a changed config, and a field on this instance knows nothing about what the
    * previous one did.
    */
+  /**
+   * Drop the application's *global* command set once guilds are pinned.
+   *
+   * Discord shows a guild the union of its own commands and the global ones, so
+   * a leftover global set does not sit harmlessly unused — it duplicates every
+   * entry in every guild's picker.
+   *
+   * A leftover is easy to acquire and impossible to notice. `registerCommands`
+   * falls back to global whenever no guild is pinned, and that includes the
+   * cold start where the control plane is not up yet and the bot is still on an
+   * empty `.env`: the API and the bot restart together after a deploy, the
+   * first refresh fails, and the bot registers globally before the pinned
+   * guilds ever arrive. The next refresh fixes the *guild* registrations and
+   * left the global copy behind, which is precisely how a working deployment
+   * ended up showing everything twice.
+   *
+   * Only ever called when at least one guild is pinned, so a deployment that
+   * genuinely runs globally keeps its commands.
+   */
+  private async withdrawGlobalCommands(): Promise<void> {
+    const application = this.client.application;
+    if (!application) return;
+    try {
+      // Fetch first: the steady state is "nothing to clear", and that should
+      // cost a read rather than a write on every registration.
+      const existing = await application.commands.fetch();
+      if (existing.size === 0) return;
+      await application.commands.set([]);
+      this.log.info(
+        { count: existing.size },
+        "withdrew global slash commands, which were duplicating the guild-scoped ones",
+      );
+    } catch (err) {
+      this.log.warn({ err }, "could not withdraw global slash commands");
+    }
+  }
+
   private async withdrawStaleGuildCommands(keep: ReadonlySet<string>): Promise<void> {
     const application = this.client.application;
     if (!application) return;

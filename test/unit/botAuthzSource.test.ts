@@ -304,3 +304,69 @@ describe("snowflakeFrom", () => {
     expect(snowflakeFrom("123")).toBeNull();
   });
 });
+
+describe("AuthzSource: the cold start", () => {
+  it("reports the first successful load, so a deferred registration can happen", async () => {
+    // When the control plane is unreachable at boot the bot starts on its
+    // environment and registers nothing. Nothing has *changed* when the real
+    // config finally lands — there was nothing to compare against — but that is
+    // exactly the moment the caller has to act on.
+    const stored = entries({ guilds: [{ id: GUILD, label: "" }] });
+    const source = new AuthzSource({
+      api: fakeApi(async () => viewOf(stored, true)),
+      env: {},
+      log: silentLog,
+    });
+    const first = await source.refresh();
+    expect(first.firstLoad).toBe(true);
+    const second = await source.refresh();
+    expect(second.firstLoad).toBe(false);
+  });
+
+  it("does not claim a first load when the very first read failed", async () => {
+    const source = new AuthzSource({
+      api: fakeApi(async () => {
+        throw new Error("connection refused");
+      }),
+      env: {},
+      log: silentLog,
+    });
+    const result = await source.refresh();
+    expect(result.firstLoad).toBe(false);
+    expect(source.loaded).toBe(false);
+  });
+
+  it("notifies on the first load even though nothing differed", async () => {
+    vi.useFakeTimers();
+    // Config identical to the env default, so `changed` is false; the callback
+    // must still fire or a bot that deferred registration never registers.
+    const source = new AuthzSource({
+      api: fakeApi(async () => viewOf(entries(), false)),
+      env: {},
+      log: silentLog,
+      refreshMs: 1000,
+    });
+    const onChange = vi.fn();
+    source.start(onChange);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange.mock.calls[0]![0]).toMatchObject({ firstLoad: true });
+
+    // And not again on every subsequent quiet poll.
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    source.stop();
+    vi.useRealTimers();
+  });
+
+  it("reports the mode the control plane returns", async () => {
+    const dashboard = new AuthzSource({
+      api: fakeApi(async () => ({ ...viewOf(entries(), true), mode: "dashboard" as const })),
+      env: {},
+      log: silentLog,
+    });
+    expect(dashboard.mode).toBe("allowlist");
+    await dashboard.refresh();
+    expect(dashboard.mode).toBe("dashboard");
+  });
+});
