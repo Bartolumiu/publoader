@@ -72,4 +72,43 @@ describe("chapterEditBody", () => {
     const body = chapterEditBody(current(), { title: "x" });
     expect(body.groups).toEqual(["7c5fb223-aa64-4eb8-955f-762d5bfd5ab7"]);
   });
+
+  it("never sends publishAt, even when a payload carries one", () => {
+    // `ChapterPayload` is deliberately `.passthrough()` so an EDIT row can hold
+    // its `payload`/`oldInfo` sidecars, which leaves a hand-built or
+    // hand-patched task able to smuggle a scheduling field into the body. A PUT
+    // /chapter is a replace, so anything that arrives here becomes the truth.
+    const body = chapterEditBody(current(), {
+      title: "x",
+      publishAt: "2037-12-31T15:00:00+00:00",
+    });
+    expect("publishAt" in body).toBe(false);
+    // The rest of the edit still goes through: this drops a field, not the task.
+    expect(body.title).toBe("x");
+  });
+
+  it("never sends readableAt either", () => {
+    // Same class of field and the same mistake; grouped so neither can be
+    // re-added by someone who only remembers the publishAt incident.
+    const body = chapterEditBody(current(), {
+      title: "x",
+      readableAt: "2023-04-03T01:00:26+00:00",
+    });
+    expect("readableAt" in body).toBe(false);
+    expect(body.title).toBe("x");
+  });
+
+  it("leaves an edit that never mentioned them untouched", () => {
+    // The strip must not perturb the ordinary path.
+    const body = chapterEditBody(current(), { title: "x" });
+    expect(body).toEqual({
+      volume: "20",
+      chapter: "175",
+      title: "x",
+      translatedLanguage: "en",
+      groups: ["7c5fb223-aa64-4eb8-955f-762d5bfd5ab7"],
+      externalUrl: "https://kmanga.kodansha.com/title/10007/episode/358273",
+      version: 3,
+    });
+  });
 });

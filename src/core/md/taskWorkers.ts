@@ -80,6 +80,15 @@ export class TaskError extends Error {
  * lose the title or number change riding along with it, so the key is dropped
  * and the link is left standing -- the survivable half of an impossible ask.
  */
+/**
+ * Chapter timestamps MangaDex owns and this platform never writes.
+ *
+ * `readableAt` sits beside `publishAt` because it is the same kind of field and
+ * the same mistake: a scheduling attribute that looks editable, is accepted by
+ * a PUT, and means something the uploader has no business asserting.
+ */
+const MANGADEX_OWNED_TIMESTAMPS = ["publishAt", "readableAt"] as const;
+
 export function chapterEditBody(
   current: {
     attributes: {
@@ -100,6 +109,20 @@ export function chapterEditBody(
 
   const requested = { ...payload };
   if ("externalUrl" in requested && !requested.externalUrl) delete requested.externalUrl;
+  // Scheduling is MangaDex's, not ours, and this platform must never restate
+  // it. Nothing here sets these — the base below is a whitelist and no route
+  // accepts them — but `payload` reaches this spread from `ChapterPayload`,
+  // which is deliberately `.passthrough()` so an EDIT row can carry its
+  // `payload`/`oldInfo` sidecars. That leaves a hand-built or hand-patched task
+  // able to put `publishAt` in an edit body, and a PUT /chapter is a replace:
+  // whatever it carries becomes the new truth.
+  //
+  // Why it matters rather than being hygiene: a chapter that is future-dated
+  // AND external cannot hold a page. Across 624 such chapters in this group,
+  // not one does, against 445 of 1,688 past-dated external ones that do. So a
+  // stray `publishAt` does not merely mis-schedule a chapter, it makes every
+  // later unavailable card silently fail to land on it.
+  for (const key of MANGADEX_OWNED_TIMESTAMPS) delete requested[key];
 
   return {
     volume: current.attributes.volume,
