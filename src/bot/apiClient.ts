@@ -1114,6 +1114,78 @@ export class AdminApiClient {
     });
   }
 
+  /** Which extensions jump the upload queue. Replaces the whole list. */
+  setUploadPriority(actor: string, extensions: string[]): Promise<{ ok: boolean; extensions?: string[] }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/upload-schedule/priority",
+      scope: "settings:write",
+      actor,
+      json: { extensions },
+    });
+  }
+
+  /** Extensions held out of uploading entirely. Replaces the whole list. */
+  setUploadPaused(actor: string, extensions: string[]): Promise<{ ok: boolean; extensions?: string[] }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/upload-schedule/paused",
+      scope: "settings:write",
+      actor,
+      json: { extensions },
+    });
+  }
+
+  /** Whether `perDay` is one platform-wide pool or one budget per extension. */
+  setUploadBudgetScope(actor: string, scope: "global" | "extension"): Promise<{ ok: boolean; scope?: string }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/upload-schedule/scope",
+      scope: "settings:write",
+      actor,
+      json: { scope },
+    });
+  }
+
+  webhookVerbosity(actor: string): Promise<{ uploadSuccesses: boolean }> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/webhook-verbosity",
+      scope: "settings:read",
+      actor,
+    });
+  }
+
+  setWebhookVerbosity(actor: string, uploadSuccesses: boolean): Promise<{ ok: boolean; uploadSuccesses: boolean }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/webhook-verbosity",
+      scope: "settings:write",
+      actor,
+      json: { uploadSuccesses },
+    });
+  }
+
+  revokeEnrollToken(actor: string, id: string): Promise<{ ok: boolean }> {
+    return this.request({
+      method: "POST",
+      path: `/api/v1/admin/enroll-tokens/${encodeURIComponent(id)}/revoke`,
+      scope: "enroll:write",
+      actor,
+    });
+  }
+
+  /** Retarget which extensions a worker will accept jobs for. */
+  setWorkerExtensions(actor: string, workerId: string, extensions: string[]): Promise<{ ok: boolean }> {
+    return this.request({
+      method: "PUT",
+      path: `/api/v1/admin/workers/${encodeURIComponent(workerId)}/extensions`,
+      scope: "workers:write",
+      actor,
+      json: { extensions },
+    });
+  }
+
   fetchThrottle(actor: string): Promise<FetchThrottleView> {
     return this.request({
       method: "GET",

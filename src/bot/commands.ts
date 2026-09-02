@@ -1661,6 +1661,8 @@ const commands: BotCommand[] = [
         };
       }
       const id = requireString(ctx.options, "id");
+
+
       if (sub === "retry") {
         await ctx.api.retryUploadTask(ctx.actor, id);
         return { text: `:arrows_counterclockwise: Upload task \`${id}\` requeued with a fresh attempt budget.` };
@@ -1866,7 +1868,7 @@ const commands: BotCommand[] = [
   {
     name: "workers",
     description: "Fleet inventory and worker lifecycle.",
-    sensitivity: { list: "read", drain: "mutate", activate: "mutate", revoke: "destructive" },
+    sensitivity: { list: "read", drain: "mutate", activate: "mutate", revoke: "destructive", extensions: "mutate" },
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("workers")
@@ -1892,6 +1894,18 @@ const commands: BotCommand[] = [
           .addBooleanOption((o) =>
             o.setName("confirm").setDescription("Required: revoking cannot be undone; the host must re-enroll."),
           ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("extensions")
+          .setDescription("Retarget which extensions a worker accepts jobs for.")
+          .addStringOption((o) => o.setName("id").setDescription("Worker id.").setRequired(true))
+          .addStringOption((o) =>
+            o
+              .setName("extensions")
+              .setDescription("Comma-separated names. Empty means it takes none.")
+              .setRequired(true),
+          ),
       ),
     async run(ctx) {
       const sub = ctx.options.subcommand();
@@ -1908,6 +1922,28 @@ const commands: BotCommand[] = [
         return { text: lines([`**${workers.length} worker(s)**`, ...rendered]) };
       }
       const id = requireString(ctx.options, "id");
+
+      if (sub === "extensions") {
+        const raw = ctx.options.string("extensions") ?? "";
+        const names = raw
+          .split(",")
+          .map((n) => n.trim())
+          .filter(Boolean)
+          .map(requireExtensionName);
+        await ctx.api.setWorkerExtensions(ctx.actor, id, names);
+        return {
+          text:
+            names.length > 0
+              ? `\`${id}\` now takes jobs for ${names.map((n) => `\`${n}\``).join(", ")}.`
+              : `\`${id}\` now takes no jobs at all; it stays enrolled but idle.`,
+          title: "Worker retargeted",
+          tone: "ok",
+          // No re-enrolment and no restart: the worker reads this on its next
+          // lease. Worth saying, because "did that take?" is the next question.
+          footer: "Applies on the worker's next lease; nothing to restart.",
+        };
+      }
+
       if (sub === "revoke" && ctx.options.boolean("confirm") !== true) {
         return {
           text:
@@ -3226,6 +3262,48 @@ const commands: BotCommand[] = [
     },
   },
   {
+    name: "notify",
+    description: "How chatty the upload webhooks are.",
+    sensitivity: { show: "read", set: "mutate" },
+    ephemeral: true,
+    builder: new SlashCommandBuilder()
+      .setName("notify")
+      .setDescription("How chatty the upload webhooks are.")
+      .addSubcommand((s) => s.setName("show").setDescription("Whether successful uploads are announced."))
+      .addSubcommand((s) =>
+        s
+          .setName("set")
+          .setDescription("Announce every successful upload, or only failures.")
+          .addBooleanOption((o) =>
+            o
+              .setName("upload-successes")
+              .setDescription("On: a message per upload. Off: failures only.")
+              .setRequired(true),
+          ),
+      ),
+    async run(ctx) {
+      if (ctx.options.subcommand() === "set") {
+        const on = ctx.options.boolean("upload-successes") === true;
+        await ctx.api.setWebhookVerbosity(ctx.actor, on);
+        return {
+          text: on
+            ? "Successful uploads will be announced to the webhooks."
+            : "Only failures will be announced. Successful uploads go unmentioned.",
+          title: "Webhook verbosity",
+          tone: "ok",
+        };
+      }
+      const { uploadSuccesses } = await ctx.api.webhookVerbosity(ctx.actor);
+      return {
+        text: uploadSuccesses
+          ? "Successful uploads **are** announced."
+          : "Only failures are announced; successful uploads are silent.",
+        title: "Webhook verbosity",
+        tone: "info",
+      };
+    },
+  },
+  {
     name: "chapters",
     description: "What this platform has on MangaDex, and where two uploads collided.",
     // Read-only on purpose. Every chapter *write* route refuses an api-token
@@ -3393,16 +3471,58 @@ const commands: BotCommand[] = [
   {
     name: "enrolments",
     description: "Worker enrollment tokens: which are outstanding, used or expired.",
-    sensitivity: "read",
+    // Revoking is destructive: an unredeemed token is a credential, and taking
+    // it back cannot be undone from here.
+    sensitivity: { list: "read", revoke: "destructive" },
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("enrolments")
       .setDescription("Worker enrollment tokens: which are outstanding, used or expired.")
-      .addBooleanOption((o) =>
-        o.setName("all").setDescription("Include used, revoked and expired ones. Default: outstanding only."),
+      .addSubcommand((s) =>
+        s
+          .setName("list")
+          .setDescription("Enrollment tokens. Outstanding only unless you ask for all.")
+          .addBooleanOption((o) =>
+            o.setName("all").setDescription("Include used, revoked and expired ones."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("revoke")
+          .setDescription("Kill an unredeemed enrollment token.")
+          .addStringOption((o) =>
+            o.setName("id").setDescription("Token id, or its first few characters.").setRequired(true),
+          )
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Required: whoever was sent it can no longer enrol."),
+          ),
       ),
     async run(ctx) {
       const { tokens } = await ctx.api.enrollTokens(ctx.actor);
+
+      if (ctx.options.subcommand() === "revoke") {
+        const needle = requireString(ctx.options, "id");
+        // Matched by prefix because the listing shows a prefix; asking for a
+        // full uuid that was never displayed would be busywork.
+        const matches = tokens.filter((t) => t.id.startsWith(needle));
+        if (matches.length === 0) return { text: `No enrollment token starts with \`${needle}\`.`, tone: "warn" };
+        if (matches.length > 1) {
+          return {
+            text: `\`${needle}\` matches ${matches.length} tokens. Give more characters.`,
+            tone: "warn",
+          };
+        }
+        const target = matches[0]!;
+        if (ctx.options.boolean("confirm") !== true) {
+          return {
+            text: `This kills \`${target.id.slice(0, 8)}\` (${target.trust}${target.note ? ` · ${clip(target.note, 40)}` : ""}). Whoever was sent it can no longer enrol.\nRe-issue with \`confirm: true\`.`,
+            tone: "warn",
+          };
+        }
+        await ctx.api.revokeEnrollToken(ctx.actor, target.id);
+        return { text: `Enrollment token \`${target.id.slice(0, 8)}\` revoked.`, title: "Revoked", tone: "ok" };
+      }
+
       const showAll = ctx.options.boolean("all") === true;
       const now = Date.now();
       const outstanding = tokens.filter(
@@ -3479,7 +3599,7 @@ const commands: BotCommand[] = [
   {
     name: "uploads",
     description: "How fast chapters go out: daily budget, interval and spacing.",
-    sensitivity: { show: "read", set: "mutate", clear: "mutate" },
+    sensitivity: { show: "read", set: "mutate", clear: "mutate", priority: "mutate", paused: "mutate", scope: "mutate" },
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("uploads")
@@ -3525,9 +3645,81 @@ const commands: BotCommand[] = [
           .addStringOption((o) =>
             o.setName("extension").setDescription("Extension name.").setRequired(true).setAutocomplete(true),
           ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("priority")
+          .setDescription("Which extensions jump the upload queue. Replaces the whole list.")
+          .addStringOption((o) =>
+            o.setName("extensions").setDescription("Comma-separated names. Empty clears the list."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("paused")
+          .setDescription("Which extensions upload nothing at all. Replaces the whole list.")
+          .addStringOption((o) =>
+            o.setName("extensions").setDescription("Comma-separated names. Empty resumes all of them."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("scope")
+          .setDescription("Whether the daily budget is one pool or one per extension.")
+          .addStringOption((o) =>
+            o
+              .setName("scope")
+              .setDescription("global: one shared budget. extension: one each.")
+              .setRequired(true)
+              .addChoices(
+                { name: "global — one shared daily budget", value: "global" },
+                { name: "extension — a budget each", value: "extension" },
+              ),
+          ),
       ),
     async run(ctx) {
       const sub = ctx.options.subcommand();
+
+      // These three replace a whole list rather than adding to one, which is
+      // worth restating in the reply: an operator who means "also pause omoi"
+      // and sends only `omoi` has just resumed everything else.
+      if (sub === "priority" || sub === "paused") {
+        const raw = ctx.options.string("extensions") ?? "";
+        const names = raw
+          .split(",")
+          .map((n) => n.trim())
+          .filter(Boolean)
+          .map(requireExtensionName);
+        const result =
+          sub === "priority"
+            ? await ctx.api.setUploadPriority(ctx.actor, names)
+            : await ctx.api.setUploadPaused(ctx.actor, names);
+        const applied = result.extensions ?? names;
+        const label = sub === "priority" ? "Priority" : "Paused";
+        return {
+          text:
+            applied.length > 0
+              ? `**${label}** is now: ${applied.map((n) => `\`${n}\``).join(", ")}.`
+              : `**${label}** is now empty.`,
+          title: `Upload ${sub}`,
+          tone: "ok",
+          footer: "This replaced the whole list; anything not named above is no longer " +
+            (sub === "priority" ? "prioritised." : "paused."),
+        };
+      }
+
+      if (sub === "scope") {
+        const scope = ctx.options.string("scope") === "extension" ? "extension" : "global";
+        await ctx.api.setUploadBudgetScope(ctx.actor, scope);
+        return {
+          text:
+            scope === "global"
+              ? "The daily budget is now **one pool shared by every extension**."
+              : "Every extension now gets **its own** daily budget.",
+          title: "Budget scope",
+          tone: "ok",
+        };
+      }
 
       if (sub === "show") {
         const view = await ctx.api.uploadSchedule(ctx.actor);

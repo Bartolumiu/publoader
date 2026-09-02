@@ -2070,7 +2070,12 @@ describe("/enrolments", () => {
   it("shows only what can still be redeemed, and warns that it can", async () => {
     // An unused token is a live credential; listing it beside used ones buries
     // the only row that matters.
-    const reply = await invoke("enrolments", fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }) }));
+    const reply = await invoke(
+      "enrolments",
+      fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }) }),
+      {},
+      "list",
+    );
     expect(reply.text).toContain("aaaaaaaa");
     expect(reply.text).not.toContain("bbbbbbbb");
     expect(reply.text).not.toContain("cccccccc");
@@ -2083,6 +2088,7 @@ describe("/enrolments", () => {
       "enrolments",
       fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }) }),
       { all: true },
+      "list",
     );
     expect(reply.text).toContain("used by `alpha`");
     expect(reply.text).toContain("expired");
@@ -2093,6 +2099,8 @@ describe("/enrolments", () => {
     const reply = await invoke(
       "enrolments",
       fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: [rows[1]] }) }),
+      {},
+      "list",
     );
     expect(reply.tone).toBe("ok");
     expect(reply.text).toContain("No outstanding");
@@ -2227,5 +2235,135 @@ describe("/chapters", () => {
   it("is read-only; the catalogue is not writable through the bot", () => {
     expect(resolveSensitivity(COMMANDS_BY_NAME.get("chapters")!, "list")).toBe("read");
     expect(resolveSensitivity(COMMANDS_BY_NAME.get("chapters")!, "collisions")).toBe("read");
+  });
+});
+
+describe("/uploads priority, paused and scope", () => {
+  it("replaces the whole list and says so", async () => {
+    // The endpoint replaces rather than appends. Someone who means "also pause
+    // omoi" and sends only `omoi` has just resumed everything else, so the
+    // reply has to state what actually happened.
+    const setUploadPaused = vi.fn().mockResolvedValue({ ok: true, extensions: ["omoi"] });
+    const reply = await invoke("uploads", fakeApi({ setUploadPaused }), { extensions: "omoi" }, "paused");
+    expect(setUploadPaused).toHaveBeenCalledWith("discord:ardax", ["omoi"]);
+    expect(reply.footer).toContain("replaced the whole list");
+  });
+
+  it("treats an empty list as clearing, not as a mistake", async () => {
+    const setUploadPriority = vi.fn().mockResolvedValue({ ok: true, extensions: [] });
+    const reply = await invoke("uploads", fakeApi({ setUploadPriority }), {}, "priority");
+    expect(setUploadPriority).toHaveBeenCalledWith("discord:ardax", []);
+    expect(reply.text).toContain("empty");
+  });
+
+  it("splits and trims a comma-separated list", async () => {
+    const setUploadPriority = vi.fn().mockResolvedValue({ ok: true });
+    await invoke("uploads", fakeApi({ setUploadPriority }), { extensions: "comikey , omoi" }, "priority");
+    expect(setUploadPriority).toHaveBeenCalledWith("discord:ardax", ["comikey", "omoi"]);
+  });
+
+  it("explains what each budget scope means rather than echoing the word", async () => {
+    const setUploadBudgetScope = vi.fn().mockResolvedValue({ ok: true });
+    const perExtension = await invoke("uploads", fakeApi({ setUploadBudgetScope }), { scope: "extension" }, "scope");
+    expect(setUploadBudgetScope).toHaveBeenCalledWith("discord:ardax", "extension");
+    expect(perExtension.text).toContain("its own");
+    const global = await invoke("uploads", fakeApi({ setUploadBudgetScope }), { scope: "global" }, "scope");
+    expect(global.text).toContain("one pool");
+  });
+});
+
+describe("/notify", () => {
+  it("says which way round the setting is, both ways", async () => {
+    const on = await invoke(
+      "notify",
+      fakeApi({ webhookVerbosity: vi.fn().mockResolvedValue({ uploadSuccesses: true }) }),
+      {},
+      "show",
+    );
+    expect(on.text).toContain("**are** announced");
+    const off = await invoke(
+      "notify",
+      fakeApi({ webhookVerbosity: vi.fn().mockResolvedValue({ uploadSuccesses: false }) }),
+      {},
+      "show",
+    );
+    expect(off.text).toContain("Only failures");
+  });
+
+  it("carries false through, since it is the setting and not an omission", async () => {
+    const setWebhookVerbosity = vi.fn().mockResolvedValue({ ok: true, uploadSuccesses: false });
+    await invoke("notify", fakeApi({ setWebhookVerbosity }), { "upload-successes": false }, "set");
+    expect(setWebhookVerbosity).toHaveBeenCalledWith("discord:ardax", false);
+  });
+});
+
+describe("/enrolments revoke", () => {
+  const rows = [
+    { id: "aaaaaaaa-1111", trust: "TRUSTED", createdAt: "2026-07-01T00:00:00Z", note: "spare host" },
+    { id: "aaaaaaab-2222", trust: "COMMUNITY", createdAt: "2026-07-01T00:00:00Z" },
+  ];
+
+  it("matches on the prefix the listing actually showed", async () => {
+    // The list renders eight characters, so asking for a full uuid nobody was
+    // shown would be busywork.
+    const revokeEnrollToken = vi.fn().mockResolvedValue({ ok: true });
+    const api = fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }), revokeEnrollToken });
+    const reply = await invoke("enrolments", api, { id: "aaaaaaaa", confirm: true }, "revoke");
+    expect(revokeEnrollToken).toHaveBeenCalledWith("discord:ardax", "aaaaaaaa-1111");
+    expect(reply.tone).toBe("ok");
+  });
+
+  it("refuses an ambiguous prefix rather than revoking the wrong credential", async () => {
+    const revokeEnrollToken = vi.fn();
+    const api = fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }), revokeEnrollToken });
+    const reply = await invoke("enrolments", api, { id: "aaaaaaa", confirm: true }, "revoke");
+    expect(revokeEnrollToken).not.toHaveBeenCalled();
+    expect(reply.text).toContain("matches 2");
+  });
+
+  it("needs confirmation, and names what is being killed", async () => {
+    const revokeEnrollToken = vi.fn();
+    const api = fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }), revokeEnrollToken });
+    const reply = await invoke("enrolments", api, { id: "aaaaaaaa" }, "revoke");
+    expect(revokeEnrollToken).not.toHaveBeenCalled();
+    expect(reply.text).toContain("spare host");
+    expect(reply.text).toContain("can no longer enrol");
+  });
+
+  it("says plainly when nothing matches", async () => {
+    const api = fakeApi({ enrollTokens: vi.fn().mockResolvedValue({ tokens: rows }) });
+    const reply = await invoke("enrolments", api, { id: "zzzz", confirm: true }, "revoke");
+    expect(reply.text).toContain("No enrollment token");
+  });
+
+  it("is destructive; an unredeemed token is a credential", () => {
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("enrolments")!, "revoke")).toBe("destructive");
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("enrolments")!, "list")).toBe("read");
+  });
+});
+
+describe("/workers extensions", () => {
+  it("retargets a worker and says when it takes effect", async () => {
+    const setWorkerExtensions = vi.fn().mockResolvedValue({ ok: true });
+    const reply = await invoke(
+      "workers",
+      fakeApi({ setWorkerExtensions }),
+      { id: "worker-1", extensions: "comikey,omoi" },
+      "extensions",
+    );
+    expect(setWorkerExtensions).toHaveBeenCalledWith("discord:ardax", "worker-1", ["comikey", "omoi"]);
+    expect(reply.footer).toContain("next lease");
+  });
+
+  it("treats an empty list as idle rather than as a mistake", async () => {
+    const setWorkerExtensions = vi.fn().mockResolvedValue({ ok: true });
+    const reply = await invoke(
+      "workers",
+      fakeApi({ setWorkerExtensions }),
+      { id: "worker-1", extensions: "" },
+      "extensions",
+    );
+    expect(setWorkerExtensions).toHaveBeenCalledWith("discord:ardax", "worker-1", []);
+    expect(reply.text).toContain("no jobs at all");
   });
 });
