@@ -122,6 +122,12 @@ const store = {
     untrackedState: "NEW",
     untrackedExtension: "",
     untrackedQuery: "",
+    /**
+     * Rows whose series is already in the series map while the row still says
+     * NEW. Hidden by default: approving one creates a second MangaDex title for
+     * a series that already has one.
+     */
+    untrackedMapped: "hide",
     /** Cursors walked so far; one per page behind the current one. */
     untrackedCursors: [],
     untrackedSort: { column: null, dir: "asc" },
@@ -10049,6 +10055,71 @@ function pauseDialog(name, item, tracked) {
   );
 }
 
+/**
+ * Is this a link, or an id that happens to look odd?
+ *
+ * Deliberately narrow. Extension ids are slugs, uuids and numbers, and one of
+ * them containing a dot is not far-fetched; treating that as a failed link
+ * would refuse a perfectly good id. A scheme, or a host with a path, is the
+ * line — the same test `mdTitleIdFrom` draws for the MangaDex side.
+ */
+function isSourceUrl(value) {
+  const text = String(value ?? "").trim();
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) return true;
+  return /^[^\s/]+\.[^\s/]+\//.test(text);
+}
+
+/**
+ * The extension's own id for the series at this link, or null.
+ *
+ * Answered by the platform's own rows, not by fetching the page: the resolver
+ * reads the queue, the map, and each extension's measured id-in-url rule. Two
+ * ways it refuses rather than guesses, both of which would otherwise write a
+ * mapping that silently never matches a series:
+ *
+ *   - a link belonging to a DIFFERENT extension. Adding it to this map would
+ *     create a row under this extension for an id it has never heard of.
+ *   - a link the resolver can place to an extension but not to a series.
+ */
+async function resolveSourceId(url, extension, button) {
+  const resolution = await act(
+    "source.resolve",
+    () => api(`/source/resolve?url=${encodeURIComponent(url)}`),
+    { button },
+  );
+  if (!resolution) return null;
+  const match = resolution.match ?? null;
+  if (!match) {
+    toast(resolution.reason ?? "could not tell what that link is", false);
+    return null;
+  }
+  if (match.extension !== extension) {
+    toast(
+      `that link is ${match.extension}, not ${extension}; add it on ${match.extension}'s series map`,
+      false,
+    );
+    return null;
+  }
+  if (!match.mangaId) {
+    toast(`that link is ${extension}, but nothing here says which series; type the id`, false);
+    return null;
+  }
+  // Shown rather than written silently: an id derived from a link is a
+  // measurement, and the operator is the one who can tell it is the wrong one.
+  const confirmed = await confirmDialog({
+    title: `That link is ${match.mangaId}`,
+    lead: `${extension} calls the series at that link ${match.mangaId}.`,
+    points: [
+      match.untracked ? `Queued as “${match.untracked.mangaName}” (${match.untracked.state}).` : null,
+      "Worked out from rows this platform already holds, not by reading the page.",
+      "Check it before mapping: an id that is not this extension's own never matches a series, and the mapping simply does nothing.",
+    ].filter(Boolean),
+    confirmLabel: "Use this id",
+    danger: false,
+  });
+  return confirmed ? match.mangaId : null;
+}
+
 function trackedCard(name, tracked) {
   const encoded = encodeURIComponent(name);
 
@@ -10059,7 +10130,11 @@ function trackedCard(name, tracked) {
     placeholder: "filter by external id, MangaDex id, or source",
     "aria-label": "Filter tracked mappings",
   });
-  const mangaId = el("input", { id: "tracked-manga-id", type: "text", placeholder: "external manga id" });
+  const mangaId = el("input", {
+    id: "tracked-manga-id",
+    type: "text",
+    placeholder: "external manga id, or the series' link",
+  });
   const mdMangaId = el("input", {
     id: "tracked-md-id",
     type: "text",
@@ -10227,16 +10302,29 @@ function trackedCard(name, tracked) {
       gatedButton("tracked:append", {
         class: "primary",
         text: "Add mapping",
-        onclick: (event) => {
-          const externalId = mangaId.value.trim();
+        onclick: async (event) => {
+          const typed = mangaId.value.trim();
           const namespace = namespaceInput.value.trim();
-          if (!externalId) return void toast("an external id is required", false);
+          if (!typed) return void toast("an external id, or the series' link, is required", false);
           const parsed = mdTitleIdFrom(mdMangaId.value);
           if (parsed.error) return void toast(parsed.error, false);
           const target = parsed.id;
           // Captured now: `currentTarget` is null by the time the confirmation
           // below resolves, and `act` needs the button to show as pending.
           const button = event.currentTarget;
+
+          /*
+           * A publisher's link is a legitimate answer to "which series".
+           *
+           * The id this field wants is the extension's own — comikey names a
+           * series with a slug, omoi with a uuid, mangaplus with a number — and
+           * an operator arriving from the publisher's page has the link, not
+           * that. Working the id out of the link by hand is both the tedious
+           * part and the part that goes wrong silently: a mistyped id is
+           * accepted by everything here and simply never matches a series.
+           */
+          const externalId = isSourceUrl(typed) ? await resolveSourceId(typed, name, button) : typed;
+          if (!externalId) return;
           const send = () =>
             act(
               "tracked_manga.set",
@@ -10309,9 +10397,12 @@ function trackedCard(name, tracked) {
     ),
     el("p", {
       class: "dim small",
-      text: can("tracked:write")
-        ? "An external id that is already mapped is not added twice: you are asked to confirm the repoint first."
-        : 'Adding a new mapping is allowed. Repointing one that already exists needs the "tracked:write" scope, and is refused with the id it is currently mapped to.',
+      text:
+        (can("tracked:write")
+          ? "An external id that is already mapped is not added twice: you are asked to confirm the repoint first. "
+          : 'Adding a new mapping is allowed. Repointing one that already exists needs the "tracked:write" scope, and is refused with the id it is currently mapped to. ') +
+        "Either field takes a link: paste the publisher's page for the series and its id is worked out, " +
+        "and the MangaDex box takes a mangadex.org/title/… link as well as a bare id.",
     }),
     row(
       search,
@@ -11639,6 +11730,7 @@ VIEWS.untracked = (route) => {
     const q = store.filters.untrackedQuery.trim();
     if (q) params.set("q", q);
     if (store.filters.untrackedExtension) params.set("extension", store.filters.untrackedExtension);
+    params.set("mapped", store.filters.untrackedMapped);
     if (store.filters.untrackedSort.column) {
       params.set("orderBy", store.filters.untrackedSort.column);
       params.set("dir", store.filters.untrackedSort.dir);
@@ -11717,6 +11809,33 @@ VIEWS.untracked = (route) => {
       // The list is a convenience; losing it must not cost the whole view.
     });
 
+  /**
+   * What to do with rows the series map has already answered.
+   *
+   * Hidden is the default and the safe one: those rows are stale, they read NEW
+   * to every button on the page, and Approve on one of them makes a duplicate
+   * title. Only is the cleanup view — it is the list of rows that need closing,
+   * which is otherwise invisible.
+   */
+  const mappedFilter = el(
+    "select",
+    {
+      id: "untracked-mapped",
+      "aria-label": "Rows whose series is already mapped",
+      onchange: (event) => {
+        setFilter({ untrackedMapped: event.target.value });
+        resetPaging();
+      },
+    },
+    [
+      ["hide", "hidden"],
+      ["show", "shown"],
+      ["only", "only these"],
+    ].map(([value, label]) =>
+      el("option", { value, text: label, selected: value === store.filters.untrackedMapped }),
+    ),
+  );
+
   // The queue routinely holds thousands of rows in one state, and an operator
   // arrives knowing the series name rather than where it sits in the list.
   const search = el("input", {
@@ -11755,12 +11874,19 @@ VIEWS.untracked = (route) => {
           el("label", { class: "inline", for: "untracked-q", text: "Search" }),
           search,
         ),
+        el(
+          "span",
+          { class: "row tight" },
+          el("label", { class: "inline", for: "untracked-mapped", text: "Already mapped" }),
+          mappedFilter,
+        ),
         el("button", {
           type: "button",
           text: "Clear",
           onclick: () => {
-            setFilter({ untrackedQuery: "", untrackedExtension: "" });
+            setFilter({ untrackedQuery: "", untrackedExtension: "", untrackedMapped: "hide" });
             extensionFilter.value = "";
+            mappedFilter.value = "hide";
             resetPaging();
           },
         }),
@@ -11807,7 +11933,7 @@ VIEWS.untracked = (route) => {
               item.mangaLanguage,
               chip(item.state),
               String(item.attempts),
-              item.mdMangaId ? mdTitleLink(item.mdMangaId, "on MangaDex") : truncate(item.lastError, 100),
+              untrackedResult(item),
               [
                 routeLink(routeTo("untracked", item.id, null), "Open", { class: "button-link inline" }),
                 // Beside Approve, not behind Open. Approving creates a second
@@ -11928,7 +12054,10 @@ function untrackedBulkBar(selected, rows, queue, note) {
     for (const row of gone) selected.delete(row.id);
   };
 
-  const approvable = inState("NEW", "FAILED");
+  // Not `inState` alone: a ticked row whose series the map has already answered
+  // is refused by the server, and offering it here would make a batch of forty
+  // report failures that were knowable before it started.
+  const approvable = inState("NEW", "FAILED").filter((row) => !row.tracked);
   const skippable = inState("NEW", "FAILED");
   const skipped = inState("SKIPPED");
 
@@ -11950,7 +12079,8 @@ function untrackedBulkBar(selected, rows, queue, note) {
       title: `Create ${targets.length} MangaDex title(s)`,
       lead: `This publishes ${targets.length} real, public title(s) on MangaDex, one after another.`,
       points: [
-        `${targets.length} of the ${count} ticked row(s) are NEW or FAILED; the rest are left alone.`,
+        `${targets.length} of the ${count} ticked row(s) can be created; the rest are not NEW or FAILED, ` +
+          "or are for series the map already answers.",
         "The names are the ones the scrapers guessed. Open a row and correct it first if it looks wrong — a bad name has to be fixed on MangaDex afterwards.",
         "Most series here are already on MangaDex under a name that did not match; Map… finds those without creating anything.",
         "It cannot be undone from here, and what has already been created stays created if you stop it.",
@@ -12106,7 +12236,13 @@ function untrackedBulkBar(selected, rows, queue, note) {
       class: count ? null : "dim",
       text: count ? `${count} selected` : "Tick series to act on several at once",
     }),
-    bulk("Approve…", approveMany, approvable.length, "None of the ticked rows is NEW or FAILED", true),
+    bulk(
+      "Approve…",
+      approveMany,
+      approvable.length,
+      "None of the ticked rows can have a title created: they are not NEW or FAILED, or are already mapped",
+      true,
+    ),
     gatedButton("tracked:append", {
       text: "Map…",
       disabled: count === 0,
@@ -12278,13 +12414,55 @@ function untrackedMapDialog(item, queue) {
   );
 }
 
-function untrackedApproveButton(item, refresh) {
+/**
+ * What became of a queue row, in one cell.
+ *
+ * Three different answers share this column, and the one worth spelling out is
+ * the third: a row that still reads NEW for a series the map already answered.
+ * It looks exactly like work to do, and the work it looks like — Approve —
+ * creates a second MangaDex title for a series that already has one. So it says
+ * "already mapped" in words, names the title, and the buttons beside it are
+ * refused rather than merely inadvisable.
+ */
+function untrackedResult(item) {
+  if (item.tracked && item.state !== "TRACKED") {
+    return el(
+      "div",
+      {},
+      el("div", {}, el("span", { class: "chip warn", text: "already mapped" })),
+      el("div", {}, mdTitleLink(item.tracked.mdMangaId, "on MangaDex")),
+      el("div", {
+        class: "dim small",
+        text:
+          `${item.extension} · ${item.mangaId} is in the series map` +
+          (item.tracked.source ? ` (${item.tracked.source})` : "") +
+          `; this row is out of date.`,
+      }),
+    );
+  }
+  if (item.mdMangaId) return mdTitleLink(item.mdMangaId, "on MangaDex");
+  return truncate(item.lastError, 100);
+}
+
+/**
+ * @param {object} item the queue row
+ * @param {object} refresh the resource to reload after a write
+ * @param {object|null} mapping the series map's answer for this series, where
+ *   the caller has it under another name; the listing carries it as `tracked`.
+ */
+function untrackedApproveButton(item, refresh, mapping = null) {
+  // The series map is the authority on whether a title exists, not the row's
+  // own state: the row is what goes stale. The server refuses this too — this
+  // is the same answer, given before the click rather than after it.
+  const mapped = mapping ?? item.tracked ?? null;
+  const creatable = item.state === "NEW" || item.state === "FAILED";
   return gatedButton("untracked:write", {
     class: "primary",
     text: "Approve",
-    disabled: item.state !== "NEW" && item.state !== "FAILED",
-    title:
-      item.state === "NEW" || item.state === "FAILED"
+    disabled: !creatable || Boolean(mapped),
+    title: mapped
+      ? `Already mapped to ${mapped.mdMangaId}; creating a title would duplicate it`
+      : creatable
         ? "Create the MangaDex title"
         : `${item.state} rows cannot be approved`,
     onclick: async (event) => {
@@ -12364,6 +12542,19 @@ function untrackedDetail(id) {
           : null,
         card(
           null,
+          data.mapping && item.state !== "TRACKED"
+            ? el(
+                "div",
+                { class: "banner" },
+                el("strong", { text: "This series is already mapped. " }),
+                "The series map sends ",
+                el("code", { text: `${item.extension} · ${item.mangaId}` }),
+                " to ",
+                mdTitleLink(data.mapping.mdMangaId, data.mapping.mdMangaId),
+                `, but this row still reads ${item.state}. Creating a title from it would make a ` +
+                  "duplicate, so Approve is refused; map it onto that same title to close the row, or skip it.",
+              )
+            : null,
           item.state === "TRACKED" || item.state === "CREATED"
             ? el("div", {
                 class: "banner info",
@@ -12389,7 +12580,7 @@ function untrackedDetail(id) {
         card(
           "Actions",
           row(
-            untrackedApproveButton(item, detail),
+            untrackedApproveButton(item, detail, data.mapping),
             gatedButton("untracked:write", {
               text: "Skip",
               disabled: !skippable,

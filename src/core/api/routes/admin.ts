@@ -62,11 +62,45 @@ const UNTRACKED_COLUMNS = Prisma.sql`u.id, u.extension, u.manga_id AS "mangaId",
   u.md_applied_by AS "mdAppliedBy",
   u.official_link_checked_at AS "officialLinkCheckedAt",
   u.title_checked_at AS "titleCheckedAt", u.created_at AS "createdAt",
-  u.updated_at AS "updatedAt"`;
+  u.updated_at AS "updatedAt",
+  t.md_manga_id AS "trackedMdMangaId", t.source AS "trackedSource",
+  t.created_at AS "trackedAt"`;
+
+/**
+ * The series map, joined onto the queue by the identity the map is keyed on.
+ *
+ * A queue row and a mapping are about the same series when the extension and
+ * the extension's own id agree; the default catalogue only, because that is the
+ * one the untracked pipeline writes into. Note this says nothing about other
+ * publishers: two extensions covering one series are two identities and two
+ * rows, and both may point at the same MangaDex title quite legitimately.
+ */
+const UNTRACKED_TRACKED_JOIN = Prisma.sql`
+  LEFT JOIN tracked_manga t
+    ON t.extension = u.extension AND t.manga_id = u.manga_id AND t.namespace = ''`;
 
 interface UntrackedRow {
   id: string;
   [key: string]: unknown;
+}
+
+/**
+ * Fold the joined map columns into one `tracked` object, or null.
+ *
+ * A nested object rather than three loose fields because callers ask one
+ * question of it — "is this series already mapped, and to what?" — and three
+ * nullable siblings is three chances to check the wrong one. Null means the
+ * series is not in the map: the honest answer, and the one that makes
+ * `row.tracked` safe to use as the condition it reads as.
+ */
+function withTrackedMapping(row: Record<string, unknown>): Record<string, unknown> {
+  const { trackedMdMangaId, trackedSource, trackedAt, ...rest } = row;
+  return {
+    ...rest,
+    tracked: trackedMdMangaId
+      ? { mdMangaId: trackedMdMangaId, source: trackedSource ?? null, at: trackedAt ?? null }
+      : null,
+  };
 }
 
 /** What the untracked listing may be ordered by, as the console's columns. */
@@ -1392,6 +1426,18 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
            */
           orderBy: z.enum(UNTRACKED_SORTS).optional(),
           dir: z.enum(["asc", "desc"]).default("asc"),
+          /**
+           * What to do with rows whose series is ALREADY in the series map
+           * while the row itself still says otherwise.
+           *
+           * These are stale, and dangerously so: the row reads NEW, so the
+           * pipeline offers it for title creation, and approving it creates a
+           * SECOND MangaDex title for a series that already has one. That has
+           * happened here, and cleaning it up meant deleting chapters off a
+           * live title. So they are out of the listing by default, `show`
+           * puts them back, and `only` is the cleanup view.
+           */
+          mapped: z.enum(["hide", "show", "only"]).default("hide"),
         })
         .parse(req.query ?? {});
 
@@ -1408,6 +1454,12 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           Prisma.sql`(u.manga_name ILIKE ${like} OR u.manga_id ILIKE ${like} OR u.extension ILIKE ${like})`,
         );
       }
+      // A row that IS state TRACKED and has a mapping is not stale, it is
+      // finished, and the TRACKED filter exists to look at exactly those; only
+      // the rows whose state disagrees with the map are hidden.
+      const stale = Prisma.sql`(t.md_manga_id IS NOT NULL AND u.state <> 'TRACKED')`;
+      if (query.mapped === "hide") filter.push(Prisma.sql`NOT ${stale}`);
+      if (query.mapped === "only") filter.push(stale);
 
       const page = [...filter];
       const sorted = sortedBy(
@@ -1437,6 +1489,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         ctx.prisma.$queryRaw<(UntrackedRow & Record<string, unknown>)[]>(Prisma.sql`
           SELECT ${UNTRACKED_COLUMNS}${sorted ? Prisma.sql`, ${sorted.order.select}` : Prisma.empty}
           FROM untracked_manga u
+          ${UNTRACKED_TRACKED_JOIN}
           ${predicate(page)}
           -- Tie-broken by id: created_at alone is not unique here — a run
           -- reports a whole catalogue at once, so hundreds of rows can share a
@@ -1449,7 +1502,7 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         // tell "that is all of them" from "here is the first page of two
         // thousand", which is exactly what the old fixed cap looked like.
         ctx.prisma.$queryRaw<{ total: bigint }[]>(
-          Prisma.sql`SELECT count(*) AS total FROM untracked_manga u ${predicate(filter)}`,
+          Prisma.sql`SELECT count(*) AS total FROM untracked_manga u ${UNTRACKED_TRACKED_JOIN} ${predicate(filter)}`,
         ),
       ]);
 
@@ -1463,7 +1516,9 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
               ? encodeSortCursor(sorted.name, sorted.dir, sorted.order.cursorOf(last))
               : last.id
             : null,
-        untracked: sorted ? rows.map((row) => sorted.order.strip(row)) : rows,
+        untracked: (sorted ? rows.map((row) => sorted.order.strip(row)) : rows).map((row) =>
+          withTrackedMapping(row),
+        ),
         total: Number(counted[0]?.total ?? 0),
         limit: query.limit,
         orderedBy: query.orderBy ?? null,
@@ -2029,6 +2084,47 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       if (!ctx.titleService) {
         return reply.code(503).send({ error: "title service not available on this instance" });
       }
+
+      /*
+       * A stale queue row is how a duplicate title gets made.
+       *
+       * The row says NEW because nothing updated it when the series was mapped
+       * by another route — a hand-written map entry, a batch paste, the
+       * auto-map. Approving it then creates a second MangaDex title for a
+       * series that already has one, and un-duplicating a catalogue afterwards
+       * means deleting chapters off a live title. The map is the authority, so
+       * it is asked here rather than trusted to have kept the row in step.
+       *
+       * The check is on this extension's own identity: another publisher's
+       * mapping onto the same MangaDex title is a legitimate second source, not
+       * a duplicate, and must not block anything.
+       */
+      const row = await ctx.prisma.untrackedManga.findUnique({
+        where: { id },
+        select: { extension: true, mangaId: true },
+      });
+      if (row) {
+        const mapped = await ctx.prisma.trackedManga.findUnique({
+          where: {
+            extension_namespace_mangaId: {
+              extension: row.extension,
+              namespace: DEFAULT_NAMESPACE,
+              mangaId: row.mangaId,
+            },
+          },
+          select: { mdMangaId: true },
+        });
+        if (mapped) {
+          return reply.code(409).send({
+            error:
+              `${row.extension}:${row.mangaId} is already mapped to ${mapped.mdMangaId}; ` +
+              "creating a title for it would make a duplicate. This queue row is out of date " +
+              "with the series map — skip it, or map it onto that same title to close it.",
+            mdMangaId: mapped.mdMangaId,
+          });
+        }
+      }
+
       const result = await ctx.titleService.approve(id, actor(req));
       if ("error" in result) return reply.code(409).send(result);
       return { ok: true, ...result };
