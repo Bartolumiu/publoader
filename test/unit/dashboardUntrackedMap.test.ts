@@ -111,6 +111,18 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
     // The paste path: one title read back by id rather than searched for.
     { match: /\/mangadex\/title\//, body: { title: SEARCH_RESULTS[0] } },
     { match: /\/untracked\/automap$/, body: () => AUTOMAP_REPORT },
+    {
+      match: /\/untracked\/extensions\?/,
+      body: {
+        state: "NEW",
+        mapped: "hide",
+        extensions: [
+          { extension: "opstest", count: 116 },
+          { extension: "mangaup_global", count: 92 },
+        ],
+        total: 208,
+      },
+    },
     { match: /\/extensions$/, body: { extensions: [{ name: "opstest" }, { name: "mangaup_global" }] } },
     { match: /\/untracked\/[^/]+\/map$/, body: { ok: true, mdMangaId: MATCH_ID } },
     { match: /\/untracked\/[^/?]+$/, body: { untracked: ROW, mangadex: null } },
@@ -437,10 +449,24 @@ describe("mapping an untracked series onto an existing MangaDex title", () => {
     const ext = doc.getElementById("untracked-extension");
     expect(ext, "the extension filter is not rendered").toBeTruthy();
     expect(ext.tagName).toBe("SELECT");
+    // Ordered by how much is waiting rather than alphabetically: the source
+    // with a backlog is the one to open.
     expect([...ext.querySelectorAll("option")].map((o: { value: string }) => o.value)).toEqual([
       "",
-      "mangaup_global",
       "opstest",
+      "mangaup_global",
+    ]);
+    /*
+     * The counts are what make "all extensions" readable. A scrape inserts a
+     * publisher's whole catalogue in one millisecond and the queue is
+     * newest-first, so the first pages of the unfiltered view are one source
+     * every time; without numbers there is no way to tell that from "that
+     * source is all there is".
+     */
+    expect([...ext.querySelectorAll("option")].map((o: { textContent: string }) => o.textContent)).toEqual([
+      "All extensions · 208",
+      "opstest · 116",
+      "mangaup_global · 92",
     ]);
 
     // Walk to page two first, so the reset is observable.

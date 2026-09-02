@@ -98,7 +98,11 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
       body: { chapters: [], total: 0, limit: 100, nextCursor: null, summary: [] },
     },
     {
-      match: /\/untracked/,
+      match: /\/untracked\/extensions\?/,
+      body: { state: "NEW", mapped: "hide", extensions: [{ extension: "opstest", count: 900 }], total: 900 },
+    },
+    {
+      match: /\/untracked\?/,
       body: { untracked: UNTRACKED, total: 900, limit: 50, nextCursor: "cursor-two" },
     },
     { match: /\/runs\?limit=1/, body: { runs: [] } },
@@ -276,7 +280,9 @@ describe("a header on a server-paged table asks the server to order it", () => {
     clickHeader(host, "Series");
     await settle();
 
-    const query = lastQuery(/\/untracked/);
+    // The listing, not the picker's counts: both live under /untracked, and
+    // only one of them is ordered.
+    const query = lastQuery(/\/untracked\?/);
     expect(query.get("orderBy")).toBe("series");
     expect(query.get("dir")).toBe("asc");
   });

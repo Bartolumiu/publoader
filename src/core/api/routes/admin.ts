@@ -1665,12 +1665,18 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           Prisma.sql`(u.manga_name ILIKE ${like} OR u.manga_id ILIKE ${like} OR u.extension ILIKE ${like})`,
         );
       }
-      // A row that IS state TRACKED and has a mapping is not stale, it is
-      // finished, and the TRACKED filter exists to look at exactly those; only
-      // the rows whose state disagrees with the map are hidden.
-      const stale = Prisma.sql`(t.md_manga_id IS NOT NULL AND u.state <> 'TRACKED')`;
-      if (query.mapped === "hide") filter.push(Prisma.sql`NOT ${stale}`);
-      if (query.mapped === "only") filter.push(stale);
+      // Mapped is mapped, whatever the row's own state says.
+      //
+      // This used to carve out state TRACKED, on the grounds that such a row is
+      // finished rather than stale. True, and beside the point: this is a
+      // TRIAGE queue, and a series that already has a MangaDex title is not
+      // triage — it is history. Two thousand finished rows sitting in the queue
+      // is how the eighty that need a decision get lost. `show` and `only` are
+      // how you look at the finished ones, and the console switches to `show`
+      // by itself when you ask for a state that only finished rows are in.
+      const resolved = Prisma.sql`t.md_manga_id IS NOT NULL`;
+      if (query.mapped === "hide") filter.push(Prisma.sql`NOT (${resolved})`);
+      if (query.mapped === "only") filter.push(resolved);
 
       const page = [...filter];
       const sorted = sortedBy(
@@ -1735,6 +1741,59 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         orderedBy: query.orderBy ?? null,
         dir: query.dir,
         sortable: UNTRACKED_SORTS,
+      };
+    });
+
+    /**
+     * How many rows each source has in this state, for the queue's own picker.
+     *
+     * WHY IT IS NOT OPTIONAL DECORATION. The queue is ordered newest-first, and
+     * a scrape adds a publisher's whole catalogue in one insert — 116 omoi rows
+     * share a single millisecond — so the first two pages of "all extensions"
+     * are one source, every time, and the 92 comikey rows behind them are
+     * invisible. The picker listed every published extension with no numbers,
+     * so "omoi is all there is" and "comikey's are on page three" looked
+     * identical, and choosing a source with nothing waiting looked like a bug.
+     *
+     * Counts respect the state and the mapped filter, which are what change
+     * them; not the free-text search, which is a needle in whichever haystack
+     * this describes.
+     */
+    scope.get("/api/v1/admin/untracked/extensions", { preHandler: requireScope("untracked:read") }, async (req) => {
+      const query = parseOrThrow(
+        z.object({
+          state: z.enum(["NEW", "CREATING", "CREATED", "TRACKED", "FAILED", "SKIPPED"]).optional(),
+          mapped: z.enum(["hide", "show", "only"]).default("hide"),
+        }),
+        req.query ?? {},
+      );
+
+      const rows = await ctx.prisma.$queryRaw<{ extension: string; total: bigint }[]>(Prisma.sql`
+        SELECT u.extension, count(*) AS total
+        FROM untracked_manga u
+        ${UNTRACKED_TRACKED_JOIN}
+        WHERE ${Prisma.join(
+          [
+            query.state ? Prisma.sql`u.state = ${query.state}::"UntrackedState"` : Prisma.sql`TRUE`,
+            query.mapped === "hide"
+              ? Prisma.sql`t.md_manga_id IS NULL`
+              : query.mapped === "only"
+                ? Prisma.sql`t.md_manga_id IS NOT NULL`
+                : Prisma.sql`TRUE`,
+          ],
+          " AND ",
+        )}
+        GROUP BY u.extension
+        ORDER BY count(*) DESC, u.extension ASC
+      `);
+
+      return {
+        state: query.state ?? null,
+        mapped: query.mapped,
+        // Ordered by how much is waiting: the source with a backlog is the one
+        // to open, and reading that off an alphabetical list is work.
+        extensions: rows.map((row) => ({ extension: row.extension, count: Number(row.total) })),
+        total: rows.reduce((sum, row) => sum + Number(row.total), 0),
       };
     });
 
@@ -2296,9 +2355,6 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
 
     scope.post("/api/v1/admin/untracked/:id/approve", { preHandler: requireScope("untracked:write") }, async (req, reply) => {
       const { id } = req.params as { id: string };
-      if (!ctx.titleService) {
-        return reply.code(503).send({ error: "title service not available on this instance" });
-      }
 
       /*
        * A stale queue row is how a duplicate title gets made.
@@ -2340,6 +2396,12 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         }
       }
 
+      // After the duplicate check, deliberately: refusing to make a second
+      // title for a series that already has one needs no MangaDex credential,
+      // and "this instance holds none" is the less useful of the two answers.
+      if (!ctx.titleService) {
+        return reply.code(503).send({ error: "title service not available on this instance" });
+      }
       const result = await ctx.titleService.approve(id, actor(req));
       if ("error" in result) return reply.code(409).send(result);
       return { ok: true, ...result };

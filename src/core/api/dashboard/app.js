@@ -9130,6 +9130,11 @@ function extensionDetail(name, tab) {
                       untrackedState: state,
                       untrackedQuery: "",
                       untrackedCursors: [],
+                      // TRACKED and CREATED rows are mapped by definition, and
+                      // the queue hides mapped rows by default; arriving from a
+                      // tile that says "1,078" onto an empty page would read as
+                      // the count being wrong.
+                      untrackedMapped: state === "TRACKED" || state === "CREATED" ? "show" : "hide",
                     }),
                 }),
               ),
@@ -12084,6 +12089,9 @@ VIEWS.untracked = (route) => {
   const resetPaging = () => {
     setFilter({ untrackedCursors: [] });
     void queue.load({ force: true });
+    // The counts are per state and per mapped filter, so they are as stale as
+    // the listing is after either changes.
+    void facets.load({ force: true });
   };
   const page = (trail) => {
     setFilter({ untrackedCursors: trail });
@@ -12096,7 +12104,19 @@ VIEWS.untracked = (route) => {
       id: "untracked-state",
       "aria-label": "Untracked state filter",
       onchange: (event) => {
-        setFilter({ untrackedState: event.target.value });
+        const state = event.target.value;
+        // TRACKED and CREATED rows are mapped by definition, and mapped rows
+        // are hidden by default — so asking for one of those states while the
+        // default is in force would answer with an empty page, which reads as
+        // "there are none" rather than "you filtered them out". Asking for that
+        // state IS asking to see resolved rows, so the other control moves too,
+        // visibly, rather than the request being quietly refused.
+        const patch = { untrackedState: state };
+        if ((state === "TRACKED" || state === "CREATED") && store.filters.untrackedMapped === "hide") {
+          patch.untrackedMapped = "show";
+          mappedFilter.value = "show";
+        }
+        setFilter(patch);
         resetPaging();
       },
     },
@@ -12106,44 +12126,59 @@ VIEWS.untracked = (route) => {
   );
 
   /**
-   * Which source's queue to look at.
+   * Which source's queue to look at, and how much each has waiting.
    *
    * A picker rather than leaning on the free-text box: "omoi" typed there also
    * matches every series with omoi in its title, and cannot say "this source
-   * and no other" at all. The yield of the auto-map is very uneven by source,
-   * so which one you are looking at is the first question, not a refinement.
+   * and no other" at all.
+   *
+   * WHY THE COUNTS ARE LOAD-BEARING. The queue is newest-first and a scrape
+   * inserts a publisher's whole catalogue at once — 116 omoi rows sharing one
+   * millisecond — so the first two pages of "all extensions" are one source,
+   * every time. Without numbers, "omoi is all there is" and "comikey's 92 are
+   * on page three" look exactly the same, and picking a source with nothing
+   * waiting looks like a broken filter rather than an empty one.
    */
-  const extensionFilter = el(
-    "select",
-    {
-      id: "untracked-extension",
-      "aria-label": "Extension filter",
-      onchange: (event) => {
-        setFilter({ untrackedExtension: event.target.value });
-        resetPaging();
-      },
-    },
-    el("option", { value: "", text: "All extensions" }),
-  );
-  void api("/extensions")
-    .then((data) => {
-      const names = (data.extensions ?? [])
-        .map((e) => e.name ?? e)
-        .filter(Boolean)
-        .sort();
-      for (const name of names) {
-        extensionFilter.append(
+  const facets = new Resource("untracked-facets", () => {
+    const params = new URLSearchParams({ mapped: store.filters.untrackedMapped });
+    params.set("state", store.filters.untrackedState);
+    return api(`/untracked/extensions?${params}`);
+  });
+
+  const extensionFilter = live(
+    [facets],
+    (data) => {
+      const counted = data.extensions ?? [];
+      const chosen = store.filters.untrackedExtension;
+      // A source with nothing in this state still has to be selectable if it
+      // is the one currently selected, or changing state would silently move
+      // you to a different filter than the one on screen.
+      const known = counted.map((e) => e.extension);
+      const options = [...counted];
+      if (chosen && !known.includes(chosen)) options.push({ extension: chosen, count: 0 });
+
+      return el(
+        "select",
+        {
+          id: "untracked-extension",
+          "aria-label": "Extension filter",
+          onchange: (event) => {
+            setFilter({ untrackedExtension: event.target.value });
+            resetPaging();
+          },
+        },
+        el("option", { value: "", text: `All extensions · ${(data.total ?? 0).toLocaleString()}` }),
+        options.map((entry) =>
           el("option", {
-            value: name,
-            text: name,
-            selected: name === store.filters.untrackedExtension,
+            value: entry.extension,
+            text: `${entry.extension} · ${entry.count.toLocaleString()}`,
+            selected: entry.extension === chosen,
           }),
-        );
-      }
-    })
-    .catch(() => {
-      // The list is a convenience; losing it must not cost the whole view.
-    });
+        ),
+      );
+    },
+    { reserve: 28, skeleton: () => el("span", { class: "dim small", text: "sources…" }) },
+  );
 
   /**
    * What to do with rows the series map has already answered.
@@ -12221,7 +12256,9 @@ VIEWS.untracked = (route) => {
           text: "Clear",
           onclick: () => {
             setFilter({ untrackedQuery: "", untrackedExtension: "", untrackedMapped: "hide" });
-            extensionFilter.value = "";
+            // The extension picker redraws itself from the filter it was just
+            // given; only the two plain controls need putting back by hand.
+            search.value = "";
             mappedFilter.value = "hide";
             resetPaging();
           },

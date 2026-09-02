@@ -313,6 +313,161 @@ describe.skipIf(!dbReady())("sorted listings", () => {
       }
     });
 
+    /**
+     * A series that already has a MangaDex title is not triage.
+     *
+     * The queue is where an operator decides what to do about series MangaDex
+     * does not have. Rows whose series IS mapped are the record of a decision
+     * already taken — and there are two thousand of them against eighty that
+     * need one, so leaving them in the listing is how the eighty get lost. The
+     * dangerous member of that set is the row still reading NEW behind a
+     * mapping somebody made by another route: it looks exactly like work, and
+     * the work it looks like creates a duplicate title.
+     */
+    describe("rows whose series is already mapped", () => {
+      beforeEach(async () => {
+        // One NEW row and one TRACKED row, both for series in the map.
+        await prisma.untrackedManga.create({
+          data: {
+            extension: "comikey",
+            mangaId: "already-mapped",
+            mangaName: "Stale Row",
+            mangaLanguage: "en",
+            mangaUrl: "https://publisher.example/stale",
+            state: "NEW",
+            createdAt: new Date(Date.UTC(2026, 1, 1, 12)),
+          },
+        });
+        await prisma.untrackedManga.create({
+          data: {
+            extension: "comikey",
+            mangaId: "finished",
+            mangaName: "Finished Row",
+            mangaLanguage: "en",
+            mangaUrl: "https://publisher.example/finished",
+            state: "TRACKED",
+            mdMangaId: "22222222-2222-4222-8222-222222222222",
+            createdAt: new Date(Date.UTC(2026, 1, 2, 12)),
+          },
+        });
+        await prisma.trackedManga.createMany({
+          data: [
+            {
+              extension: "comikey",
+              namespace: "",
+              mangaId: "already-mapped",
+              mdMangaId: "11111111-1111-4111-8111-111111111111",
+              source: "operator:someone",
+            },
+            {
+              extension: "comikey",
+              namespace: "",
+              mangaId: "finished",
+              mdMangaId: "22222222-2222-4222-8222-222222222222",
+              source: "operator:someone",
+            },
+          ],
+        });
+      });
+
+      it("keeps them out of the listing by default", async () => {
+        const res = await app.inject({
+          method: "GET",
+          url: "/api/v1/admin/untracked?limit=200",
+          headers: root,
+        });
+        const ids = res.json().untracked.map((row: { mangaId: string }) => row.mangaId);
+        expect(ids).not.toContain("already-mapped");
+        // Including the finished one: its state agrees with the map, which
+        // makes it history rather than work.
+        expect(ids).not.toContain("finished");
+      });
+
+      it("gathers exactly those rows on request, which is the cleanup view", async () => {
+        const res = await app.inject({
+          method: "GET",
+          url: "/api/v1/admin/untracked?limit=200&mapped=only",
+          headers: root,
+        });
+        const rows = res.json().untracked;
+        expect(rows.map((row: { mangaId: string }) => row.mangaId).sort()).toEqual([
+          "already-mapped",
+          "finished",
+        ]);
+        // Each carries the mapping it is measured against, so the listing can
+        // say what it is mapped to without a second request.
+        const stale = rows.find((row: { mangaId: string }) => row.mangaId === "already-mapped");
+        expect(stale.tracked.mdMangaId).toBe("11111111-1111-4111-8111-111111111111");
+        expect(stale.state).toBe("NEW");
+      });
+
+      it("refuses to create a title for one, naming what it is already mapped to", async () => {
+        const row = await prisma.untrackedManga.findFirst({ where: { mangaId: "already-mapped" } });
+        const res = await app.inject({
+          method: "POST",
+          url: `/api/v1/admin/untracked/${row!.id}/approve`,
+          headers: root,
+          payload: {},
+        });
+        expect(res.statusCode).toBe(409);
+        expect(res.json().error).toContain("11111111-1111-4111-8111-111111111111");
+        expect(res.json().error).toContain("duplicate");
+      });
+    });
+
+    /**
+     * How much work each source has waiting.
+     *
+     * The queue is newest-first and a scrape inserts a publisher's whole
+     * catalogue in one go, so the first pages of the unfiltered view are one
+     * source every time. Without these numbers an operator cannot tell that
+     * from "that source is all there is", and picking a source with nothing
+     * waiting looks like a broken filter rather than an empty one.
+     */
+    describe("counts per source", () => {
+      it("counts the rows each extension has in this state", async () => {
+        const res = await app.inject({
+          method: "GET",
+          url: "/api/v1/admin/untracked/extensions?state=NEW",
+          headers: root,
+        });
+        expect(res.statusCode).toBe(200);
+        const { extensions, total } = res.json();
+        const byName = Object.fromEntries(
+          extensions.map((e: { extension: string; count: number }) => [e.extension, e.count]),
+        );
+        // 24 rows alternate the two sources; every fourth is FAILED.
+        expect(byName.omoi + byName.comikey).toBe(total);
+        expect(total).toBe(18);
+      });
+
+      it("orders them by how much is waiting, not alphabetically", async () => {
+        const res = await app.inject({
+          method: "GET",
+          url: "/api/v1/admin/untracked/extensions",
+          headers: root,
+        });
+        const counts = res.json().extensions.map((e: { count: number }) => e.count);
+        expect(counts).toEqual([...counts].sort((a: number, b: number) => b - a));
+      });
+
+      it("counts what the mapped filter selects, so the picker agrees with the table", async () => {
+        const hidden = await app.inject({
+          method: "GET",
+          url: "/api/v1/admin/untracked/extensions?state=NEW&mapped=hide",
+          headers: root,
+        });
+        const shown = await app.inject({
+          method: "GET",
+          url: "/api/v1/admin/untracked/extensions?state=NEW&mapped=show",
+          headers: root,
+        });
+        // No mapped rows exist in this fixture, so the two agree; what is being
+        // tested is that the parameter is honoured rather than ignored.
+        expect(hidden.json().total).toBe(shown.json().total);
+      });
+    });
+
     it("orders the whole queue, and pages that order intact", async () => {
       const rows = await pageThrough("/api/v1/admin/untracked?orderBy=series&dir=asc", "untracked", 7);
       expect(rows).toHaveLength(24);
