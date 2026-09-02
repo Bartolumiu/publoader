@@ -77,6 +77,15 @@ const store = {
     queueExtension: "",
     queueLanguage: "",
     queueQ: "",
+    /**
+     * Rows per fetch. Paging here is keyset, so a deep queue is reached by
+     * walking rather than by jumping to an offset — which is deliberate,
+     * because the queue drains while it is being read and an offset page skips
+     * rows that moved and repeats rows that did not. The cost is that 31,000
+     * rows is 310 presses of Next at the old fixed 100. This does not remove
+     * that cost, it divides it: the API caps a page at 500.
+     */
+    queueLimit: "100",
     /** Keyset cursors already walked, so "Back" does not need a second scheme. */
     queueCursors: [],
     /**
@@ -2351,7 +2360,18 @@ function stopSummaryPolling() {
   summaryTimer = null;
 }
 
-const IN_FLIGHT_JOB_STATES = ["QUEUED", "LEASED", "EXECUTING", "INGESTING", "RUNNING"];
+/**
+ * The `JobState` values that mean a job is still going to do something.
+ *
+ * These are job states, and only job states. The list used to read
+ * `QUEUED, LEASED, EXECUTING, INGESTING, RUNNING`, which mixed two enums and
+ * matched almost nothing: `EXECUTING` and `INGESTING` are `RunState` values,
+ * and `QUEUED` exists in neither — the job state for waiting work is `PENDING`.
+ * So the header counted `LEASED + RUNNING` and silently dropped every job that
+ * had been queued but not yet claimed, which is exactly the state a backlog
+ * sits in. "jobs in flight" read 0 while jobs were piling up.
+ */
+const IN_FLIGHT_JOB_STATES = ["PENDING", "LEASED", "RUNNING"];
 
 function renderSummary() {
   const data = summary.data;
@@ -2391,18 +2411,26 @@ function renderSummary() {
   const quarantineOutstanding = stats?.errorsOutstanding?.submissions ?? stats?.quarantined ?? 0;
   queueNode.className = `summary-n${stats && quarantineOutstanding > 0 ? " bad" : ""}`;
 
-  // The strip's only link, and only while it leads somewhere this principal can
-  // open: an anchor that 403s on arrival is worse than a plain number.
-  const queueLink = $("sum-queue-link");
-  if (can("runs:read")) {
-    queueLink.setAttribute("href", routeTo("queues", null, "tasks"));
-    queueLink.removeAttribute("aria-disabled");
-    queueLink.title = "Open the upload queue";
-  } else {
-    queueLink.removeAttribute("href");
-    queueLink.setAttribute("aria-disabled", "true");
-    queueLink.removeAttribute("title");
-  }
+  // Links only while they lead somewhere this principal can open: an anchor
+  // that 403s on arrival is worse than a plain number. Both counts in the strip
+  // now lead to the thing they are counting, because a number an operator can
+  // read and not act on prompts a question — *which* ones — that the strip
+  // otherwise leaves them to answer by retyping a filter by hand.
+  const stripLink = (id, href, title) => {
+    const node = $(id);
+    if (!node) return;
+    if (can("runs:read")) {
+      node.setAttribute("href", href);
+      node.removeAttribute("aria-disabled");
+      node.title = title;
+    } else {
+      node.removeAttribute("href");
+      node.setAttribute("aria-disabled", "true");
+      node.removeAttribute("title");
+    }
+  };
+  stripLink("sum-queue-link", routeTo("queues", null, "tasks"), "Open the upload queue");
+  stripLink("sum-jobs-link", routeTo("runs"), "Open the runs these jobs belong to");
 
   const run = data?.lastRun ?? null;
   $("sum-run").textContent = run
@@ -3774,6 +3802,22 @@ function queueActiveFilter() {
   return filter;
 }
 
+/**
+ * How many rows a queue fetch asks for.
+ *
+ * The sizes offered stop at 500 because that is the route's own
+ * `limit: z.coerce.number().int().min(1).max(500)`; offering 1000 would just
+ * turn a page press into a 400. Clamped rather than trusted on read, since the
+ * value survives in the filter store across reloads and a stale or hand-edited
+ * one must not be able to send a request the API refuses.
+ */
+const QUEUE_PAGE_SIZES = ["100", "250", "500"];
+
+function queuePageSize() {
+  const chosen = String(store.filters.queueLimit ?? "");
+  return QUEUE_PAGE_SIZES.includes(chosen) ? chosen : "100";
+}
+
 /** Whether the filter card narrows anything beyond the Kind picker. */
 function queueFilterIsNarrowed() {
   return Object.keys(queueActiveFilter()).some((key) => key !== "kind");
@@ -3815,10 +3859,14 @@ VIEWS.queues = (route) => {
   const f = () => store.filters;
 
   const queryString = (extra = {}) => {
-    // Newest first. The server's default is the claim order (what drains next);
-    // a queue is read here to see what has just arrived, and the page that
-    // matters is the one at the recent end.
-    const q = new URLSearchParams({ limit: "100", sort: "desc" });
+    // Claim order: what drains next, then the one after it, out to furthest.
+    // This read "newest first" on the theory that a queue is opened to see what
+    // has just arrived — true of a queue that keeps up, and wrong of one that
+    // does not. With 31,000 rows spread six weeks out, the recent end is the
+    // work nobody will see for a month, and the first page showed exactly the
+    // rows least worth looking at. `asc` is the server's own default and the
+    // order a reorder is checked against, so the page now agrees with both.
+    const q = new URLSearchParams({ limit: queuePageSize(), sort: "asc" });
     if (f().queueKind) q.set("kind", f().queueKind);
     if (f().queueState) q.set("state", f().queueState);
     if (f().queueDedupeKey) q.set("dedupeKey", f().queueDedupeKey);
@@ -3942,6 +3990,30 @@ function queueDepthTile(entry) {
 }
 
 /**
+ * One completed row's link into the list, filtered to exactly that cell.
+ *
+ * The outstanding tiles above have been openable since they existed; the
+ * completed rows were plain text, which made "9,638 UPLOADs went through" a
+ * number an operator could read and then not act on. The question it prompts —
+ * *which* ones — had no answer short of retyping the filter by hand.
+ *
+ * Both cells link rather than just the kind, because the count is the part
+ * people aim at, and a link that is live on half a row reads as a bug.
+ */
+function queueDoneLink(entry, text) {
+  return el(
+    "a",
+    {
+      class: "linked",
+      href: routeTo("queues", null, "tasks"),
+      title: `Open the ${entry.count.toLocaleString()} completed ${entry.kind} task(s)`,
+      onclick: () => setFilter({ queueKind: entry.kind, queueState: "DONE", queueCursors: [] }),
+    },
+    text,
+  );
+}
+
+/**
  * What the queue still owes, and (folded away) what it has already settled.
  *
  * DONE is deliberately not a tile. It is both the largest number here and the
@@ -3972,7 +4044,7 @@ function outstandingTasks(counts, { emptyText }) {
             done
               .slice()
               .sort((a, b) => a.kind.localeCompare(b.kind))
-              .map((entry) => [entry.kind, String(entry.count)]),
+              .map((entry) => [queueDoneLink(entry, entry.kind), queueDoneLink(entry, String(entry.count))]),
             { empty: "Nothing has completed yet." },
           ),
         )
@@ -4026,9 +4098,11 @@ function queueChaptersPanel() {
   };
 
   const queryString = () => {
-    // Newest first, as on the Tasks tab; `position` is unaffected and still
-    // counts from the front of the claim order.
-    const q = new URLSearchParams({ limit: "100", sort: "desc" });
+    // Claim order, as on the Tasks tab: what goes to MangaDex next, first.
+    // `position` was already counting from the front of the claim order, so
+    // this makes the rows agree with the number beside them instead of running
+    // against it.
+    const q = new URLSearchParams({ limit: queuePageSize(), sort: "asc" });
     if (f().queueChapterKind) q.set("kind", f().queueChapterKind);
     if (f().queueChapterState) q.set("state", f().queueChapterState);
     if (f().queueChapterQuery) q.set("q", f().queueChapterQuery);
@@ -4321,6 +4395,12 @@ function queueFilterCard(onChange) {
             queueExtension: "",
             queueLanguage: "",
             queueQ: "",
+            // Cursors name positions in the filtered sequence, so they mean
+            // nothing once the filter is gone. Page size is not a filter and is
+            // deliberately kept: an operator who chose 500 to get through a
+            // deep queue has not asked to be put back on 100 by clearing a
+            // search box.
+            queueCursors: [],
           });
           onChange();
         },
@@ -4339,6 +4419,29 @@ function queueFilterCard(onChange) {
         onChange();
       }),
       text("queue-language", "Language", "queueLanguage", { placeholder: "exact code, e.g. en" }),
+      // Paging, not filtering, so it sits at the end of the row rather than
+      // among the predicates. Changing it resets the walked cursors: they name
+      // positions in a page sequence of the old size, and replaying them
+      // against a different one would skip or repeat rows.
+      el(
+        "div",
+        { class: "row tight" },
+        el("label", { class: "inline", for: "queue-limit", text: "Rows per page" }),
+        el(
+          "select",
+          {
+            id: "queue-limit",
+            title: "How many rows each Next fetches. The API allows at most 500.",
+            onchange: (event) => {
+              setFilter({ queueLimit: event.target.value, queueCursors: [] });
+              onChange();
+            },
+          },
+          QUEUE_PAGE_SIZES.map((size) =>
+            el("option", { value: size, text: size, selected: size === queuePageSize() }),
+          ),
+        ),
+      ),
     ),
     row(
       gatedButton("runs:write", {
