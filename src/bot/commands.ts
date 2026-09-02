@@ -121,6 +121,28 @@ export interface BotCommand {
   run(ctx: HandlerContext): Promise<BotReply>;
 }
 
+/**
+ * Turn a registration failure into the sentence that names its actual cause.
+ *
+ * Discord's two failures here need opposite fixes and are trivially told apart
+ * by status, so guessing in the log line is worse than useless: a 400 hint that
+ * says "check the invite scope" sends whoever is reading it to Discord's
+ * settings when the bug is in this file.
+ */
+export function describeRegistrationFailure(err: unknown): string {
+  const status = (err as { status?: unknown })?.status;
+  if (status === 400) {
+    return "Discord rejected the command definitions themselves (400 Invalid Form Body), so NO guild has commands. The error names the offending command by index; test/unit/botCommandShape.test.ts checks for the common causes.";
+  }
+  if (status === 403) {
+    return "Discord refused access to this guild (403). The invite almost certainly omitted the `applications.commands` scope; re-authorize the bot for that server.";
+  }
+  if (status === 404) {
+    return "Discord does not know this guild (404). The bot is not a member of it.";
+  }
+  return "Discord refused the registration for this guild.";
+}
+
 export function resolveSensitivity(command: BotCommand, subcommand: string | null): Sensitivity {
   if (typeof command.sensitivity === "string") return command.sensitivity;
   const found = subcommand ? command.sensitivity[subcommand] : undefined;
@@ -2563,11 +2585,16 @@ const commands: BotCommand[] = [
           .setName("set-user")
           .setDescription("Grant and deny scopes for one account. Both lists are replaced.")
           .addStringOption((o) => o.setName("id").setDescription("Account id.").setRequired(true))
-          .addStringOption((o) => o.setName("grant").setDescription("Comma-separated scopes to add."))
-          .addStringOption((o) => o.setName("deny").setDescription("Comma-separated scopes to refuse."))
+          // `confirm` is declared here, before the optional lists, because
+          // Discord rejects a command whose required options do not all come
+          // first — and it rejects the *whole* registration over it, in every
+          // guild. Reads slightly oddly in the picker; the alternative was no
+          // slash commands at all. See test/unit/botCommandShape.test.ts.
           .addBooleanOption((o) =>
             o.setName("confirm").setDescription("Yes, change what this account may do.").setRequired(true),
-          ),
+          )
+          .addStringOption((o) => o.setName("grant").setDescription("Comma-separated scopes to add."))
+          .addStringOption((o) => o.setName("deny").setDescription("Comma-separated scopes to refuse.")),
       ),
     async run(ctx) {
       const sub = ctx.options.subcommand();

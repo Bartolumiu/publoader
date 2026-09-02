@@ -33,6 +33,7 @@ import type { AuthzSource } from "./authzSource.js";
 import {
   ALL_COMMANDS,
   COMMANDS_BY_NAME,
+  describeRegistrationFailure,
   resolveSensitivity,
   runCommand,
   type BotCommand,
@@ -367,7 +368,7 @@ export class PubloaderBot {
         for (const { guildId, err } of failed) {
           this.log.error(
             { err, guildId },
-            "failed to register slash commands in this guild; the other pinned guilds are unaffected. The usual cause is an invite that omitted the `applications.commands` scope",
+            `failed to register slash commands in this guild; the other pinned guilds are unaffected. ${describeRegistrationFailure(err)}`,
           );
         }
         if (registered.length > 0) {
