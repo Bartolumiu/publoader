@@ -328,6 +328,10 @@ DMs are closed the bot falls back to the ephemeral reply and says so.
 | `/status` | read | `stats:read` (+ `workers:read` for the fleet section) | Pause state, job counts by state, upload-task depths, worker fleet with heartbeat age. |
 | `/ping` | read | `stats:read` | Whether the admin API answers, and how fast. |
 | `/stats` | read | `stats:read` | Alias for `/status`, kept from the legacy bot. |
+| `/maps sync [extension] [confirm]` | destructive | `tracked:write` | Push the series map to its git repository. **Always a dry run without `confirm`**, inverting the endpoint's own default — that default exists for the scheduled job, not for a person typing a command. |
+| `/enrolments [all]` | read | `workers:read` | Worker enrollment tokens. Outstanding ones only by default, because an unused token is still a live credential. |
+| `/extension-config <extension>` | read | `extensions:read` | Stored overrides for one extension. Read-only: an extension reads its overrides from its published bundle, so editing these rows changes nothing — republish instead. |
+| `/audit [actor] [action] [subject] [q] [limit]` | read | `audit:read` | The audit trail. With no filter it is the recent feed; any filter switches it to a search over the whole log. |
 | `/queue purge [kind] [state] [extension] [q] [confirm]` | destructive | `runs:write` | Delete queued tasks matching a filter. Always counts first, even when confirmed; an unfiltered purge says so in the confirmation. |
 | `/queue restagger <gap-seconds> [kind]` | mutate | `runs:write` | Re-space pending tasks so they go out a fixed gap apart. |
 | `/runs cancel <id> [confirm]` | destructive | `runs:write` | Stop one run and its queued jobs. |
