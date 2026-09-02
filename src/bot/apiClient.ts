@@ -583,6 +583,16 @@ interface RequestSpec {
   timeoutMs?: number;
 }
 
+/** One published version of an extension. */
+export interface BundleVersion {
+  version?: string;
+  sha256?: string;
+  publishedAt?: string;
+  publishedBy?: string | null;
+  yanked?: boolean;
+  [key: string]: unknown;
+}
+
 /** Which record of a chapter to read: the live mirror, or an archive. */
 export const CHAPTER_ARCHIVES = ["uploaded", "edited", "unavailable", "deleted"] as const;
 export type ChapterArchive = (typeof CHAPTER_ARCHIVES)[number];
@@ -1021,6 +1031,75 @@ export class AdminApiClient {
       method: "GET",
       path: `/api/v1/admin/extensions/${encodeURIComponent(extension)}/config`,
       scope: "extensions:read",
+      actor,
+    });
+  }
+
+  // ---- one task, one run, one extension's history ----
+
+  uploadTask(actor: string, id: string): Promise<Record<string, unknown>> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/admin/queues/tasks/${encodeURIComponent(id)}`,
+      scope: "runs:read",
+      actor,
+    });
+  }
+
+  /** Move tasks within the queue: to the front, to the back, or later. */
+  reorderQueue(
+    actor: string,
+    ids: string[],
+    mode: "front" | "back" | "defer",
+    deferSeconds?: number,
+  ): Promise<{ moved?: number }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/queues/reorder",
+      scope: "runs:write",
+      actor,
+      json: mode === "defer" ? { ids, mode, deferSeconds } : { ids, mode },
+    });
+  }
+
+  /** What one run found, counted rather than listed. */
+  runChapterSummary(actor: string, runId: string): Promise<Record<string, unknown>> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/admin/runs/${encodeURIComponent(runId)}/chapters/summary`,
+      scope: "runs:read",
+      actor,
+    });
+  }
+
+  /** Put skipped untracked series back in the queue. Dry run by default. */
+  unskipUntracked(
+    actor: string,
+    opts: { extension?: string; dryRun: boolean },
+  ): Promise<{ dryRun?: boolean; matched?: number; restored?: number }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/untracked/unskip",
+      scope: "untracked:write",
+      actor,
+      json: { extension: opts.extension, dryRun: opts.dryRun },
+    });
+  }
+
+  bundleVersions(actor: string, extension: string): Promise<{ extension: string; versions: BundleVersion[] }> {
+    return this.request({
+      method: "GET",
+      path: `/api/v1/admin/bundles/${encodeURIComponent(extension)}/versions`,
+      scope: "bundles:read",
+      actor,
+    });
+  }
+
+  githubStatus(actor: string): Promise<Record<string, unknown>> {
+    return this.request({
+      method: "GET",
+      path: "/api/v1/admin/sysops/github/status",
+      scope: "bundles:read",
       actor,
     });
   }
