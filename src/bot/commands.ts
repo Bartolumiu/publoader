@@ -1624,6 +1624,15 @@ const commands: BotCommand[] = [
                 { name: "DELETE", value: "DELETE" },
                 { name: "UNAVAILABLE", value: "UNAVAILABLE" },
               ),
+          )
+          // The same two narrowing options `purge` takes, for the same reason:
+          // one publisher's backfill is the queue an operator actually wants to
+          // slow down, and without these the only offer is the whole kind.
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Only this extension.").setAutocomplete(true),
+          )
+          .addStringOption((o) =>
+            o.setName("q").setDescription("Substring of series, title or number."),
           ),
       )
       .addSubcommand((s) =>
@@ -1753,12 +1762,21 @@ const commands: BotCommand[] = [
       if (sub === "restagger") {
         const gapSeconds = ctx.options.integer("gap-seconds") ?? 60;
         const kind = (ctx.options.string("kind") as UploadTaskKind | null) ?? "UPLOAD";
-        const result = await ctx.api.restaggerQueue(ctx.actor, gapSeconds, kind);
+        const extension = ctx.options.string("extension") ?? undefined;
+        const q = ctx.options.string("q") ?? undefined;
+        const filter = extension || q ? { extension, q } : undefined;
+        const result = await ctx.api.restaggerQueue(ctx.actor, gapSeconds, kind, filter);
+        // Named in the reply because a narrowed re-space and a whole-queue one
+        // read identically otherwise, and the number alone cannot tell them
+        // apart: "40 moved" is either a small filter or a small queue.
+        const where = [`${kind} queue`, extension ? `extension ${extension}` : null, q ? `matching “${q}”` : null]
+          .filter(Boolean)
+          .join(", ");
         return {
           text:
             result.moved > 0
-              ? `Re-spaced **${result.moved}** pending ${kind} task(s) to ${gapSeconds}s apart.`
-              : `Nothing pending in the ${kind} queue to re-space.`,
+              ? `Re-spaced **${result.moved}** pending task(s) in the ${where} to ${gapSeconds}s apart.`
+              : `Nothing pending in the ${where} to re-space.`,
           title: "Queue restaggered",
           tone: "ok",
         };

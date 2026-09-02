@@ -755,10 +755,15 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
   it("gives every pending row its own time, in the order the queue already had", async () => {
     // All three due at once: the state a pulled-forward queue is in, and the
     // one the uploader drains back to back.
+    //
+    // `created_at` is set rather than left to default. It is the second key in
+    // the claim order, stored at millisecond precision, and three inserts in a
+    // row land inside one millisecond often enough that the tie fell through to
+    // `id` — a random uuid — and this assertion failed about once in eight runs.
     const at = new Date(Date.now() - 60_000);
-    const first = await task({ notBefore: at });
-    const second = await task({ notBefore: at });
-    const third = await task({ notBefore: at });
+    const first = await task({ notBefore: at, createdAt: new Date(Date.now() - 3_000) });
+    const second = await task({ notBefore: at, createdAt: new Date(Date.now() - 2_000) });
+    const third = await task({ notBefore: at, createdAt: new Date(Date.now() - 1_000) });
 
     const res = await app.inject({
       method: "POST",
@@ -817,6 +822,118 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
       payload: { gapSeconds: 0 },
     });
     expect(res.statusCode).toBe(400);
+  });
+
+  it("re-spaces only the listed rows, leaving the rest of the queue where it was", async () => {
+    // Distinct `created_at` for the same reason the whole-queue case sets them:
+    // it is the tie-break the claim order actually uses.
+    const at = new Date(Date.now() - 60_000);
+    const picked = await task({ notBefore: at, createdAt: new Date(Date.now() - 3_000) });
+    const alsoPicked = await task({ notBefore: at, createdAt: new Date(Date.now() - 2_000) });
+    const untouched = await task({ notBefore: at, createdAt: new Date(Date.now() - 1_000) });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/restagger",
+      headers: root,
+      payload: { gapSeconds: 60, ids: [picked.id, alsoPicked.id] },
+    });
+    expect(res.statusCode).toBe(200);
+    // `kind` is null under ids: the rows were named, so echoing a kind filter
+    // would describe one that was never applied.
+    expect(res.json()).toMatchObject({ moved: 2, scope: "ids", kind: null, spansSeconds: 60 });
+
+    const after = await prisma.uploadTask.findUniqueOrThrow({ where: { id: untouched.id } });
+    expect(after.notBefore.getTime()).toBe(at.getTime());
+
+    const moved = await prisma.uploadTask.findMany({
+      where: { id: { in: [picked.id, alsoPicked.id] } },
+      orderBy: { notBefore: "asc" },
+    });
+    expect(moved.map((r) => r.id)).toEqual([picked.id, alsoPicked.id]);
+    expect(moved[1]!.notBefore.getTime() - moved[0]!.notBefore.getTime()).toBeGreaterThanOrEqual(59_000);
+  });
+
+  it("re-spaces only the rows a filter matches", async () => {
+    const at = new Date(Date.now() - 60_000);
+    const mine = await task({
+      notBefore: at,
+      chapter: { chapterNumber: "1", chapterLanguage: "en", extensionName: "mangaup_global" },
+    });
+    const theirs = await task({
+      notBefore: at,
+      chapter: { chapterNumber: "2", chapterLanguage: "en", extensionName: "mangaplus" },
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/restagger",
+      headers: root,
+      payload: { gapSeconds: 60, filter: { extension: "mangaup_global" } },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ moved: 1, scope: "filter" });
+
+    expect(
+      (await prisma.uploadTask.findUniqueOrThrow({ where: { id: theirs.id } })).notBefore.getTime(),
+    ).toBe(at.getTime());
+    expect(
+      (await prisma.uploadTask.findUniqueOrThrow({ where: { id: mine.id } })).notBefore.getTime(),
+    ).toBeGreaterThan(at.getTime());
+  });
+
+  it("will not take a selection and a filter at once", async () => {
+    const one = await task({});
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/restagger",
+      headers: root,
+      payload: { gapSeconds: 60, ids: [one.id], filter: { extension: "mangaup_global" } },
+    });
+    // Two different sets in one body has no correct reading, and guessing at
+    // one would move rows the caller did not ask about.
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("refuses a LEASED row named in a selection rather than re-spacing it", async () => {
+    const held = await leasedTask({ notBefore: new Date(Date.now() - 60_000) });
+    const before = held.notBefore.getTime();
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/restagger",
+      headers: root,
+      payload: { gapSeconds: 60, ids: [held.id] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ moved: 0 });
+    expect(
+      (await prisma.uploadTask.findUniqueOrThrow({ where: { id: held.id } })).notBefore.getTime(),
+    ).toBe(before);
+  });
+
+  it("does not re-space the whole queue when a state filter names DONE rows", async () => {
+    const at = new Date(Date.now() - 60_000);
+    const pending = await task({ notBefore: at });
+    const done = await task({ notBefore: at, state: "DONE" });
+
+    // The console's filter card can be sitting on state=DONE when the button is
+    // pressed. PENDING is the invariant, so this moves the pending row and
+    // leaves the completed one alone rather than matching nothing at all.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/restagger",
+      headers: root,
+      payload: { gapSeconds: 60, filter: { state: "DONE" } },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ moved: 1 });
+    expect(
+      (await prisma.uploadTask.findUniqueOrThrow({ where: { id: done.id } })).notBefore.getTime(),
+    ).toBe(at.getTime());
+    expect(
+      (await prisma.uploadTask.findUniqueOrThrow({ where: { id: pending.id } })).notBefore.getTime(),
+    ).toBeGreaterThan(at.getTime());
   });
 
   // ---- reorder ----

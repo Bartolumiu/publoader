@@ -1123,18 +1123,25 @@ export class AdminApiClient {
     });
   }
 
-  /** Re-space pending uploads so they go out `gapSeconds` apart. */
+  /**
+   * Re-space pending uploads so they go out `gapSeconds` apart.
+   *
+   * `filter` narrows the set the same way the console's filter card does; the
+   * route's third scope, an explicit id list, has no Discord equivalent because
+   * there is nothing there to tick.
+   */
   restaggerQueue(
     actor: string,
     gapSeconds: number,
     kind: UploadTaskKind,
+    filter?: { extension?: string; q?: string },
   ): Promise<{ moved: number; gapSeconds: number }> {
     return this.request({
       method: "POST",
       path: "/api/v1/admin/queues/restagger",
       scope: "runs:write",
       actor,
-      json: { gapSeconds, kind },
+      json: { gapSeconds, kind, ...(filter ? { filter } : {}) },
     });
   }
 

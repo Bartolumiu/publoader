@@ -1943,14 +1943,31 @@ describe("/queue restagger", () => {
   it("re-spaces the chosen queue and reports how many moved", async () => {
     const restaggerQueue = vi.fn().mockResolvedValue({ moved: 40, gapSeconds: 300 });
     const reply = await invoke("queue", fakeApi({ restaggerQueue }), { "gap-seconds": 300, kind: "EDIT" }, "restagger");
-    expect(restaggerQueue).toHaveBeenCalledWith("discord:ardax", 300, "EDIT");
+    expect(restaggerQueue).toHaveBeenCalledWith("discord:ardax", 300, "EDIT", undefined);
     expect(reply.text).toContain("40");
   });
 
   it("defaults to the upload queue", async () => {
     const restaggerQueue = vi.fn().mockResolvedValue({ moved: 0, gapSeconds: 60 });
     await invoke("queue", fakeApi({ restaggerQueue }), { "gap-seconds": 60 }, "restagger");
-    expect(restaggerQueue).toHaveBeenCalledWith("discord:ardax", 60, "UPLOAD");
+    expect(restaggerQueue).toHaveBeenCalledWith("discord:ardax", 60, "UPLOAD", undefined);
+  });
+
+  it("narrows to one extension when asked, and says so", async () => {
+    const restaggerQueue = vi.fn().mockResolvedValue({ moved: 12, gapSeconds: 300 });
+    const reply = await invoke(
+      "queue",
+      fakeApi({ restaggerQueue }),
+      { "gap-seconds": 300, extension: "mangaup_global" },
+      "restagger",
+    );
+    expect(restaggerQueue).toHaveBeenCalledWith("discord:ardax", 300, "UPLOAD", {
+      extension: "mangaup_global",
+      q: undefined,
+    });
+    // The reply has to name the filter: "12 moved" reads the same whether it
+    // was one publisher's backlog or the entire queue.
+    expect(reply.text).toContain("mangaup_global");
   });
 });
 

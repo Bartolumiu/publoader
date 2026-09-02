@@ -807,10 +807,9 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
     // ---- restagger ----
 
     /**
-     * Re-space the whole pending queue to a fixed rate.
+     * Re-space pending rows to a fixed rate.
      *
      * Separate from `/reorder` because it is a different shape of operation: no
-     * id list, because it acts on the queue rather than on a selection, and no
      * mode, because the only parameter is the gap. `/reorder` cannot do it —
      * every mode there lands the listed rows on one instant, so a bunched queue
      * stays bunched.
@@ -820,8 +819,24 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
      * and the uploader drains it back to back. `spacingMinutes` fixes that when
      * work is planned; nothing fixed it for work already queued.
      *
+     * Three scopes, and the body says which:
+     *
+     *  - `ids`, a selection. What the console's bulk bar sends, and the reason
+     *    this takes an id list at all: pacing every pending row when an operator
+     *    had five ticked reads as the button ignoring them, which is exactly
+     *    how it was reported.
+     *  - `filter`, the same names the list and the other bulk verbs take, so
+     *    "space out the mangaup_global backlog" is one request rather than a
+     *    purge-and-requeue.
+     *  - neither, the whole `kind`. The original behaviour, still the default,
+     *    because pacing half a queue and leaving the rest bunched interleaves
+     *    into the same burst.
+     *
+     * `kind` is ignored under `ids` — the rows are named, and a mismatched kind
+     * would silently narrow a selection the operator can see on screen.
+     *
      * `runs:write` and the audit record match `/reorder`: this rewrites when
-     * every pending row runs, which is the same authority.
+     * pending rows run, which is the same authority.
      */
     scope.post("/api/v1/admin/queues/restagger", { preHandler: requireScope("runs:write") }, async (req) => {
       const body = parseOrThrow(
@@ -830,19 +845,43 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
             /** Seconds between consecutive uploads. 60 is one a minute. */
             gapSeconds: z.coerce.number().int().min(1).max(24 * 3600),
             kind: z.enum(UPLOAD_TASK_KINDS).default("UPLOAD"),
+            /** A selection. Capped like every other id-taking bulk verb. */
+            ids: z.array(z.string().uuid()).min(1).max(BULK_CAP).optional(),
+            filter: FilterSchema.optional(),
           })
-          .strict(),
+          .strict()
+          .refine((value) => !(value.ids && value.filter), {
+            message: "pass ids or filter, not both",
+            path: ["ids"],
+          }),
         req.body ?? {},
       );
 
-      const moved = await ctx.uploadTasks.restagger(body.gapSeconds, body.kind);
-      await ctx.audit.record(actor(req), "queue.restagger", body.kind, {
+      // A filter's own `kind` wins when it carries one, so a body built by
+      // copying the list view's filter means the same set here as it does there.
+      const filter = body.filter ? toFilter(body.filter) : {};
+      const scoped = body.ids
+        ? { ids: body.ids }
+        : { filter: { ...filter, kinds: filter.kinds ?? [body.kind as UploadTaskKind] } };
+
+      const moved = await ctx.uploadTasks.restagger(body.gapSeconds, scoped);
+      const via = body.ids ? "ids" : body.filter ? "filter" : "kind";
+      await ctx.audit.record(actor(req), "queue.restagger", body.ids ? undefined : body.kind, {
         gapSeconds: body.gapSeconds,
         moved,
+        // Which set was asked for, not just how many rows it turned out to be:
+        // "spaced 40 rows" a week later cannot be told apart from a queue that
+        // only had 40 rows in it.
+        scope: via,
+        ...(body.ids ? { ids: body.ids.length } : {}),
+        ...(body.filter ? { filter: body.filter } : {}),
       });
       return {
         ok: true,
-        kind: body.kind,
+        // Null under `ids` because the rows were named rather than selected by
+        // kind, and echoing "UPLOAD" there would describe a filter never applied.
+        kind: body.ids ? null : body.kind,
+        scope: via,
         gapSeconds: body.gapSeconds,
         moved,
         // What the operator actually asked for, echoed as the thing they can

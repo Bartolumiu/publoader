@@ -877,7 +877,7 @@ export class UploadTaskStore {
    * which keeps the whole thing atomic.
    */
   /**
-   * Re-space the whole pending queue so it drains at a fixed rate.
+   * Re-space a set of pending rows so they drain at a fixed rate.
    *
    * `reorder` cannot express this. Every one of its modes assigns the listed
    * rows one instant — `defer` moves them all by the same amount, `front` and
@@ -886,23 +886,53 @@ export class UploadTaskStore {
    * which is a rank over the queue rather than arithmetic on an id list.
    *
    * The rank is `not_before, created_at, id`: the claim order, so re-spacing
-   * preserves the order the queue is already in rather than inventing one. The
-   * first row keeps `now()`, so this paces the queue without delaying its head.
+   * preserves the order the set is already in rather than inventing one. The
+   * first row keeps `now()`, so this paces the set without delaying its head.
    *
-   * PENDING only, which is what keeps this off a row the uploader is mid-way
-   * through: a LEASED task has a worker holding it and its date means nothing.
+   * `scope` says which rows. `ids` names them outright, which is what a console
+   * selection is; `filter` derives them, which is what the Kind picker and the
+   * extension/language/search boxes above the queue mean. Neither subsumes the
+   * other — a selection is the rows a person read, a filter is a set usually
+   * larger than the page they read — and an empty scope is the whole queue,
+   * which is what this did before either existed.
+   *
+   * Rows outside the scope keep their times, so pacing a subset can land it on
+   * top of work that was already spaced. That is the operator's call: moving
+   * rows they did not pick is the worse surprise. Callers report how many rows
+   * moved, which is what makes "not all of them" visible.
+   *
+   * PENDING only whatever the filter said, which is what keeps this off a row
+   * the uploader is mid-way through: a LEASED task has a worker holding it and
+   * its date means nothing, and a DONE row has no future left to move.
    */
-  async restagger(gapSeconds: number, kind: UploadTaskKind = "UPLOAD"): Promise<number> {
+  async restagger(
+    gapSeconds: number,
+    scope: { ids?: readonly string[]; filter?: UploadTaskFilter } = {},
+  ): Promise<number> {
+    const parts: Prisma.Sql[] = [];
+    // An explicit empty selection means "no rows", not "every row". The console
+    // disables the button at zero, but a caller that sends `ids: []` must not
+    // have the whole queue re-spaced by omission.
+    if (scope.ids) {
+      if (scope.ids.length === 0) return 0;
+      parts.push(Prisma.sql`t.id = ANY(${[...scope.ids]}::text[])`);
+    }
+    // `states` is dropped rather than honoured: the PENDING predicate below is
+    // the invariant, and a filter carrying `state=DONE` from the list view must
+    // not widen it into a contradiction that silently matches nothing.
+    if (scope.filter) parts.push(...taskWhere({ ...scope.filter, states: undefined }));
+    parts.push(Prisma.sql`t.state = 'PENDING'`);
+
     const rows = await this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
-      UPDATE upload_tasks t
+      UPDATE upload_tasks u
       SET not_before = now() + make_interval(secs => r.rn * ${gapSeconds}), updated_at = now()
       FROM (
-        SELECT id, row_number() OVER (ORDER BY not_before, created_at, id) - 1 AS rn
-        FROM upload_tasks
-        WHERE kind = ${kind}::"UploadTaskKind" AND state = 'PENDING'
+        SELECT t.id, row_number() OVER (ORDER BY t.not_before, t.created_at, t.id) - 1 AS rn
+        FROM upload_tasks t
+        ${combine(parts)}
       ) r
-      WHERE t.id = r.id AND t.state = 'PENDING'
-      RETURNING t.id
+      WHERE u.id = r.id AND u.state = 'PENDING'
+      RETURNING u.id
     `);
     return rows.length;
   }

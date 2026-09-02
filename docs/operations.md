@@ -1049,6 +1049,54 @@ its `notBefore` means nothing until you retry it; reordering one is refused with
 `wrong_state`. The response's `ordered` array is the resulting claim order, so
 you can verify the change rather than trust it.
 
+### Space out: pace a queue that is due all at once
+
+`reorder` cannot express pacing. Every mode above lands the listed rows on one
+instant, so a queue that is bunched stays bunched, just somewhere else.
+`POST /queues/restagger` gives each row its own `notBefore`, `gapSeconds` apart,
+counting from now and keeping the order the queue is already in.
+
+```bash
+restagger() {
+  curl -fsS -X POST "$API/api/v1/admin/queues/restagger" -H "$AUTH" \
+    -H 'content-type: application/json' -d "$1"
+}
+
+# the whole UPLOAD queue, one a minute
+restagger '{"gapSeconds":60}'
+
+# one publisher's backfill, five minutes apart; the rest of the queue is untouched
+restagger '{"gapSeconds":300,"filter":{"extension":"mangaup_global"}}'
+
+# just these rows
+restagger '{"gapSeconds":300,"ids":["<a>","<b>"]}'
+```
+
+| Scope | Set |
+|---|---|
+| neither `ids` nor `filter` | every `PENDING` row of `kind` (default `UPLOAD`). |
+| `filter` | the same filter names the list and the bulk verbs take. `kind` in the filter wins over the top-level one. |
+| `ids` | exactly those rows. `kind` is ignored, and the response echoes `kind: null` to say so. |
+
+`ids` and `filter` together is a 400: two different sets in one body has no
+correct reading, and guessing at one moves rows nobody asked about.
+
+`PENDING` only, whatever `filter.state` says — a `LEASED` row belongs to a live
+uploader and a `DONE` row has no future left to move, so both are skipped rather
+than refused, and `moved` reports what actually shifted.
+
+**A scoped re-space paces its own set, not the queue.** Rows outside it keep the
+times they have, so a paced subset can land in the same slots as work that was
+already spread out. If what you want is one single rate across everything, space
+out the whole kind. The console offers all three: the button above the filter
+card is the whole queue (with a tick-box for the current filter), and the one in
+the selection bar acts on the ticked rows.
+
+Pacing already-queued work and pacing *future* work are different settings:
+`POST /upload-schedule` with `spacingSeconds` is what the processor uses when it
+plans new rows. The console offers to set both at once; over the API they are
+two calls.
+
 ### Queue a chapter by hand
 
 `POST /api/v1/admin/queues/tasks` creates a task from a chapter payload you
