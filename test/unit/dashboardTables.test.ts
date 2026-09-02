@@ -46,6 +46,12 @@ const RUNS = Array.from({ length: 45 }, (_, i) => ({
   state: i % 5 === 0 ? "FAILED" : "SUCCEEDED",
   chaptersFound: i,
   chaptersSeen: i * 2,
+  titlesFound: i % 7,
+  untrackedManga: i % 4,
+  // Every fifth run looked at named titles only, so the Scope column reads
+  // "2 title(s)" on some rows and "catalogue" on the rest.
+  scoped: i % 5 === 0,
+  scopeMangaIds: i % 5 === 0 ? ["a", "b"] : [],
   segmentsTotal: (i % 15) + 1,
   triggeredBy: "scheduler",
   // Noon, so the local calendar day is the same in every plausible timezone.
@@ -107,8 +113,8 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
       },
     },
     { match: /\/extensions$/, body: { extensions: EXTENSIONS } },
-    { match: /\/runs\?limit=50/, body: { runs: RUNS } },
-    { match: /\/runs\?limit=1/, body: { runs: [] } },
+    { match: /\/runs\?limit=50/, body: { runs: RUNS, total: RUNS.length, limit: 50, offset: 0 } },
+    { match: /\/runs\?limit=1/, body: { runs: [], total: 0, limit: 1, offset: 0 } },
     { match: /\/stats$/, body: { paused: false, workers: {}, jobs: {}, uploadTasks: [], quarantined: 0 } },
     { match: /\/queues\?/, body: { summary: [], total: 0 } },
     { match: /\/queues$/, body: { summary: [], total: 0 } },
@@ -213,6 +219,20 @@ const bodyRows = (host: any): any[] => [...host.querySelectorAll("tbody tr")];
 const columnText = (host: any, index: number): string[] =>
   bodyRows(host).map((tr: any) => tr.children[index].textContent.trim());
 
+/**
+ * Where `label`'s column is, asked of the header rather than counted by hand.
+ *
+ * These assertions used to carry the index as a literal, which made every one
+ * of them a hidden assertion about the column ORDER as well: adding a column to
+ * the runs table moved seven unrelated tests onto the wrong cell, and they
+ * failed with a value mismatch that said nothing about the cause.
+ */
+const columnOf = (host: any, label: string): number =>
+  [...host.querySelectorAll("thead th")].findIndex((th: any) => th.textContent.includes(label));
+
+/** The text under `label`, for the rows currently drawn. */
+const column = (host: any, label: string): string[] => columnText(host, columnOf(host, label));
+
 const headerCell = (host: any, label: string): any =>
   [...host.querySelectorAll("thead th")].find((th: any) => th.textContent.includes(label));
 
@@ -262,7 +282,7 @@ describe("every table pages at twenty rows with numbered pages", () => {
     expect(bodyRows(host).length).toBe(5);
     expect(host.querySelector(".page-count").textContent).toBe("41-45 of 45");
     // The first row of page three is the forty-first run, in server order.
-    expect(columnText(host, 0)[0]).toBe("ext-05");
+    expect(column(host, "Extension")[0]).toBe("ext-05");
   });
 
   it("caps the numbers it draws, however long the table is", async () => {
@@ -299,7 +319,7 @@ describe("a table header is the sort control", () => {
 
     // Segment counts run 1 to 15, three runs each, so page one ascending is
     // three of each of 1 to 6 and then two 7s.
-    const shown = columnText(runsTable(), 4).map(Number);
+    const shown = column(runsTable(), "Segments").map(Number);
     expect(shown).toEqual([...shown].sort((a, b) => a - b));
     expect(shown[0]).toBe(1);
     // The trap: sorted as text, "10" comes before "2", so this slot would hold
@@ -317,7 +337,7 @@ describe("a table header is the sort control", () => {
     clickHeader(runsTable(), "Segments");
     await settle();
     expect(headerCell(runsTable(), "Segments").getAttribute("aria-sort")).toBe("descending");
-    expect(columnText(runsTable(), 4).map(Number)[0]).toBe(15);
+    expect(column(runsTable(), "Segments").map(Number)[0]).toBe(15);
   });
 
   it("marks only the column doing the ordering", async () => {
@@ -336,7 +356,7 @@ describe("a table header is the sort control", () => {
     await goto("#/runs");
     clickHeader(runsTable(), "Created");
     await settle();
-    expect(columnText(runsTable(), 0)).toEqual(CHRONOLOGICAL.slice(0, 20));
+    expect(column(runsTable(), "Extension")).toEqual(CHRONOLOGICAL.slice(0, 20));
   });
 
   /**
@@ -370,11 +390,11 @@ describe("a table header is the sort control", () => {
       // Note what `Date.parse` does with these rather than that it refuses
       // them — "05/02/2026" comes back as the 2nd of May, not as NaN, and it is
       // that half-success the parser has to be kept away from.
-      expect(columnText(runsTable(), 6)[0]).toMatch(/^\d{2}\/\d{2}\/\d{4}/);
+      expect(column(runsTable(), "Created")[0]).toMatch(/^\d{2}\/\d{2}\/\d{4}/);
 
       clickHeader(runsTable(), "Created");
       await settle();
-      expect(columnText(runsTable(), 0)).toEqual(CHRONOLOGICAL.slice(0, 20));
+      expect(column(runsTable(), "Extension")).toEqual(CHRONOLOGICAL.slice(0, 20));
     } finally {
       (Intl as any).DateTimeFormat = realFormat;
       (Date.prototype as any).toLocaleString = realToLocaleString;
@@ -387,11 +407,11 @@ describe("a table header is the sort control", () => {
     // forty-five, so a page of twenty would show some if they sorted first.
     clickHeader(runsTable(), "Error");
     await settle();
-    expect(columnText(runsTable(), 7)).not.toContain("-");
+    expect(column(runsTable(), "Error")).not.toContain("-");
 
     clickHeader(runsTable(), "Error");
     await settle();
-    expect(columnText(runsTable(), 7)).not.toContain("-");
+    expect(column(runsTable(), "Error")).not.toContain("-");
   });
 
   it("returns to the first page when the order changes", async () => {
@@ -418,13 +438,13 @@ describe("a table header is the sort control", () => {
     await goto("#/runs");
 
     expect(headerCell(runsTable(), "Segments").getAttribute("aria-sort")).toBe("descending");
-    expect(columnText(runsTable(), 4).map(Number)[0]).toBe(15);
+    expect(column(runsTable(), "Segments").map(Number)[0]).toBe(15);
   });
 
   it("never offers to sort a column of buttons", async () => {
     await goto("#/runs");
-    // Runs is all data, so every one of its eight columns is sortable.
-    expect(runsTable().querySelectorAll("thead th.sortable").length).toBe(8);
+    // Runs is all data, so every one of its ten columns is sortable.
+    expect(runsTable().querySelectorAll("thead th.sortable").length).toBe(10);
 
     await goto("#/queues/tasks");
     const host = queueTable();
@@ -450,13 +470,17 @@ describe("a table header is the sort control", () => {
       "Kind",
       "State",
       "Chapters found",
+      "Titles found",
+      "Scope",
       "Segments",
       "Triggered by",
       "Created",
       "Error",
     ]);
 
-    select.value = "4";
+    // Selected by its index among the sortable columns, which is where
+    // "Segments" now sits; the option list above is what that index means.
+    select.value = String(columnOf(runsTable(), "Segments"));
     select.dispatchEvent(new win.Event("change"));
     await settle();
     expect(headerCell(runsTable(), "Segments").getAttribute("aria-sort")).toBe("ascending");
@@ -489,7 +513,7 @@ describe("the table chrome is usable from the keyboard", () => {
     await settle();
 
     const active = doc.activeElement;
-    expect(active.getAttribute("data-focus")).toBe("sort:4");
+    expect(active.getAttribute("data-focus")).toBe(`sort:${columnOf(runsTable(), "Segments")}`);
     expect(active.closest(".table-host")).toBe(runsTable());
   });
 

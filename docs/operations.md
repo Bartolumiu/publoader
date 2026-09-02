@@ -1194,7 +1194,39 @@ superseded and is not going away:
 | Everything else on this page | `/admin/queues/*` |
 | What is about to be published, as chapters | `GET /admin/queues/chapters` |
 | What a run actually found | `GET /admin/runs/<id>/chapters` |
+| How much it found, by segment and by series | `GET /admin/runs/<id>/chapters/summary` |
+| Which runs to look at in the first place | `GET /admin/runs` (filtered; see below) |
 | What is on MangaDex now, and its history | `GET /admin/chapters` |
+
+### Finding the run
+
+`GET /admin/runs` is filtered and paged, and every row carries what that run
+found, so the list answers "which run should I open" without opening any:
+
+| Field | Meaning |
+|---|---|
+| `chaptersFound` | Chapters the extension flagged as new or changed. `null` means no segment has committed an envelope **yet** — not that it found nothing. |
+| `chaptersSeen` | Chapters in the full catalogue snapshot; `null` when the extension sends none, in which case removal detection is skipped. |
+| `titlesFound` | Distinct series across `chaptersFound`, counted over the whole run rather than summed per segment. |
+| `untrackedManga` | Series the run saw that the platform does not track. |
+| `scoped` | True when the run looked at named titles only (`scope_manga_ids`), so its snapshot is **silent** about every other title. |
+
+Filters, combinable: `extension`, `state`, `kind` (both repeatable, so
+`?state=FAILED&state=DEAD_LETTER` means either), `scope=catalogue|scoped`,
+`triggeredBy` (substring — `user:` is every manual trigger), `failed=true|false`,
+`q` (substring over the run id, idempotency key and error), `since`, `before`,
+and `limit`/`offset`. `total` counts what **matched**, not what fitted on the
+page.
+
+```bash
+# Every failed clean run somebody triggered by hand this week.
+curl -s "$CORE/api/v1/admin/runs?kind=CLEAN&failed=true&triggeredBy=user:&since=$(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ)" \
+  -H "authorization: Bearer $ADMIN_TOKEN"
+```
+
+The same filters are on the dashboard's Runs page and on `padmin runs list`
+(`--state`, `--kind`, `--scope`, `--triggered-by`, `--failed`, `-q`), and the
+Discord bot's `/runs recent`.
 
 ---
 

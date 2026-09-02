@@ -30,6 +30,7 @@ import {
   type ErrorClearedFilter,
   type RemovalMode,
   type RunKind,
+  type RunState,
   type SourceMatch,
   type SourceResolution,
   type TrackedEntry,
@@ -642,6 +643,24 @@ const RUN_KINDS: { name: string; value: RunKind }[] = [
 ];
 
 /**
+ * The same kinds and every run state, as plain names for FILTERING by.
+ *
+ * Deliberately not `RUN_KINDS` above: those labels describe what triggering a
+ * kind will DO ("force (run now regardless of schedule)"), which is the right
+ * thing to say next to a button that starts one and the wrong thing to say next
+ * to a filter that only narrows a list. Mirrors prisma/schema.prisma.
+ */
+const RUN_KIND_FILTERS: { name: string; value: RunKind }[] = [
+  { name: "UPDATE", value: "UPDATE" },
+  { name: "CLEAN", value: "CLEAN" },
+  { name: "FORCE", value: "FORCE" },
+];
+
+const RUN_STATE_FILTERS: { name: string; value: RunState }[] = (
+  ["PENDING", "EXECUTING", "INGESTING", "PROCESSED", "FAILED", "DEAD_LETTER", "CANCELLED"] as const
+).map((state) => ({ name: state, value: state }));
+
+/**
  * How long `/reconcile` will wait for a pass before answering with progress.
  *
  * Discord gives a deferred interaction fifteen minutes, but nobody watches a
@@ -1218,6 +1237,28 @@ const commands: BotCommand[] = [
           .addStringOption((o) =>
             o.setName("extension").setDescription("Filter to one extension.").setAutocomplete(true),
           )
+          .addStringOption((o) =>
+            o
+              .setName("state")
+              .setDescription("Only runs in this state.")
+              .addChoices(...RUN_STATE_FILTERS),
+          )
+          .addStringOption((o) =>
+            o.setName("kind").setDescription("Only runs of this kind.").addChoices(...RUN_KIND_FILTERS),
+          )
+          .addStringOption((o) =>
+            o
+              .setName("scope")
+              .setDescription("Whole-catalogue runs, or ones scoped to named titles.")
+              .addChoices(
+                { name: "whole catalogue", value: "catalogue" },
+                { name: "named titles only", value: "scoped" },
+              ),
+          )
+          .addStringOption((o) =>
+            o.setName("triggered-by").setDescription("Substring; 'user:' matches every manual trigger."),
+          )
+          .addBooleanOption((o) => o.setName("failed").setDescription("Only runs that recorded an error."))
           .addIntegerOption((o) =>
             o.setName("limit").setDescription("How many (1-50, default 15).").setMinValue(1).setMaxValue(50),
           ),
@@ -1310,17 +1351,44 @@ const commands: BotCommand[] = [
 
       if (sub === "recent") {
         const extension = ctx.options.string("extension");
-        const { runs } = await ctx.api.listRuns(ctx.actor, {
+        const state = ctx.options.string("state");
+        const kind = ctx.options.string("kind");
+        const scope = ctx.options.string("scope");
+        const triggeredBy = ctx.options.string("triggered-by");
+        const failed = ctx.options.boolean("failed");
+        const { runs, total } = await ctx.api.listRuns(ctx.actor, {
           limit: ctx.options.integer("limit") ?? 15,
           ...(extension ? { extension: requireExtensionName(extension) } : {}),
+          ...(state ? { state } : {}),
+          ...(kind ? { kind } : {}),
+          ...(scope ? { scope } : {}),
+          ...(triggeredBy ? { triggeredBy } : {}),
+          ...(failed === true ? { failed: true } : {}),
         });
-        if (runs.length === 0) return { text: "No runs recorded." };
-        const rendered = runs.map(
-          (r) =>
+        const filtered = Boolean(extension || state || kind || scope || triggeredBy || failed);
+        if (runs.length === 0) {
+          return { text: filtered ? "No run matches those filters." : "No runs recorded." };
+        }
+        const rendered = runs.map((r) => {
+          // "-" where nothing has been committed yet, so a run still in flight
+          // does not read as one that found nothing.
+          const found = r.chaptersFound == null ? "-" : String(r.chaptersFound);
+          const seen = r.chaptersSeen == null ? "" : ` of ${r.chaptersSeen} seen`;
+          const titles = r.titlesFound == null ? "" : ` across ${r.titlesFound} title(s)`;
+          return (
             `${runIcon(r.state)} \`${r.id.slice(0, 8)}\` **${r.extension}** [${r.kind}] ${r.state} ` +
-            `: ${shortTime(r.createdAt)} by ${r.triggeredBy ?? "schedule"}`,
-        );
-        return { text: lines([`**${runs.length} recent run(s)**`, ...rendered]) };
+            `: ${shortTime(r.createdAt)} by ${r.triggeredBy ?? "schedule"}\n` +
+            ` found **${found}**${seen}${titles}${r.scoped ? " · scoped" : ""}` +
+            (r.untrackedManga ? ` · ${r.untrackedManga} untracked` : "")
+          );
+        });
+        // The page against the match count: a filtered list that fills its page
+        // says nothing on its own about how much it left out.
+        const header =
+          total > runs.length
+            ? `**${runs.length} of ${total} matching run(s)**`
+            : `**${runs.length} recent run(s)**`;
+        return { text: lines([header, ...rendered]) };
       }
       const { run } = await ctx.api.getRun(ctx.actor, requireString(ctx.options, "id"));
       const header = [

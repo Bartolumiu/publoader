@@ -114,6 +114,25 @@ export interface RunSegmentCounts {
   submittedAt: Date | null;
 }
 
+/**
+ * What one run found, in the shape the runs list draws a row from.
+ *
+ * Every field is null-when-unknown rather than zero-when-unknown: a run whose
+ * segments have not reported has found nothing YET, which is a different claim
+ * from a completed run that found nothing, and a list that renders both as "0"
+ * cannot be used to tell them apart.
+ */
+export interface RunTotals {
+  /** Chapters the extension flagged as new or changed. */
+  updated: number;
+  /** Chapters in the full catalogue snapshot; null when no segment sent one. */
+  all: number | null;
+  /** Series the extension saw but the platform does not track; null if unreported. */
+  untrackedManga: number | null;
+  /** Distinct series across `updated`, counted over the whole run. */
+  titlesUpdated: number;
+}
+
 export class RunChapterStore {
   constructor(private readonly prisma: PrismaClient) {}
 
@@ -200,39 +219,106 @@ export class RunChapterStore {
   }
 
   /**
-   * Chapters-found totals for a set of runs, for the list view's column.
+   * Chapters-found totals for a set of runs, for the list view's columns.
    *
    * Aggregated in one statement over the page of runs being drawn rather than
    * one query per run: a 50-row runs list is the common case and 50 round trips
    * to render one column is not.
+   *
+   * There is deliberately no `titlesAll` here. Measured against production over
+   * a 50-run page: the lengths alone are ~390ms (this is dominated by detoasting
+   * the envelopes, not by the arithmetic), adding the `updatedChapters` unnest
+   * for `titlesUpdated` takes it to ~630ms, and unnesting `allChapters` as well
+   * would add ~530ms more — a catalogue snapshot is tens of thousands of
+   * elements per run where the updated set is tens. This list polls, so that
+   * last step is not affordable here. The catalogue's distinct-title count is a
+   * question about ONE run, and `titlesFor` answers it on the detail page for a
+   * fraction of the cost.
    */
-  async totalsForRuns(runIds: readonly string[]): Promise<Map<string, { updated: number; all: number | null }>> {
+  async totalsForRuns(runIds: readonly string[]): Promise<Map<string, RunTotals>> {
     if (runIds.length === 0) return new Map();
     const rows = await this.prisma.$queryRaw<
-      { runId: string; updated: bigint; all: bigint | null }[]
+      { runId: string; updated: bigint; all: bigint | null; untracked: bigint | null; titlesUpdated: bigint }[]
     >(Prisma.sql`
-      SELECT j.run_id AS "runId",
-             coalesce(sum(
-               CASE WHEN jsonb_typeof(rs.envelope -> 'updatedChapters') = 'array'
-                    THEN jsonb_array_length(rs.envelope -> 'updatedChapters') ELSE 0 END
-             ), 0) AS "updated",
-             -- NULL when no segment sent a catalogue snapshot, so the column can
-             -- say "-" rather than a zero that reads as "found nothing".
-             sum(
-               CASE WHEN jsonb_typeof(rs.envelope -> 'allChapters') = 'array'
-                    THEN jsonb_array_length(rs.envelope -> 'allChapters') END
-             ) AS "all"
-      FROM jobs j
-      JOIN result_submissions rs ON rs.job_id = j.id AND rs.state = 'COMMITTED'
-      WHERE j.run_id = ANY(${[...runIds]}::text[])
-      GROUP BY j.run_id
+      WITH env AS (
+        SELECT j.run_id, rs.envelope
+        FROM jobs j
+        JOIN result_submissions rs ON rs.job_id = j.id AND rs.state = 'COMMITTED'
+        WHERE j.run_id = ANY(${[...runIds]}::text[])
+      ),
+      -- The lengths, one row per envelope. Kept apart from the unnest below
+      -- rather than folded into one GROUP BY: unnesting multiplies each
+      -- envelope's row by its chapter count, and summing a length over those
+      -- copies would report a 40-chapter segment as 1600.
+      counts AS (
+        SELECT run_id,
+               coalesce(sum(
+                 CASE WHEN jsonb_typeof(envelope -> 'updatedChapters') = 'array'
+                      THEN jsonb_array_length(envelope -> 'updatedChapters') ELSE 0 END
+               ), 0) AS updated,
+               -- NULL when no segment sent a catalogue snapshot, so the column
+               -- can say "-" rather than a zero that reads as "found nothing".
+               sum(
+                 CASE WHEN jsonb_typeof(envelope -> 'allChapters') = 'array'
+                      THEN jsonb_array_length(envelope -> 'allChapters') END
+               ) AS "all",
+               sum(
+                 CASE WHEN jsonb_typeof(envelope -> 'untrackedManga') = 'array'
+                      THEN jsonb_array_length(envelope -> 'untrackedManga') END
+               ) AS untracked
+        FROM env GROUP BY run_id
+      ),
+      -- Distinct across the whole run, not summed per segment: a title split
+      -- over two segments is one title, and adding the segments' counts would
+      -- report it as two.
+      titles AS (
+        SELECT e.run_id, count(DISTINCT coalesce(u.value ->> 'mdMangaId', u.value ->> 'mangaId')) AS titles
+        FROM env e
+        CROSS JOIN LATERAL jsonb_array_elements(
+          CASE WHEN jsonb_typeof(e.envelope -> 'updatedChapters') = 'array'
+               THEN e.envelope -> 'updatedChapters' ELSE '[]'::jsonb END
+        ) AS u(value)
+        GROUP BY e.run_id
+      )
+      SELECT c.run_id AS "runId", c.updated, c."all", c.untracked,
+             coalesce(t.titles, 0) AS "titlesUpdated"
+      FROM counts c
+      LEFT JOIN titles t ON t.run_id = c.run_id
     `);
     return new Map(
       rows.map((row) => [
         row.runId,
-        { updated: Number(row.updated), all: row.all === null ? null : Number(row.all) },
+        {
+          updated: Number(row.updated),
+          all: row.all === null ? null : Number(row.all),
+          untrackedManga: row.untracked === null ? null : Number(row.untracked),
+          titlesUpdated: Number(row.titlesUpdated),
+        },
       ]),
     );
+  }
+
+  /**
+   * How many distinct titles one run's chosen set covers, uncapped.
+   *
+   * Separate from `byManga` because that one is a LIMITed page of the breakdown:
+   * its length is the number of rows the caller asked for, not the number of
+   * titles the run touched, and reading it as the latter silently reports "200
+   * titles" for every run that has more. This counts in the database instead, so
+   * a capped breakdown can still say what it is a breakdown OF.
+   */
+  async titlesFor(runId: string, set: ChapterSet): Promise<number> {
+    const rows = await this.prisma.$queryRaw<{ titles: bigint }[]>(Prisma.sql`
+      SELECT count(DISTINCT coalesce(c.value ->> 'mdMangaId', c.value ->> 'mangaId')) AS titles
+      FROM jobs j
+      JOIN result_submissions rs ON rs.job_id = j.id AND rs.state = 'COMMITTED'
+      CROSS JOIN LATERAL jsonb_array_elements(
+        CASE WHEN jsonb_typeof(rs.envelope -> ${ENVELOPE_KEY[set]}) = 'array'
+             THEN rs.envelope -> ${ENVELOPE_KEY[set]} ELSE '[]'::jsonb END
+      ) AS c(value)
+      WHERE j.run_id = ${runId}
+    `);
+    return Number(rows[0]?.titles ?? 0);
   }
 
   /**

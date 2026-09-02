@@ -155,6 +155,18 @@ export interface RunSummary {
   startedAt?: string | null;
   finishedAt?: string | null;
   triggeredBy?: string | null;
+  /**
+   * What the run found. Null means no segment has committed an envelope yet,
+   * which is not the same as a run that found nothing — rendered as "-".
+   */
+  chaptersFound?: number | null;
+  /** Chapters in the full catalogue snapshot; null when none was sent. */
+  chaptersSeen?: number | null;
+  /** Distinct series among `chaptersFound`. */
+  titlesFound?: number | null;
+  untrackedManga?: number | null;
+  /** True when the run looked only at named titles. */
+  scoped?: boolean;
 }
 
 export interface JobSummary {
@@ -569,6 +581,16 @@ export interface UserPermissions {
 
 export type UntrackedState = "NEW" | "CREATING" | "CREATED" | "TRACKED" | "FAILED" | "SKIPPED";
 export type RunKind = "UPDATE" | "CLEAN" | "FORCE";
+
+/** Mirrors the `RunState` enum in prisma/schema.prisma. */
+export type RunState =
+  | "PENDING"
+  | "EXECUTING"
+  | "INGESTING"
+  | "PROCESSED"
+  | "FAILED"
+  | "DEAD_LETTER"
+  | "CANCELLED";
 export type RemovalMode = "unavailable" | "delete";
 export type WorkerAction = "drain" | "activate" | "revoke";
 
@@ -1644,13 +1666,34 @@ export class AdminApiClient {
     });
   }
 
-  listRuns(actor: string, opts: { limit: number; extension?: string }): Promise<{ runs: RunSummary[] }> {
+  listRuns(
+    actor: string,
+    opts: {
+      limit: number;
+      extension?: string;
+      state?: string;
+      kind?: string;
+      triggeredBy?: string;
+      scope?: string;
+      failed?: boolean;
+    },
+  ): Promise<{ runs: RunSummary[]; total: number }> {
     return this.request({
       method: "GET",
       path: "/api/v1/admin/runs",
       scope: "runs:read",
       actor,
-      query: { limit: opts.limit, extension: opts.extension },
+      query: {
+        limit: opts.limit,
+        extension: opts.extension,
+        state: opts.state,
+        kind: opts.kind,
+        triggeredBy: opts.triggeredBy,
+        scope: opts.scope,
+        // Only sent when asked for: `failed=false` is a filter of its own
+        // (runs that recorded no error), not the absence of one.
+        failed: opts.failed === undefined ? undefined : String(opts.failed),
+      },
     });
   }
 

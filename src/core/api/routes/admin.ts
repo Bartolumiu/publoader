@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { Prisma } from "@prisma/client";
+import { Prisma, RunKind, RunState } from "@prisma/client";
 import { z } from "zod";
 import type { AppContext } from "../context.js";
 import { adminAuthHook, requireScope } from "../auth.js";
@@ -219,6 +219,30 @@ function parseOrThrow<S extends z.ZodTypeAny>(schema: S, value: unknown): z.infe
     statusCode: 400,
   });
 }
+
+/**
+ * A boolean that may arrive as a query-string word. Not `z.coerce.boolean()`,
+ * which is `Boolean(value)`, so the string "false" coerces to true. Same helper
+ * as routes/chapters.ts and routes/queues.ts.
+ */
+const Flag = z.preprocess(
+  (value) => (typeof value === "string" ? value === "true" || value === "1" : value),
+  z.boolean(),
+);
+
+/**
+ * A filter that accepts one value or several, so `?state=FAILED&state=CANCELLED`
+ * means either. Fastify parses a repeated key into an array; a single one stays
+ * a string, and both become a deduplicated list here.
+ */
+function oneOrMany<T extends readonly [string, ...string[]]>(values: T) {
+  return z
+    .union([z.enum(values), z.array(z.enum(values)).min(1)])
+    .transform((value) => (Array.isArray(value) ? [...new Set(value)] : [value]));
+}
+
+const RUN_STATES = Object.values(RunState) as [RunState, ...RunState[]];
+const RUN_KINDS = Object.values(RunKind) as [RunKind, ...RunKind[]];
 
 /**
  * How many links one paste may carry.
@@ -478,18 +502,87 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return reply.code(result.created ? 201 : 200).send(result);
     });
 
+    /**
+     * Recent runs, newest first, filtered.
+     *
+     * Every filter narrows the same ordering rather than changing it, so a
+     * filtered page is a subsequence of the unfiltered one and `total` counts
+     * what matched rather than what was returned — otherwise "25 runs" would
+     * mean the page size on every query wide enough to fill it.
+     *
+     * Offset paging rather than a cursor: unlike the log table, `runs` is
+     * appended to slowly (a handful an hour), and an operator paging back
+     * through a filtered history is not racing the writer in a way that would
+     * skip or repeat rows often enough to matter.
+     */
     scope.get("/api/v1/admin/runs", { preHandler: requireScope("runs:read") }, async (req) => {
-      const query = z
-        .object({
+      const query = parseOrThrow(
+        z.object({
           limit: z.coerce.number().int().min(1).max(200).default(25),
-          extension: z.string().optional(),
-        })
-        .parse(req.query ?? {});
-      const runs = await ctx.prisma.run.findMany({
-        where: query.extension ? { extension: query.extension } : undefined,
-        orderBy: { createdAt: "desc" },
-        take: query.limit,
-      });
+          offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+          extension: z.string().max(64).optional(),
+          /** Repeatable: `?state=FAILED&state=DEAD_LETTER` means either. */
+          state: oneOrMany(RUN_STATES).optional(),
+          kind: oneOrMany(RUN_KINDS).optional(),
+          /** Case-insensitive substring: "user:" finds every manual trigger. */
+          triggeredBy: z.string().min(1).max(200).optional(),
+          /**
+           * Scope shape, not a title id. A CLEAN run over three named titles and
+           * one over the whole catalogue make incompatible claims about what a
+           * missing chapter means, and telling them apart in a list is the point
+           * of the filter.
+           */
+          scope: z.enum(["catalogue", "scoped"]).optional(),
+          /** Only runs that recorded an error. */
+          failed: Flag.optional(),
+          /** Case-insensitive substring over the run and idempotency ids and the error. */
+          q: z.string().min(1).max(200).optional(),
+          since: z.coerce.date().optional(),
+          before: z.coerce.date().optional(),
+        }),
+        req.query ?? {},
+      );
+
+      const createdAt: { gte?: Date; lt?: Date } = {};
+      if (query.since) createdAt.gte = query.since;
+      if (query.before) createdAt.lt = query.before;
+
+      const where: Prisma.RunWhereInput = {
+        ...(query.extension ? { extension: query.extension } : {}),
+        ...(query.state ? { state: { in: query.state } } : {}),
+        ...(query.kind ? { kind: { in: query.kind } } : {}),
+        ...(query.triggeredBy
+          ? { triggeredBy: { contains: query.triggeredBy, mode: "insensitive" as const } }
+          : {}),
+        // `isEmpty` on the array column, so this is answered by the row itself
+        // rather than by counting ids.
+        ...(query.scope ? { scopeMangaIds: { isEmpty: query.scope === "catalogue" } } : {}),
+        ...(query.failed === undefined
+          ? {}
+          : query.failed
+            ? { error: { not: null } }
+            : { error: null }),
+        ...(query.q
+          ? {
+              OR: [
+                { id: { contains: query.q, mode: "insensitive" as const } },
+                { idempotencyKey: { contains: query.q, mode: "insensitive" as const } },
+                { error: { contains: query.q, mode: "insensitive" as const } },
+              ],
+            }
+          : {}),
+        ...(Object.keys(createdAt).length > 0 ? { createdAt } : {}),
+      };
+
+      const [runs, total] = await Promise.all([
+        ctx.prisma.run.findMany({
+          where,
+          orderBy: { createdAt: "desc" },
+          take: query.limit,
+          skip: query.offset,
+        }),
+        ctx.prisma.run.count({ where }),
+      ]);
       // How much each run found, aggregated in one statement over the page being
       // returned. `chaptersFound` is null for a run with no committed envelope
       // yet, which is distinct from a run that found nothing.
@@ -501,8 +594,17 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
             ...run,
             chaptersFound: found ? found.updated : null,
             chaptersSeen: found ? found.all : null,
+            titlesFound: found ? found.titlesUpdated : null,
+            untrackedManga: found ? found.untrackedManga : null,
+            /** True when the run looked at named titles only; see `scopeMangaIds`. */
+            scoped: run.scopeMangaIds.length > 0,
           };
         }),
+        total,
+        limit: query.limit,
+        offset: query.offset,
+        /** What `state`, `kind` and `scope` accept, so a client need not hardcode them. */
+        filters: { state: RUN_STATES, kind: RUN_KINDS, scope: ["catalogue", "scoped"] },
       };
     });
 

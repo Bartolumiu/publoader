@@ -248,21 +248,67 @@ runs
   .command("list")
   .description("recent runs, newest first")
   .option("--limit <n>", "how many runs", "25")
+  .option("--offset <n>", "skip this many, for paging back through history")
   .option("--extension <name>", "filter to one extension")
-  .action(async (opts: { limit: string; extension?: string }) => {
-    const res = await api<{ runs: Record<string, unknown>[] }>("/api/v1/admin/runs", {
-      query: { limit: opts.limit, extension: opts.extension },
-    });
-    table(res.runs, [
-      { header: "ID", get: (r) => r["id"] },
-      { header: "EXTENSION", get: (r) => r["extension"] },
-      { header: "KIND", get: (r) => r["kind"] },
-      { header: "STATE", get: (r) => r["state"] },
-      { header: "SEGMENTS", get: (r) => r["segmentsTotal"] },
-      { header: "TRIGGERED BY", get: (r) => r["triggeredBy"] },
-      { header: "CREATED", get: (r) => ago(r["createdAt"]) },
-    ], "no runs");
-  });
+  .option("--state <state>", "PENDING | EXECUTING | INGESTING | PROCESSED | FAILED | DEAD_LETTER | CANCELLED")
+  .option("--kind <kind>", "UPDATE | CLEAN | FORCE")
+  .option("--triggered-by <who>", "substring; 'user:' matches every manual trigger")
+  .option("--scope <scope>", "catalogue (whole publisher) | scoped (named titles only)")
+  .option("--failed", "only runs that recorded an error")
+  .option("--since <iso>", "only runs created at or after this time")
+  .option("--before <iso>", "only runs created before this time")
+  .option("-q, --query <text>", "substring over the run id, idempotency key and error")
+  .action(
+    async (opts: {
+      limit: string;
+      offset?: string;
+      extension?: string;
+      state?: string;
+      kind?: string;
+      triggeredBy?: string;
+      scope?: string;
+      failed?: boolean;
+      since?: string;
+      before?: string;
+      query?: string;
+    }) => {
+      const res = await api<{ runs: Record<string, unknown>[]; total: number }>("/api/v1/admin/runs", {
+        query: {
+          limit: opts.limit,
+          offset: opts.offset,
+          extension: opts.extension,
+          state: opts.state?.toUpperCase(),
+          kind: opts.kind?.toUpperCase(),
+          triggeredBy: opts.triggeredBy,
+          scope: opts.scope?.toLowerCase(),
+          failed: opts.failed ? "true" : undefined,
+          since: opts.since,
+          before: opts.before,
+          q: opts.query,
+        },
+      });
+      table(res.runs, [
+        { header: "ID", get: (r) => r["id"] },
+        { header: "EXTENSION", get: (r) => r["extension"] },
+        { header: "KIND", get: (r) => r["kind"] },
+        { header: "STATE", get: (r) => r["state"] },
+        // "-" rather than 0 where no segment has committed an envelope: a run
+        // that has not reported yet is not a run that found nothing.
+        { header: "FOUND", get: (r) => r["chaptersFound"] ?? "-" },
+        { header: "SEEN", get: (r) => r["chaptersSeen"] ?? "-" },
+        { header: "TITLES", get: (r) => r["titlesFound"] ?? "-" },
+        { header: "UNTRACKED", get: (r) => r["untrackedManga"] ?? "-" },
+        { header: "SCOPE", get: (r) => (r["scoped"] ? `${(r["scopeMangaIds"] as string[]).length} titles` : "catalogue") },
+        { header: "SEGMENTS", get: (r) => r["segmentsTotal"] },
+        { header: "TRIGGERED BY", get: (r) => r["triggeredBy"] },
+        { header: "CREATED", get: (r) => ago(r["createdAt"]) },
+      ], "no runs");
+      // The page is `limit` rows; the count is what matched. Printed because a
+      // filtered list that fills its page says nothing about how much it hid.
+      console.log("");
+      console.log(`${res.runs.length} of ${res.total} matching run(s)`);
+    },
+  );
 
 runs
   .command("show <id>")

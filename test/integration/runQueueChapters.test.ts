@@ -45,6 +45,9 @@ describe.skipIf(!dbReady())("run and queue chapter projections", () => {
   const MD_MANGA = "9a1b1c1d-0000-4000-8000-000000000000";
   const MD_GROUP = "4f1de6a2-f0c5-4ac5-bce5-02c7dbb67deb";
   const MD_CHAPTER = "1c2d3e4f-0000-4000-8000-000000000001";
+  /** Two more titles, so "distinct titles" has something to be distinct across. */
+  const OTHER_MANGA = "9a1b1c1d-0000-4000-8000-000000000002";
+  const THIRD_MANGA = "9a1b1c1d-0000-4000-8000-000000000003";
 
   /**
    * Same probe as queues.test.ts: register by hand only if `buildServer` has not
@@ -316,6 +319,154 @@ describe.skipIf(!dbReady())("run and queue chapter projections", () => {
     expect(counts).toContain(2);
     // The unreported run reads "-", not "0".
     expect(counts).toContain(null);
+  });
+
+  /**
+   * The counts on the list are three aggregates over the same envelopes, and
+   * the way to get them wrong is to compute them in one pass: unnesting
+   * `updatedChapters` to count distinct titles multiplies each envelope's row
+   * by its chapter count, and a `jsonb_array_length` summed over those copies
+   * reports a 3-chapter segment as 9. Seeded so that mistake cannot pass —
+   * every count here is smaller than the product it would become.
+   */
+  it("counts titles per run without inflating the chapter counts beside them", async () => {
+    const { run } = await seedRun({
+      segments: 2,
+      reported: 2,
+      chaptersPerSegment: [
+        // Three chapters over two titles, one of which continues in segment 2:
+        // the run has three distinct titles, not four.
+        [
+          chapterRecord({ chapterId: "a1", mdMangaId: MD_MANGA }),
+          chapterRecord({ chapterId: "a2", mdMangaId: MD_MANGA }),
+          chapterRecord({ chapterId: "a3", mdMangaId: OTHER_MANGA }),
+        ],
+        [
+          chapterRecord({ chapterId: "b1", mdMangaId: MD_MANGA }),
+          chapterRecord({ chapterId: "b2", mdMangaId: THIRD_MANGA }),
+        ],
+      ],
+      allChapters: [
+        [chapterRecord({ chapterId: "a1" }), chapterRecord({ chapterId: "a2" })],
+        [chapterRecord({ chapterId: "b1" })],
+      ],
+    });
+
+    const runs = await app.inject({ method: "GET", url: "/api/v1/admin/runs", headers: root });
+    const row = runs.json().runs.find((r: { id: string }) => r.id === run.id);
+    expect(row.chaptersFound).toBe(5);
+    // 3 across two segments, not 6 (2 titles x 3 chapters) and not 4 (a naive
+    // per-segment sum, which would double-count the title in both segments).
+    expect(row.titlesFound).toBe(3);
+    expect(row.chaptersSeen).toBe(3);
+    expect(row.scoped).toBe(false);
+  });
+
+  /**
+   * `mangaTitles` used to be `byManga.length`, the size of a LIMITed page, so a
+   * run touching more titles than the breakdown lists reported the limit as its
+   * title count. 250 titles is past MANGA_BREAKDOWN_LIMIT (200) precisely so
+   * that substitution cannot pass: it would answer 200 to both questions.
+   */
+  it("counts every title of a run, not just the ones the breakdown lists", async () => {
+    const many = Array.from({ length: 250 }, (_, i) =>
+      chapterRecord({
+        chapterId: `many-${i}`,
+        mdMangaId: `9a1b1c1d-0000-4000-8000-${String(i).padStart(12, "0")}`,
+      }),
+    );
+    const { run } = await seedRun({ segments: 1, reported: 1, chaptersPerSegment: [many] });
+
+    const summary = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/runs/${run.id}/chapters/summary`,
+      headers: root,
+    });
+    expect(summary.statusCode).toBe(200);
+    expect(summary.json().mangaTitles).toBe(250);
+    // The breakdown itself is still one capped page, and says so.
+    expect(summary.json().mangaShown).toBe(200);
+    expect(summary.json().byManga.length).toBe(200);
+    expect(summary.json().mangaCapped).toBe(true);
+    expect(summary.json().totals.updated).toBe(250);
+  });
+
+  it("filters the runs list by state, kind, scope and who triggered it", async () => {
+    const mine = await prisma.run.create({
+      data: {
+        idempotencyKey: `run-filter-a-${Math.random()}`,
+        extension: "chaptertest",
+        extensionVersion: "1.0.0",
+        bundleSha256: "a".repeat(64),
+        kind: "CLEAN",
+        state: "FAILED",
+        segmentsTotal: 1,
+        triggeredBy: "user:someone@example.test",
+        scopeMangaIds: [MD_MANGA],
+        error: "it went bang",
+      },
+    });
+    await prisma.run.create({
+      data: {
+        idempotencyKey: `run-filter-b-${Math.random()}`,
+        extension: "chaptertest",
+        extensionVersion: "1.0.0",
+        bundleSha256: "a".repeat(64),
+        kind: "UPDATE",
+        state: "PROCESSED",
+        segmentsTotal: 1,
+        triggeredBy: null,
+      },
+    });
+
+    const ids = async (query: string): Promise<string[]> => {
+      const res = await app.inject({ method: "GET", url: `/api/v1/admin/runs?${query}`, headers: root });
+      expect(res.statusCode).toBe(200);
+      return res.json().runs.map((r: { id: string }) => r.id);
+    };
+
+    expect(await ids("state=FAILED")).toEqual([mine.id]);
+    expect(await ids("kind=CLEAN")).toEqual([mine.id]);
+    // Scope is a shape, not a title id: "scoped" is every run that named its
+    // titles, whichever titles those were.
+    expect(await ids("scope=scoped")).toEqual([mine.id]);
+    expect(await ids("scope=catalogue")).not.toContain(mine.id);
+    expect(await ids("triggeredBy=someone@example")).toEqual([mine.id]);
+    expect(await ids("failed=true")).toEqual([mine.id]);
+    // The string "false" is a filter of its own, not a missing one: `failed=false`
+    // must exclude the failed run rather than coerce to true and return only it.
+    expect(await ids("failed=false")).not.toContain(mine.id);
+    expect(await ids("q=it went bang")).toEqual([mine.id]);
+    // Repeated keys mean "either", so a two-state filter is a union.
+    expect((await ids("state=FAILED&state=PROCESSED")).length).toBe(2);
+  });
+
+  it("counts what matched rather than what fitted on the page", async () => {
+    for (let i = 0; i < 3; i++) {
+      await prisma.run.create({
+        data: {
+          idempotencyKey: `run-page-${i}-${Math.random()}`,
+          extension: "chaptertest",
+          extensionVersion: "1.0.0",
+          bundleSha256: "a".repeat(64),
+          kind: "UPDATE",
+          state: "PROCESSED",
+          segmentsTotal: 1,
+        },
+      });
+    }
+
+    const page = await app.inject({ method: "GET", url: "/api/v1/admin/runs?limit=2", headers: root });
+    expect(page.json().runs.length).toBe(2);
+    expect(page.json().total).toBe(3);
+
+    const second = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/runs?limit=2&offset=2",
+      headers: root,
+    });
+    expect(second.json().runs.length).toBe(1);
+    expect(second.json().total).toBe(3);
   });
 
   // -------------------------------------------- 2. queued, in claim order
