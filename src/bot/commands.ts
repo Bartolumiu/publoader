@@ -672,6 +672,27 @@ function stillWorkingText(
   );
 }
 
+/**
+ * The filter in words, so a destructive confirmation restates its own scope.
+ *
+ * "That would delete 400 tasks" is not enough to approve; "400 EDIT tasks for
+ * comikey" is. An unfiltered purge says so loudly, because that is the one an
+ * operator most needs to notice before confirming.
+ */
+function describeFilter(filter: {
+  kind?: string | undefined;
+  state?: string | undefined;
+  extension?: string | undefined;
+  q?: string | undefined;
+}): string {
+  const parts: string[] = [];
+  if (filter.kind) parts.push(`kind ${filter.kind}`);
+  if (filter.state) parts.push(`state ${filter.state}`);
+  if (filter.extension) parts.push(`extension \`${filter.extension}\``);
+  if (filter.q) parts.push(`matching \`${filter.q}\``);
+  return parts.length > 0 ? ` (${parts.join(", ")})` : " — **the whole queue**, no filter given";
+}
+
 /** Pacing in words, skipping whatever is not set rather than printing nulls. */
 function describeUploadValues(v: UploadScheduleValues | undefined): string {
   if (!v) return "_default_";
@@ -1135,12 +1156,12 @@ const commands: BotCommand[] = [
   },
   {
     name: "runs",
-    description: "Recent runs, or one run in detail.",
-    sensitivity: "read",
+    description: "Recent runs, one run in detail, or stopping one that is stuck.",
+    sensitivity: { recent: "read", show: "read", cancel: "destructive", "cancel-all": "destructive" },
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("runs")
-      .setDescription("Recent runs, or one run in detail.")
+      .setDescription("Recent runs, one run in detail, or stopping one that is stuck.")
       .addSubcommand((s) =>
         s
           .setName("recent")
@@ -1157,9 +1178,63 @@ const commands: BotCommand[] = [
           .setName("show")
           .setDescription("One run with every job, attempt count and error.")
           .addStringOption((o) => o.setName("id").setDescription("Run id.").setRequired(true)),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("cancel")
+          .setDescription("Stop one run and its queued jobs.")
+          .addStringOption((o) => o.setName("id").setDescription("Run id.").setRequired(true))
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Required: in-flight jobs are abandoned."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("cancel-all")
+          .setDescription("Stop every active run, or every one for a single extension.")
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Required: this stops work across the platform."),
+          )
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Only this extension. Omit for all of them.").setAutocomplete(true),
+          ),
       ),
     async run(ctx) {
-      if (ctx.options.subcommand() === "recent") {
+      const sub = ctx.options.subcommand();
+
+      if (sub === "cancel") {
+        const id = requireString(ctx.options, "id");
+        if (ctx.options.boolean("confirm") !== true) {
+          return {
+            text: `This stops run \`${id}\` and abandons whatever it has in flight.\nRe-issue with \`confirm: true\`.`,
+            tone: "warn",
+          };
+        }
+        await ctx.api.cancelRun(ctx.actor, id);
+        return { text: `Run \`${id}\` cancelled.`, title: "Run cancelled", tone: "ok" };
+      }
+
+      if (sub === "cancel-all") {
+        const extension = ctx.options.string("extension");
+        if (ctx.options.boolean("confirm") !== true) {
+          return {
+            text: extension
+              ? `This stops every active run for \`${extension}\`.\nRe-issue with \`confirm: true\`.`
+              : "This stops **every active run on the platform**.\nRe-issue with `confirm: true`.",
+            tone: "warn",
+          };
+        }
+        const stopped = await ctx.api.cancelAllRuns(ctx.actor, extension ?? undefined);
+        return {
+          text: `Stopped **${stopped.runs ?? 0}** run(s) and **${stopped.jobs ?? 0}** queued job(s)${
+            extension ? ` for \`${extension}\`` : ""
+          }.`,
+          title: "Runs cancelled",
+          tone: "ok",
+        };
+      }
+
+      if (sub === "recent") {
         const extension = ctx.options.string("extension");
         const { runs } = await ctx.api.listRuns(ctx.actor, {
           limit: ctx.options.integer("limit") ?? 15,
@@ -1286,7 +1361,14 @@ const commands: BotCommand[] = [
     // so cancellation is per task.
     name: "queue",
     description: "The uploader's task queue: inspect, retry, cancel, unstick.",
-    sensitivity: { list: "read", retry: "mutate", cancel: "destructive", "requeue-stale": "mutate" },
+    sensitivity: {
+      list: "read",
+      retry: "mutate",
+      cancel: "destructive",
+      "requeue-stale": "mutate",
+      purge: "destructive",
+      restagger: "mutate",
+    },
     ephemeral: true,
     builder: new SlashCommandBuilder()
       .setName("queue")
@@ -1339,6 +1421,63 @@ const commands: BotCommand[] = [
       )
       .addSubcommand((s) =>
         s
+          .setName("purge")
+          .setDescription("Delete queued tasks matching a filter. Counts first unless you confirm.")
+          .addStringOption((o) =>
+            o
+              .setName("kind")
+              .setDescription("Only this task kind.")
+              .addChoices(
+                { name: "UPLOAD", value: "UPLOAD" },
+                { name: "EDIT", value: "EDIT" },
+                { name: "DELETE", value: "DELETE" },
+                { name: "UNAVAILABLE", value: "UNAVAILABLE" },
+              ),
+          )
+          .addStringOption((o) =>
+            o
+              .setName("state")
+              .setDescription("Only this state.")
+              .addChoices(
+                { name: "PENDING", value: "PENDING" },
+                { name: "FAILED", value: "FAILED" },
+                { name: "DEAD_LETTER", value: "DEAD_LETTER" },
+              ),
+          )
+          .addStringOption((o) =>
+            o.setName("extension").setDescription("Only this extension.").setAutocomplete(true),
+          )
+          .addStringOption((o) => o.setName("q").setDescription("Substring of series, title or number."))
+          .addBooleanOption((o) =>
+            o.setName("confirm").setDescription("Required to actually delete. Without it you get a count."),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
+          .setName("restagger")
+          .setDescription("Re-space pending uploads so they go out a fixed gap apart.")
+          .addIntegerOption((o) =>
+            o
+              .setName("gap-seconds")
+              .setDescription("Seconds between consecutive uploads.")
+              .setRequired(true)
+              .setMinValue(1)
+              .setMaxValue(86400),
+          )
+          .addStringOption((o) =>
+            o
+              .setName("kind")
+              .setDescription("Which queue. Default: UPLOAD.")
+              .addChoices(
+                { name: "UPLOAD", value: "UPLOAD" },
+                { name: "EDIT", value: "EDIT" },
+                { name: "DELETE", value: "DELETE" },
+                { name: "UNAVAILABLE", value: "UNAVAILABLE" },
+              ),
+          ),
+      )
+      .addSubcommand((s) =>
+        s
           .setName("requeue-stale")
           .setDescription("Sweep leases held by a dead uploader back onto the queue."),
       ),
@@ -1371,6 +1510,52 @@ const commands: BotCommand[] = [
             `**${tasks.length} task(s)**: ids are truncated above; use \`/queue list\` output with the full id from the dashboard for retry/cancel.`,
             ...rendered,
           ]),
+        };
+      }
+      if (sub === "purge") {
+        const filter = {
+          kind: (ctx.options.string("kind") as UploadTaskKind | null) ?? undefined,
+          state: (ctx.options.string("state") as UploadTaskState | null) ?? undefined,
+          extension: ctx.options.string("extension") ?? undefined,
+          q: ctx.options.string("q") ?? undefined,
+        };
+        const confirmed = ctx.options.boolean("confirm") === true;
+
+        // Always count first, even when confirmed: a purge cannot be undone,
+        // and "it matched far more than I expected" is the failure worth
+        // catching. The dry run costs one round trip.
+        const preview = await ctx.api.purgeQueue(ctx.actor, { ...filter, dryRun: true });
+        const matched = preview.matched ?? 0;
+        if (matched === 0) return { text: "Nothing matches that filter.", title: "Queue purge", tone: "info" };
+
+        if (!confirmed) {
+          return {
+            text: `That would delete **${matched}** queued task(s)${describeFilter(filter)}.`,
+            title: "Queue purge — nothing deleted yet",
+            tone: "warn",
+            footer: "Re-issue with `confirm: true` to delete them. This cannot be undone.",
+          };
+        }
+
+        const result = await ctx.api.purgeQueue(ctx.actor, { ...filter, dryRun: false, confirm: true });
+        return {
+          text: `Deleted **${result.deleted ?? 0}** queued task(s)${describeFilter(filter)}.`,
+          title: "Queue purged",
+          tone: "ok",
+          footer: result.capped ? "Capped by the server's bulk limit; run it again for the rest." : undefined,
+        };
+      }
+      if (sub === "restagger") {
+        const gapSeconds = ctx.options.integer("gap-seconds") ?? 60;
+        const kind = (ctx.options.string("kind") as UploadTaskKind | null) ?? "UPLOAD";
+        const result = await ctx.api.restaggerQueue(ctx.actor, gapSeconds, kind);
+        return {
+          text:
+            result.moved > 0
+              ? `Re-spaced **${result.moved}** pending ${kind} task(s) to ${gapSeconds}s apart.`
+              : `Nothing pending in the ${kind} queue to re-space.`,
+          title: "Queue restaggered",
+          tone: "ok",
         };
       }
       if (sub === "requeue-stale") {

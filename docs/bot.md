@@ -328,6 +328,10 @@ DMs are closed the bot falls back to the ephemeral reply and says so.
 | `/status` | read | `stats:read` (+ `workers:read` for the fleet section) | Pause state, job counts by state, upload-task depths, worker fleet with heartbeat age. |
 | `/ping` | read | `stats:read` | Whether the admin API answers, and how fast. |
 | `/stats` | read | `stats:read` | Alias for `/status`, kept from the legacy bot. |
+| `/queue purge [kind] [state] [extension] [q] [confirm]` | destructive | `runs:write` | Delete queued tasks matching a filter. Always counts first, even when confirmed; an unfiltered purge says so in the confirmation. |
+| `/queue restagger <gap-seconds> [kind]` | mutate | `runs:write` | Re-space pending tasks so they go out a fixed gap apart. |
+| `/runs cancel <id> [confirm]` | destructive | `runs:write` | Stop one run and its queued jobs. |
+| `/runs cancel-all [extension] [confirm]` | destructive | `runs:write` | Stop every active run, or every one for a single extension. |
 | `/logs [level] [service] [q] [limit]` | read | `runs:read` | Recent lines from the core services' log table. Defaults to warnings and errors. Covers core-api, scheduler, processor and uploader; extension runs are not there, because workers keep no database. |
 | `/activity [severity] [hours] [extension] [q] [limit]` | read | `runs:read` | The merged operational feed, worst first. Audit entries are folded in only for a caller holding `audit:read`. |
 | `/uploads show` | read | `settings:read` | Upload pacing in force: daily budget, interval, spacing, budget scope, and any per-extension overrides. |

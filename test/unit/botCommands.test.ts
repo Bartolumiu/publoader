@@ -1924,3 +1924,106 @@ describe("/activity", () => {
     expect(without.footer).toContain("Audit entries are hidden");
   });
 });
+
+describe("/queue purge", () => {
+  it("counts before deleting, and deletes nothing without confirmation", async () => {
+    // A purge cannot be undone, so the count is the whole point: "it matched
+    // far more than I expected" is the failure worth catching.
+    const purgeQueue = vi.fn().mockResolvedValue({ dryRun: true, matched: 412 });
+    const reply = await invoke("queue", fakeApi({ purgeQueue }), { extension: "comikey" }, "purge");
+    expect(purgeQueue).toHaveBeenCalledTimes(1);
+    expect(purgeQueue).toHaveBeenCalledWith("discord:ardax", expect.objectContaining({ dryRun: true }));
+    expect(reply.text).toContain("412");
+    expect(reply.text).toContain("comikey");
+    expect(reply.footer).toContain("cannot be undone");
+    expect(reply.tone).toBe("warn");
+  });
+
+  it("still counts first even when confirmed", async () => {
+    const purgeQueue = vi
+      .fn()
+      .mockResolvedValueOnce({ dryRun: true, matched: 3 })
+      .mockResolvedValueOnce({ deleted: 3 });
+    const reply = await invoke("queue", fakeApi({ purgeQueue }), { confirm: true, state: "FAILED" }, "purge");
+    expect(purgeQueue).toHaveBeenCalledTimes(2);
+    expect(purgeQueue).toHaveBeenLastCalledWith(
+      "discord:ardax",
+      expect.objectContaining({ dryRun: false, confirm: true }),
+    );
+    expect(reply.text).toContain("Deleted **3**");
+  });
+
+  it("says loudly when no filter was given, because that is the whole queue", async () => {
+    const purgeQueue = vi.fn().mockResolvedValue({ dryRun: true, matched: 9000 });
+    const reply = await invoke("queue", fakeApi({ purgeQueue }), {}, "purge");
+    expect(reply.text).toContain("the whole queue");
+  });
+
+  it("stops at the count when nothing matches", async () => {
+    const purgeQueue = vi.fn().mockResolvedValue({ dryRun: true, matched: 0 });
+    const reply = await invoke("queue", fakeApi({ purgeQueue }), { confirm: true }, "purge");
+    expect(purgeQueue).toHaveBeenCalledTimes(1);
+    expect(reply.text).toContain("Nothing matches");
+  });
+
+  it("is gated as destructive", () => {
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("queue")!, "purge")).toBe("destructive");
+    expect(resolveSensitivity(COMMANDS_BY_NAME.get("queue")!, "restagger")).toBe("mutate");
+  });
+});
+
+describe("/queue restagger", () => {
+  it("re-spaces the chosen queue and reports how many moved", async () => {
+    const restaggerQueue = vi.fn().mockResolvedValue({ moved: 40, gapSeconds: 300 });
+    const reply = await invoke("queue", fakeApi({ restaggerQueue }), { "gap-seconds": 300, kind: "EDIT" }, "restagger");
+    expect(restaggerQueue).toHaveBeenCalledWith("discord:ardax", 300, "EDIT");
+    expect(reply.text).toContain("40");
+  });
+
+  it("defaults to the upload queue", async () => {
+    const restaggerQueue = vi.fn().mockResolvedValue({ moved: 0, gapSeconds: 60 });
+    await invoke("queue", fakeApi({ restaggerQueue }), { "gap-seconds": 60 }, "restagger");
+    expect(restaggerQueue).toHaveBeenCalledWith("discord:ardax", 60, "UPLOAD");
+  });
+});
+
+describe("/runs cancel", () => {
+  it("refuses without confirmation, naming what is abandoned", async () => {
+    const cancelRun = vi.fn();
+    const reply = await invoke("runs", fakeApi({ cancelRun }), { id: "run-1" }, "cancel");
+    expect(cancelRun).not.toHaveBeenCalled();
+    expect(reply.text).toContain("in flight");
+  });
+
+  it("cancels when confirmed", async () => {
+    const cancelRun = vi.fn().mockResolvedValue({ ok: true });
+    const reply = await invoke("runs", fakeApi({ cancelRun }), { id: "run-1", confirm: true }, "cancel");
+    expect(cancelRun).toHaveBeenCalledWith("discord:ardax", "run-1");
+    expect(reply.tone).toBe("ok");
+  });
+
+  it("says how wide cancel-all reaches before doing it", async () => {
+    const cancelAllRuns = vi.fn();
+    const all = await invoke("runs", fakeApi({ cancelAllRuns }), {}, "cancel-all");
+    expect(all.text).toContain("every active run on the platform");
+    const one = await invoke("runs", fakeApi({ cancelAllRuns }), { extension: "omoi" }, "cancel-all");
+    expect(one.text).toContain("omoi");
+    expect(cancelAllRuns).not.toHaveBeenCalled();
+  });
+
+  it("reports what cancel-all stopped", async () => {
+    const cancelAllRuns = vi.fn().mockResolvedValue({ ok: true, runs: 2, jobs: 17 });
+    const reply = await invoke("runs", fakeApi({ cancelAllRuns }), { confirm: true }, "cancel-all");
+    expect(cancelAllRuns).toHaveBeenCalledWith("discord:ardax", undefined);
+    expect(reply.text).toContain("**2**");
+    expect(reply.text).toContain("**17**");
+  });
+
+  it("keeps the read subcommands readable", () => {
+    const runs = COMMANDS_BY_NAME.get("runs")!;
+    expect(resolveSensitivity(runs, "recent")).toBe("read");
+    expect(resolveSensitivity(runs, "show")).toBe("read");
+    expect(resolveSensitivity(runs, "cancel")).toBe("destructive");
+    expect(resolveSensitivity(runs, "cancel-all")).toBe("destructive");
+  });
+});

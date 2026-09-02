@@ -581,6 +581,25 @@ interface RequestSpec {
   timeoutMs?: number;
 }
 
+export interface QueuePurgeBody {
+  kind?: UploadTaskKind;
+  state?: UploadTaskState;
+  extension?: string;
+  q?: string;
+  /** True asks "how many would this hit"; false actually deletes. */
+  dryRun: boolean;
+  confirm?: boolean;
+  includeCompleted?: boolean;
+}
+
+export interface QueuePurgeResult {
+  dryRun?: boolean;
+  matched?: number;
+  deleted?: number;
+  capped?: boolean;
+  error?: string;
+}
+
 /** How many chapters go out, how often, and how far apart. */
 export interface UploadScheduleValues {
   perDay?: number;
@@ -829,6 +848,59 @@ export class AdminApiClient {
       path: "/api/v1/admin/discord/authz",
       scope: "users:admin",
       actor,
+    });
+  }
+
+  // ---- clearing up after an incident ----
+
+  /**
+   * Delete queued upload tasks matching a filter.
+   *
+   * `dryRun` defaults to true server-side and this keeps that: the count comes
+   * back before anything is deleted, because "how many would that hit?" is the
+   * question an operator actually has, and a purge is not undoable.
+   */
+  purgeQueue(actor: string, body: QueuePurgeBody): Promise<QueuePurgeResult> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/queues/purge",
+      scope: "runs:write",
+      actor,
+      json: body,
+    });
+  }
+
+  /** Re-space pending uploads so they go out `gapSeconds` apart. */
+  restaggerQueue(
+    actor: string,
+    gapSeconds: number,
+    kind: UploadTaskKind,
+  ): Promise<{ moved: number; gapSeconds: number }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/queues/restagger",
+      scope: "runs:write",
+      actor,
+      json: { gapSeconds, kind },
+    });
+  }
+
+  cancelRun(actor: string, runId: string): Promise<{ ok: boolean }> {
+    return this.request({
+      method: "POST",
+      path: `/api/v1/admin/runs/${encodeURIComponent(runId)}/cancel`,
+      scope: "runs:write",
+      actor,
+    });
+  }
+
+  cancelAllRuns(actor: string, extension?: string): Promise<{ ok: boolean; runs?: number; jobs?: number }> {
+    return this.request({
+      method: "POST",
+      path: "/api/v1/admin/runs/cancel-all",
+      scope: "runs:write",
+      actor,
+      json: extension ? { extension } : {},
     });
   }
 
