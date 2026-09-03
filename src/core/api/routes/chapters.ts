@@ -11,6 +11,7 @@ import { chapterToTaskPayload } from "../../md/chapterRows.js";
 import { ReconcileRunner } from "../../md/reconcileRunner.js";
 import { DuplicateRunner } from "../../md/duplicateRunner.js";
 import { ChapterCollisionStore, MAX_COLLISION_PAGE } from "../../store/chapterCollisions.js";
+import { REMOVAL_CONFIRMATIONS } from "../../store/removalChecks.js";
 import type { MdExtendedApi } from "../../md/client.js";
 import { generateChapterCard } from "../../md/card.js";
 import { unavailableCardOptions } from "../../md/unavailableCard.js";
@@ -692,6 +693,163 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
      * tokens, and `confirm: true` on top — deletion cannot be undone, and an
      * unscoped scan can find hundreds at once.
      */
+    /**
+     * Removals that several runs have not yet agreed on.
+     *
+     * The question this answers is "the publisher dropped this chapter days ago
+     * -- why is it still up?", and before this the only answer was in the
+     * processor's logs. A held removal is deliberate: absence is a vote, and a
+     * chapter is carded only once separate runs days apart have all said the
+     * same thing (see RemovalCheckStore).
+     */
+    scope.get(
+      "/api/v1/admin/chapters/removal-checks",
+      { preHandler: requireScope("chapters:read") },
+      async (req) => {
+        const query = parseOrThrow(
+          z.object({
+            extension: z.string().max(64).optional(),
+            limit: z.coerce.number().int().min(1).max(500).default(100),
+          }),
+          req.query ?? {},
+        );
+        const pending = await ctx.removalChecks.pending(query.extension, query.limit);
+        return {
+          confirmations: REMOVAL_CONFIRMATIONS,
+          pending: pending.map((row) => ({
+            mdChapterId: row.mdChapterId,
+            extension: row.extension,
+            mdMangaId: row.mdMangaId,
+            pass: row.pass,
+            mode: row.mode,
+            misses: row.misses,
+            remaining: Math.max(0, REMOVAL_CONFIRMATIONS - row.misses),
+            firstMissedAt: row.firstMissedAt,
+            lastMissedAt: row.lastMissedAt,
+            nextVoteAt: row.notBefore,
+          })),
+        };
+      },
+    );
+
+    /**
+     * Forget one extension's tally outright.
+     *
+     * Ordinarily unnecessary: a recovered extension lists its chapters again
+     * and each tally is dropped on sight. This is for the operator who already
+     * knows it was an outage and does not want the votes sitting there until
+     * the next run, and it can only ever make the platform LESS likely to
+     * remove something, which is why it needs no confirm flag.
+     */
+    scope.post(
+      "/api/v1/admin/chapters/removal-checks/clear",
+      { preHandler: requireScope("chapters:write") },
+      async (req) => {
+        const body = parseOrThrow(
+          z.object({ extension: z.string().min(1).max(64) }),
+          req.body ?? {},
+        );
+        const cleared = await ctx.removalChecks.clearExtension(body.extension);
+        await ctx.audit.record(actor(req), "chapter.removal_checks.clear", body.extension, {
+          extension: body.extension,
+          cleared,
+        });
+        return { ok: true, extension: body.extension, cleared };
+      },
+    );
+
+    /**
+     * Put a chapter on the tally by hand.
+     *
+     * A vote, not a removal: the runs still have to agree before anything
+     * reaches MangaDex, which is why this needs no confirmation flag. An
+     * operator who wants the chapter carded outright has `bulk/unavailable`,
+     * which says so and asks.
+     */
+    scope.post(
+      "/api/v1/admin/chapters/removal-checks",
+      { preHandler: requireScope("chapters:write") },
+      async (req) => {
+        const body = parseOrThrow(
+          z.object({
+            mdChapterId: z.string().uuid(),
+            extension: z.string().min(1).max(64),
+            mdMangaId: z.string().uuid().optional(),
+            mode: z.enum(["unavailable", "delete"]).default("unavailable"),
+          }),
+          req.body ?? {},
+        );
+        const row = await ctx.removalChecks.add({
+          mdChapterId: body.mdChapterId,
+          extension: body.extension,
+          mdMangaId: body.mdMangaId ?? null,
+          pass: "operator",
+          mode: body.mode,
+        });
+        await ctx.audit.record(actor(req), "chapter.removal_checks.add", body.mdChapterId, {
+          extension: body.extension,
+          mode: body.mode,
+          misses: row.misses,
+        });
+        return { ok: true, check: row, confirmations: REMOVAL_CONFIRMATIONS };
+      },
+    );
+
+    /** Take chapters off the tally: they are not going anywhere. */
+    scope.post(
+      "/api/v1/admin/chapters/removal-checks/remove",
+      { preHandler: requireScope("chapters:write") },
+      async (req) => {
+        const body = parseOrThrow(
+          z.object({ mdChapterIds: z.array(z.string().uuid()).min(1).max(CHAPTER_BULK_CAP) }),
+          req.body ?? {},
+        );
+        const removed = await ctx.removalChecks.clear(body.mdChapterIds);
+        await ctx.audit.record(actor(req), "chapter.removal_checks.remove", undefined, {
+          mdChapterIds: body.mdChapterIds,
+          removed,
+        });
+        return { ok: true, removed };
+      },
+    );
+
+    /**
+     * Stop waiting on these: the next run removes them.
+     *
+     * Tops the tally up and opens the window rather than writing to MangaDex,
+     * so the removal still goes through the ordinary path with its ownership
+     * check and its audit row. `confirm` is required because the outcome is a
+     * chapter carded or deleted, which is the one direction that cannot be
+     * walked back.
+     */
+    scope.post(
+      "/api/v1/admin/chapters/removal-checks/confirm",
+      { preHandler: requireScope("chapters:write") },
+      async (req, reply) => {
+        const body = parseOrThrow(
+          z.object({
+            mdChapterIds: z.array(z.string().uuid()).min(1).max(CHAPTER_BULK_CAP),
+            confirm: z.boolean().default(false),
+          }),
+          req.body ?? {},
+        );
+        if (!body.confirm) {
+          return reply.code(400).send({
+            error:
+              "confirming skips the agreement between runs that stops a broken extension " +
+              "retiring live chapters; pass confirm: true",
+            wouldConfirm: body.mdChapterIds.length,
+          });
+        }
+        const confirmed = await ctx.removalChecks.confirmNow(body.mdChapterIds);
+        await ctx.audit.record(actor(req), "chapter.removal_checks.confirm", undefined, {
+          mdChapterIds: body.mdChapterIds,
+          confirmed,
+        });
+        return { ok: true, confirmed };
+      },
+    );
+
     scope.post(
       "/api/v1/admin/chapters/duplicates",
       { preHandler: requireScope("chapters:read") },

@@ -1915,6 +1915,7 @@ const NAV = [
     tabs: [
       ["uploaded", "On MangaDex"],
       ["unavailable", "Unavailable"],
+      ["holding", "Holding"],
       ["restores", "Restores"],
       ["collisions", "Collisions"],
       ["deleted", "Deleted"],
@@ -5881,8 +5882,169 @@ function chapterCollisions() {
   );
 }
 
+/**
+ * Chapters the platform thinks the publisher dropped, but has not acted on.
+ *
+ * "The extension did not list this chapter" is the same sentence whether the
+ * publisher retired it or the extension was broken when we asked, so a removal
+ * waits for several runs, days apart, to agree. This is that waiting room: what
+ * is part-way to being carded, how much more agreement it needs, and the three
+ * things an operator can do about it.
+ *
+ * The verbs are deliberately asymmetric. Forgetting is one click, because it
+ * only ever leaves a chapter up. Confirming asks first, because its outcome is
+ * a chapter carded or deleted, and that is the direction with no way back.
+ */
+function chapterHolding() {
+  const filter = { extension: "" };
+  const checks = new Resource("removal-checks", () =>
+    api(
+      `/chapters/removal-checks?limit=200${
+        filter.extension ? `&extension=${encodeURIComponent(filter.extension)}` : ""
+      }`,
+    ),
+  );
+  const writable = can("chapters:write") && isOperator();
+
+  const refresh = () => void checks.load({ force: true });
+
+  const act = async (label, fn) => {
+    try {
+      const res = await fn();
+      toast(label(res));
+      refresh();
+    } catch (err) {
+      toast(err.message ?? "could not update", "error");
+    }
+  };
+
+  const forget = (ids) =>
+    act(
+      (r) => `${r.removed} no longer waiting to be removed`,
+      () => api("/chapters/removal-checks/remove", { method: "POST", json: { mdChapterIds: ids } }),
+    );
+
+  const confirmNow = (ids) => {
+    // The one destructive direction on this page, so it is spelled out: what
+    // happens, to how many, and that the agreement is what is being skipped.
+    const ok = window.confirm(
+      `Skip the wait for ${ids.length} chapter(s)?\n\n` +
+        "The next run will mark them unavailable on MangaDex. The agreement " +
+        "between runs is what stops a broken extension retiring live chapters, " +
+        "so only do this if you have checked the publisher really dropped them.",
+    );
+    if (!ok) return;
+    return act(
+      (r) => `${r.confirmed} will be removed on the next run`,
+      () =>
+        api("/chapters/removal-checks/confirm", {
+          method: "POST",
+          json: { mdChapterIds: ids, confirm: true },
+        }),
+    );
+  };
+
+  const addChapter = el("input", { placeholder: "MangaDex chapter id", size: 38 });
+  const addExtension = el("input", { placeholder: "extension", size: 14 });
+  const add = () => {
+    const mdChapterId = addChapter.value.trim();
+    const extension = addExtension.value.trim();
+    if (!mdChapterId || !extension) {
+      toast("chapter id and extension are both needed", "error");
+      return;
+    }
+    return act(
+      () => "added; the runs still have to agree before anything is removed",
+      async () => {
+        const res = await api("/chapters/removal-checks", {
+          method: "POST",
+          json: { mdChapterId, extension },
+        });
+        addChapter.value = "";
+        return res;
+      },
+    );
+  };
+
+  const extensionFilter = el("input", { placeholder: "all extensions", size: 14 });
+  extensionFilter.addEventListener("change", () => {
+    filter.extension = extensionFilter.value.trim();
+    refresh();
+  });
+
+  return el(
+    "div",
+    {},
+    card(
+      "Waiting to be removed",
+      el("p", {
+        class: "dim small",
+        text:
+          "Chapters an extension has stopped listing. A single run is not enough to act on: " +
+          "an extension that is down looks exactly like a publisher that removed everything, " +
+          "so a chapter is only carded once several runs days apart agree. Any run that lists " +
+          "it again clears it from here.",
+      }),
+      el("div", { class: "row" }, [
+        el("label", { class: "inline small", text: "Extension" }),
+        extensionFilter,
+        el("button", { type: "button", text: "Refresh", onclick: refresh }),
+      ]),
+      writable
+        ? el("div", { class: "row" }, [
+            el("label", { class: "inline small", text: "Add" }),
+            addChapter,
+            addExtension,
+            el("button", { type: "button", text: "Add", onclick: add }),
+          ])
+        : null,
+      live([checks], (data) => {
+        const rows = data?.pending ?? [];
+        const needed = data?.confirmations ?? 0;
+        return el("div", {}, [
+          el("p", {
+            class: "small",
+            text: `${rows.length} waiting · ${needed} agreeing runs needed before removal`,
+          }),
+          table(
+            ["Chapter", "Extension", "Agreed", "Still needs", "First seen", "Next check", ""],
+            rows.map((r) => [
+              el("code", { text: (r.mdChapterId ?? "—").slice(0, 8) }),
+              r.extension ?? "—",
+              String(r.misses ?? 0),
+              // The number an operator actually reads: how much longer.
+              el("span", {
+                class: r.remaining === 0 ? "warn-text" : "",
+                text: r.remaining === 0 ? "ready" : String(r.remaining),
+              }),
+              el("span", { class: "dim small", text: (r.firstMissedAt ?? "").slice(0, 10) }),
+              el("span", { class: "dim small", text: (r.nextVoteAt ?? "").slice(0, 16) }),
+              writable
+                ? el("div", { class: "row" }, [
+                    el("button", {
+                      type: "button",
+                      text: "Forget",
+                      onclick: () => forget([r.mdChapterId]),
+                    }),
+                    el("button", {
+                      type: "button",
+                      text: "Remove now",
+                      onclick: () => confirmNow([r.mdChapterId]),
+                    }),
+                  ])
+                : el("span", { class: "dim", text: "" }),
+            ]),
+            { empty: "Nothing is waiting: no extension has dropped a chapter it had listed." },
+          ),
+        ]);
+      }),
+    ),
+  );
+}
+
 VIEWS.chapters = (route) => {
   if (route.param) return chapterDetail(route.param);
+  if (route.tab === "holding") return chapterHolding();
   // Not an archive: these are chapters spread across archives, grouped by a
   // decision made about them. It shares the section because that is where an
   // operator looks, not because it shares the listing machinery.

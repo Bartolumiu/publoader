@@ -1816,4 +1816,198 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
       });
     });
   });
+
+  /**
+   * Why a chapter the publisher dropped is still on MangaDex.
+   *
+   * Absence is a vote, not a verdict: a chapter missing from one run is equally
+   * an extension that was broken when we asked. Before these routes the only
+   * record of a held removal was a processor log line.
+   */
+  describe("removal checks", () => {
+    const tally = (mdChapterId: string, extension: string, misses: number) =>
+      prisma.chapterRemovalCheck.create({
+        data: { mdChapterId, extension, pass: "no-longer-listed", mode: "unavailable", misses },
+      });
+
+    it("reports what is waiting, and how much more agreement it needs", async () => {
+      await tally("chapter-a", "mangaplus", 1);
+      await tally("chapter-b", "mangaplus", 2);
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/admin/chapters/removal-checks",
+        headers: root,
+      });
+      expect(res.statusCode).toBe(200);
+
+      const body = res.json();
+      expect(body.confirmations).toBeGreaterThan(1);
+      const byId = new Map(body.pending.map((p: { mdChapterId: string }) => [p.mdChapterId, p]));
+      expect(byId.get("chapter-a")).toMatchObject({ misses: 1, extension: "mangaplus" });
+      // The useful number: how many more runs have to agree.
+      expect(byId.get("chapter-b")).toMatchObject({
+        misses: 2,
+        remaining: body.confirmations - 2,
+      });
+    });
+
+    it("narrows to one extension", async () => {
+      await tally("chapter-a", "mangaplus", 1);
+      await tally("chapter-c", "omoi", 1);
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/admin/chapters/removal-checks?extension=omoi",
+        headers: root,
+      });
+      expect(res.json().pending.map((p: { mdChapterId: string }) => p.mdChapterId)).toEqual([
+        "chapter-c",
+      ]);
+    });
+
+    it("clears one extension's tally and records who did it", async () => {
+      await tally("chapter-a", "mangaplus", 2);
+      await tally("chapter-c", "omoi", 1);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/chapters/removal-checks/clear",
+        headers: root,
+        payload: { extension: "mangaplus" },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ ok: true, extension: "mangaplus", cleared: 1 });
+
+      // Only that extension, and the other publisher's tally is untouched.
+      expect((await prisma.chapterRemovalCheck.findMany()).map((r) => r.mdChapterId)).toEqual([
+        "chapter-c",
+      ]);
+      expect(
+        await prisma.auditEvent.count({ where: { action: "chapter.removal_checks.clear" } }),
+      ).toBe(1);
+    });
+
+    it("adds a chapter by hand as a vote, not as a removal", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/chapters/removal-checks",
+        headers: root,
+        payload: { mdChapterId: uuid(1), extension: "exampleext" },
+      });
+      expect(res.statusCode).toBe(200);
+      // One vote. The runs still have to agree, which is what makes this safe
+      // to expose without a confirmation.
+      expect(res.json().check).toMatchObject({ misses: 1, pass: "operator" });
+      expect(res.json().confirmations).toBeGreaterThan(1);
+      // And nothing was queued against MangaDex.
+      expect(await prisma.uploadTask.count({ where: { kind: "UNAVAILABLE" } })).toBe(0);
+    });
+
+    it("does not walk an existing tally backwards when re-added", async () => {
+      await tally(uuid(1), "exampleext", 2);
+
+      await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/chapters/removal-checks",
+        headers: root,
+        payload: { mdChapterId: uuid(1), extension: "exampleext" },
+      });
+
+      expect(
+        (await prisma.chapterRemovalCheck.findUniqueOrThrow({ where: { mdChapterId: uuid(1) } }))
+          .misses,
+      ).toBe(2);
+    });
+
+    it("removes named chapters from the tally", async () => {
+      await tally(uuid(1), "exampleext", 2);
+      await tally(uuid(2), "exampleext", 1);
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/chapters/removal-checks/remove",
+        headers: root,
+        payload: { mdChapterIds: [uuid(1)] },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ removed: 1 });
+      expect((await prisma.chapterRemovalCheck.findMany()).map((r) => r.mdChapterId)).toEqual([
+        uuid(2),
+      ]);
+    });
+
+    it("refuses to skip the agreement without confirm, then tops the tally up", async () => {
+      await tally(uuid(1), "exampleext", 1);
+
+      const refused = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/chapters/removal-checks/confirm",
+        headers: root,
+        payload: { mdChapterIds: [uuid(1)] },
+      });
+      // The agreement is the safety property, so skipping it is asked about.
+      expect(refused.statusCode).toBe(400);
+      expect(refused.json()).toMatchObject({ wouldConfirm: 1 });
+      expect(
+        (await prisma.chapterRemovalCheck.findUniqueOrThrow({ where: { mdChapterId: uuid(1) } }))
+          .misses,
+      ).toBe(1);
+
+      const done = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/chapters/removal-checks/confirm",
+        headers: root,
+        payload: { mdChapterIds: [uuid(1)], confirm: true },
+      });
+      expect(done.statusCode).toBe(200);
+
+      // Topped up and the window opened, so the NEXT run removes it through the
+      // ordinary path -- this route never touches MangaDex itself.
+      const row = await prisma.chapterRemovalCheck.findUniqueOrThrow({
+        where: { mdChapterId: uuid(1) },
+      });
+      expect(row.misses).toBeGreaterThanOrEqual(3);
+      expect(row.notBefore.getTime()).toBeLessThanOrEqual(Date.now());
+      expect(await prisma.uploadTask.count({ where: { kind: "UNAVAILABLE" } })).toBe(0);
+    });
+
+    it("needs chapters:write to add, remove or confirm", async () => {
+      const reader = await mint(["chapters:read"]);
+      for (const [url, payload] of [
+        ["/api/v1/admin/chapters/removal-checks", { mdChapterId: uuid(1), extension: "e" }],
+        ["/api/v1/admin/chapters/removal-checks/remove", { mdChapterIds: [uuid(1)] }],
+        [
+          "/api/v1/admin/chapters/removal-checks/confirm",
+          { mdChapterIds: [uuid(1)], confirm: true },
+        ],
+      ] as const) {
+        const res = await app.inject({ method: "POST", url, headers: reader, payload });
+        expect(res.statusCode).toBe(403);
+      }
+    });
+
+    it("needs chapters:write to clear, and only read to look", async () => {
+      const reader = await mint(["chapters:read"]);
+      expect(
+        (
+          await app.inject({
+            method: "GET",
+            url: "/api/v1/admin/chapters/removal-checks",
+            headers: reader,
+          })
+        ).statusCode,
+      ).toBe(200);
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/api/v1/admin/chapters/removal-checks/clear",
+            headers: reader,
+            payload: { extension: "mangaplus" },
+          })
+        ).statusCode,
+      ).toBe(403);
+    });
+  });
 });
