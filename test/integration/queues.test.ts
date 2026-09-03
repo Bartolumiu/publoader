@@ -790,6 +790,61 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
     expect(await prisma.auditEvent.count({ where: { action: "queue.restagger" } })).toBe(1);
   });
 
+  /**
+   * `defer` is how a task that wrote successfully waits to find out whether the
+   * write took, without the uploader standing still for it. It is neither
+   * `completeDone` nor `fail`, and the differences from `fail` are the point.
+   */
+  describe("defer", () => {
+    it("puts the task back later, with a new payload and the attempt returned", async () => {
+      const row = await task({ notBefore: new Date(Date.now() - 30_000) });
+      const claimed = await ctx.uploadTasks.claim("UPLOAD", 300);
+      expect(claimed?.id).toBe(row.id);
+      expect(claimed?.attempt).toBe(1);
+
+      const deferred = await ctx.uploadTasks.defer(row.id, claimed?.leaseId ?? "", 120, {
+        chapterNumber: "1",
+        cardVerify: { round: 1, pagesBefore: 0, versionBefore: 4 },
+      });
+      expect(deferred).toBe(true);
+
+      const after = await prisma.uploadTask.findUniqueOrThrow({ where: { id: row.id } });
+      expect(after.state).toBe("PENDING");
+      expect(after.leaseId).toBeNull();
+      expect(after.notBefore.getTime()).toBeGreaterThan(Date.now() + 60_000);
+      expect(after.chapter).toMatchObject({ cardVerify: { round: 1 } });
+      // Handed back, because waiting is not a retry: a card needing three rounds
+      // of looking would otherwise dead-letter while working perfectly.
+      expect(after.attempt).toBe(0);
+      // And not claimable until its time comes, which is what stops the loop
+      // spinning on a task that has nothing to do yet.
+      expect(await ctx.uploadTasks.claim("UPLOAD", 60)).toBeNull();
+    });
+
+    it("refuses a lease it does not hold, so a swept task is not resurrected", async () => {
+      const row = await task();
+      await ctx.uploadTasks.claim("UPLOAD", 300);
+
+      expect(
+        await ctx.uploadTasks.defer(row.id, "22222222-2222-4222-8222-222222222222", 60, {}),
+      ).toBe(false);
+      expect((await prisma.uploadTask.findUniqueOrThrow({ where: { id: row.id } })).state).toBe(
+        "LEASED",
+      );
+    });
+
+    it("clears the last error, since the row is no longer a failure", async () => {
+      const row = await task({ lastError: "the card did not land" });
+      const claimed = await ctx.uploadTasks.claim("UPLOAD", 300);
+
+      await ctx.uploadTasks.defer(row.id, claimed?.leaseId ?? "", 60, {});
+
+      expect(
+        (await prisma.uploadTask.findUniqueOrThrow({ where: { id: row.id } })).lastError,
+      ).toBeNull();
+    });
+  });
+
   it("leaves a leased row alone while re-spacing the rest", async () => {
     const a = await task({ notBefore: new Date(Date.now() - 30_000) });
     await task({ notBefore: new Date(Date.now() - 20_000) });

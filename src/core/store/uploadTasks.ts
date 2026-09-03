@@ -495,6 +495,38 @@ export class UploadTaskStore {
     return res.count === 1;
   }
 
+  /**
+   * Put a claimed task back in the queue for later, with its payload rewritten.
+   *
+   * Distinct from `fail` in the one way that matters: this is not a retry. The
+   * write SUCCEEDED and is waiting on something outside this process to become
+   * observable -- the unavailable card's page appearing on MangaDex -- so the
+   * attempt that `claim` took is handed back. A card that legitimately needs
+   * three rounds of looking would otherwise spend three of its five attempts
+   * before anything had gone wrong, and dead-letter while working perfectly.
+   *
+   * `chapter` replaces the payload wholesale because that is where the round
+   * counter lives: the row is the only place a deferred task can keep state.
+   */
+  async defer(
+    taskId: string,
+    leaseId: string,
+    delaySeconds: number,
+    chapter: unknown,
+  ): Promise<boolean> {
+    const count = await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE upload_tasks
+      SET state = 'PENDING',
+          chapter = ${JSON.stringify(chapter)}::jsonb,
+          not_before = now() + make_interval(secs => ${delaySeconds}),
+          attempt = greatest(attempt - 1, 0),
+          lease_id = NULL, lease_expires_at = NULL, last_error = NULL,
+          updated_at = now()
+      WHERE id = ${taskId} AND lease_id = ${leaseId} AND state = 'LEASED'
+    `);
+    return count === 1;
+  }
+
   async fail(taskId: string, leaseId: string, message: string, retryDelaySeconds: number): Promise<"requeued" | "dead_letter" | "rejected"> {
     const task = await this.prisma.uploadTask.findUnique({ where: { id: taskId } });
     if (!task) return "rejected";
