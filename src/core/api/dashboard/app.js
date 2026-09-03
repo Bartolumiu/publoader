@@ -12465,6 +12465,7 @@ VIEWS.untracked = (route) => {
     "div",
     {},
     autoMapCard(queue),
+    untrackedReconcileCard(queue),
     card(
       "Filter",
       row(
@@ -13243,6 +13244,110 @@ function autoMapVia(via) {
   // The description case is marked, because it is the one an operator might
   // reasonably want to look at before trusting.
   return el("span", { class: via === "description" ? "chip warn" : "chip", text: known[0], title: known[1] });
+}
+
+/**
+ * Queue rows whose claim to a mapping is void.
+ *
+ * WHAT THEY ARE. A row saying TRACKED whose series is not in the series map:
+ * nothing uploads for it, and the row says it is handled. It arises when a
+ * mapping is removed — which is a legitimate thing to do, and until recently
+ * left the row behind. Three omoi rows sat like that for four days after a
+ * duplicate cleanup, invisible as work and wrong as a record.
+ *
+ * Folded shut, because finding none is the normal answer and this should not
+ * spend a card's worth of the page on saying so every visit. Preview then
+ * release, like every other bulk action here; the release is reversible, since
+ * the rows go to SKIPPED and Unskip brings them back.
+ */
+function untrackedReconcileCard(queue) {
+  const writable = can("untracked:write");
+  const results = el("div", {});
+
+  const draw = (report, onRelease) => {
+    const rows = report.rows ?? [];
+    setChildren(
+      results,
+      rows.length
+        ? table(
+            ["Extension", "Series", "State", "Claims"],
+            rows.map((row) => [
+              row.extension,
+              el(
+                "div",
+                {},
+                el("div", { text: truncate(row.mangaName, 60) }),
+                el("code", { class: "dim small", text: row.mangaId }),
+              ),
+              chip(row.state),
+              row.mdMangaId ? mdTitleLink(row.mdMangaId, "on MangaDex") : el("span", { class: "dim", text: "-" }),
+            ]),
+            { empty: "" },
+          )
+        : null,
+      el("p", {
+        class: rows.length ? "" : "dim small",
+        text: rows.length
+          ? `${rows.length} row(s) claim a MangaDex title the series map does not have. ` +
+            "Nothing is uploaded for them."
+          : "Every row that claims a mapping has one. Nothing to reconcile.",
+      }),
+      report.dryRun && rows.length && onRelease
+        ? row(
+            gatedButton("untracked:write", {
+              class: "primary",
+              text: `Release ${rows.length} row(s)`,
+              onclick: (event) => void onRelease(event.currentTarget),
+            }),
+          )
+        : null,
+      !report.dryRun && rows.length
+        ? el("p", {
+            text:
+              `Released ${report.released ?? rows.length} row(s) to SKIPPED. They are out of the queue and ` +
+              "come back with Unskip if any of them should be tracked after all.",
+          })
+        : null,
+    );
+  };
+
+  const run = async (button, dryRun) => {
+    const report = await act(
+      dryRun ? "untracked.reconcile.preview" : "untracked.reconcile",
+      () => api("/untracked/reconcile", { method: "POST", body: { dryRun } }),
+      { button, refresh: dryRun ? [] : [queue] },
+    );
+    if (!report) return;
+    draw(report, dryRun ? (next) => run(next, false) : null);
+  };
+
+  return card(
+    null,
+    el(
+      "details",
+      { class: "card-fold" },
+      el("summary", {}, el("h2", { text: "Rows claiming a mapping that is gone" })),
+      el("p", {
+        class: "dim small",
+        text:
+          "A row saying TRACKED whose series is not in the series map. Nothing is uploaded for it and the " +
+          "queue says it is handled, so it is invisible as work and wrong as a record. Removing a mapping " +
+          "used to leave one behind; this finds the ones that predate the fix.",
+      }),
+      writable
+        ? null
+        : el("p", { class: "dim small", text: 'Reconciling needs the "untracked:write" scope.' }),
+      row(
+        el("button", {
+          type: "button",
+          text: "Check",
+          disabled: !writable,
+          onclick: (event) => void run(event.currentTarget, true),
+        }),
+      ),
+      results,
+    ),
+  );
 }
 
 function autoMapCard(queue) {

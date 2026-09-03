@@ -1354,7 +1354,27 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         where: { extension: name, namespace, mangaId },
       });
       await ctx.audit.record(actor(req), "tracked_manga.remove", trackedSubject(name, namespace, mangaId));
-      return { ok: true, removed: res.count > 0 };
+
+      /*
+       * The queue row that claimed this mapping has to let go of it.
+       *
+       * Removing a mapping used to stop at the map, leaving the untracked row
+       * saying TRACKED and naming a title it no longer feeds. Nothing uploads
+       * for that series any more and the queue says it is handled, which is the
+       * worst pair: it looks finished to every filter and to every person.
+       * Three omoi rows sat like that for four days after a duplicate cleanup.
+       */
+      const released = await ctx.trackedManga.releaseQueueRows(name, namespace, [mangaId]);
+      for (const row of released) {
+        await ctx.audit.record(actor(req), "untracked.released", row.id, {
+          extension: name,
+          mangaId: row.mangaId,
+          mangaName: row.mangaName,
+          mdMangaId: row.mdMangaId,
+          reason: "its mapping was removed from the series map",
+        });
+      }
+      return { ok: true, removed: res.count > 0, releasedQueueRows: released };
     });
 
     /**
@@ -1521,6 +1541,15 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           canWrite,
           source: actor(req),
         });
+        for (const row of summary.releasedQueueRows) {
+          await ctx.audit.record(actor(req), "untracked.released", row.id, {
+            extension: name,
+            mangaId: row.mangaId,
+            mangaName: row.mangaName,
+            mdMangaId: row.mdMangaId,
+            reason: "its mapping was removed by a bulk edit of the series map",
+          });
+        }
         await ctx.audit.record(actor(req), "tracked_manga.batch", name, {
           added: summary.added,
           updated: summary.updated,
@@ -2416,6 +2445,90 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       if (res.count !== 1) return reply.code(409).send({ error: "not skippable" });
       await ctx.audit.record(actor(req), "untracked.skip", id);
       return { ok: true };
+    });
+
+    /**
+     * Find and fix queue rows whose claim to a mapping is void.
+     *
+     * The companion to the fix above, for the rows that predate it: a row
+     * saying TRACKED whose series is not in the series map. Nothing uploads for
+     * it, and the row says otherwise — so it is invisible as work and wrong as
+     * a record. Reading MangaDex is not involved; this compares two of our own
+     * tables.
+     *
+     * `dryRun` defaults to true, like every other bulk route here, because the
+     * honest report is the point: an operator should see WHICH rows and why
+     * before anything moves. The write itself is reversible — the rows go to
+     * SKIPPED, and Unskip brings them back — which is exactly why it may be
+     * safely offered at all.
+     */
+    scope.post("/api/v1/admin/untracked/reconcile", { preHandler: requireScope("untracked:write") }, async (req) => {
+      const body = parseOrThrow(
+        z
+          .object({
+            dryRun: z.boolean().default(true),
+            extension: z.string().max(64).optional(),
+            limit: z.coerce.number().int().min(1).max(1000).default(500),
+          })
+          .strict(),
+        req.body ?? {},
+      );
+
+      // A left join in SQL rather than two queries and a set difference: the
+      // pairing is (extension, manga_id) in the default catalogue, which is the
+      // same identity the map is keyed on, and saying it once keeps the two
+      // definitions from drifting.
+      const orphaned = await ctx.prisma.$queryRaw<
+        { id: string; extension: string; mangaId: string; mangaName: string; state: string; mdMangaId: string | null }[]
+      >(Prisma.sql`
+        SELECT u.id, u.extension, u.manga_id AS "mangaId", u.manga_name AS "mangaName",
+               u.state::text AS state, u.md_manga_id AS "mdMangaId"
+        FROM untracked_manga u
+        LEFT JOIN tracked_manga t
+          ON t.extension = u.extension AND t.manga_id = u.manga_id AND t.namespace = ''
+        WHERE u.state IN ('TRACKED', 'CREATED')
+          AND t.md_manga_id IS NULL
+          ${body.extension ? Prisma.sql`AND u.extension = ${body.extension}` : Prisma.empty}
+        ORDER BY u.updated_at DESC
+        LIMIT ${body.limit}
+      `);
+
+      if (body.dryRun) {
+        return {
+          ok: true,
+          dryRun: true,
+          found: orphaned.length,
+          rows: orphaned,
+          note:
+            "nothing was changed. These rows claim a MangaDex title but are not in the series map, " +
+            "so nothing is uploaded for them. Repeat with {dryRun: false} to move them to SKIPPED; " +
+            "Unskip brings any of them back.",
+        };
+      }
+
+      if (orphaned.length > 0) {
+        await ctx.prisma.untrackedManga.updateMany({
+          where: { id: { in: orphaned.map((row) => row.id) } },
+          data: { state: "SKIPPED" },
+        });
+        await ctx.audit.recordMany(
+          orphaned.map((row) => ({
+            actor: actor(req),
+            action: "untracked.released",
+            subject: row.id,
+            detail: {
+              extension: row.extension,
+              mangaId: row.mangaId,
+              mangaName: row.mangaName,
+              mdMangaId: row.mdMangaId,
+              was: row.state,
+              reason: "it claimed a mapping the series map does not have",
+            },
+          })),
+        );
+      }
+
+      return { ok: true, dryRun: false, found: orphaned.length, released: orphaned.length, rows: orphaned };
     });
 
     /**

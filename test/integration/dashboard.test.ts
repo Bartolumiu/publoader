@@ -1051,6 +1051,238 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     }
   });
 
+  /**
+   * Removing a mapping has to let go of the queue row that claimed it.
+   *
+   * THE INCIDENT. Three omoi series were listed twice by the publisher — a
+   * second id for the same work, "Dragon Head" and "Dragon Head Omnibus" — and
+   * both ids were mapped to one MangaDex title. Mapping two ids to one title
+   * uploads the same chapters twice (the upload dedupe key is the PUBLISHER's
+   * chapter id, which differs between the two listings), so the duplicate
+   * mappings were removed. Correct — but the removal stopped at the map, and
+   * the three queue rows went on saying TRACKED and naming a title they no
+   * longer fed. Nothing uploaded for them and the queue said they were handled,
+   * which is the worst pair: finished to every filter, wrong as a record.
+   */
+  describe("removing a mapping", () => {
+    const TITLE = "aaaaaaaa-0000-4000-8000-000000000001";
+
+    /** A mapped series, with the queue row that recorded the mapping. */
+    async function mappedSeries(mangaId: string, mangaName: string): Promise<string> {
+      await prisma.trackedManga.create({
+        data: { extension: "opstest", namespace: "", mangaId, mdMangaId: TITLE, source: "operator:someone" },
+      });
+      const row = await prisma.untrackedManga.create({
+        data: {
+          extension: "opstest",
+          mangaId,
+          mangaName,
+          mangaLanguage: "en",
+          mangaUrl: `https://publisher.example/${mangaId}`,
+          state: "TRACKED",
+          mdMangaId: TITLE,
+        },
+      });
+      return row.id;
+    }
+
+    it("moves the queue row out of TRACKED, so it stops claiming a title it does not feed", async () => {
+      const rowId = await mappedSeries("dup-1", "Dragon Head Omnibus");
+
+      const res = await app.inject({
+        method: "DELETE",
+        url: "/api/v1/admin/extensions/opstest/tracked/dup-1",
+        headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().releasedQueueRows).toHaveLength(1);
+
+      const row = await prisma.untrackedManga.findUniqueOrThrow({ where: { id: rowId } });
+      // SKIPPED, not NEW: "stop tracking this" is a decision, and putting the
+      // row back as work would offer a brand new MangaDex title for the very
+      // series somebody was de-duplicating.
+      expect(row.state).toBe("SKIPPED");
+      // The title id stays. It was never the false part — the series really is
+      // on that title — and it is the first thing you want when you come back.
+      expect(row.mdMangaId).toBe(TITLE);
+    });
+
+    it("records why the row moved, under the operator who removed the mapping", async () => {
+      await mappedSeries("dup-2", "Tokyo Tarareba Girls Returns 2");
+      await app.inject({
+        method: "DELETE",
+        url: "/api/v1/admin/extensions/opstest/tracked/dup-2",
+        headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+      });
+
+      const events = await prisma.auditEvent.findMany({ where: { action: "untracked.released" } });
+      expect(events).toHaveLength(1);
+      expect((events[0]!.detail as Record<string, unknown>).reason).toContain("removed from the series map");
+      expect((events[0]!.detail as Record<string, unknown>).mangaId).toBe("dup-2");
+    });
+
+    it("does the same for a removal inside a bulk edit", async () => {
+      const rowId = await mappedSeries("dup-3", "Red Riding Hood's Wolf Apprentice");
+
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/extensions/opstest/tracked/batch",
+        headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+        payload: { remove: ["dup-3"], dryRun: false },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().removed).toBe(1);
+      // Said out loud: the paste changed a row in a table nobody named.
+      expect(res.json().releasedQueueRows).toHaveLength(1);
+
+      const row = await prisma.untrackedManga.findUniqueOrThrow({ where: { id: rowId } });
+      expect(row.state).toBe("SKIPPED");
+    });
+
+    it("changes nothing on a dry run", async () => {
+      const rowId = await mappedSeries("dup-4", "Untouched");
+      await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/extensions/opstest/tracked/batch",
+        headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+        payload: { remove: ["dup-4"], dryRun: true },
+      });
+
+      const row = await prisma.untrackedManga.findUniqueOrThrow({ where: { id: rowId } });
+      expect(row.state).toBe("TRACKED");
+      expect(await prisma.trackedManga.count({ where: { mangaId: "dup-4" } })).toBe(1);
+    });
+
+    it("leaves a queue row alone when the series is still mapped elsewhere in the map", async () => {
+      // A removal in one catalogue says nothing about the default one, which is
+      // the only id space the untracked pipeline writes into.
+      const rowId = await mappedSeries("dup-5", "Still Mapped");
+      await prisma.trackedManga.create({
+        data: { extension: "opstest", namespace: "other", mangaId: "dup-5", mdMangaId: TITLE, source: "x" },
+      });
+
+      await app.inject({
+        method: "DELETE",
+        url: "/api/v1/admin/extensions/opstest/tracked/dup-5?namespace=other",
+        headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+      });
+
+      const row = await prisma.untrackedManga.findUniqueOrThrow({ where: { id: rowId } });
+      expect(row.state).toBe("TRACKED");
+    });
+  });
+
+  /**
+   * Repairing the rows that were already left behind.
+   *
+   * The fix above only helps removals made after it. Three rows had been in
+   * this state for four days, and there was no way to correct them through the
+   * API at all: skip refuses anything past NEW or FAILED, and the only other
+   * route to that column is editing the database by hand.
+   */
+  describe("reconciling queue rows whose mapping is gone", () => {
+    beforeEach(async () => {
+      await prisma.untrackedManga.createMany({
+        data: [
+          {
+            extension: "opstest",
+            mangaId: "orphan-1",
+            mangaName: "Claims A Title",
+            mangaLanguage: "en",
+            mangaUrl: "https://publisher.example/orphan-1",
+            state: "TRACKED",
+            mdMangaId: "bbbbbbbb-0000-4000-8000-000000000002",
+          },
+          {
+            extension: "opstest",
+            mangaId: "genuine",
+            mangaName: "Actually Mapped",
+            mangaLanguage: "en",
+            mangaUrl: "https://publisher.example/genuine",
+            state: "TRACKED",
+            mdMangaId: "cccccccc-0000-4000-8000-000000000003",
+          },
+          {
+            extension: "opstest",
+            mangaId: "waiting",
+            mangaName: "Still New",
+            mangaLanguage: "en",
+            mangaUrl: "https://publisher.example/waiting",
+            state: "NEW",
+          },
+        ],
+      });
+      await prisma.trackedManga.create({
+        data: {
+          extension: "opstest",
+          namespace: "",
+          mangaId: "genuine",
+          mdMangaId: "cccccccc-0000-4000-8000-000000000003",
+          source: "operator:someone",
+        },
+      });
+    });
+
+    it("finds only the rows whose claim is void, and writes nothing by default", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/untracked/reconcile",
+        headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+        payload: {},
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.json().dryRun).toBe(true);
+      expect(res.json().rows.map((r: { mangaId: string }) => r.mangaId)).toEqual(["orphan-1"]);
+
+      // A dry run is a question.
+      const row = await prisma.untrackedManga.findFirstOrThrow({ where: { mangaId: "orphan-1" } });
+      expect(row.state).toBe("TRACKED");
+    });
+
+    it("releases them when asked, and leaves the genuinely mapped one alone", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/untracked/reconcile",
+        headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+        payload: { dryRun: false },
+      });
+      expect(res.json().released).toBe(1);
+
+      expect((await prisma.untrackedManga.findFirstOrThrow({ where: { mangaId: "orphan-1" } })).state).toBe(
+        "SKIPPED",
+      );
+      expect((await prisma.untrackedManga.findFirstOrThrow({ where: { mangaId: "genuine" } })).state).toBe(
+        "TRACKED",
+      );
+      // A NEW row has made no claim, so it is not this route's business.
+      expect((await prisma.untrackedManga.findFirstOrThrow({ where: { mangaId: "waiting" } })).state).toBe("NEW");
+    });
+
+    it("records each repair, naming what the row used to claim", async () => {
+      await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/untracked/reconcile",
+        headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+        payload: { dryRun: false },
+      });
+      const events = await prisma.auditEvent.findMany({ where: { action: "untracked.released" } });
+      expect(events).toHaveLength(1);
+      const detail = events[0]!.detail as Record<string, unknown>;
+      expect(detail.was).toBe("TRACKED");
+      expect(detail.mdMangaId).toBe("bbbbbbbb-0000-4000-8000-000000000002");
+    });
+
+    it("can be scoped to one extension", async () => {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/admin/untracked/reconcile",
+        headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
+        payload: { extension: "somebody-else" },
+      });
+      expect(res.json().found).toBe(0);
+    });
+  });
+
   it("does not let the root mount shadow the internal endpoints", async () => {
     expect((await app.inject({ method: "GET", url: "/healthz" })).json()).toMatchObject({ ok: true });
     // /metrics is served only on the internal METRICS_PORT: the public
