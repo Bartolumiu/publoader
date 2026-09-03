@@ -1,4 +1,3 @@
-import { setTimeout as sleep } from "node:timers/promises";
 import type { Prisma, PrismaClient, UploadTask } from "@prisma/client";
 import type { Config } from "../../config.js";
 import type { Logger } from "../../logging.js";
@@ -12,6 +11,7 @@ import { queueEmbed, queueFinishedEmbed, queueSummaryEmbed } from "./webhookEmbe
 import { botUserIdFromClientId, isCarded, type Chapter } from "./types.js";
 import type { UnavailableReason } from "./card.js";
 import type { SettingsStore } from "../store/settings.js";
+import { UploadSessionLock } from "./sessionLock.js";
 
 /**
  * Execution of a single claimed UploadTask; the TypeScript port of
@@ -33,22 +33,34 @@ import type { SettingsStore } from "../store/settings.js";
 const IMAGE_BATCH_SIZE = 10;
 
 /**
- * How hard to look for the card before deciding it did not land.
- *
- * This is now the ONLY thing that decides a card, first or re-card, so it has
- * to be generous: nothing cheaper corroborates it, and every premature verdict
- * fails a task whose commit had worked, which then retries and uploads another
- * card. Three attempts two seconds apart was not enough.
- *
- * Eight attempts covers thirty-five seconds of lag. The number comes from a
- * measurement rather than a guess: on 2026-09-02 a card committed at 21:14:14
- * was not visible to `GET /chapter/{id}` until 21:14:29, so a real, working
- * write took about fifteen seconds to surface. Five attempts covered twenty,
- * which is a margin of one read over observed behaviour, and being wrong in
- * that direction now costs a false failure rather than a slow success.
+ * The embed title the UNAVAILABLE queue reports under, and the one action whose
+ * failures are not posted to Discord; see `queue`. Named rather than repeated
+ * so the suppression cannot drift away from the call sites it is about.
  */
-const CARD_CONFIRM_ATTEMPTS = 8;
-const CARD_CONFIRM_DELAY_MS = 5_000;
+const UNAVAILABLE_ACTION = "Unavailable";
+
+/**
+ * How long to leave a committed card alone before asking whether it landed,
+ * and how many times to come back.
+ *
+ * This is the ONLY thing that decides a card, first or re-card, so it has to be
+ * generous: nothing cheaper corroborates it, and every premature verdict fails
+ * a task whose commit had worked, which then retries and uploads another card.
+ *
+ * It used to be eight reads five seconds apart, in line, and the two properties
+ * fought each other. Generous meant slow, and slow meant HELD: thirty-five
+ * seconds of sleeping per card, inside the drain, with the whole queue stopped
+ * behind it. So the wait could not grow to fit what MangaDex actually does
+ * without the queue paying for it twice.
+ *
+ * Deferring breaks that trade. The task is put back with a `not_before` and the
+ * uploader goes on to the next one, so waiting costs nothing but a row, and the
+ * budget can be minutes instead of seconds. Two minutes, then five, then
+ * fifteen: twenty-two minutes of grace against the fifteen seconds a healthy
+ * write was measured to take on 2026-09-02, and a card still page-less after
+ * that is not lagging, it is missing.
+ */
+const CARD_VERIFY_DELAYS_SECONDS = [120, 300, 900];
 
 /** Failure that should send the task back to the queue with its message intact. */
 export class TaskError extends Error {
@@ -57,6 +69,23 @@ export class TaskError extends Error {
     this.name = "TaskError";
   }
 }
+
+/**
+ * What `execute` leaves behind: nothing, or an instruction to come back.
+ *
+ * A third disposition was needed alongside "done" and "failed". The unavailable
+ * card is written by one call and made true by another, minutes later, and
+ * neither of the two existing answers fits the gap between them: DONE would
+ * claim a card that may never appear, and a failure would burn an attempt and
+ * re-upload a card that is probably already on its way.
+ *
+ * `chapter` is the payload to carry into the next claim, which is how a
+ * deferred task remembers which round it is on.
+ */
+export type TaskOutcome = { defer: { seconds: number; chapter: Record<string, unknown> } } | null;
+
+/** What `commitUploadSession` hands back; kept only to quote in a failure. */
+type MdCommitEcho = { id?: string; attributes?: { version?: number; pages?: number } } | null;
 
 /**
  * The full body a `PUT /chapter` needs: what MangaDex currently holds, with
@@ -184,7 +213,23 @@ export class UploadTaskWorkers {
    */
   private readonly queueTotals = new Map<string, { processed: number; failed: number }>();
 
+  /**
+   * Turnstile for the one upload session the MangaDex account is allowed.
+   *
+   * Held by whichever worker is currently putting images up, and by nothing
+   * else. It lives on the workers rather than on the client because it is the
+   * workers that bracket a session -- open, upload, commit or delete -- and the
+   * uploader shares ONE instance of this class across both of its drain loops,
+   * so a card and a chapter upload contend here and nowhere else.
+   */
+  private readonly session = new UploadSessionLock();
+
   constructor(private readonly deps: TaskWorkerDeps) {}
+
+  /** Whether a session is held, and how many workers are waiting for it. */
+  sessionPressure(): { busy: boolean; queued: number } {
+    return { busy: this.session.busy, queued: this.session.queued };
+  }
 
   /** The MangaDex account publoader uploads as; see `uploadedByBot`. */
   private get botUserId(): string | null {
@@ -239,8 +284,14 @@ export class UploadTaskWorkers {
     this.sendSuccesses = await this.deps.settings.getWebhookUploadSuccesses();
   }
 
-  /** Run one claimed task. Throws on failure; the caller requeues. */
-  async execute(task: UploadTask): Promise<void> {
+  /**
+   * Run one claimed task.
+   *
+   * Throws on failure; the caller requeues. Returns a `defer` when the task did
+   * its write and now needs time to pass before anyone can tell whether it
+   * worked -- see TaskOutcome -- and `null` when it is finished.
+   */
+  async execute(task: UploadTask): Promise<TaskOutcome> {
     const log = this.deps.log.child({
       taskId: task.id,
       kind: task.kind,
@@ -249,17 +300,24 @@ export class UploadTaskWorkers {
     const raw = asRecord(task.chapter) ?? {};
     const chapter = chapterFromJson(raw);
 
+    // Only UNAVAILABLE has anything to say beyond done-or-thrown; the rest are
+    // finished by the time they return, so they answer for themselves here
+    // rather than each ending in a `return null` that means nothing locally.
     switch (task.kind) {
       case "UPLOAD":
-        return this.runUpload(task, chapter, raw, log);
+        await this.runUpload(task, chapter, raw, log);
+        return null;
       case "EDIT":
-        return this.runEdit(chapter, raw, log);
+        await this.runEdit(chapter, raw, log);
+        return null;
       case "DELETE":
-        return this.runDelete(chapter, log);
+        await this.runDelete(chapter, log);
+        return null;
       case "UNAVAILABLE":
-        return this.runUnavailable(chapter, raw, log);
+        return this.runUnavailable(task, chapter, raw, log);
       case "RESTORE":
-        return this.runRestore(chapter, raw, log);
+        await this.runRestore(chapter, raw, log);
+        return null;
       default:
         throw new TaskError(`unknown upload task kind ${String(task.kind)}`);
     }
@@ -367,90 +425,102 @@ export class UploadTaskWorkers {
 
     await prisma.uploadLog.create({ data: { dedupeKey: task.dedupeKey, outcome: "COMMITTING" } });
 
-    // MangaDex allows one open upload session per account.
-    const existingSession = await md.currentUploadSession();
-    if (existingSession) {
-      log.debug({ sessionId: existingSession.id }, "removing stale upload session");
-      await md.deleteUploadSession(existingSession.id);
-    }
-
-    const session = await md.createUploadSession(mdMangaId, [mdGroupId]);
-    log.info({ sessionId: session.id, images: chapter.imageArtifacts.length }, "upload session opened");
-
     let mdChapterId: string | null = null;
-    try {
-      // A chapter known to be unreadable is published already carded, rather
-      // than published live and carded afterwards. The two-step version leaves
-      // a window -- however short -- in which MangaDex shows readers a working
-      // link to a page that gives them nothing, which is the exact thing the
-      // card exists to prevent. `runUnavailable` cannot do this: it opens an
-      // EDIT session against a chapter that must already exist.
-      const carded = cardOnUpload(raw);
-      const files = carded
-        ? [
-            {
-              name: "0.png",
-              data: await generateChapterCard(
-                unavailableCardOptions({
-                  chapter,
-                  detail: null,
-                  footerNote: readString(raw, "footerNote"),
-                  reason: carded.reason,
-                  subscriptionName: carded.subscriptionName,
-                }),
-              ),
-            },
-          ]
-        : await this.loadImages(chapter.imageArtifacts);
-
-      const { pageOrder, failed } = await this.uploadPages(session.id, files, log);
-      if (failed) {
-        // uploader.py still commits when pages fail: the chapter lands as an
-        // external-only entry rather than being lost entirely.
-        log.error({ sessionId: session.id }, "some pages failed to upload, committing without pages");
-      }
-      // A carded chapter whose card failed to upload would commit with no
-      // pages and a live publisher link -- indistinguishable from a healthy
-      // external chapter, and pointing at nothing. Fail instead and retry.
-      if (carded && failed) {
-        throw new TaskError(
-          `couldn't upload the unavailable card for a chapter being published as unavailable`,
-        );
+    // Everything from here to the commit holds the account's one upload
+    // session, so it takes a turn: the UNAVAILABLE queue is drained at the same
+    // time as this one, and both open sessions. Waiting here is the price of
+    // that, and it is the only place either queue waits for the other.
+    await this.session.run(async () => {
+      // MangaDex allows one open upload session per account.
+      const existingSession = await md.currentUploadSession();
+      if (existingSession) {
+        log.debug({ sessionId: existingSession.id }, "removing stale upload session");
+        await md.deleteUploadSession(existingSession.id);
       }
 
-      const committed = await md.commitUploadSession(
-        session.id,
-        {
-          volume: chapter.chapterVolume,
-          chapter: chapter.chapterNumber,
-          title: chapter.chapterTitle,
-          translatedLanguage: chapter.chapterLanguage ?? "",
-          // Repointed away from the chapter nobody can open, exactly as the
-          // card flow does, so `isCarded` recognises this as already handled
-          // and no later pass re-cards or deletes it.
-          externalUrl: carded
-            ? resolveReplacementUrl(chapter.chapterUrl, chapter)
-            : chapter.chapterUrl,
-        },
-        failed ? [] : pageOrder,
+      const session = await md.createUploadSession(mdMangaId, [mdGroupId]);
+      log.info(
+        { sessionId: session.id, images: chapter.imageArtifacts.length },
+        "upload session opened",
       );
-      mdChapterId = committed?.id ?? null;
-      if (carded) {
-        log.info(
-          { mdChapterId, reason: carded.reason },
-          "chapter published already marked unavailable",
+
+      try {
+        // A chapter known to be unreadable is published already carded, rather
+        // than published live and carded afterwards. The two-step version leaves
+        // a window -- however short -- in which MangaDex shows readers a working
+        // link to a page that gives them nothing, which is the exact thing the
+        // card exists to prevent. `runUnavailable` cannot do this: it opens an
+        // EDIT session against a chapter that must already exist.
+        const carded = cardOnUpload(raw);
+        const files = carded
+          ? [
+              {
+                name: "0.png",
+                data: await generateChapterCard(
+                  unavailableCardOptions({
+                    chapter,
+                    detail: null,
+                    footerNote: readString(raw, "footerNote"),
+                    reason: carded.reason,
+                    subscriptionName: carded.subscriptionName,
+                  }),
+                ),
+              },
+            ]
+          : await this.loadImages(chapter.imageArtifacts);
+
+        const { pageOrder, failed } = await this.uploadPages(session.id, files, log);
+        if (failed) {
+          // uploader.py still commits when pages fail: the chapter lands as an
+          // external-only entry rather than being lost entirely.
+          log.error(
+            { sessionId: session.id },
+            "some pages failed to upload, committing without pages",
+          );
+        }
+        // A carded chapter whose card failed to upload would commit with no
+        // pages and a live publisher link -- indistinguishable from a healthy
+        // external chapter, and pointing at nothing. Fail instead and retry.
+        if (carded && failed) {
+          throw new TaskError(
+            `couldn't upload the unavailable card for a chapter being published as unavailable`,
+          );
+        }
+
+        const committed = await md.commitUploadSession(
+          session.id,
+          {
+            volume: chapter.chapterVolume,
+            chapter: chapter.chapterNumber,
+            title: chapter.chapterTitle,
+            translatedLanguage: chapter.chapterLanguage ?? "",
+            // Repointed away from the chapter nobody can open, exactly as the
+            // card flow does, so `isCarded` recognises this as already handled
+            // and no later pass re-cards or deletes it.
+            externalUrl: carded
+              ? resolveReplacementUrl(chapter.chapterUrl, chapter)
+              : chapter.chapterUrl,
+          },
+          failed ? [] : pageOrder,
         );
+        mdChapterId = committed?.id ?? null;
+        if (carded) {
+          log.info(
+            { mdChapterId, reason: carded.reason },
+            "chapter published already marked unavailable",
+          );
+        }
+      } catch (err) {
+        const message = errorMessage(err);
+        await this.safeDeleteSession(session.id, log);
+        await prisma.uploadLog.create({
+          data: { dedupeKey: task.dedupeKey, outcome: "FAILED", detail: message.slice(0, 4000) },
+        });
+        metrics.uploadsTotal.inc({ outcome: "upload_failed" });
+        this.queue("Upload", chapter, null, false, message);
+        throw err;
       }
-    } catch (err) {
-      const message = errorMessage(err);
-      await this.safeDeleteSession(session.id, log);
-      await prisma.uploadLog.create({
-        data: { dedupeKey: task.dedupeKey, outcome: "FAILED", detail: message.slice(0, 4000) },
-      });
-      metrics.uploadsTotal.inc({ outcome: "upload_failed" });
-      this.queue("Upload", chapter, null, false, message);
-      throw err;
-    }
+    });
 
     await prisma.uploadLog.create({
       data: { dedupeKey: task.dedupeKey, mdChapterId, outcome: "COMMITTED" },
@@ -705,24 +775,37 @@ export class UploadTaskWorkers {
    *    public catalogue, so there has to be a way to replace it.
    *  - `footerNote` overrides the explanatory paragraph on the card, for the
    *    takedowns whose reason is not "the publisher removed it".
+   *
+   * A third sidecar, `cardVerify`, is set by this method on itself. It marks a
+   * task that has already written its card and is only here to find out whether
+   * the card arrived; see `verifyCard`. It is the reason the method can return
+   * a deferral rather than only done-or-thrown.
    */
   private async runUnavailable(
+    task: UploadTask,
     chapter: Chapter,
     raw: Record<string, unknown>,
     log: Logger,
-  ): Promise<void> {
+  ): Promise<TaskOutcome> {
     const { md } = this.deps;
     const mdChapterId = chapter.mdChapterId;
     if (!mdChapterId) throw new TaskError("unavailable task has no mdChapterId");
     const force = raw["force"] === true;
     const footerNote = readString(raw, "footerNote");
 
+    // A task carrying `cardVerify` wrote its card on an earlier claim. It must
+    // not write another: everything below opens a session and uploads an image,
+    // and doing that to a chapter whose first card is merely late is how one
+    // takedown becomes four commits.
+    const pending = readVerifyState(raw);
+    if (pending) return this.verifyCard(task, chapter, raw, pending, log);
+
     let owned: Awaited<ReturnType<UploadTaskWorkers["ownership"]>>;
     try {
       owned = await this.ownership(mdChapterId);
     } catch (err) {
       metrics.uploadsTotal.inc({ outcome: "unavailable_failed" });
-      this.queue("Unavailable", chapter, mdChapterId, false, errorMessage(err));
+      this.queue(UNAVAILABLE_ACTION, chapter, mdChapterId, false, errorMessage(err));
       throw err;
     }
 
@@ -736,8 +819,8 @@ export class UploadTaskWorkers {
         "refusing to card a chapter this account did not upload",
       );
       metrics.uploadsTotal.inc({ outcome: "unavailable_refused_not_ours" });
-      this.queue("Unavailable", chapter, mdChapterId, false, `Refused: ${owned.reason}`);
-      return;
+      this.queue(UNAVAILABLE_ACTION, chapter, mdChapterId, false, `Refused: ${owned.reason}`);
+      return null;
     }
 
     const detail: MdChapterDetail | null = owned.ok ? owned.detail : null;
@@ -752,8 +835,8 @@ export class UploadTaskWorkers {
       log.info({ mdChapterId }, "chapter already gone from MangaDex, archiving as deleted");
       await this.archiveDeleted(mdChapterId, chapter);
       metrics.uploadsTotal.inc({ outcome: "unavailable_already_gone" });
-      this.queue("Unavailable", chapter, mdChapterId, true, "Chapter no longer on MangaDex.");
-      return;
+      this.queue(UNAVAILABLE_ACTION, chapter, mdChapterId, true, "Chapter no longer on MangaDex.");
+      return null;
     }
 
     const attrs = detail.attributes;
@@ -766,11 +849,16 @@ export class UploadTaskWorkers {
       log.info({ mdChapterId }, "chapter is already marked unavailable, archiving");
       await this.archiveUnavailable(mdChapterId, chapter, detail);
       metrics.uploadsTotal.inc({ outcome: "unavailable_already_done" });
-      this.queue("Unavailable", chapter, mdChapterId, true, "Already marked unavailable.");
-      return;
+      this.queue(UNAVAILABLE_ACTION, chapter, mdChapterId, true, "Already marked unavailable.");
+      return null;
     }
 
+    let committed: MdCommitEcho = null;
     try {
+      // Outside the session lock on purpose. Rendering a card is CPU and a
+      // couple of image reads, and it is the bulk of the work either side of
+      // the commit; doing it while another queue holds the session is most of
+      // what running the two queues at once actually buys.
       const card = await generateChapterCard(
         unavailableCardOptions({
           chapter,
@@ -780,95 +868,111 @@ export class UploadTaskWorkers {
         }),
       );
 
-      // MangaDex allows one open upload session per account, and this task is
-      // retried: an attempt killed between opening a session and deleting it
-      // leaves one behind that rejects every later begin, edit or upload alike.
-      const openSession = await md.currentUploadSession();
-      if (openSession) {
-        log.warn({ sessionId: openSession.id }, "removing stale upload session before edit");
-        await md.deleteUploadSession(openSession.id);
-      }
-
-      const session = await md.beginEditSession(mdChapterId, attrs.version);
-      try {
-        const pageId = await this.uploadCard(session.id, card, log);
-        if (!pageId) throw new TaskError(`couldn't upload the chapter card for ${mdChapterId}`);
-
-        // The repoint goes in the COMMIT, and used to be a PUT /chapter of its
-        // own immediately afterwards. That ordering is the best explanation for
-        // 98 of 101 cards being committed and then not existing: MangaDex
-        // attaches the page synchronously, the PUT lands a second or two later
-        // on a chapter that now has one, and the page does not survive it.
+      committed = await this.session.run(async () => {
+        // MangaDex allows one open upload session per account, and this task is
+        // retried: an attempt killed between opening a session and deleting it
+        // leaves one behind that rejects every later begin, edit or upload alike.
         //
-        // The evidence is the commit echo, which sorts the outcome almost
-        // perfectly the WRONG way round. Across 113 cards in one sweep:
-        //
-        //   echoed `resultingPages: 1`  ->  98 lost, 3 kept
-        //   echoed `resultingPages: 0`  ->   0 lost, 12 kept
-        //
-        // Reading that as attachment timing rather than as a broken echo makes
-        // it ordinary: echo 1 means the page was attached before the PUT, so
-        // the PUT had something to strip; echo 0 means it had not attached yet,
-        // so the PUT hit a page-less chapter and the page appeared afterwards
-        // and survived. The three that echoed 1 and survived are the same race
-        // finishing the other way. It also explains the ~15s some cards took to
-        // become visible: they were landing after the PUT, not lagging a read.
-        //
-        // Folding the url into the commit makes the card and the repoint one
-        // write, with nothing running between it and the confirmation below.
-        // The commit body already carried a non-null `externalUrl` alongside a
-        // page and MangaDex accepted it, so this is the same shape with a
-        // different value, not a new thing to be allowed.
-        const replacementUrl = resolveReplacementUrl(attrs.externalUrl, chapter);
-        const committed = await md.commitUploadSession(
-          session.id,
-          {
-            volume: attrs.volume,
-            chapter: attrs.chapter,
-            title: attrs.title,
-            translatedLanguage: attrs.translatedLanguage,
-            externalUrl: replacementUrl,
-          },
-          [pageId],
-        );
+        // Inside the lock, and it has to be: this deletes whatever session the
+        // account has open, which with two queues drained at once would be the
+        // session the OTHER queue is uploading into.
+        const openSession = await md.currentUploadSession();
+        if (openSession) {
+          log.warn({ sessionId: openSession.id }, "removing stale upload session before edit");
+          await md.deleteUploadSession(openSession.id);
+        }
 
-        // A successful call does not add up to a card on the chapter. A commit
-        // that changes nothing returns 200 exactly like one that works, so the
-        // chapter is asked what happened rather than inferred from the call.
-        // Without this a re-card sweep over thousands of chapters would report
-        // every one of them regenerated and change none.
-        await this.confirmCardLanded(
-          mdChapterId,
-          { pages: attrs.pages ?? 0, version: attrs.version },
-          committed,
-          log,
-        );
+        const session = await md.beginEditSession(mdChapterId, attrs.version);
+        try {
+          const pageId = await this.uploadCard(session.id, card, log);
+          if (!pageId) throw new TaskError(`couldn't upload the chapter card for ${mdChapterId}`);
 
-        log.info(
-          { mdChapterId, replacementUrl: replacementUrl ?? "cleared", force },
-          force ? "unavailable card regenerated" : "chapter marked unavailable",
-        );
-      } catch (err) {
-        await this.safeDeleteSession(session.id, log);
-        throw err;
-      }
+          // The repoint goes in the COMMIT, and used to be a PUT /chapter of its
+          // own immediately afterwards. That ordering is the best explanation for
+          // 98 of 101 cards being committed and then not existing: MangaDex
+          // attaches the page synchronously, the PUT lands a second or two later
+          // on a chapter that now has one, and the page does not survive it.
+          //
+          // The evidence is the commit echo, which sorts the outcome almost
+          // perfectly the WRONG way round. Across 113 cards in one sweep:
+          //
+          //   echoed `resultingPages: 1`  ->  98 lost, 3 kept
+          //   echoed `resultingPages: 0`  ->   0 lost, 12 kept
+          //
+          // Reading that as attachment timing rather than as a broken echo makes
+          // it ordinary: echo 1 means the page was attached before the PUT, so
+          // the PUT had something to strip; echo 0 means it had not attached yet,
+          // so the PUT hit a page-less chapter and the page appeared afterwards
+          // and survived. The three that echoed 1 and survived are the same race
+          // finishing the other way. It also explains the ~15s some cards took to
+          // become visible: they were landing after the PUT, not lagging a read.
+          //
+          // Folding the url into the commit makes the card and the repoint one
+          // write, with nothing running between it and the confirmation.
+          // The commit body already carried a non-null `externalUrl` alongside a
+          // page and MangaDex accepted it, so this is the same shape with a
+          // different value, not a new thing to be allowed.
+          const replacementUrl = resolveReplacementUrl(attrs.externalUrl, chapter);
+          const echo = await md.commitUploadSession(
+            session.id,
+            {
+              volume: attrs.volume,
+              chapter: attrs.chapter,
+              title: attrs.title,
+              translatedLanguage: attrs.translatedLanguage,
+              externalUrl: replacementUrl,
+            },
+            [pageId],
+          );
+
+          log.info(
+            { mdChapterId, replacementUrl: replacementUrl ?? "cleared", force },
+            force ? "unavailable card committed for regeneration" : "unavailable card committed",
+          );
+          return echo;
+        } catch (err) {
+          await this.safeDeleteSession(session.id, log);
+          throw err;
+        }
+      });
     } catch (err) {
       metrics.uploadsTotal.inc({ outcome: "unavailable_failed" });
-      this.queue("Unavailable", chapter, mdChapterId, false, errorMessage(err));
+      this.queue(UNAVAILABLE_ACTION, chapter, mdChapterId, false, errorMessage(err));
       throw err;
     }
 
-    // archiveUnavailable moves the row out of uploaded_chapters as it writes.
-    await this.archiveUnavailable(mdChapterId, chapter, detail);
-    metrics.uploadsTotal.inc({ outcome: "unavailable_ok" });
-    this.queue("Unavailable", chapter, mdChapterId, true);
+    // The session is released and the chapter is NOT archived yet. A successful
+    // call does not add up to a card on the chapter: a commit that changes
+    // nothing answers 200 exactly like one that works, and on 2026-09-03 eighty
+    // consecutive commits echoed `resultingPages: 1` over chapters that are
+    // still page-less hours later. Archiving on the strength of the call would
+    // record every one of them as carded.
+    //
+    // So the task goes back in the queue to be asked again later, and the
+    // uploader takes the next one meanwhile. Nothing waits.
+    return {
+      defer: {
+        seconds: CARD_VERIFY_DELAYS_SECONDS[0] ?? 120,
+        chapter: {
+          ...raw,
+          cardVerify: {
+            round: 1,
+            pagesBefore: attrs.pages ?? 0,
+            versionBefore: attrs.version,
+            committedPages: committed?.attributes?.pages ?? null,
+          },
+        },
+      },
+    };
   }
 
   /**
-   * Check that the card is actually on the chapter, and throw if it is not.
+   * The second half of a card: has the page MangaDex accepted actually arrived?
    *
-   * `before` is how the chapter looked going in, because what counts as success
-   * depends on it:
+   * Reached only by a task that already committed a card, minutes ago, and it
+   * does the reading `confirmCardLanded` used to do in a sleep loop -- one read
+   * per claim now, with the waiting done by `not_before` instead of by the
+   * uploader standing still. The verdicts are unchanged:
    *
    *  - a chapter with no pages must come back with at least one. That is a card
    *    where there was none.
@@ -877,104 +981,101 @@ export class UploadTaskWorkers {
    *    the image was replaced, and re-carding thousands of chapters whose
    *    commits all quietly did nothing would look identical to success.
    *
-   * The version is the available signal for that second case, and it is a sound
-   * one: a commit that does real work bumps it, and the no-op commit behind the
-   * un-carding bug leaves it untouched -- that chapter sat at version 7 across
-   * repeated attempts while MangaDex answered 200 every time.
+   * Page CONTENT would be the more direct comparison and is not available:
+   * `GET /chapter/{id}` returns no `hash` field at all. Comparing it was the
+   * first attempt here and it failed every re-card it saw, because the value
+   * was absent rather than merely unchanged.
    *
-   * Page CONTENT would be the more direct thing to compare, and it is not
-   * available: `GET /chapter/{id}` returns no `hash` field at all. Comparing it
-   * was the first attempt here and it failed every re-card it saw, because the
-   * value was absent rather than merely unchanged.
-   *
-   * Re-read a few times before giving up. MangaDex serves chapter reads from a
-   * cache that lags its own writes, so the first read after a commit can still
-   * show the old state; failing on that would turn working re-cards into
-   * dead-lettered tasks.
-   *
-   * The commit's own echo is NOT accepted as proof, and used to be. It was
-   * taken as the write path's answer, on the reasoning that it cannot lag the
-   * way a cached read can. It does not lag; it is simply not about the chapter.
-   * Two batches from one sweep on 2026-09-02 say so exactly:
-   *
-   *  - 19:38, the echo reported `resultingPages: 1`. That took the fast path
-   *    and returned 1.9 seconds after the commit without reading anything. Those
-   *    chapters are `pages: 0` on MangaDex now: the card never landed, and 84 of
-   *    the 100 newest rows in the unavailable archive are in that state, every
-   *    one of them archived as done.
-   *  - 21:14, the echo reported `resultingPages: 0` for the SAME operation. The
-   *    fast path could not fire, the read loop ran for about fifteen seconds,
-   *    found the page, and passed. Those chapters are `pages: 1` now.
-   *
-   * So the echo claimed a page where none landed and claimed none where one
-   * did, and the read was right both times. It used to be captured BEFORE the
-   * trailing `editChapter`, so even an accurate echo described the chapter one
-   * write short of the state being checked. That write is now folded into the
-   * commit; the echo is kept only to say what MangaDex claimed, in the error.
-   *
-   * RE-CARDS ARE CONFIRMED TOO, and were not. They returned the moment the
-   * commit came back, on the reasoning that a re-card which quietly fails leaves
-   * the OLD card in place rather than a live chapter looking dead, and that
-   * reading is what made a 2,425 chapter sweep take days. Both halves have since
-   * turned out to be wrong. `force` runs this same function, so a re-card was
-   * committed and then hit by the same trailing PUT -- which does not leave the
-   * old card in place, it takes the page off and leaves a live-looking chapter
-   * with nothing on it, reported as success. And the read is not expensive: the
-   * uploader measures at roughly 3% busy, so the wait is time it has nothing
-   * else to do with.
+   * Running out of rounds fails the task in the ordinary way, which re-cards it
+   * on the next attempt -- but the `cardVerify` marker is cleared FIRST, or the
+   * retry would arrive here again and re-read a chapter nobody has written to
+   * since, forever, until the attempts ran out without a second card ever being
+   * tried.
    */
-  private async confirmCardLanded(
-    mdChapterId: string,
-    before: { pages: number; version: number },
-    committed: { attributes?: { version?: number; pages?: number } } | null,
+  private async verifyCard(
+    task: UploadTask,
+    chapter: Chapter,
+    raw: Record<string, unknown>,
+    state: VerifyState,
     log: Logger,
-  ): Promise<void> {
-    let pages: number | null = null;
-    let version: number | null = null;
+  ): Promise<TaskOutcome> {
+    const mdChapterId = chapter.mdChapterId;
+    if (!mdChapterId) throw new TaskError("unavailable task has no mdChapterId");
 
-    for (let attempt = 1; attempt <= CARD_CONFIRM_ATTEMPTS; attempt += 1) {
-      if (attempt > 1) {
-        // Worth saying: a retry here means the read came back stale, and if
-        // these become common the delay is the thing to look at.
-        log.debug({ mdChapterId, attempt }, "card not visible yet, re-reading");
-        await sleep(CARD_CONFIRM_DELAY_MS);
-      }
-      const after = await this.deps.md.chapterById(mdChapterId);
-      pages = after?.attributes.pages ?? null;
-      version = after?.attributes.version ?? null;
-
-      const gainedAPage = before.pages === 0 && (pages ?? 0) > 0;
-      const commitDidWork = before.pages > 0 && version !== null && version > before.version;
-      if (gainedAPage || commitDidWork) {
-        // The success is logged, and was not. A card that landed used to write
-        // nothing of its own, so the only evidence it worked was the absence of
-        // a failure -- which is precisely what the silent-success bug looked
-        // like from the outside, and why it survived a sweep of 3,756 chapters.
-        //
-        // `attempt` is the useful half. The retry line above is debug and
-        // production keeps nothing below info, so without this the number of
-        // reads a card needed is unrecoverable. It separates two futures: cards
-        // confirming on the first read means the page is attached by the time
-        // the commit returns, and cards still needing several means MangaDex
-        // attaches asynchronously and the old trailing PUT was destroying a
-        // result that had not arrived yet.
-        log.info({ mdChapterId, attempt, pages, version }, "card confirmed on the chapter");
-        return;
-      }
+    const after = await this.deps.md.chapterById(mdChapterId);
+    if (after === null) {
+      // Deleted between the card and the check. It is DELETED, not carded, and
+      // saying otherwise writes a row claiming a chapter that no longer exists
+      // is carrying one of our cards.
+      log.info({ mdChapterId }, "chapter went away before the card could be confirmed");
+      await this.archiveDeleted(mdChapterId, chapter);
+      metrics.uploadsTotal.inc({ outcome: "unavailable_already_gone" });
+      this.queue(UNAVAILABLE_ACTION, chapter, mdChapterId, true, "Chapter no longer on MangaDex.");
+      return null;
     }
 
-    // What the commit claimed goes in the message. It is not evidence, but when
-    // it disagrees with the read -- which is the common case for this failure --
-    // that disagreement is the single most useful thing an operator can be told,
-    // because it distinguishes "MangaDex refused the page" from "MangaDex
-    // accepted the page and then did not keep it".
-    const echoedPages = committed?.attributes?.pages;
+    const pages = after.attributes.pages ?? null;
+    const version = after.attributes.version ?? null;
+    if (cardLanded({ pages: state.pagesBefore, version: state.versionBefore }, { pages, version })) {
+      log.info(
+        { mdChapterId, round: state.round, pages, version },
+        "card confirmed on the chapter",
+      );
+      // archiveUnavailable moves the row out of uploaded_chapters as it writes.
+      await this.archiveUnavailable(mdChapterId, chapter, after);
+      metrics.uploadsTotal.inc({ outcome: "unavailable_ok" });
+      this.queue(UNAVAILABLE_ACTION, chapter, mdChapterId, true);
+      return null;
+    }
+
+    const nextDelay = CARD_VERIFY_DELAYS_SECONDS[state.round];
+    if (nextDelay !== undefined) {
+      log.info(
+        { mdChapterId, round: state.round, pages, version, nextDelay },
+        "card not on the chapter yet, looking again later",
+      );
+      return {
+        defer: {
+          seconds: nextDelay,
+          chapter: { ...raw, cardVerify: { ...state, round: state.round + 1 } },
+        },
+      };
+    }
+
+    await this.clearVerifyState(task.id, raw);
+    metrics.uploadsTotal.inc({ outcome: "unavailable_failed" });
+    // Deliberately not queued for Discord; see `queue`.
     throw new TaskError(
-      `the card did not land on chapter ${mdChapterId}: pages ${before.pages} -> ` +
-        `${pages === null ? "unknown" : pages}, version ${before.version} -> ` +
+      `the card did not land on chapter ${mdChapterId}: pages ${state.pagesBefore} -> ` +
+        `${pages === null ? "unknown" : pages}, version ${state.versionBefore} -> ` +
         `${version === null ? "unknown" : version}` +
-        `, commit echoed ${echoedPages === undefined ? "nothing" : `pages ${echoedPages}`}`,
+        `, commit echoed ${
+          state.committedPages === null ? "nothing" : `pages ${state.committedPages}`
+        }` +
+        `, over ${CARD_VERIFY_DELAYS_SECONDS.reduce((a, b) => a + b, 0)}s`,
     );
+  }
+
+  /**
+   * Take the verification marker off a task before failing it, so the retry
+   * writes a new card instead of re-reading the old chapter.
+   *
+   * Written straight to the row rather than routed through the outcome: the
+   * task is about to throw, and the caller's `fail` path does not carry a
+   * payload. Best-effort -- a task that keeps the marker still terminates, it
+   * just spends its remaining attempts looking rather than writing, so a
+   * failure here must not mask the real error being raised.
+   */
+  private async clearVerifyState(taskId: string, raw: Record<string, unknown>): Promise<void> {
+    const { cardVerify: _dropped, ...rest } = raw;
+    try {
+      await this.deps.prisma.uploadTask.update({
+        where: { id: taskId },
+        data: { chapter: rest as Prisma.InputJsonValue },
+      });
+    } catch {
+      // Swallowed on purpose; the TaskError that follows is the useful one.
+    }
   }
 
   /**
@@ -1049,88 +1150,93 @@ export class UploadTaskWorkers {
     // which on a carded chapter is the replacement, not the chapter.
     const replacement = readString(raw, "externalUrl") ?? chapter.chapterUrl ?? attrs.externalUrl;
 
-    const openSession = await md.currentUploadSession();
-    if (openSession) {
-      log.warn({ sessionId: openSession.id }, "removing stale upload session before restore");
-      await md.deleteUploadSession(openSession.id);
-    }
-
-    const session = await md.beginEditSession(mdChapterId, attrs.version);
-    try {
-      // The card is a file of this session, and it has to be taken OUT of the
-      // session before the commit; a commit alone leaves it exactly where it
-      // was. The ids come from the begin-edit response, which returns an
-      // `upload_session_file` relationship per existing page -- undocumented,
-      // but it is the only place they are available.
-      if (session.fileIds.length > 0) {
-        const removed = await md.deleteUploadSessionFiles(session.id, session.fileIds);
-        if (!removed) {
-          throw new TaskError(
-            `couldn't remove the card's page from the edit session for ${mdChapterId}`,
-          );
-        }
-        log.info(
-          { mdChapterId, sessionId: session.id, files: session.fileIds.length },
-          "removed the card's page from the edit session",
-        );
+    // Under the session lock for the same reason as the other two: this deletes
+    // whatever session the account has open, which is the other queue's if the
+    // other queue is mid-upload.
+    await this.session.run(async () => {
+      const openSession = await md.currentUploadSession();
+      if (openSession) {
+        log.warn({ sessionId: openSession.id }, "removing stale upload session before restore");
+        await md.deleteUploadSession(openSession.id);
       }
 
-      // Then commit with no pages kept. `[]` rather than omitting the field:
-      // omitting it is rejected outright as required, and null is rejected as
-      // not-an-array, so this is the only form the endpoint accepts.
-      const committed = await md.commitUploadSession(
-        session.id,
-        {
+      const session = await md.beginEditSession(mdChapterId, attrs.version);
+      try {
+        // The card is a file of this session, and it has to be taken OUT of the
+        // session before the commit; a commit alone leaves it exactly where it
+        // was. The ids come from the begin-edit response, which returns an
+        // `upload_session_file` relationship per existing page -- undocumented,
+        // but it is the only place they are available.
+        if (session.fileIds.length > 0) {
+          const removed = await md.deleteUploadSessionFiles(session.id, session.fileIds);
+          if (!removed) {
+            throw new TaskError(
+              `couldn't remove the card's page from the edit session for ${mdChapterId}`,
+            );
+          }
+          log.info(
+            { mdChapterId, sessionId: session.id, files: session.fileIds.length },
+            "removed the card's page from the edit session",
+          );
+        }
+
+        // Then commit with no pages kept. `[]` rather than omitting the field:
+        // omitting it is rejected outright as required, and null is rejected as
+        // not-an-array, so this is the only form the endpoint accepts.
+        const committed = await md.commitUploadSession(
+          session.id,
+          {
+            volume: attrs.volume,
+            chapter: attrs.chapter,
+            title: attrs.title,
+            translatedLanguage: attrs.translatedLanguage,
+            externalUrl: replacement,
+          },
+          [],
+        );
+
+        let version = committed?.attributes?.version ?? null;
+        if (version === null) {
+          const refetched = await md.chapterById(mdChapterId);
+          version = refetched?.attributes.version ?? attrs.version;
+        }
+
+        const edited = await md.editChapter(mdChapterId, {
           volume: attrs.volume,
           chapter: attrs.chapter,
           title: attrs.title,
           translatedLanguage: attrs.translatedLanguage,
+          groups,
           externalUrl: replacement,
-        },
-        [],
-      );
+          version,
+        });
+        if (!edited) throw new TaskError(`couldn't restore externalUrl for chapter ${mdChapterId}`);
 
-      let version = committed?.attributes?.version ?? null;
-      if (version === null) {
-        const refetched = await md.chapterById(mdChapterId);
-        version = refetched?.attributes.version ?? attrs.version;
+        // MangaDex accepting the commit is not the same as MangaDex having
+        // dropped the pages, and the difference is invisible from here: a commit
+        // that changes nothing comes back 2xx exactly like one that works. Ask
+        // the chapter what happened instead of trusting the call.
+        //
+        // Worth the extra request because of what the two failures cost. A
+        // restore that silently leaves the card on is a live chapter still
+        // showing "no longer available" to readers, recorded as DONE, retried by
+        // nobody -- which is precisely how 23 chapters were reported restored
+        // while every one of them kept its card. A restore that fails loudly is
+        // a queue entry someone can see.
+        const after = await md.chapterById(mdChapterId);
+        const pagesAfter = after?.attributes.pages ?? null;
+        if (pagesAfter === null || pagesAfter > 0) {
+          throw new TaskError(
+            `commit left ${pagesAfter === null ? "unknown" : String(pagesAfter)} page(s) on ` +
+              `chapter ${mdChapterId}; the card was not removed`,
+          );
+        }
+      } catch (err) {
+        await this.safeDeleteSession(session.id, log);
+        this.queue("Restore", chapter, mdChapterId, false, errorMessage(err));
+        throw err;
       }
-
-      const edited = await md.editChapter(mdChapterId, {
-        volume: attrs.volume,
-        chapter: attrs.chapter,
-        title: attrs.title,
-        translatedLanguage: attrs.translatedLanguage,
-        groups,
-        externalUrl: replacement,
-        version,
-      });
-      if (!edited) throw new TaskError(`couldn't restore externalUrl for chapter ${mdChapterId}`);
-
-      // MangaDex accepting the commit is not the same as MangaDex having
-      // dropped the pages, and the difference is invisible from here: a commit
-      // that changes nothing comes back 2xx exactly like one that works. Ask
-      // the chapter what happened instead of trusting the call.
-      //
-      // Worth the extra request because of what the two failures cost. A
-      // restore that silently leaves the card on is a live chapter still
-      // showing "no longer available" to readers, recorded as DONE, retried by
-      // nobody -- which is precisely how 23 chapters were reported restored
-      // while every one of them kept its card. A restore that fails loudly is
-      // a queue entry someone can see.
-      const after = await md.chapterById(mdChapterId);
-      const pagesAfter = after?.attributes.pages ?? null;
-      if (pagesAfter === null || pagesAfter > 0) {
-        throw new TaskError(
-          `commit left ${pagesAfter === null ? "unknown" : String(pagesAfter)} page(s) on ` +
-            `chapter ${mdChapterId}; the card was not removed`,
-        );
-      }
-    } catch (err) {
-      await this.safeDeleteSession(session.id, log);
-      this.queue("Restore", chapter, mdChapterId, false, errorMessage(err));
-      throw err;
-    }
+    });
 
     await this.archiveRestored(mdChapterId, chapter);
     log.info({ mdChapterId, externalUrl: replacement }, "card removed; chapter restored");
@@ -1283,6 +1389,19 @@ export class UploadTaskWorkers {
     // it is what the operator wanted.
     if (success && !this.sendSuccesses) return;
 
+    // Except an unavailable card that did not land, which is the one failure
+    // nobody can act on from Discord. It is bulk work -- a takedown sweep is
+    // hundreds of chapters -- and when it fails it fails in runs, because the
+    // cause is on MangaDex's side: 80 chapters in one night, each posting an
+    // embed saying the same thing about a different uuid. That is the channel
+    // filled with a message whose only correct response is to wait.
+    //
+    // Nothing is lost by it. The failure is logged with the page and version
+    // counts, counted into `unavailable_failed`, left on the queue row as
+    // `last_error`, and totalled in the end-of-drain summary embed, which is
+    // where a run of them is legible as one number instead of hundreds.
+    if (!success && action === UNAVAILABLE_ACTION) return;
+
     // Not a per-action status line: one field carrying
     // Success/Manga/Chapter/Extension plus the language, title, expiry and the
     // four links, titled after the queue that did the work. A channel that has
@@ -1312,6 +1431,80 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function readString(source: Record<string, unknown>, key: string): string | null {
   const value = source[key];
   return typeof value === "string" && value !== "" ? value : null;
+}
+
+function readNumber(source: Record<string, unknown>, key: string): number | null {
+  const value = source[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * How the chapter looked before its card was committed, plus which round of
+ * looking we are on. Carried on the task payload as `cardVerify` between the
+ * commit and the confirmation.
+ */
+export interface VerifyState {
+  round: number;
+  pagesBefore: number;
+  versionBefore: number;
+  /** What the commit claimed. Reported in the failure, never believed. */
+  committedPages: number | null;
+}
+
+/**
+ * Read the marker back off a task payload, if it is there.
+ *
+ * Validated rather than cast. The payload is JSONB written by an older build of
+ * this same code, so a half-shaped marker is a real possibility, and one that
+ * arrives with `round` missing would defer forever: `CARD_VERIFY_DELAYS[NaN]`
+ * is undefined, which reads as "out of rounds", but `versionBefore` of NaN
+ * would already have failed the comparison above it. Requiring the numbers up
+ * front makes an unreadable marker fall through to writing a fresh card, which
+ * is the recoverable direction.
+ */
+export function readVerifyState(raw: Record<string, unknown>): VerifyState | null {
+  const marker = asRecord(raw["cardVerify"]);
+  if (!marker) return null;
+  const round = readNumber(marker, "round");
+  const pagesBefore = readNumber(marker, "pagesBefore");
+  const versionBefore = readNumber(marker, "versionBefore");
+  if (round === null || pagesBefore === null || versionBefore === null) return null;
+  return { round, pagesBefore, versionBefore, committedPages: readNumber(marker, "committedPages") };
+}
+
+/**
+ * Did the card arrive? The whole verdict, in one place, over what MangaDex says
+ * about the chapter now versus what it said before the commit.
+ *
+ * The commit's own echo is deliberately NOT an input. It was once accepted as
+ * proof, on the reasoning that the write path cannot lag the way a cached read
+ * can. It does not lag; it is simply not about the chapter. Two batches from one
+ * sweep on 2026-09-02 say so exactly:
+ *
+ *  - 19:38, the echo reported `resultingPages: 1`, was believed, and returned
+ *    1.9 seconds after the commit without reading anything. Those chapters are
+ *    `pages: 0` on MangaDex now -- 84 of the 100 newest rows in the unavailable
+ *    archive, every one archived as done.
+ *  - 21:14, the echo reported `resultingPages: 0` for the SAME operation. The
+ *    read found the page about fifteen seconds later. Those chapters are
+ *    `pages: 1` now.
+ *
+ * So the echo claimed a page where none landed and claimed none where one did,
+ * in the same sweep, and the read was right both times.
+ */
+export function cardLanded(
+  before: { pages: number; version: number },
+  after: { pages: number | null; version: number | null },
+): boolean {
+  // A chapter that had no page must now have one: that is a card where there
+  // was none, and nothing else produces it.
+  if (before.pages === 0) return (after.pages ?? 0) > 0;
+  // A re-card leaves the page count at one either way, so the count says
+  // nothing. The version is the available signal and a sound one: a commit that
+  // does real work bumps it, and the no-op commit behind the un-carding bug
+  // leaves it untouched -- that chapter sat at version 7 across repeated
+  // attempts while MangaDex answered 200 every time.
+  return after.version !== null && after.version > before.version;
 }
 
 function isHttpUrl(url: string | null | undefined): boolean {

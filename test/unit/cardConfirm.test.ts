@@ -1,125 +1,201 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-// The confirmation sleeps five seconds between reads, eight times over. Mocking
-// the timer rather than shortening the constant keeps the test honest about the
-// production values: a change to CARD_CONFIRM_ATTEMPTS is still exercised here.
-vi.mock("node:timers/promises", () => ({ setTimeout: vi.fn(async () => undefined) }));
-
-import { UploadTaskWorkers, type TaskWorkerDeps } from "../../src/core/md/taskWorkers.js";
+import {
+  UploadTaskWorkers,
+  cardLanded,
+  readVerifyState,
+  type TaskWorkerDeps,
+} from "../../src/core/md/taskWorkers.js";
 import type { Logger } from "../../src/logging.js";
+import type { UploadTask } from "@prisma/client";
 
 /**
  * Whether a card actually reached MangaDex, which is the one thing the
  * unavailable flow may not get wrong.
  *
- * Every case here is taken from the sweep of 2026-09-02, where 84 of the 100
- * newest carded chapters were archived as done while MangaDex held no page for
- * them. The cause was that `confirmCardLanded` accepted the commit's echo as
- * proof; the echo turned out to claim a page where none landed and claim none
- * where one did, in the same sweep, an hour apart.
+ * Every case here is taken from production. The verdict cases come from the
+ * sweep of 2026-09-02, where 84 of the 100 newest carded chapters were archived
+ * as done while MangaDex held no page for them, because the commit's echo was
+ * accepted as proof. The waiting cases come from the night of 2026-09-03, when
+ * 80 chapters failed in a row against an in-line confirmation that gave up
+ * after forty seconds with the whole queue stopped behind it.
  */
-describe("confirmCardLanded", () => {
+describe("cardLanded", () => {
+  it("passes a first card the chapter actually received", () => {
+    expect(cardLanded({ pages: 0, version: 4 }, { pages: 1, version: 5 })).toBe(true);
+  });
+
+  it("fails a first card the chapter never received, however the commit echoed it", () => {
+    // The commit echo is not an input at all: on 2026-09-03 eighty consecutive
+    // commits echoed `resultingPages: 1` over chapters still page-less hours
+    // later, and believing any of them would have archived all eighty.
+    expect(cardLanded({ pages: 0, version: 4 }, { pages: 0, version: 5 })).toBe(false);
+  });
+
+  it("confirms a re-card from the version, since the page count cannot move", () => {
+    expect(cardLanded({ pages: 1, version: 7 }, { pages: 1, version: 8 })).toBe(true);
+  });
+
+  it("fails a re-card whose version never moves, which is a commit that did nothing", () => {
+    expect(cardLanded({ pages: 1, version: 7 }, { pages: 1, version: 7 })).toBe(false);
+  });
+
+  it("treats an unreadable chapter as a card that did not land", () => {
+    expect(cardLanded({ pages: 0, version: 4 }, { pages: null, version: null })).toBe(false);
+    expect(cardLanded({ pages: 1, version: 7 }, { pages: null, version: null })).toBe(false);
+  });
+});
+
+describe("readVerifyState", () => {
+  it("reads a marker this code wrote", () => {
+    expect(
+      readVerifyState({ cardVerify: { round: 2, pagesBefore: 0, versionBefore: 4, committedPages: 1 } }),
+    ).toEqual({ round: 2, pagesBefore: 0, versionBefore: 4, committedPages: 1 });
+  });
+
+  it("has no marker for an ordinary task, which is what makes it write a card", () => {
+    expect(readVerifyState({ force: true })).toBeNull();
+  });
+
+  it("rejects a half-shaped marker rather than deferring on nonsense", () => {
+    // The payload is JSONB written by an older build of this same code, so a
+    // marker missing its numbers is reachable. Falling through to writing a
+    // fresh card is the recoverable direction; deferring forever is not.
+    expect(readVerifyState({ cardVerify: { round: 1 } })).toBeNull();
+    expect(readVerifyState({ cardVerify: "yes" })).toBeNull();
+  });
+});
+
+/**
+ * The deferred half: the task that already committed a card and came back to
+ * find out whether it arrived.
+ */
+describe("verifyCard", () => {
   const logger = (): Logger =>
     ({ info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() }) as unknown as Logger;
 
-  /** A worker whose only live dependency is the chapter read. */
-  const workersReading = (pageCounts: (number | null)[]) => {
-    const chapterById = vi.fn(async () => {
-      const pages = pageCounts.shift() ?? null;
-      return pages === null ? null : { attributes: { pages, version: 9 } };
-    });
-    const workers = new UploadTaskWorkers({ md: { chapterById } } as unknown as TaskWorkerDeps);
-    return { workers, chapterById };
+  const chapter = { mdChapterId: "chapter-id", extensionName: "mangaplus" };
+
+  const workersReading = (after: { pages: number; version: number } | null) => {
+    const chapterById = vi.fn(async () => (after === null ? null : { attributes: after }));
+    const archiveUnavailable = vi.fn(async () => undefined);
+    const archiveDeleted = vi.fn(async () => undefined);
+    const update = vi.fn(async (_args: { where: { id: string }; data: { chapter: unknown } }) =>
+      undefined,
+    );
+    const workers = new UploadTaskWorkers({
+      md: { chapterById },
+      notifier: { enabled: false },
+      prisma: { uploadTask: { update } },
+    } as unknown as TaskWorkerDeps);
+    Object.assign(workers, { archiveUnavailable, archiveDeleted });
+    return { workers, chapterById, archiveUnavailable, archiveDeleted, update };
   };
 
-  const confirm = (
+  const verify = (
     workers: UploadTaskWorkers,
-    before: { pages: number; version: number },
-    committed: { attributes?: { version?: number; pages?: number } } | null,
-  ): Promise<void> =>
+    state: { round: number; pagesBefore: number; versionBefore: number; committedPages: number | null },
+  ) =>
     (
       workers as unknown as {
-        confirmCardLanded: (
-          id: string,
-          before: { pages: number; version: number },
-          committed: { attributes?: { version?: number; pages?: number } } | null,
+        verifyCard: (
+          task: UploadTask,
+          chapter: unknown,
+          raw: Record<string, unknown>,
+          state: unknown,
           log: Logger,
-        ) => Promise<void>;
+        ) => Promise<{ defer: { seconds: number; chapter: Record<string, unknown> } } | null>;
       }
-    ).confirmCardLanded("chapter-id", before, committed, logger());
+    ).verifyCard(
+      { id: "task-id" } as UploadTask,
+      chapter,
+      { cardVerify: state, force: true },
+      state,
+      logger(),
+    );
 
   beforeEach(() => vi.clearAllMocks());
 
-  it("fails a first card the chapter never received, however the commit echoed it", async () => {
-    // The 19:38 batch: `resultingPages: 1` from the commit, nothing on the
-    // chapter. This returned success before, and archived the chapter.
-    const { workers, chapterById } = workersReading([0, 0, 0, 0, 0, 0, 0, 0]);
+  it("archives the chapter once the card is actually there", async () => {
+    const { workers, archiveUnavailable } = workersReading({ pages: 1, version: 5 });
 
-    await expect(confirm(workers, { pages: 0, version: 4 }, { attributes: { pages: 1 } })).rejects.toThrow(
-      /did not land/,
-    );
-    expect(chapterById).toHaveBeenCalledTimes(8);
+    const outcome = await verify(workers, {
+      round: 1,
+      pagesBefore: 0,
+      versionBefore: 4,
+      committedPages: 1,
+    });
+
+    expect(outcome).toBeNull();
+    expect(archiveUnavailable).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not archive a chapter the card has not reached, it comes back later", async () => {
+    // The whole point: one read per claim, and the waiting happens on the queue
+    // rather than in the drain. Nothing is recorded either way yet.
+    const { workers, archiveUnavailable, chapterById } = workersReading({ pages: 0, version: 5 });
+
+    const outcome = await verify(workers, {
+      round: 1,
+      pagesBefore: 0,
+      versionBefore: 4,
+      committedPages: 1,
+    });
+
+    expect(outcome?.defer.seconds).toBe(300);
+    expect(readVerifyState(outcome?.defer.chapter ?? {})?.round).toBe(2);
+    expect(chapterById).toHaveBeenCalledTimes(1);
+    expect(archiveUnavailable).not.toHaveBeenCalled();
+  });
+
+  it("keeps the operator's sidecars on the payload it defers", async () => {
+    const { workers } = workersReading({ pages: 0, version: 5 });
+
+    const outcome = await verify(workers, {
+      round: 1,
+      pagesBefore: 0,
+      versionBefore: 4,
+      committedPages: 1,
+    });
+
+    expect(outcome?.defer.chapter["force"]).toBe(true);
+  });
+
+  it("fails the task once it has waited out every round", async () => {
+    const { workers, update } = workersReading({ pages: 0, version: 5 });
+
+    await expect(
+      verify(workers, { round: 3, pagesBefore: 0, versionBefore: 4, committedPages: 1 }),
+    ).rejects.toThrow(/did not land/);
+
+    // The marker is taken off first, or the retry arrives back in here and
+    // re-reads a chapter nobody has written to since, until the attempts run
+    // out with no second card ever tried.
+    expect(update).toHaveBeenCalledTimes(1);
+    const written = update.mock.calls[0]?.[0].data.chapter as Record<string, unknown>;
+    expect(readVerifyState(written)).toBeNull();
   });
 
   it("says what the commit claimed, so a disagreement is visible in the error", async () => {
-    const { workers } = workersReading([0, 0, 0, 0, 0, 0, 0, 0]);
+    const { workers } = workersReading({ pages: 0, version: 5 });
 
     await expect(
-      confirm(workers, { pages: 0, version: 4 }, { attributes: { pages: 1 } }),
+      verify(workers, { round: 3, pagesBefore: 0, versionBefore: 4, committedPages: 1 }),
     ).rejects.toThrow(/commit echoed pages 1/);
   });
 
-  it("passes a first card that did land, even though the commit echoed no page", async () => {
-    // The 21:14 batch: `resultingPages: 0` from the commit, and the page was
-    // there once MangaDex caught up about fifteen seconds later.
-    const { workers, chapterById } = workersReading([0, 0, 1]);
+  it("records a chapter deleted under it as deleted, not as carded", async () => {
+    const { workers, archiveDeleted, archiveUnavailable } = workersReading(null);
 
-    await expect(
-      confirm(workers, { pages: 0, version: 4 }, { attributes: { pages: 0 } }),
-    ).resolves.toBeUndefined();
-    expect(chapterById).toHaveBeenCalledTimes(3);
-  });
+    const outcome = await verify(workers, {
+      round: 1,
+      pagesBefore: 0,
+      versionBefore: 4,
+      committedPages: 1,
+    });
 
-  it("keeps reading past a stale read rather than failing a working card", async () => {
-    // A read that lags its own write is the thing the retry budget exists for,
-    // and the budget has to outlast the lag actually measured in production.
-    const { workers, chapterById } = workersReading([0, 0, 0, 0, 0, 0, 1]);
-
-    await expect(confirm(workers, { pages: 0, version: 4 }, null)).resolves.toBeUndefined();
-    expect(chapterById).toHaveBeenCalledTimes(7);
-  });
-
-  it("treats a chapter that has gone unreadable as a card that did not land", async () => {
-    const { workers } = workersReading([null, null, null, null, null, null, null, null]);
-
-    await expect(confirm(workers, { pages: 0, version: 4 }, null)).rejects.toThrow(
-      /pages 0 -> unknown/,
-    );
-  });
-
-  it("confirms a re-card from the version, rather than returning on the commit", async () => {
-    // Re-cards used to return the moment the commit came back. `force` runs the
-    // same path as a first card, so they were exposed to the same defect and
-    // reported success just as confidently.
-    const versions = [7, 7, 8];
-    const chapterById = vi.fn(async () => ({
-      attributes: { pages: 1, version: versions.shift() ?? 8 },
-    }));
-    const workers = new UploadTaskWorkers({ md: { chapterById } } as unknown as TaskWorkerDeps);
-
-    await expect(
-      confirm(workers, { pages: 1, version: 7 }, { attributes: { version: 7 } }),
-    ).resolves.toBeUndefined();
-    expect(chapterById).toHaveBeenCalledTimes(3);
-  });
-
-  it("fails a re-card whose version never moves, which is a commit that did nothing", async () => {
-    const chapterById = vi.fn(async () => ({ attributes: { pages: 1, version: 7 } }));
-    const workers = new UploadTaskWorkers({ md: { chapterById } } as unknown as TaskWorkerDeps);
-
-    await expect(
-      confirm(workers, { pages: 1, version: 7 }, { attributes: { version: 7 } }),
-    ).rejects.toThrow(/did not land/);
-    expect(chapterById).toHaveBeenCalledTimes(8);
+    expect(outcome).toBeNull();
+    expect(archiveDeleted).toHaveBeenCalledTimes(1);
+    expect(archiveUnavailable).not.toHaveBeenCalled();
   });
 });

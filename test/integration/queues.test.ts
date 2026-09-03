@@ -6,6 +6,7 @@ import { buildContext, type AppContext } from "../../src/core/api/context.js";
 import { buildServer } from "../../src/core/api/server.js";
 import { registerQueueRoutes } from "../../src/core/api/routes/queues.js";
 import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
+import type { UploadTaskKind } from "@prisma/client";
 
 /**
  * Full operator control of the upload queues.
@@ -790,6 +791,389 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
     expect(await prisma.auditEvent.count({ where: { action: "queue.restagger" } })).toBe(1);
   });
 
+  /**
+   * Pacing is per kind, because the uploader drains one loop per kind and they
+   * all run at once. A single ranking across the kinds spaces rows against work
+   * they never wait for.
+   */
+  it("paces each kind within itself rather than in one line across them", async () => {
+    const at = new Date(Date.now() - 60_000);
+    const upA = await task({ notBefore: at, createdAt: new Date(Date.now() - 4_000) });
+    const edA = await task({
+      kind: "EDIT",
+      notBefore: at,
+      createdAt: new Date(Date.now() - 3_000),
+    });
+    const upB = await task({ notBefore: at, createdAt: new Date(Date.now() - 2_000) });
+    const edB = await task({
+      kind: "EDIT",
+      notBefore: at,
+      createdAt: new Date(Date.now() - 1_000),
+    });
+
+    // Named rows rather than a kind, because that is the only scope that can
+    // span kinds -- and a console selection spanning them is exactly the case
+    // the old single ranking got wrong.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/restagger",
+      headers: root,
+      payload: { ids: [upA.id, edA.id, upB.id, edB.id], gapSeconds: 60 },
+    });
+    expect(res.statusCode).toBe(200);
+    // Four rows moved, but the set is finished when its longest queue is: two
+    // rows at a 60s gap is one gap, not the three a single line would give.
+    expect(res.json()).toMatchObject({
+      moved: 4,
+      perKind: { UPLOAD: 2, EDIT: 2 },
+      spansSeconds: 60,
+    });
+
+    const rows = new Map(
+      (
+        await prisma.uploadTask.findMany({
+          where: { id: { in: [upA.id, upB.id, edA.id, edB.id] } },
+        })
+      ).map((r) => [r.id, r.notBefore.getTime()]),
+    );
+
+    // Both queues START at now: the EDIT at the head of its own queue is not
+    // pushed a gap out because an UPLOAD happened to sort ahead of it.
+    expect(Math.abs(rows.get(edA.id)! - rows.get(upA.id)!)).toBeLessThan(2_000);
+    // ...and each is paced against its own kind, one gap back.
+    expect(rows.get(upB.id)! - rows.get(upA.id)!).toBeGreaterThanOrEqual(59_000);
+    expect(rows.get(edB.id)! - rows.get(edA.id)!).toBeGreaterThanOrEqual(59_000);
+    // The tail of the whole set is one gap out, not three.
+    expect(Math.max(...rows.values()) - Math.min(...rows.values())).toBeLessThan(62_000);
+  });
+
+  it("sends a row to the back of its own queue, not behind every other kind", async () => {
+    // The queue this was found on had 31,451 pending UPLOAD rows spaced into the
+    // future. Anchoring "back" across all kinds read that tail, so sending one
+    // EDIT to the back parked it weeks out, behind work its loop never waits on.
+    const farFuture = new Date(Date.now() + 7 * 24 * 3600 * 1000);
+    await task({ notBefore: farFuture });
+    const edA = await task({ kind: "EDIT", notBefore: new Date(Date.now() - 20_000) });
+    const edB = await task({ kind: "EDIT", notBefore: new Date(Date.now() - 10_000) });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/reorder",
+      headers: root,
+      payload: { ids: [edA.id], mode: "back" },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const moved = await prisma.uploadTask.findUniqueOrThrow({ where: { id: edA.id } });
+    const other = await prisma.uploadTask.findUniqueOrThrow({ where: { id: edB.id } });
+    // Behind the other EDIT, and nowhere near the UPLOAD queue's tail.
+    expect(moved.notBefore.getTime()).toBeGreaterThan(other.notBefore.getTime());
+    expect(moved.notBefore.getTime()).toBeLessThan(Date.now() + 60_000);
+    // And still claimable behind its neighbour, which is what "back" means.
+    expect((await ctx.uploadTasks.claim("EDIT", 60))?.id).toBe(edB.id);
+    expect((await ctx.uploadTasks.claim("EDIT", 60))?.id).toBe(edA.id);
+  });
+
+  /**
+   * Retiring a queued upload the publisher has renumbered.
+   *
+   * The dedupe key carries the chapter number, because one publisher chapter
+   * legitimately becomes several MangaDex ones. The cost is that a chapter
+   * whose number CHANGES gets a new key, misses the ON CONFLICT that would have
+   * absorbed it, and is queued twice. 27 groups in the live queue are exactly
+   * that -- one mangaup_global chapter as both `35.01` and `35.1`.
+   */
+  describe("supersedeRenumbered", () => {
+    const queued = (extension: string, chapterId: string, number: string, language = "en") =>
+      task({
+        kind: "UPLOAD",
+        dedupeKey: `${extension}|${chapterId}|${number}|${language}`,
+        chapter: {
+          extensionName: extension,
+          chapterId,
+          chapterNumber: number,
+          chapterLanguage: language,
+        },
+      });
+
+    const report = (extension: string, chapterId: string, number: string, language = "en") => ({
+      extensionName: extension,
+      chapterId,
+      chapterNumber: number,
+      chapterLanguage: language,
+    });
+
+    it("drops the row carrying the number the publisher stopped using", async () => {
+      const stale = await queued("mangaup_global", "13115", "35.01");
+      const current = await queued("mangaup_global", "13115", "35.1");
+
+      const dropped = await ctx.uploadTasks.supersedeRenumbered([
+        report("mangaup_global", "13115", "35.1"),
+      ]);
+
+      expect(dropped.map((r) => r.id)).toEqual([stale.id]);
+      expect(await prisma.uploadTask.findUnique({ where: { id: stale.id } })).toBeNull();
+      // And the number the run actually reported is left exactly as it was.
+      expect(await prisma.uploadTask.findUnique({ where: { id: current.id } })).not.toBeNull();
+    });
+
+    it("keeps every number of a split the run still reports", async () => {
+      // 54 groups in the live queue are one chapter across several numbers -- a
+      // volume sold as one episode. All of them are in the run's set, so none
+      // of them is stale.
+      const parts = await Promise.all(
+        ["2", "3", "4"].map((n) => queued("mangaup_global", "98157", n)),
+      );
+
+      const dropped = await ctx.uploadTasks.supersedeRenumbered(
+        ["2", "3", "4"].map((n) => report("mangaup_global", "98157", n)),
+      );
+
+      expect(dropped).toEqual([]);
+      expect(await prisma.uploadTask.count({ where: { id: { in: parts.map((p) => p.id) } } })).toBe(3);
+    });
+
+    it("never reaches a chapter the run did not report", async () => {
+      // A scoped run covers one series. Anything outside it is not this run's
+      // to judge, and a rule that swept the queue would empty it.
+      const other = await queued("mangaup_global", "99999", "7");
+
+      expect(await ctx.uploadTasks.supersedeRenumbered([report("mangaup_global", "13115", "35.1")]))
+        .toEqual([]);
+      expect(await prisma.uploadTask.findUnique({ where: { id: other.id } })).not.toBeNull();
+    });
+
+    it("never reaches another extension, or another language, of the same id", async () => {
+      const otherExtension = await queued("k_manga", "13115", "35.01");
+      const otherLanguage = await queued("mangaup_global", "13115", "35.01", "es-la");
+
+      const dropped = await ctx.uploadTasks.supersedeRenumbered([
+        report("mangaup_global", "13115", "35.1"),
+      ]);
+
+      expect(dropped).toEqual([]);
+      expect(await prisma.uploadTask.count({
+        where: { id: { in: [otherExtension.id, otherLanguage.id] } },
+      })).toBe(2);
+    });
+
+    it("leaves a leased row alone, because an uploader is mid-flight on it", async () => {
+      const leased = await queued("mangaup_global", "13115", "35.01");
+      await prisma.uploadTask.update({
+        where: { id: leased.id },
+        data: { state: "LEASED", leaseId: LEASE_ID, leaseExpiresAt: new Date(Date.now() + 60_000) },
+      });
+
+      expect(await ctx.uploadTasks.supersedeRenumbered([report("mangaup_global", "13115", "35.1")]))
+        .toEqual([]);
+      expect((await prisma.uploadTask.findUniqueOrThrow({ where: { id: leased.id } })).state).toBe(
+        "LEASED",
+      );
+    });
+
+    it("skips chapters with no publisher id rather than matching all of them", async () => {
+      // Their identity would be (extension, '', language), which is every
+      // anonymous chapter of that extension at once.
+      const anonymous = await task({
+        kind: "UPLOAD",
+        dedupeKey: "mangaup_global||9|en",
+        chapter: { extensionName: "mangaup_global", chapterNumber: "9", chapterLanguage: "en" },
+      });
+
+      const dropped = await ctx.uploadTasks.supersedeRenumbered([
+        { extensionName: "mangaup_global", chapterId: null, chapterNumber: "10", chapterLanguage: "en" },
+      ]);
+
+      expect(dropped).toEqual([]);
+      expect(await prisma.uploadTask.findUnique({ where: { id: anonymous.id } })).not.toBeNull();
+    });
+  });
+
+  /**
+   * The chapter interlock.
+   *
+   * Every kind drains in its own loop now, all at once, so two kinds can reach
+   * the same chapter at the same time -- a DELETE removing it while an
+   * UNAVAILABLE uploads a card over it. The fixed order used to make that
+   * impossible; this does it instead, by passing over any row whose chapter is
+   * already leased by another row.
+   */
+  describe("chapter interlock", () => {
+    /** Re-read a row, for the lease id a claim just wrote onto it. */
+    const current = (id: string) => prisma.uploadTask.findUniqueOrThrow({ where: { id } });
+    const MD_A = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+    const MD_B = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+
+    /** A task carrying a real publisher identity, which is what the scope reads. */
+    const chapterTask = (
+      kind: UploadTaskKind,
+      identity: { extension: string; chapterId: string; language?: string; number?: string },
+      overrides: Record<string, unknown> = {},
+    ) =>
+      task({
+        kind,
+        dedupeKey: `${kind}-${identity.extension}-${identity.chapterId}-${identity.number ?? "1"}`,
+        chapter: {
+          extensionName: identity.extension,
+          chapterId: identity.chapterId,
+          chapterNumber: identity.number ?? "1",
+          chapterLanguage: identity.language ?? "en",
+        },
+        ...overrides,
+      });
+
+    it("will not hand out a chapter another kind is already holding", async () => {
+      const upload = await chapterTask("UPLOAD", { extension: "mangaplus", chapterId: "1013910" });
+      await chapterTask("UNAVAILABLE", { extension: "mangaplus", chapterId: "1013910" });
+
+      // The UPLOAD is leased, so the card for the same chapter is passed over.
+      expect((await ctx.uploadTasks.claim("UPLOAD", 300))?.id).toBe(upload.id);
+      expect(await ctx.uploadTasks.claim("UNAVAILABLE", 300)).toBeNull();
+
+      // Skipped, not lost: once the upload settles the card is claimable, and
+      // its date was never touched.
+      await ctx.uploadTasks.completeDone(upload.id, (await current(upload.id)).leaseId ?? "");
+      expect((await ctx.uploadTasks.claim("UNAVAILABLE", 300))?.chapter).toMatchObject({
+        chapterId: "1013910",
+      });
+    });
+
+    it("does not confuse two extensions that number from the same id space", async () => {
+      // k_manga and mangaup_global are both plain six-digit integers, so this
+      // is one collision away from real. The publisher is part of the scope
+      // precisely so one of them never waits on the other.
+      const a = await chapterTask("UPLOAD", { extension: "k_manga", chapterId: "304221" });
+      const b = await chapterTask("UNAVAILABLE", { extension: "mangaup_global", chapterId: "304221" });
+
+      expect((await ctx.uploadTasks.claim("UPLOAD", 300))?.id).toBe(a.id);
+      // Same id, different publisher: a different chapter, and claimable.
+      expect((await ctx.uploadTasks.claim("UNAVAILABLE", 300))?.id).toBe(b.id);
+    });
+
+    it("does not confuse two languages of one chapter, which are separate chapters", async () => {
+      const en = await chapterTask("UPLOAD", { extension: "mangaplus", chapterId: "1013910" });
+      const es = await chapterTask("UNAVAILABLE", {
+        extension: "mangaplus",
+        chapterId: "1013910",
+        language: "es",
+      });
+
+      expect((await ctx.uploadTasks.claim("UPLOAD", 300))?.id).toBe(en.id);
+      expect((await ctx.uploadTasks.claim("UNAVAILABLE", 300))?.id).toBe(es.id);
+    });
+
+    it("still lets a split episode upload every one of its numbers", async () => {
+      // 81 rows in the live queue are one publisher chapter split across several
+      // chapter numbers. They share a scope by design -- the number is not in it
+      // -- so they take turns, but every one of them must still go up.
+      const first = await chapterTask("UPLOAD", {
+        extension: "mangaup_global",
+        chapterId: "98157",
+        number: "2",
+      });
+      const second = await chapterTask("UPLOAD", {
+        extension: "mangaup_global",
+        chapterId: "98157",
+        number: "3",
+      });
+
+      // One at a time, and the second is not dropped: it is claimed the moment
+      // the first stops being held.
+      expect((await ctx.uploadTasks.claim("UPLOAD", 300))?.id).toBe(first.id);
+      expect(await ctx.uploadTasks.claim("UPLOAD", 300)).toBeNull();
+      await ctx.uploadTasks.completeDone(first.id, (await current(first.id)).leaseId ?? "");
+      expect((await ctx.uploadTasks.claim("UPLOAD", 300))?.id).toBe(second.id);
+    });
+
+    it("frees the chapter when the holder's lease is swept", async () => {
+      // An uploader that dies holding a lease must not wedge the chapter for
+      // good; the sweep that requeues the row releases the interlock with it.
+      const held = await chapterTask(
+        "UPLOAD",
+        { extension: "omoi", chapterId: "05e78d52" },
+        { state: "LEASED", leaseId: LEASE_ID, leaseExpiresAt: new Date(Date.now() - 60_000) },
+      );
+      await chapterTask("DELETE", { extension: "omoi", chapterId: "05e78d52" });
+
+      expect(await ctx.uploadTasks.claim("DELETE", 300)).toBeNull();
+      await ctx.uploadTasks.sweepExpired();
+      expect((await ctx.uploadTasks.claim("DELETE", 300))?.chapter).toMatchObject({
+        chapterId: "05e78d52",
+      });
+      expect(held.id).toBeTruthy();
+    });
+
+    it("leaves rows with no publisher identity claimable, one per dedupe key", async () => {
+      // Reconcile-built rows carry an mdChapterId and no publisher chapter id.
+      // They fall back to that id, so they neither collide with each other nor
+      // strand themselves behind an unrelated row.
+      const a = await task({ kind: "DELETE", dedupeKey: MD_A, chapter: { mdChapterId: MD_A } });
+      const b = await task({
+        kind: "UNAVAILABLE",
+        dedupeKey: MD_B,
+        chapter: { mdChapterId: MD_B },
+      });
+
+      expect((await ctx.uploadTasks.claim("DELETE", 300))?.id).toBe(a.id);
+      expect((await ctx.uploadTasks.claim("UNAVAILABLE", 300))?.id).toBe(b.id);
+    });
+  });
+
+  /**
+   * `defer` is how a task that wrote successfully waits to find out whether the
+   * write took, without the uploader standing still for it. It is neither
+   * `completeDone` nor `fail`, and the differences from `fail` are the point.
+   */
+  describe("defer", () => {
+    it("puts the task back later, with a new payload and the attempt returned", async () => {
+      const row = await task({ notBefore: new Date(Date.now() - 30_000) });
+      const claimed = await ctx.uploadTasks.claim("UPLOAD", 300);
+      expect(claimed?.id).toBe(row.id);
+      expect(claimed?.attempt).toBe(1);
+
+      const deferred = await ctx.uploadTasks.defer(row.id, claimed?.leaseId ?? "", 120, {
+        chapterNumber: "1",
+        cardVerify: { round: 1, pagesBefore: 0, versionBefore: 4 },
+      });
+      expect(deferred).toBe(true);
+
+      const after = await prisma.uploadTask.findUniqueOrThrow({ where: { id: row.id } });
+      expect(after.state).toBe("PENDING");
+      expect(after.leaseId).toBeNull();
+      expect(after.notBefore.getTime()).toBeGreaterThan(Date.now() + 60_000);
+      expect(after.chapter).toMatchObject({ cardVerify: { round: 1 } });
+      // Handed back, because waiting is not a retry: a card needing three rounds
+      // of looking would otherwise dead-letter while working perfectly.
+      expect(after.attempt).toBe(0);
+      // And not claimable until its time comes, which is what stops the loop
+      // spinning on a task that has nothing to do yet.
+      expect(await ctx.uploadTasks.claim("UPLOAD", 60)).toBeNull();
+    });
+
+    it("refuses a lease it does not hold, so a swept task is not resurrected", async () => {
+      const row = await task();
+      await ctx.uploadTasks.claim("UPLOAD", 300);
+
+      expect(
+        await ctx.uploadTasks.defer(row.id, "22222222-2222-4222-8222-222222222222", 60, {}),
+      ).toBe(false);
+      expect((await prisma.uploadTask.findUniqueOrThrow({ where: { id: row.id } })).state).toBe(
+        "LEASED",
+      );
+    });
+
+    it("clears the last error, since the row is no longer a failure", async () => {
+      const row = await task({ lastError: "the card did not land" });
+      const claimed = await ctx.uploadTasks.claim("UPLOAD", 300);
+
+      await ctx.uploadTasks.defer(row.id, claimed?.leaseId ?? "", 60, {});
+
+      expect(
+        (await prisma.uploadTask.findUniqueOrThrow({ where: { id: row.id } })).lastError,
+      ).toBeNull();
+    });
+  });
+
   it("leaves a leased row alone while re-spacing the rest", async () => {
     const a = await task({ notBefore: new Date(Date.now() - 30_000) });
     await task({ notBefore: new Date(Date.now() - 20_000) });
@@ -1103,11 +1487,13 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
       payload: { kind: "UPLOAD", chapter: uploadChapter() },
     });
     expect(res.statusCode).toBe(201);
-    // Same rule as processor.ts: chapterId|chapterNumber|chapterLanguage.
+    // Same rule as processor.ts:
+    // extension|chapterId|chapterNumber|chapterLanguage. The publisher leads it
+    // so two extensions numbering out of one id space cannot claim one slot.
     expect(res.json().task).toMatchObject({
       kind: "UPLOAD",
       state: "PENDING",
-      dedupeKey: "src-4001|12|en",
+      dedupeKey: "queuetest|src-4001|12|en",
       attempt: 0,
     });
 
@@ -1134,7 +1520,7 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
     });
     expect(dupe.statusCode).toBe(409);
     expect(dupe.json().existing.id).toBe(res.json().task.id);
-    expect(dupe.json().dedupeKey).toBe("src-4001|12|en");
+    expect(dupe.json().dedupeKey).toBe("queuetest|src-4001|12|en");
     expect(await prisma.uploadTask.count()).toBe(1);
 
     // Same chapter, different kind: a different slot, so this is allowed.
@@ -1248,7 +1634,7 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
     });
     expect(titled.statusCode).toBe(200);
     expect(titled.json()).toMatchObject({ ok: true, dedupeKeyChanged: false });
-    expect(titled.json().task).toMatchObject({ maxAttempts: 9, dedupeKey: "src-4001|12|en" });
+    expect(titled.json().task).toMatchObject({ maxAttempts: 9, dedupeKey: "queuetest|src-4001|12|en" });
     expect((titled.json().task.chapter as Record<string, unknown>)["chapterTitle"]).toBe("Corrected");
     // The untouched fields are still there.
     expect((titled.json().task.chapter as Record<string, unknown>)["mdGroupId"]).toBeTruthy();
@@ -1262,7 +1648,7 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
     });
     expect(renumbered.statusCode).toBe(200);
     expect(renumbered.json()).toMatchObject({ dedupeKeyChanged: true });
-    expect(renumbered.json().task.dedupeKey).toBe("src-4001|13|en");
+    expect(renumbered.json().task.dedupeKey).toBe("queuetest|src-4001|13|en");
     expect(await prisma.auditEvent.count({ where: { action: "queue.task_edit" } })).toBe(2);
 
     // ...but not onto a slot another task holds.
@@ -1283,7 +1669,7 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
     expect(collide.json().existing.id).toBe(other.json().task.id);
     expect(
       (await prisma.uploadTask.findUniqueOrThrow({ where: { id } })).dedupeKey,
-    ).toBe("src-4001|13|en");
+    ).toBe("queuetest|src-4001|13|en");
 
     // An edit that would make the task unexecutable is refused too.
     const broken = await app.inject({

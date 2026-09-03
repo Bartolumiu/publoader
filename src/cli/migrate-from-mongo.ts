@@ -527,12 +527,16 @@ async function migrateQueue(
       const dedupeKey =
         kind === "UPLOAD"
           ? uploadDedupeKey({
+              // Same field order the legacy documents use elsewhere in this
+              // file; the publisher leads the key so two extensions numbering
+              // out of one id space cannot describe the same row.
+              extensionName: str(doc["extension"]) ?? str(doc["extension_name"]),
               chapterId: str(doc["chapter_id"]),
               chapterNumber: str(doc["chapter_number"]),
               chapterLanguage: str(doc["chapter_language"]),
             })
           : str(doc["md_chapter_id"]);
-      if (!dedupeKey || dedupeKey === "||") {
+      if (!dedupeKey || dedupeKey === "|||") {
         counts.skipped += 1;
         continue;
       }

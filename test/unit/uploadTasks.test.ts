@@ -17,20 +17,54 @@ import { manualTaskProblems } from "../../src/core/api/routes/queues.js";
 
 describe("taskDedupeKey", () => {
   it("derives an UPLOAD key exactly as the processor does", () => {
-    const chapter = { chapterId: "src-9", chapterNumber: "4.5", chapterLanguage: "en" };
-    expect(taskDedupeKey("UPLOAD", chapter)).toBe("src-9|4.5|en");
+    const chapter = {
+      extensionName: "comikey",
+      chapterId: "src-9",
+      chapterNumber: "4.5",
+      chapterLanguage: "en",
+    };
+    expect(taskDedupeKey("UPLOAD", chapter)).toBe("comikey|src-9|4.5|en");
     // The one place both rules live, so drift between them is not possible.
     expect(taskDedupeKey("UPLOAD", chapter)).toBe(uploadDedupeKey(chapter));
+  });
+
+  it("separates two extensions that number out of the same id space", () => {
+    // The reason the publisher is in the key at all. k_manga and
+    // mangaup_global are both plain six-digit integers; sharing a key means the
+    // unique (kind, dedupe_key) constraint drops the second chapter through ON
+    // CONFLICT DO NOTHING -- no error, no log, just a chapter that never
+    // uploads.
+    const shared = { chapterId: "304221", chapterNumber: "12", chapterLanguage: "en" };
+    expect(taskDedupeKey("UPLOAD", { ...shared, extensionName: "k_manga" })).not.toBe(
+      taskDedupeKey("UPLOAD", { ...shared, extensionName: "mangaup_global" }),
+    );
+  });
+
+  it("keeps the number, because one publisher chapter can be several MangaDex ones", () => {
+    // A volume sold as one episode, or a chapter split across numbers: 54 such
+    // groups are in the live queue. Drop the number from the key and they
+    // collapse into one row, and only one of them ever uploads.
+    const split = { extensionName: "mangaup_global", chapterId: "98157", chapterLanguage: "en" };
+    expect(taskDedupeKey("UPLOAD", { ...split, chapterNumber: "2" })).not.toBe(
+      taskDedupeKey("UPLOAD", { ...split, chapterNumber: "3" }),
+    );
   });
 
   it("keeps a partial UPLOAD key but refuses one with no identity at all", () => {
     // A chapter with no source id is normal, the number and language still
     // identify it, so the key is partial rather than rejected.
-    expect(taskDedupeKey("UPLOAD", { chapterNumber: "1", chapterLanguage: "en" })).toBe("|1|en");
-    // All three empty would occupy the single `||` slot for every such chapter,
-    // which is the collision cli/migrate-from-mongo.ts also refuses.
+    expect(taskDedupeKey("UPLOAD", { chapterNumber: "1", chapterLanguage: "en" })).toBe("||1|en");
+    // All four empty would occupy one slot for every such chapter, which is the
+    // collision cli/migrate-from-mongo.ts also refuses.
     expect(taskDedupeKey("UPLOAD", {})).toBeNull();
-    expect(taskDedupeKey("UPLOAD", { chapterId: null, chapterNumber: null, chapterLanguage: null })).toBeNull();
+    expect(
+      taskDedupeKey("UPLOAD", {
+        extensionName: null,
+        chapterId: null,
+        chapterNumber: null,
+        chapterLanguage: null,
+      }),
+    ).toBeNull();
   });
 
   it("keys every other kind on the MangaDex chapter id", () => {

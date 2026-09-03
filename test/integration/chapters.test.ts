@@ -9,6 +9,7 @@ import { registerChapterRoutes } from "../../src/core/api/routes/chapters.js";
 import { UploadTaskWorkers } from "../../src/core/md/taskWorkers.js";
 import { SettingsStore } from "../../src/core/store/settings.js";
 import type { MdChapterDetail, MdExtendedApi } from "../../src/core/md/client.js";
+import type { Prisma } from "@prisma/client";
 import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
 
 /**
@@ -1299,7 +1300,20 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
           },
         },
       });
-      await workers.execute(task);
+      // Carding is two claims now, not one: the commit writes the card and the
+      // task goes back on the queue to be confirmed later, so a test that ran
+      // `execute` once would stop before anything was recorded. This is what
+      // the uploader does with a deferral, minus the waiting.
+      let current = task;
+      for (let claim = 0; claim < 5; claim += 1) {
+        const outcome = await workers.execute(current);
+        if (!outcome?.defer) break;
+        calls.push(`deferred:${outcome.defer.seconds}`);
+        current = await prisma.uploadTask.update({
+          where: { id: current.id },
+          data: { chapter: outcome.defer.chapter as Prisma.InputJsonValue },
+        });
+      }
       return calls;
     }
 
@@ -1326,10 +1340,79 @@ describe.skipIf(!dbReady())("chapter management endpoints", () => {
       // call is the point of this test now -- a card and its url are one write.
       expect(calls).toContain("commitExternalUrl:https://publisher.example/series");
       expect(calls).not.toContain("editChapter");
+
+      // The commit does not archive anything; the task goes back on the queue
+      // and a later claim reads the chapter and finds the card there. Two
+      // minutes is the first gap, and the confirming read is the LAST call.
+      expect(calls).toContain("deferred:120");
+      expect(calls[calls.length - 1]).toBe("chapterById");
+
       const archived = await prisma.unavailableChapter.findUniqueOrThrow({
         where: { mdChapterId: uuid(1) },
       });
       expect(archived.chapterNumber).toBe("1");
+    });
+
+    it("does not record a card the chapter never received", async () => {
+      // The same flow against a MangaDex that accepts the commit and keeps no
+      // page -- 80 chapters in a row did exactly this on 2026-09-03. Every
+      // round of looking has to end with the task failing rather than with an
+      // `unavailable_chapters` row saying the card is up.
+      const calls: string[] = [];
+      const md = stubMd(calls);
+      // Never carded, whatever the commit says.
+      const stuck = { ...md, chapterById: async () => (calls.push("chapterById"), detail(0, 3)) };
+      const workers = new UploadTaskWorkers({
+        prisma,
+        md: stuck as unknown as MdExtendedApi,
+        notifier: notifier as never,
+        settings: new SettingsStore(prisma),
+        config,
+        log,
+      });
+      const task = await prisma.uploadTask.create({
+        data: {
+          kind: "UNAVAILABLE",
+          dedupeKey: uuid(2),
+          state: "LEASED",
+          chapter: {
+            mdChapterId: uuid(1),
+            mdMangaId: uuid(900),
+            mdGroupId: uuid(800),
+            chapterNumber: "1",
+            chapterLanguage: "en",
+            mangaName: "Test Series",
+            mangaUrl: "https://publisher.example/series",
+            extensionName: "exampleext",
+            imageArtifacts: [],
+            force: true,
+          },
+        },
+      });
+
+      let current = task;
+      let rounds = 0;
+      for (; rounds < 6; rounds += 1) {
+        try {
+          const outcome = await workers.execute(current);
+          if (!outcome?.defer) break;
+          current = await prisma.uploadTask.update({
+            where: { id: current.id },
+            data: { chapter: outcome.defer.chapter as Prisma.InputJsonValue },
+          });
+        } catch (err) {
+          expect((err as Error).message).toMatch(/did not land/);
+          break;
+        }
+      }
+
+      // Three gaps, so three deferrals and then the failure on the fourth look.
+      expect(rounds).toBe(3);
+      expect(await prisma.unavailableChapter.count({ where: { mdChapterId: uuid(1) } })).toBe(0);
+      // And the marker is off the row, so the retry writes a new card rather
+      // than reading the same chapter until its attempts run out.
+      const row = await prisma.uploadTask.findUniqueOrThrow({ where: { id: task.id } });
+      expect((row.chapter as Record<string, unknown>)["cardVerify"]).toBeUndefined();
     });
 
     /**
