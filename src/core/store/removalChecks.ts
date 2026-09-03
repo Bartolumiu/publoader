@@ -187,6 +187,52 @@ export class RemovalCheckStore {
     return count;
   }
 
+  /**
+   * Put a chapter on the tally by hand, for an operator who has seen it go.
+   *
+   * Deliberately NOT a removal. It casts the first vote and nothing more, so
+   * the runs still have to agree before anything is written to MangaDex --
+   * which is the whole point, and the reason this is safe to expose. An
+   * operator who wants the chapter carded now has `chapters/bulk/unavailable`,
+   * which says so plainly and asks for a confirmation.
+   */
+  async add(candidate: RemovalCandidate, now = new Date()) {
+    return this.prisma.chapterRemovalCheck.upsert({
+      where: { mdChapterId: candidate.mdChapterId },
+      create: {
+        mdChapterId: candidate.mdChapterId,
+        extension: candidate.extension,
+        mdMangaId: candidate.mdMangaId,
+        pass: candidate.pass,
+        mode: candidate.mode,
+        misses: 1,
+        firstMissedAt: now,
+        lastMissedAt: now,
+        notBefore: nextVoteAt(now.getTime()),
+      },
+      // An existing tally is left at the count it has earned; this is a vote,
+      // not a reset, and re-adding must not walk a chapter backwards.
+      update: { lastMissedAt: now, pass: candidate.pass, mode: candidate.mode },
+    });
+  }
+
+  /**
+   * Stop waiting: treat these chapters as already agreed.
+   *
+   * The operator override for "I have checked, the publisher really did drop
+   * it". It does not touch MangaDex -- it tops the tally up and opens the
+   * window, so the next run queues the removal through the ordinary path, with
+   * the ordinary ownership checks and the ordinary audit row.
+   */
+  async confirmNow(mdChapterIds: readonly string[], now = new Date()): Promise<number> {
+    if (mdChapterIds.length === 0) return 0;
+    const { count } = await this.prisma.chapterRemovalCheck.updateMany({
+      where: { mdChapterId: { in: [...mdChapterIds] } },
+      data: { misses: this.confirmations, notBefore: now, lastMissedAt: now },
+    });
+    return count;
+  }
+
   /** What is currently part-way to removal, newest report first. */
   async pending(extension?: string, limit = 100) {
     return this.prisma.chapterRemovalCheck.findMany({
