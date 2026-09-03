@@ -15,45 +15,48 @@ import { startMetricsServer } from "../core/observability/metricsServer.js";
 
 /**
  * core-uploader: the only process that talks to MangaDex with write
- * credentials. It drains the UploadTask queues in a fixed order; removals
- * first, so a chapter that was deleted upstream never races the re-upload of
- * its replacement; and leaves task bookkeeping to UploadTaskStore.
+ * credentials. It drains the UploadTask queues and leaves task bookkeeping to
+ * UploadTaskStore.
  *
  * Title creation for untracked series lives here for the same reason: this is
  * the only process holding MangaDex write credentials.
  *
- * TWO loops, not one. UNAVAILABLE is drained alongside the rest rather than
- * after them, because it is the only queue whose work is mostly NOT the write:
- * a card is rendered, committed, and then confirmed minutes later, and only the
- * commit needs MangaDex's one upload session. Sharing a loop with UPLOAD meant
- * all of that waiting happened with the queue stopped behind it.
+ * ONE LOOP PER QUEUE, plus a housekeeping loop. Every kind is drained
+ * concurrently rather than taking its turn in a fixed order, because a queue's
+ * wait used to be everything ahead of it: UPLOAD is the slowest verb at roughly
+ * six seconds a chapter, and a hundred of them is ten minutes during which a
+ * RESTORE -- the corrective verb, the one a reader is waiting on -- was not
+ * looked at once.
  *
- * What still takes turns is the session itself, held by `UploadSessionLock`
- * inside UploadTaskWorkers: one MangaDex account may have one open upload
- * session, so a card's image goes up between two chapters' page sets rather
- * than beside them. Everything either side of that runs in parallel.
+ * WHAT THIS GIVES UP. The kinds used to run removals-first, so a chapter
+ * deleted upstream could not race the re-upload of its replacement. They now
+ * interleave freely, and that guarantee is gone by choice. What still holds:
+ *
+ *  - `UploadSessionLock` (in UploadTaskWorkers) serialises every stretch that
+ *    holds MangaDex's one upload session, so UPLOAD, UNAVAILABLE and RESTORE
+ *    take turns to put images up. DELETE and EDIT open no session at all.
+ *  - The workers re-check ownership immediately before each write, and
+ *    `runDelete` and `runUnavailable` both treat a chapter that has gone from
+ *    MangaDex as already handled rather than as a failure.
+ *
+ * So the residual risk is a window, not a corruption: a replacement chapter can
+ * briefly exist alongside the one being deleted. If that starts mattering, the
+ * fix is a dedupe-key interlock in the store, not a return to a fixed order.
  */
 
 /** Long enough for a full page set at the MangaDex ratelimit. */
 const LEASE_TTL_SECONDS = 600;
 const IDLE_SLEEP_MS = 5_000;
 /**
- * Which queues the main loop drains, and in what order.
+ * Every queue this process drains, one loop each.
  *
- * A kind missing from here AND from the unavailable loop is never claimed at
- * all: `claim` takes one kind, so a task of a kind nobody asks for waits
- * forever in PENDING with nothing to say it is stuck. RESTORE was added as a
- * task kind and a worker without being added here, and 39 restore tasks sat
- * untouched because of it.
- *
- * RESTORE goes first because it is the corrective verb: it takes a card off a
- * chapter that should not have one, and until it runs a reader is looking at
- * "no longer available" over a chapter they can actually read.
+ * A kind missing from here is never claimed at all: `claim` takes one kind, so
+ * a task of a kind nobody asks for waits forever in PENDING with nothing to say
+ * it is stuck. RESTORE was added as a task kind and a worker without being
+ * added to the old ordered list, and 39 restore tasks sat untouched because of
+ * it. The list is no longer an order, but it is still the enrolment.
  */
-const KIND_ORDER: UploadTaskKind[] = ["RESTORE", "DELETE", "EDIT", "UPLOAD"];
-
-/** The queue with a loop to itself; see the note above. */
-const UNAVAILABLE_KIND: UploadTaskKind = "UNAVAILABLE";
+const DRAINED_KINDS: UploadTaskKind[] = ["RESTORE", "DELETE", "EDIT", "UPLOAD", "UNAVAILABLE"];
 
 const config = loadConfig();
 const log = createLogger("core-uploader", config.logLevel);
@@ -87,25 +90,40 @@ function retryDelaySeconds(attempt: number): number {
  * whether the loop sleeps, since a pass that only failed still did I/O.
  */
 /**
- * How many tasks of one kind a single pass may take before yielding.
+ * How many tasks a single pass may take before yielding.
  *
- * Without a bound, `drain` empties its kind completely before returning, and
- * the main loop's kinds are visited in a fixed order. A bulk backfill would
- * therefore own that loop for as long as it takes: 2,425 items at roughly
- * twenty seconds each is thirteen hours during which UPLOAD is never looked at
- * again, so a chapter published in the meantime simply waits. That is the queue
- * "not doing anything" while plainly being busy.
+ * This used to be the thing that stopped one kind owning the shared loop, and
+ * that job is gone: nothing queues behind anything now, so a kind emptying
+ * itself costs no other kind a thing. UNAVAILABLE's slice of ten -- which
+ * existed only because every card it drained was a chapter that did not go up
+ * -- goes with it.
  *
- * The budget is also what makes a pause take effect: `isPaused` and the paused
- * extension list are read once per pass, so a long pass is a long time before
- * either is noticed.
- *
- * UNAVAILABLE used to take the small slice, because sharing a loop with UPLOAD
- * meant every card it drained was a chapter that did not go up. It has its own
- * loop now and nothing waits behind it, so it takes the ordinary budget.
+ * What is left is a reporting bound. `report` publishes a pass's counts, and
+ * `publishDepths` scrapes the queue, so an unbounded pass would leave both
+ * silent for as long as the backfill ran. A hundred is close enough to
+ * continuous for a metric sampled every few seconds.
  */
 const DEFAULT_DRAIN_BUDGET = 100;
 const DRAIN_BUDGET: Partial<Record<UploadTaskKind, number>> = {};
+
+/**
+ * The pause gates, read once by the housekeeping loop and shared by all five
+ * drains.
+ *
+ * Read per loop instead, these would be ten settings queries every five seconds
+ * for a platform that is usually idle. Cached, they are also FRESHER than they
+ * were: the gate used to be read at the top of a pass and not looked at again,
+ * so a pause landing during a hundred-chapter drain took ten minutes to bite.
+ * `drain` now re-reads these between tasks, and they are never more than one
+ * housekeeping tick stale.
+ */
+let paused = false;
+let pausedExtensions: readonly string[] = [];
+
+async function refreshGates(): Promise<void> {
+  paused = await settings.isPaused();
+  pausedExtensions = paused ? [] : await settings.getUploadPausedExtensions();
+}
 
 /** What one pass of `drain` did, split by what the task's outcome was. */
 interface Drained {
@@ -120,12 +138,15 @@ interface Drained {
   deferred: number;
 }
 
-async function drain(kind: UploadTaskKind, pausedExtensions: readonly string[]): Promise<Drained> {
+async function drain(kind: UploadTaskKind): Promise<Drained> {
   let processed = 0;
   let failed = 0;
   let deferred = 0;
   const budget = DRAIN_BUDGET[kind] ?? DEFAULT_DRAIN_BUDGET;
-  while (running && processed + failed + deferred < budget) {
+  // `paused` is re-read every task rather than once at the top: a pause is an
+  // operator asking the platform to stop, and waiting out a hundred-chapter
+  // drain first is not stopping.
+  while (running && !paused && processed + failed + deferred < budget) {
     const task = await tasks.claim(kind, LEASE_TTL_SECONDS, pausedExtensions);
     if (!task) break;
     const leaseId = task.leaseId ?? "";
@@ -160,12 +181,12 @@ async function drain(kind: UploadTaskKind, pausedExtensions: readonly string[]):
 }
 
 /**
- * Work the unavailable loop has done that the main loop has not reported yet.
+ * Work the drain loops have done that has not been reported yet.
  *
- * The two loops run at once but only one of them reports: `flushQueueSummary`
+ * Five loops run at once and exactly one of them reports: `flushQueueSummary`
  * accumulates per kind and decides when a queue is finished, and calling it
- * from both would race over those totals. So the unavailable loop leaves its
- * counts here and the main loop picks them up on its next pass.
+ * from five places would race over those totals. So each drain leaves its
+ * counts here and the housekeeping loop picks them all up together.
  */
 const unreported = new Map<string, { processed: number; failed: number }>();
 
@@ -208,115 +229,115 @@ const metricsServer = await startMetricsServer({
   defaultPort: 8103,
 });
 
-log.info(
-  { kinds: KIND_ORDER, alongside: UNAVAILABLE_KIND, discord: notifier.enabled },
-  "core-uploader started",
-);
+log.info({ kinds: DRAINED_KINDS, discord: notifier.enabled }, "core-uploader started");
 
 /**
- * The main loop: every queue but UNAVAILABLE, plus everything that is done once
- * per pass rather than per queue -- the lease sweep, the pause gate, the title
- * service, and all of the reporting.
+ * One queue, drained until it is empty or the budget runs out, then a sleep.
+ *
+ * Deliberately thin, and the same code for all five kinds: it claims, drains
+ * and sleeps. It does not sweep leases, tick the title service, read settings
+ * or flush anything, because those are once-per-process concerns and doing them
+ * five times over is five times the queries for the same answer. `houseLoop`
+ * owns them.
  */
-async function mainLoop(): Promise<void> {
+async function drainLoop(kind: UploadTaskKind): Promise<void> {
+  while (running) {
+    try {
+      // The gate is a cached flag, so this costs nothing to check often.
+      if (paused) {
+        await sleep(IDLE_SLEEP_MS);
+        continue;
+      }
+
+      const done = await drain(kind);
+      report(kind, done);
+
+      // Only this kind's own work decides whether it sleeps. Another queue
+      // having been busy says nothing about there being work of this kind.
+      const claimed = done.processed + done.failed + done.deferred;
+      if (claimed === 0 && running) await sleep(IDLE_SLEEP_MS);
+    } catch (err) {
+      log.error({ err, kind }, "queue loop iteration failed");
+      await sleep(IDLE_SLEEP_MS);
+    }
+  }
+}
+
+/**
+ * Everything that is once-per-process rather than once-per-queue: the restart
+ * signal, the lease sweep, the pause gates, the reporting settings, the title
+ * service, and all of the notification and metric flushing.
+ *
+ * It is also the loop that decides when the process stops, so it is the only
+ * one that consults the restart signal.
+ */
+async function houseLoop(): Promise<void> {
   while (running) {
     // Between iterations, so we are never holding a task lease, and ahead of the
-    // pause gate's `continue`: a paused uploader must still be restartable.
+    // pause gate: a paused uploader must still be restartable.
     if (await shouldRestart(settings, "uploader", log)) break;
 
     try {
       await tasks.sweepExpired();
+      await refreshGates();
 
-      if (await settings.isPaused()) {
+      if (paused) {
         log.debug("uploads paused, not claiming tasks");
-        await sleep(IDLE_SLEEP_MS);
-        continue;
-      }
+      } else {
+        if (pausedExtensions.length > 0) {
+          log.debug({ pausedExtensions }, "holding queued work for paused extensions");
+        }
+        // Once per tick, not per task: a setting changed mid-drain should not
+        // split one batch into two reporting styles.
+        await workers.refreshReporting();
 
-      // Once per pass, not per task: a setting changed mid-drain should not split
-      // one batch into two reporting styles.
-      await workers.refreshReporting();
-
-      // Read per pass for the same reason, and outside `drain` so every kind in
-      // this pass agrees about who is paused.
-      const pausedExtensions = await settings.getUploadPausedExtensions();
-      if (pausedExtensions.length > 0) {
-        log.debug({ pausedExtensions }, "holding queued work for paused extensions");
-      }
-
-      let claimed = 0;
-      for (const kind of KIND_ORDER) {
-        if (!running) break;
-        const done = await drain(kind, pausedExtensions);
-        claimed += done.processed + done.failed + done.deferred;
-        report(kind, done);
-      }
-
-      // Title creation is its own MangaDex-facing pass; a failure there must not
-      // cost us the queue drain we just did, so it gets its own guard.
-      try {
-        await titles.tick();
-      } catch (err) {
-        log.error({ err }, "title service tick failed");
+        // Title creation is its own MangaDex-facing pass; a failure there must
+        // not cost us the bookkeeping below, so it gets its own guard.
+        try {
+          await titles.tick();
+        } catch (err) {
+          log.error({ err }, "title service tick failed");
+        }
       }
 
       await workers.flushNotifications();
       // Depths first: the summary only announces a queue as finished once
-      // nothing is left in it, so it needs this pass's remainder to decide.
+      // nothing is left in it, so it needs the current remainder to decide.
       const remaining = await publishDepths();
-      // Per-kind counts, so the end-of-drain summary can name the queue that did
-      // the work the way the Python worker threads did. Drained wholesale, both
-      // loops' worth, and handed over in one call.
+      // Every loop's counts, taken together and handed over in one call. The
+      // swap is synchronous, so no drain can slip a count in between the copy
+      // and the clear.
       const drained = new Map(unreported);
       unreported.clear();
       await workers.flushQueueSummary(drained, remaining);
-
-      // Only this loop's own work decides whether it sleeps. The unavailable
-      // loop having been busy says nothing about there being an upload to do.
-      if (claimed === 0 && running) await sleep(IDLE_SLEEP_MS);
     } catch (err) {
-      log.error({ err }, "uploader loop iteration failed");
-      await sleep(IDLE_SLEEP_MS);
+      log.error({ err }, "uploader housekeeping iteration failed");
     }
+
+    if (running) await sleep(IDLE_SLEEP_MS);
   }
-  // The other loop only ever stops on this flag, so a restart signal or a
-  // failure that breaks out of here has to take it down too.
+  // The drain loops only ever stop on this flag, so a restart signal or a
+  // failure that breaks out of here has to take them down too.
   running = false;
 }
 
-/**
- * The unavailable loop: cards, and nothing else.
- *
- * Deliberately thin. It claims, drains and sleeps; it does not sweep leases,
- * tick the title service or flush anything, because those are once-per-pass
- * concerns and the main loop already has them. What it does share is the pause
- * gate -- a paused platform must stop carding as surely as it stops uploading.
- */
-async function unavailableLoop(): Promise<void> {
-  while (running) {
-    try {
-      if (await settings.isPaused()) {
-        await sleep(IDLE_SLEEP_MS);
-        continue;
-      }
-
-      const pausedExtensions = await settings.getUploadPausedExtensions();
-      const done = await drain(UNAVAILABLE_KIND, pausedExtensions);
-      report(UNAVAILABLE_KIND, done);
-
-      const claimed = done.processed + done.failed + done.deferred;
-      if (claimed === 0 && running) await sleep(IDLE_SLEEP_MS);
-    } catch (err) {
-      log.error({ err }, "unavailable loop iteration failed");
-      await sleep(IDLE_SLEEP_MS);
-    }
-  }
+// The gates start closed until the first read says otherwise: a drain loop that
+// began before `houseLoop` had answered would claim tasks on a paused platform.
+// A failure here leaves them closed and lets `houseLoop` retry, rather than
+// taking the process down over a database that is momentarily unreachable --
+// the loops below are built to wait, and this is the one read that happens
+// before any of them can.
+paused = true;
+try {
+  await refreshGates();
+} catch (err) {
+  log.error({ err }, "could not read the pause settings at startup, holding until they are");
 }
 
-// Both are awaited so shutdown waits for whichever is mid-task; neither
-// rejects, so `all` is safe here and a crash in one still stops the other
-// through the `running` flag.
-await Promise.all([mainLoop(), unavailableLoop()]);
+// All awaited, so shutdown waits for whichever loops are mid-task; none of them
+// reject, so `all` is safe here and a crash in one still stops the rest through
+// the `running` flag.
+await Promise.all([houseLoop(), ...DRAINED_KINDS.map((kind) => drainLoop(kind))]);
 
 await workers.flushNotifications();
 await metricsServer.close();

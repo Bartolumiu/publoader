@@ -791,6 +791,89 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
   });
 
   /**
+   * Pacing is per kind, because the uploader drains one loop per kind and they
+   * all run at once. A single ranking across the kinds spaces rows against work
+   * they never wait for.
+   */
+  it("paces each kind within itself rather than in one line across them", async () => {
+    const at = new Date(Date.now() - 60_000);
+    const upA = await task({ notBefore: at, createdAt: new Date(Date.now() - 4_000) });
+    const edA = await task({
+      kind: "EDIT",
+      notBefore: at,
+      createdAt: new Date(Date.now() - 3_000),
+    });
+    const upB = await task({ notBefore: at, createdAt: new Date(Date.now() - 2_000) });
+    const edB = await task({
+      kind: "EDIT",
+      notBefore: at,
+      createdAt: new Date(Date.now() - 1_000),
+    });
+
+    // Named rows rather than a kind, because that is the only scope that can
+    // span kinds -- and a console selection spanning them is exactly the case
+    // the old single ranking got wrong.
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/restagger",
+      headers: root,
+      payload: { ids: [upA.id, edA.id, upB.id, edB.id], gapSeconds: 60 },
+    });
+    expect(res.statusCode).toBe(200);
+    // Four rows moved, but the set is finished when its longest queue is: two
+    // rows at a 60s gap is one gap, not the three a single line would give.
+    expect(res.json()).toMatchObject({
+      moved: 4,
+      perKind: { UPLOAD: 2, EDIT: 2 },
+      spansSeconds: 60,
+    });
+
+    const rows = new Map(
+      (
+        await prisma.uploadTask.findMany({
+          where: { id: { in: [upA.id, upB.id, edA.id, edB.id] } },
+        })
+      ).map((r) => [r.id, r.notBefore.getTime()]),
+    );
+
+    // Both queues START at now: the EDIT at the head of its own queue is not
+    // pushed a gap out because an UPLOAD happened to sort ahead of it.
+    expect(Math.abs(rows.get(edA.id)! - rows.get(upA.id)!)).toBeLessThan(2_000);
+    // ...and each is paced against its own kind, one gap back.
+    expect(rows.get(upB.id)! - rows.get(upA.id)!).toBeGreaterThanOrEqual(59_000);
+    expect(rows.get(edB.id)! - rows.get(edA.id)!).toBeGreaterThanOrEqual(59_000);
+    // The tail of the whole set is one gap out, not three.
+    expect(Math.max(...rows.values()) - Math.min(...rows.values())).toBeLessThan(62_000);
+  });
+
+  it("sends a row to the back of its own queue, not behind every other kind", async () => {
+    // The queue this was found on had 31,451 pending UPLOAD rows spaced into the
+    // future. Anchoring "back" across all kinds read that tail, so sending one
+    // EDIT to the back parked it weeks out, behind work its loop never waits on.
+    const farFuture = new Date(Date.now() + 7 * 24 * 3600 * 1000);
+    await task({ notBefore: farFuture });
+    const edA = await task({ kind: "EDIT", notBefore: new Date(Date.now() - 20_000) });
+    const edB = await task({ kind: "EDIT", notBefore: new Date(Date.now() - 10_000) });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/queues/reorder",
+      headers: root,
+      payload: { ids: [edA.id], mode: "back" },
+    });
+    expect(res.statusCode).toBe(200);
+
+    const moved = await prisma.uploadTask.findUniqueOrThrow({ where: { id: edA.id } });
+    const other = await prisma.uploadTask.findUniqueOrThrow({ where: { id: edB.id } });
+    // Behind the other EDIT, and nowhere near the UPLOAD queue's tail.
+    expect(moved.notBefore.getTime()).toBeGreaterThan(other.notBefore.getTime());
+    expect(moved.notBefore.getTime()).toBeLessThan(Date.now() + 60_000);
+    // And still claimable behind its neighbour, which is what "back" means.
+    expect((await ctx.uploadTasks.claim("EDIT", 60))?.id).toBe(edB.id);
+    expect((await ctx.uploadTasks.claim("EDIT", 60))?.id).toBe(edA.id);
+  });
+
+  /**
    * `defer` is how a task that wrote successfully waits to find out whether the
    * write took, without the uploader standing still for it. It is neither
    * `completeDone` nor `fail`, and the differences from `fail` are the point.

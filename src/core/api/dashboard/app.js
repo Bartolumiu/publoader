@@ -5112,8 +5112,15 @@ function queueRestaggerDialog(scope, tasks, done) {
               { button: event.currentTarget, refresh: [tasks] },
             );
             if (result) {
+              // Each kind is paced within itself, because each kind has its own
+              // drain loop and they all run at once. Said out loud when the
+              // selection spanned more than one, or "one every 300s" reads as a
+              // single line of 40 rows that will take three hours -- when it is
+              // really two queues of 20 running side by side.
+              const queues = Object.keys(result.perKind || {}).length;
               toast(
                 `spaced ${result.moved} row(s), one every ${result.gapSeconds}s` +
+                  (queues > 1 ? ` within each of ${queues} queues, which drain at the same time` : "") +
                   (keepPacing.checked ? "; new chapters will queue at the same pace" : ""),
                 true,
               );

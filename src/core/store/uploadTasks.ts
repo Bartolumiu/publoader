@@ -921,6 +921,19 @@ export class UploadTaskStore {
    * preserves the order the set is already in rather than inventing one. The
    * first row keeps `now()`, so this paces the set without delaying its head.
    *
+   * RANKED PER KIND, and that is the whole point of the partition. The uploader
+   * drains one loop per kind, all at once, so the kinds are not in a line and a
+   * single ranking across them spaces rows against work they never wait for: at
+   * a 60s gap, an EDIT sitting third in a mixed set came out two minutes late
+   * because an UPLOAD and a DELETE happened to sort ahead of it, neither of
+   * which it shares a drain with. Partitioned, each queue starts at `now()` and
+   * paces itself, which is what "60 seconds apart" means when the thing doing
+   * the work is that queue's own loop.
+   *
+   * So a mixed scope now returns a per-kind breakdown as well as a total. The
+   * set no longer spans `(moved - 1) × gap` seconds; it spans as long as its
+   * BIGGEST kind does, and the queues run that span concurrently.
+   *
    * `scope` says which rows. `ids` names them outright, which is what a console
    * selection is; `filter` derives them, which is what the Kind picker and the
    * extension/language/search boxes above the queue mean. Neither subsumes the
@@ -940,13 +953,13 @@ export class UploadTaskStore {
   async restagger(
     gapSeconds: number,
     scope: { ids?: readonly string[]; filter?: UploadTaskFilter } = {},
-  ): Promise<number> {
+  ): Promise<{ moved: number; perKind: Record<string, number> }> {
     const parts: Prisma.Sql[] = [];
     // An explicit empty selection means "no rows", not "every row". The console
     // disables the button at zero, but a caller that sends `ids: []` must not
     // have the whole queue re-spaced by omission.
     if (scope.ids) {
-      if (scope.ids.length === 0) return 0;
+      if (scope.ids.length === 0) return { moved: 0, perKind: {} };
       parts.push(Prisma.sql`t.id = ANY(${[...scope.ids]}::text[])`);
     }
     // `states` is dropped rather than honoured: the PENDING predicate below is
@@ -955,18 +968,25 @@ export class UploadTaskStore {
     if (scope.filter) parts.push(...taskWhere({ ...scope.filter, states: undefined }));
     parts.push(Prisma.sql`t.state = 'PENDING'`);
 
-    const rows = await this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+    const rows = await this.prisma.$queryRaw<{ id: string; kind: string }[]>(Prisma.sql`
       UPDATE upload_tasks u
       SET not_before = now() + make_interval(secs => r.rn * ${gapSeconds}), updated_at = now()
       FROM (
-        SELECT t.id, row_number() OVER (ORDER BY t.not_before, t.created_at, t.id) - 1 AS rn
+        SELECT t.id,
+               row_number() OVER (
+                 PARTITION BY t.kind
+                 ORDER BY t.not_before, t.created_at, t.id
+               ) - 1 AS rn
         FROM upload_tasks t
         ${combine(parts)}
       ) r
       WHERE u.id = r.id AND u.state = 'PENDING'
-      RETURNING u.id
+      RETURNING u.id, u.kind::text AS kind
     `);
-    return rows.length;
+
+    const perKind: Record<string, number> = {};
+    for (const row of rows) perKind[row.kind] = (perKind[row.kind] ?? 0) + 1;
+    return { moved: rows.length, perKind };
   }
 
   async reorder(
@@ -998,23 +1018,43 @@ export class UploadTaskStore {
     // "front" is due immediately even when every other pending row is backing
     // off into the future. sequence anchors on the listed rows themselves, which
     // makes it a relative reordering rather than a queue jump.
+    //
+    // ANCHORED PER KIND. Each kind has its own drain loop, so "the rest of the
+    // queue" means the rest of THIS row's queue and nothing else. Anchored
+    // across all kinds, "send to back" read the tail of whichever queue happened
+    // to reach furthest into the future -- with 31,451 spaced UPLOAD rows
+    // pending, sending a single EDIT to the back of "the queue" would have
+    // parked it weeks out, behind work its loop never waits for.
     const anchor =
-      mode === "front"
-        ? Prisma.sql`SELECT least(coalesce(min(not_before), now()), now()) AS at
-                     FROM upload_tasks WHERE state = 'PENDING' AND NOT (id = ANY(${idArray}::text[]))`
-        : mode === "back"
-          ? Prisma.sql`SELECT greatest(coalesce(max(not_before), now()), now()) AS at
-                       FROM upload_tasks WHERE state = 'PENDING' AND NOT (id = ANY(${idArray}::text[]))`
-          : Prisma.sql`SELECT coalesce(min(not_before), now()) AS at
-                       FROM upload_tasks WHERE state = 'PENDING' AND id = ANY(${idArray}::text[])`;
+      mode === "sequence"
+        ? Prisma.sql`SELECT kind, coalesce(min(not_before), now()) AS at FROM target GROUP BY kind`
+        : Prisma.sql`
+            SELECT k.kind,
+                   ${
+                     mode === "front"
+                       ? Prisma.sql`least(coalesce(min(o.not_before), now()), now())`
+                       : Prisma.sql`greatest(coalesce(max(o.not_before), now()), now())`
+                   } AS at
+            FROM (SELECT DISTINCT kind FROM target) k
+            LEFT JOIN upload_tasks o
+              ON o.kind = k.kind
+             AND o.state = 'PENDING'
+             AND NOT (o.id = ANY(${idArray}::text[]))
+            GROUP BY k.kind`;
 
     return this.prisma.$queryRaw<{ id: string; notBefore: Date }[]>(Prisma.sql`
-      WITH anchor AS (${anchor})
-      UPDATE upload_tasks t
-      SET not_before = anchor.at + make_interval(secs => v.secs), updated_at = now()
-      FROM (VALUES ${pairs}) AS v(id, secs), anchor
-      WHERE t.id = v.id AND t.state = 'PENDING'
-      RETURNING t.id, t.not_before AS "notBefore"
+      WITH target AS (
+        SELECT t.id, t.kind, t.not_before, v.secs
+        FROM (VALUES ${pairs}) AS v(id, secs)
+        JOIN upload_tasks t ON t.id = v.id
+        WHERE t.state = 'PENDING'
+      ),
+      anchor AS (${anchor})
+      UPDATE upload_tasks u
+      SET not_before = a.at + make_interval(secs => tg.secs), updated_at = now()
+      FROM target tg JOIN anchor a ON a.kind = tg.kind
+      WHERE u.id = tg.id AND u.state = 'PENDING'
+      RETURNING u.id, u.not_before AS "notBefore"
     `);
   }
 

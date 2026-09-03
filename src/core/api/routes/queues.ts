@@ -864,11 +864,17 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
         ? { ids: body.ids }
         : { filter: { ...filter, kinds: filter.kinds ?? [body.kind as UploadTaskKind] } };
 
-      const moved = await ctx.uploadTasks.restagger(body.gapSeconds, scoped);
+      const { moved, perKind } = await ctx.uploadTasks.restagger(body.gapSeconds, scoped);
       const via = body.ids ? "ids" : body.filter ? "filter" : "kind";
+      // Each kind is paced within itself and the kinds drain concurrently, so
+      // the set is finished when its LONGEST queue is, not when the sum of them
+      // would be. Reporting `(moved - 1) × gap` over a mixed set now overstates
+      // the wait by however many kinds were in it.
+      const longest = Math.max(0, ...Object.values(perKind));
       await ctx.audit.record(actor(req), "queue.restagger", body.ids ? undefined : body.kind, {
         gapSeconds: body.gapSeconds,
         moved,
+        perKind,
         // Which set was asked for, not just how many rows it turned out to be:
         // "spaced 40 rows" a week later cannot be told apart from a queue that
         // only had 40 rows in it.
@@ -884,9 +890,11 @@ export function registerQueueRoutes(app: FastifyInstance, ctx: AppContext): void
         scope: via,
         gapSeconds: body.gapSeconds,
         moved,
-        // What the operator actually asked for, echoed as the thing they can
-        // check: the last row is `moved - 1` gaps out.
-        spansSeconds: moved > 0 ? (moved - 1) * body.gapSeconds : 0,
+        // How the total splits across the queues that will actually run it.
+        perKind,
+        // What the operator can check: the last row of the busiest queue is
+        // `longest - 1` gaps out, and every other queue finishes sooner.
+        spansSeconds: longest > 0 ? (longest - 1) * body.gapSeconds : 0,
       };
     });
 
