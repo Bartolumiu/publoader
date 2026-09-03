@@ -7,6 +7,7 @@ import { BundleStore } from "../store/bundles.js";
 import { ArtifactStore } from "../store/artifacts.js";
 import { SettingsStore, AuditLog } from "../store/settings.js";
 import { UploadTaskStore } from "../store/uploadTasks.js";
+import { RemovalCheckStore } from "../store/removalChecks.js";
 import { ChapterStore } from "../store/chapters.js";
 import { RunChapterStore } from "../store/runChapters.js";
 import { IngestService } from "../ingest/ingest.js";
@@ -37,6 +38,8 @@ export interface AppContext {
   artifacts: ArtifactStore;
   settings: SettingsStore;
   uploadTasks: UploadTaskStore;
+  /// The tally behind every automatic removal; see RemovalCheckStore.
+  removalChecks: RemovalCheckStore;
   /** The four chapter history tables, read-only. */
   chapters: ChapterStore;
   /** What each run reported, read back out of the stored result envelopes. */
@@ -112,6 +115,7 @@ export function buildContext(prisma: PrismaClient, config: Config, log: Logger):
     artifacts: new ArtifactStore(prisma),
     settings: new SettingsStore(prisma),
     uploadTasks: new UploadTaskStore(prisma),
+    removalChecks: new RemovalCheckStore(prisma),
     chapters: new ChapterStore(prisma),
     runChapters: new RunChapterStore(prisma),
     audit: new AuditLog(prisma),

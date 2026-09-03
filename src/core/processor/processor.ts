@@ -15,6 +15,7 @@ import {
 } from "../md/webhookEmbeds.js";
 import { chapterFromRecord, uploaderId, type Chapter, type MdApi, type MdChapter } from "../md/types.js";
 import { ChapterCollisionStore, type CollisionRecord } from "../store/chapterCollisions.js";
+import { RemovalCheckStore, REMOVAL_CONFIRMATIONS } from "../store/removalChecks.js";
 import { ExtensionConfigStore } from "../store/extensionConfig.js";
 import { ResultStore } from "../store/results.js";
 import { activeTrackedTitles } from "../store/trackedManga.js";
@@ -81,6 +82,21 @@ export type RemovalPass =
   | "manga-untracked"
   | "manga-without-external-chapters";
 
+/**
+ * The passes whose evidence is "the extension did not mention it", and which
+ * therefore have to be confirmed across runs before they act.
+ *
+ * `duplicates` is absent deliberately: it compares two chapters already on
+ * MangaDex against each other, so it says nothing about whether the publisher
+ * was reachable, and holding it for two days would leave a duplicate up for two
+ * days for no gain.
+ */
+const LISTING_DERIVED_PASSES = new Set<RemovalPass>([
+  "no-longer-listed",
+  "manga-untracked",
+  "manga-without-external-chapters",
+]);
+
 export interface MergedResults {
   updatedChapters: Chapter[];
   /** null when any segment declined to publish a full listing. */
@@ -110,6 +126,15 @@ export interface MergedResults {
 export interface RunProcessorOptions {
   /** Safety valve so one tick cannot monopolise the process. */
   maxRunsPerTick?: number;
+  /**
+   * How many separate runs must report a chapter gone before it is removed.
+   *
+   * Defaults to REMOVAL_CONFIRMATIONS. Exists so a test about something else --
+   * scoped-run coverage, say -- can set it to 1 and go on asserting what it was
+   * written to assert, rather than modelling two days of voting to reach an
+   * outcome it is not about.
+   */
+  removalConfirmations?: number;
   /**
    * Where the per-manga update report goes. Optional: the processor's job is
    * to decide what to upload, and it must keep doing that when Discord is not
@@ -141,6 +166,7 @@ export class RunProcessor {
   private readonly botUserId: string | null;
   private readonly audit: AuditLog;
   private readonly collisions: ChapterCollisionStore;
+  private readonly removalChecks: RemovalCheckStore;
 
   constructor(
     private readonly prisma: PrismaClient,
@@ -154,6 +180,7 @@ export class RunProcessor {
     this.config = new ExtensionConfigStore(prisma);
     this.audit = new AuditLog(prisma);
     this.collisions = new ChapterCollisionStore(prisma);
+    this.removalChecks = new RemovalCheckStore(prisma, options.removalConfirmations);
     this.maxRunsPerTick = options.maxRunsPerTick ?? 10;
     this.notifier = options.notifier ?? null;
     this.botUserId = options.botUserId ?? null;
@@ -623,6 +650,22 @@ export class RunProcessor {
           payload: edit.payload,
         });
       }
+      // One sighting outranks any number of absences, so a chapter the
+      // publisher listed again forgets whatever tally it had built up. Only
+      // when the run could actually read the listing: a null one is "no removal
+      // information", and clearing on it would let a broken extension reset the
+      // very evidence the tally exists to accumulate.
+      //
+      // Before the removals, so a chapter that came back and went again in the
+      // same pass starts its tally from one rather than resuming an old one.
+      if (allMangaChapters !== null) {
+        const missing = new Set(decision.toRemove.map((mdChapter) => mdChapter.id));
+        await this.forgetRemovalChecks(
+          chaptersOnMd.filter((mdChapter) => !missing.has(mdChapter.id)).map((c) => c.id),
+          run.extension,
+        );
+      }
+
       await this.enqueueRemovals(
         decision.toRemove,
         mangaId,
@@ -1111,6 +1154,94 @@ export class RunProcessor {
    * or the "replace with an unavailable card" queue, and drop them from the
    * uploaded bookkeeping so nothing re-queues them later.
    */
+  /**
+   * Forget the removal tally for chapters the publisher has listed again.
+   *
+   * Never allowed to fail the run: a tally that survives one extra run is a
+   * removal delayed by a day, and the alternative -- throwing after the run has
+   * already queued its uploads -- replays the whole ingest.
+   */
+  private async forgetRemovalChecks(mdChapterIds: string[], extension: string): Promise<void> {
+    if (mdChapterIds.length === 0) return;
+    try {
+      const cleared = await this.removalChecks.clear(mdChapterIds);
+      if (cleared > 0) {
+        this.log.info(
+          { extension, cleared },
+          "the publisher listed these chapters again; their removal tally is forgotten",
+        );
+      }
+    } catch (error) {
+      this.log.warn({ error, extension }, "could not clear removal confirmations");
+    }
+  }
+
+  /**
+   * Hold a removal until several separate runs agree, and say what is waiting.
+   *
+   * The whole point is stated in RemovalCheckStore: "the extension did not list
+   * this chapter" is the same sentence whether the publisher retired it or the
+   * extension was broken when we asked, and carding is a one-way door onto a
+   * public catalogue.
+   *
+   * A failure here holds the removal rather than releasing it. That is the
+   * asymmetry worth having: not removing a retired chapter today costs a stale
+   * entry that the next run fixes, and removing a live one costs a reader a
+   * chapter and an operator an irreversible write.
+   */
+  private async confirmRemovals(
+    mdChapters: MdChapter[],
+    mdMangaId: string,
+    extension: string,
+    mode: RemovalMode,
+    pass: RemovalPass,
+  ): Promise<MdChapter[]> {
+    let votes;
+    try {
+      votes = await this.removalChecks.vote(
+        mdChapters.map((mdChapter) => ({
+          mdChapterId: mdChapter.id,
+          mdMangaId,
+          extension,
+          pass,
+          mode,
+        })),
+      );
+    } catch (error) {
+      this.log.error(
+        { error, extension, mdMangaId, pass, held: mdChapters.length },
+        "could not record removal confirmations; holding every removal in this pass",
+      );
+      return [];
+    }
+
+    const byId = new Map(votes.map((vote) => [vote.mdChapterId, vote]));
+    const ready = mdChapters.filter((mdChapter) => byId.get(mdChapter.id)?.confirmed === true);
+    const waiting = mdChapters.length - ready.length;
+
+    if (waiting > 0) {
+      // At info, not debug: "the publisher dropped 300 chapters and we did
+      // nothing" is the single most useful line in a run that hit an outage,
+      // and the tally is the evidence that the platform noticed.
+      const held = votes.filter((vote) => !vote.confirmed);
+      this.log.info(
+        {
+          extension,
+          mdMangaId,
+          pass,
+          mode,
+          waiting,
+          confirmations: REMOVAL_CONFIRMATIONS,
+          misses: held.slice(0, 10).map((vote) => vote.misses),
+          repeatedWithinWindow: held.filter((vote) => vote.tooSoon).length,
+          nextVote: held[0]?.notBefore,
+        },
+        "holding removals until more runs agree the publisher dropped them",
+      );
+    }
+    return ready;
+  }
+
   private async enqueueRemovals(
     mdChapters: MdChapter[],
     mdMangaId: string,
@@ -1122,6 +1253,16 @@ export class RunProcessor {
     if (mdChapters.length === 0) return;
     const kind: UploadTaskKind = mode === "delete" ? "DELETE" : "UNAVAILABLE";
     const mangaName = this.mangaNames.get(mdMangaId) ?? null;
+
+    // Absence is a vote, not a verdict; see RemovalCheckStore. Only the passes
+    // whose evidence comes from what the extension listed go through it -- a
+    // duplicate is decided from MangaDex's own data and says nothing about
+    // whether the publisher was reachable.
+    const confirmed = LISTING_DERIVED_PASSES.has(pass)
+      ? await this.confirmRemovals(mdChapters, mdMangaId, extension, mode, pass)
+      : mdChapters;
+    if (confirmed.length === 0) return;
+    mdChapters = confirmed;
 
     for (const mdChapter of mdChapters) {
       await this.tasks.enqueue(

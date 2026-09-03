@@ -1039,3 +1039,50 @@ model ChapterCollision {
   @@index([extension, detectedAt])
   @@map("chapter_collisions")
 }
+
+/// How many separate runs have reported a chapter as gone from the publisher,
+/// and when the next report may be believed.
+///
+/// Carding is a one-way door onto a public catalogue, and the evidence for it --
+/// "the extension did not list this chapter" -- is indistinguishable from "the
+/// extension was broken when we asked". A partial page, an expired auth token, a
+/// geo-block, an upstream that answers 200 with an empty body: each makes a live
+/// series look retired, and the platform believed every one of them on sight.
+///
+/// So absence is a vote rather than a verdict. A chapter must be missing from
+/// several separate runs, each a day or more apart, before it is queued for
+/// removal; and the row is dropped the moment the publisher lists it again.
+model ChapterRemovalCheck {
+  id String @id @default(uuid())
+
+  /// The chapter the votes are about. One tally per chapter, whichever rule
+  /// reported it.
+  mdChapterId String @unique @map("md_chapter_id")
+
+  /// Who reported it. Also what an operator clears wholesale once an outage is
+  /// understood, rather than waiting out the tally chapter by chapter.
+  extension String
+  mdMangaId  String? @map("md_manga_id")
+  /// Which rule last voted; see RemovalPass in processor.ts.
+  pass String
+  /// What will happen once the tally is met, so a mode changed mid-tally is
+  /// visible rather than silent.
+  mode String
+
+  /// How many separate runs have reported it missing.
+  misses Int @default(1)
+
+  firstMissedAt DateTime @default(now()) @map("first_missed_at")
+  lastMissedAt  DateTime @default(now()) @map("last_missed_at")
+
+  /// The earliest a further vote counts. Runs inside this window are the same
+  /// observation seen twice -- a retry, a scoped recheck, another segment of the
+  /// same run -- and counting those would let one broken hour retire a series.
+  notBefore DateTime @default(now()) @map("not_before")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([extension, lastMissedAt])
+  @@map("chapter_removal_checks")
+}

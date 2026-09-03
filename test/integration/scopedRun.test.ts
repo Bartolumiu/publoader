@@ -18,6 +18,13 @@ import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
  * though that is here too. It is that a scoped run CANNOT touch a title it did
  * not ask about, and the control case proves the guard is load-bearing rather
  * than decorative: the same envelope, unscoped, unpublishes the other title.
+ *
+ * Every processor here is built with `removalConfirmations: 1`. Removal
+ * normally needs several runs days apart to agree (see RemovalCheckStore),
+ * which is a different property with its own tests; modelling two days of
+ * voting in each of these would only obscure the one thing they are about.
+ * Setting it to 1 restores the one-run-one-decision shape these were written
+ * against, so a broken coverage guard still fails them.
  */
 describe.skipIf(!dbReady())("scoped runs", () => {
   const prisma = testPrisma();
@@ -123,12 +130,23 @@ describe.skipIf(!dbReady())("scoped runs", () => {
      */
     updated?: { mdMangaId: string; mangaId: string; chapterId: string; url: string }[];
   }) {
+    // Upserted rather than created, so a test can build a SECOND envelope and
+    // process two runs in sequence -- which is the only way to show what a
+    // later run does to an earlier one's removal tally.
     for (const [mangaId, mdMangaId] of [
       ["series-a", SERIES_A],
       ["series-b", SERIES_B],
     ]) {
-      await prisma.trackedManga.create({
-        data: { extension: "testext", mangaId: mangaId!, mdMangaId: mdMangaId! },
+      await prisma.trackedManga.upsert({
+        where: {
+          extension_namespace_mangaId: {
+            extension: "testext",
+            namespace: "",
+            mangaId: mangaId!,
+          },
+        },
+        create: { extension: "testext", mangaId: mangaId!, mdMangaId: mdMangaId! },
+        update: {},
       });
     }
 
@@ -237,7 +255,45 @@ describe.skipIf(!dbReady())("scoped runs", () => {
     },
   ];
 
+  /** Series A with nothing missing: the publisher listing both chapters again. */
+  const A_BOTH = [
+    ...A_LOST_ONE,
+    {
+      mdMangaId: SERIES_A,
+      mangaId: "series-a",
+      chapterId: "a2",
+      url: "https://publisher.example/a/a2",
+    },
+  ];
+
   it("marks what the publisher dropped, for the series it asked about", async () => {
+    const { run } = await runWithEnvelope({
+      scopeMangaIds: [SERIES_A],
+      stillListed: A_LOST_ONE,
+    });
+
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT, removalConfirmations: 1 });
+    await processor.processRun({
+      id: run.id,
+      extension: "testext",
+      bundleSha256: BUNDLE,
+      kind: "CLEAN",
+      scopeMangaIds: [SERIES_A],
+    });
+
+    // The chapter the publisher no longer lists, and only that one.
+    expect(await queuedFor()).toEqual(["UNAVAILABLE:aaaa2222-0000-4000-8000-000000000002"]);
+  });
+
+  /**
+   * The same run at the real threshold, which is what production does.
+   *
+   * A chapter missing from ONE run is not evidence that the publisher dropped
+   * it; it is equally the extension having been broken when we asked, and the
+   * two cannot be told apart from a single answer. So nothing is queued, and
+   * the run records a vote instead.
+   */
+  it("queues nothing on one run, and records what it would have removed", async () => {
     const { run } = await runWithEnvelope({
       scopeMangaIds: [SERIES_A],
       stillListed: A_LOST_ONE,
@@ -252,8 +308,44 @@ describe.skipIf(!dbReady())("scoped runs", () => {
       scopeMangaIds: [SERIES_A],
     });
 
-    // The chapter the publisher no longer lists, and only that one.
-    expect(await queuedFor()).toEqual(["UNAVAILABLE:aaaa2222-0000-4000-8000-000000000002"]);
+    expect(await queuedFor()).toEqual([]);
+
+    // Held, not dropped: the tally is the evidence the platform noticed, and
+    // what a later run counts towards.
+    const held = await prisma.chapterRemovalCheck.findMany();
+    expect(held).toHaveLength(1);
+    expect(held[0]).toMatchObject({
+      mdChapterId: "aaaa2222-0000-4000-8000-000000000002",
+      extension: "testext",
+      pass: "no-longer-listed",
+      misses: 1,
+    });
+  });
+
+  it("forgets the tally when a later run lists the chapter again", async () => {
+    // One sighting outranks any number of absences. Without this a chapter that
+    // flickers -- a flaky upstream, a partial page -- accumulates its way to
+    // removal over weeks despite being listed most of the time.
+    const first = await runWithEnvelope({ scopeMangaIds: [SERIES_A], stillListed: A_LOST_ONE });
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
+    const runOnce = async (runId: string) =>
+      processor.processRun({
+        id: runId,
+        extension: "testext",
+        bundleSha256: BUNDLE,
+        kind: "CLEAN",
+        scopeMangaIds: [SERIES_A],
+      });
+
+    await runOnce(first.run.id);
+    expect(await prisma.chapterRemovalCheck.count()).toBe(1);
+
+    // The publisher lists everything again.
+    const second = await runWithEnvelope({ scopeMangaIds: [SERIES_A], stillListed: A_BOTH });
+    await runOnce(second.run.id);
+
+    expect(await prisma.chapterRemovalCheck.count()).toBe(0);
+    expect(await queuedFor()).toEqual([]);
   });
 
   /**
@@ -267,7 +359,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
       stillListed: A_LOST_ONE,
     });
 
-    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT, removalConfirmations: 1 });
     await processor.processRun({
       id: run.id,
       extension: "testext",
@@ -289,7 +381,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
   it("still unpublishes an absent series when the run did claim to cover everything", async () => {
     const { run } = await runWithEnvelope({ scopeMangaIds: [], stillListed: A_LOST_ONE });
 
-    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT, removalConfirmations: 1 });
     await processor.processRun({
       id: run.id,
       extension: "testext",
@@ -314,7 +406,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
   it("visits a scoped series that reported no updates at all", async () => {
     const { run } = await runWithEnvelope({ scopeMangaIds: [SERIES_A], stillListed: [] });
     // Nothing listed anywhere: the publisher has dropped series A entirely.
-    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT, removalConfirmations: 1 });
     await processor.processRun({
       id: run.id,
       extension: "testext",
@@ -356,7 +448,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
       updated: [],
     });
 
-    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT, removalConfirmations: 1 });
     await processor.processRun({
       id: run.id,
       extension: "testext",
@@ -388,7 +480,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
       updated: [],
     });
 
-    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT, removalConfirmations: 1 });
     await processor.processRun({
       id: run.id,
       extension: "testext",
@@ -451,7 +543,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
       updated: [],
     });
 
-    const processor = new RunProcessor(prisma, fakeMd(), capturing(), { botUserId: BOT });
+    const processor = new RunProcessor(prisma, fakeMd(), capturing(), { botUserId: BOT, removalConfirmations: 1 });
     await processor.processRun({
       id: run.id,
       extension: "testext",
@@ -467,7 +559,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
 
   it("marks the run processed either way", async () => {
     const { run } = await runWithEnvelope({ scopeMangaIds: [SERIES_A], stillListed: A_LOST_ONE });
-    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT });
+    const processor = new RunProcessor(prisma, fakeMd(), log, { botUserId: BOT, removalConfirmations: 1 });
     await processor.processRun({
       id: run.id,
       extension: "testext",

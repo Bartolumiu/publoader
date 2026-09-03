@@ -11,6 +11,7 @@ import { chapterToTaskPayload } from "../../md/chapterRows.js";
 import { ReconcileRunner } from "../../md/reconcileRunner.js";
 import { DuplicateRunner } from "../../md/duplicateRunner.js";
 import { ChapterCollisionStore, MAX_COLLISION_PAGE } from "../../store/chapterCollisions.js";
+import { REMOVAL_CONFIRMATIONS } from "../../store/removalChecks.js";
 import type { MdExtendedApi } from "../../md/client.js";
 import { generateChapterCard } from "../../md/card.js";
 import { unavailableCardOptions } from "../../md/unavailableCard.js";
@@ -692,6 +693,71 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
      * tokens, and `confirm: true` on top — deletion cannot be undone, and an
      * unscoped scan can find hundreds at once.
      */
+    /**
+     * Removals that several runs have not yet agreed on.
+     *
+     * The question this answers is "the publisher dropped this chapter days ago
+     * -- why is it still up?", and before this the only answer was in the
+     * processor's logs. A held removal is deliberate: absence is a vote, and a
+     * chapter is carded only once separate runs days apart have all said the
+     * same thing (see RemovalCheckStore).
+     */
+    scope.get(
+      "/api/v1/admin/chapters/removal-checks",
+      { preHandler: requireScope("chapters:read") },
+      async (req) => {
+        const query = parseOrThrow(
+          z.object({
+            extension: z.string().max(64).optional(),
+            limit: z.coerce.number().int().min(1).max(500).default(100),
+          }),
+          req.query ?? {},
+        );
+        const pending = await ctx.removalChecks.pending(query.extension, query.limit);
+        return {
+          confirmations: REMOVAL_CONFIRMATIONS,
+          pending: pending.map((row) => ({
+            mdChapterId: row.mdChapterId,
+            extension: row.extension,
+            mdMangaId: row.mdMangaId,
+            pass: row.pass,
+            mode: row.mode,
+            misses: row.misses,
+            remaining: Math.max(0, REMOVAL_CONFIRMATIONS - row.misses),
+            firstMissedAt: row.firstMissedAt,
+            lastMissedAt: row.lastMissedAt,
+            nextVoteAt: row.notBefore,
+          })),
+        };
+      },
+    );
+
+    /**
+     * Forget one extension's tally outright.
+     *
+     * Ordinarily unnecessary: a recovered extension lists its chapters again
+     * and each tally is dropped on sight. This is for the operator who already
+     * knows it was an outage and does not want the votes sitting there until
+     * the next run, and it can only ever make the platform LESS likely to
+     * remove something, which is why it needs no confirm flag.
+     */
+    scope.post(
+      "/api/v1/admin/chapters/removal-checks/clear",
+      { preHandler: requireScope("chapters:write") },
+      async (req) => {
+        const body = parseOrThrow(
+          z.object({ extension: z.string().min(1).max(64) }),
+          req.body ?? {},
+        );
+        const cleared = await ctx.removalChecks.clearExtension(body.extension);
+        await ctx.audit.record(actor(req), "chapter.removal_checks.clear", body.extension, {
+          extension: body.extension,
+          cleared,
+        });
+        return { ok: true, extension: body.extension, cleared };
+      },
+    );
+
     scope.post(
       "/api/v1/admin/chapters/duplicates",
       { preHandler: requireScope("chapters:read") },
