@@ -787,6 +787,16 @@ export class RunProcessor {
           log.debug({ queued: scheduled.length }, "queued this run's uploads, all due now");
         }
       }
+
+      // After both branches, because it judges what is queued against what this
+      // run just said, and the run has now said all of it.
+      //
+      // A chapter whose number changed was enqueued under a new key rather than
+      // absorbed by the old one, so the row carrying the number the publisher
+      // has stopped using is still pending and would upload the chapter a
+      // second time. It is retired here. Splits are untouched: every number
+      // they carry is in this run's set.
+      await this.supersedeRenumbered(pendingUploads, run.extension, log);
     }
 
     // "Untracked" is derived from the union of every segment's tracked ids, so
@@ -1161,6 +1171,57 @@ export class RunProcessor {
       );
     } catch (error) {
       this.log.warn({ error, mdMangaId, pass }, "could not write removal audit rows");
+    }
+  }
+
+  /**
+   * Drop queued uploads this run has superseded by renumbering, and say so.
+   *
+   * The removal is audited per row for the same reason the automatic chapter
+   * removals are: "why is this chapter not on MangaDex?" is asked about one
+   * chapter, and answered by a lookup on its subject. The subject is the queue
+   * row's dedupe key, because a superseded upload never reached MangaDex and so
+   * has no chapter id to be asked about.
+   *
+   * Never allowed to fail the run. The uploads are already queued and correct;
+   * a stale row that survives one more run is a duplicate to clean up later,
+   * where a thrown error here would replay the whole ingest.
+   */
+  private async supersedeRenumbered(
+    reported: readonly Chapter[],
+    extension: string,
+    log: Logger,
+  ): Promise<void> {
+    try {
+      const dropped = await this.tasks.supersedeRenumbered(reported);
+      if (dropped.length === 0) return;
+
+      log.info(
+        {
+          dropped: dropped.length,
+          chapters: dropped.slice(0, 10).map((row) => row.dedupeKey),
+        },
+        "retired queued uploads whose chapter number this run replaced",
+      );
+
+      await this.audit.recordMany(
+        dropped.map((row) => ({
+          actor: `processor:${extension}`,
+          action: "upload.superseded.auto",
+          subject: row.dedupeKey,
+          detail: {
+            extension,
+            reason: "the publisher reported this chapter under a different number",
+            chapterNumber: row.identity.chapterNumber,
+            language: row.identity.chapterLanguage,
+            mangaName: row.identity.mangaName,
+            mdMangaId: row.identity.mdMangaId,
+            notBefore: row.notBefore.toISOString(),
+          },
+        })),
+      );
+    } catch (error) {
+      log.warn({ error, extension }, "could not retire superseded uploads");
     }
   }
 

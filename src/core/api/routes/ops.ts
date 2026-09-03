@@ -665,10 +665,11 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
           limit: z.coerce.number().int().min(1).max(500).default(100),
           /**
            * Substring of the dedupe key. For an UPLOAD that key is
-           * `chapterId|chapterNumber|language` (uploadDedupeKey), so `||`
-           * finds the tasks queued with no chapter number and `|es-la` finds
-           * one language. Matched literally: `%` and `_` are escaped, because
-           * an operator typing a key is not writing a LIKE pattern.
+           * `extension|chapterId|chapterNumber|language` (uploadDedupeKey), so
+           * `comikey|` finds one publisher's queued uploads, `||` finds the
+           * tasks queued with no chapter number and `|es-la` finds one
+           * language. Matched literally: `%` and `_` are escaped, because an
+           * operator typing a key is not writing a LIKE pattern.
            */
           q: z.string().min(1).max(200).optional(),
           /**

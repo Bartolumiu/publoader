@@ -57,13 +57,50 @@ export const BULK_CAP = 1000;
 /** Same idea for a whole-queue purge, which is expected to be larger. */
 export const PURGE_CAP = 5000;
 
+/**
+ * What makes two UPLOAD rows the same row.
+ *
+ * THE EXTENSION LEADS IT, and did not until migration
+ * `20260903090000_upload_dedupe_key_extension`. The key was
+ * `chapterId|chapterNumber|chapterLanguage` with no publisher in it at all, so
+ * two extensions numbering out of one integer space describe the same key --
+ * and the (kind, dedupe_key) constraint then means the SECOND one is silently
+ * dropped by ON CONFLICT DO NOTHING. Not an error, not a log line: a chapter
+ * that simply never uploads.
+ *
+ * Nothing collides today. comikey ids are `EPI-` prefixed and omoi's are
+ * uuids, but k_manga (304221) and mangaup_global (109515) are both plain
+ * six-digit integers, and the day their ranges meet is the day one publisher's
+ * chapters start disappearing with no evidence anywhere that they existed.
+ *
+ * THE NUMBER STAYS IN IT, which reads like the opposite mistake and is not. One
+ * publisher chapter legitimately maps to several MangaDex chapters -- a volume
+ * sold as one episode, a chapter split across numbers -- and 54 such groups are
+ * in the queue right now. Drop the number and they collapse into one row and
+ * only one of them ever uploads.
+ *
+ * The cost of keeping it is that a chapter whose number CHANGES gets a new key
+ * and a second row, which is a double upload rather than a dropped one. That is
+ * not fixed here, because a key cannot fix it: see
+ * `supersedeRenumbered`, which retires the stale row against what the run
+ * actually reported.
+ */
 export function uploadDedupeKey(chapter: {
+  extensionName?: string | null;
   chapterId?: string | null;
   chapterNumber?: string | null;
   chapterLanguage?: string | null;
 }): string {
-  return `${chapter.chapterId ?? ""}|${chapter.chapterNumber ?? ""}|${chapter.chapterLanguage ?? ""}`;
+  return [
+    chapter.extensionName ?? "",
+    chapter.chapterId ?? "",
+    chapter.chapterNumber ?? "",
+    chapter.chapterLanguage ?? "",
+  ].join("|");
 }
+
+/** An UPLOAD key carrying no identity at all; see `taskDedupeKey`. */
+const EMPTY_UPLOAD_KEY = "|||";
 
 /**
  * Which real-world chapter a queue row is about, for the purpose of not writing
@@ -111,11 +148,12 @@ function scopeKeySql(alias: string): Prisma.Sql {
  * The dedupe key for a hand-built task, derived exactly as the producers do:
  * `uploadDedupeKey` for UPLOAD and the MangaDex chapter id for every other kind.
  * Returning null rather than a degenerate key stops a chapter with no identity
- * from occupying the `||` slot.
+ * from occupying the empty slot.
  */
 export function taskDedupeKey(
   kind: UploadTaskKind,
   chapter: {
+    extensionName?: string | null;
     chapterId?: string | null;
     chapterNumber?: string | null;
     chapterLanguage?: string | null;
@@ -124,7 +162,7 @@ export function taskDedupeKey(
 ): string | null {
   if (kind === "UPLOAD") {
     const key = uploadDedupeKey(chapter);
-    return key === "||" ? null : key;
+    return key === EMPTY_UPLOAD_KEY ? null : key;
   }
   return chapter.mdChapterId ?? null;
 }
@@ -404,6 +442,85 @@ export class UploadTaskStore {
       ON CONFLICT (kind, dedupe_key) DO NOTHING
     `);
     return res === 1;
+  }
+
+  /**
+   * Retire PENDING uploads for chapters this run just reported under a
+   * different number.
+   *
+   * The gap a dedupe key cannot close. The key carries the chapter number
+   * because one publisher chapter legitimately becomes several MangaDex ones,
+   * so a chapter whose number CHANGES produces a new key, misses the ON
+   * CONFLICT that would have absorbed it, and is queued a second time. Both
+   * rows then upload, and MangaDex ends up with the chapter twice.
+   *
+   * It is live. 27 groups in the queue are one mangaup_global chapter under two
+   * spellings of one number -- 13115 as both `35.01` and `35.1`, 13116 as
+   * `35.02` and `35.2`, straight down a consecutive run of ids -- which is a
+   * numbering change, not a split.
+   *
+   * A run is the authority, and that is what makes this decidable. Within one
+   * run the extension states every number a chapter currently has, so a PENDING
+   * row for that chapter carrying a number the run did NOT state is a number
+   * the publisher has stopped using. Splits survive untouched: their numbers
+   * are all in the same run's set, so none of them match this.
+   *
+   * Scoped to the chapters actually reported, so a run covering one series
+   * cannot retire another's, and a chapter with no publisher id is skipped
+   * outright -- its identity would be `(extension, '', language)`, which is
+   * every anonymous chapter of that extension at once.
+   *
+   * PENDING only. A LEASED row has an uploader mid-flight against MangaDex and
+   * is not ours to remove; it settles, and the next run sees it.
+   */
+  async supersedeRenumbered(
+    reported: readonly {
+      extensionName?: string | null;
+      chapterId?: string | null;
+      chapterLanguage?: string | null;
+      chapterNumber?: string | null;
+    }[],
+  ): Promise<UploadTaskRow[]> {
+    // One entry per chapter identity, carrying every number the run gave it.
+    const byChapter = new Map<string, { tuple: [string, string, string]; keys: Set<string> }>();
+    for (const chapter of reported) {
+      const extension = chapter.extensionName ?? "";
+      const chapterId = chapter.chapterId ?? "";
+      const language = chapter.chapterLanguage ?? "";
+      if (chapterId === "") continue;
+      const id = `${extension}|${chapterId}|${language}`;
+      const entry = byChapter.get(id) ?? {
+        tuple: [extension, chapterId, language] as [string, string, string],
+        keys: new Set<string>(),
+      };
+      entry.keys.add(uploadDedupeKey(chapter));
+      byChapter.set(id, entry);
+    }
+    if (byChapter.size === 0) return [];
+
+    const entries = [...byChapter.values()];
+    const identities = Prisma.join(
+      entries.map((e) => Prisma.sql`(${e.tuple[0]}::text, ${e.tuple[1]}::text, ${e.tuple[2]}::text)`),
+      ", ",
+    );
+    const keep = [...new Set(entries.flatMap((e) => [...e.keys]))];
+
+    return this.prisma.$queryRaw<UploadTaskRow[]>(Prisma.sql`
+      DELETE FROM upload_tasks t
+      WHERE t.kind = 'UPLOAD'
+        AND t.state = 'PENDING'
+        AND (
+          coalesce(t.chapter ->> 'extensionName', ''),
+          coalesce(t.chapter ->> 'chapterId', ''),
+          coalesce(t.chapter ->> 'chapterLanguage', '')
+        ) IN (${identities})
+        AND t.dedupe_key <> ALL(${keep}::text[])
+      RETURNING t.id, t.kind::text AS kind, t.dedupe_key AS "dedupeKey", t.state::text AS state,
+                t.attempt, t.max_attempts AS "maxAttempts", t.not_before AS "notBefore",
+                t.lease_id AS "leaseId", t.lease_expires_at AS "leaseExpiresAt",
+                t.last_error AS "lastError", t.created_at AS "createdAt",
+                t.updated_at AS "updatedAt", ${TASK_IDENTITY}
+    `);
   }
 
   /**
