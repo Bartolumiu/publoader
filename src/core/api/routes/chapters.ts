@@ -392,9 +392,10 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
         });
         if (!run) return reply.code(404).send({ error: "unknown run" });
 
-        const [segments, byManga] = await Promise.all([
+        const [segments, byManga, mangaTitles] = await Promise.all([
           ctx.runChapters.segmentCounts(id),
           ctx.runChapters.byManga(id, query.set as ChapterSet, MANGA_BREAKDOWN_LIMIT),
+          ctx.runChapters.titlesFor(id, query.set as ChapterSet),
         ]);
 
         const reported = segments.filter((segment) => segment.updated !== null);
@@ -416,8 +417,13 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
             untrackedManga: reported.reduce((sum, segment) => sum + (segment.untrackedManga ?? 0), 0),
           },
           byManga,
-          mangaTitles: byManga.length,
-          mangaCapped: byManga.length === MANGA_BREAKDOWN_LIMIT,
+          // Counted in the database over every title, NOT `byManga.length`,
+          // which is the size of a LIMITed page: a run touching 900 titles
+          // reported "200 titles" for as long as that was the number shown.
+          mangaTitles,
+          mangaCapped: byManga.length < mangaTitles,
+          /** How many of the titles the breakdown below actually lists. */
+          mangaShown: byManga.length,
         };
       },
     );

@@ -110,6 +110,16 @@ const store = {
     queueChapterLanguage: "",
     queueChapterCursors: [],
     queueChapterSort: { column: null, dir: "asc" },
+    /** The runs list. Offset-paged: `runs` is appended to slowly enough that a
+     * page number stays meaningful between presses, unlike the draining queue. */
+    runsExtension: "",
+    runsState: "",
+    runsKind: "",
+    runsTriggeredBy: "",
+    /** "" any, "catalogue" whole-publisher runs, "scoped" named-title ones. */
+    runsScope: "",
+    runsQuery: "",
+    runsPage: 0,
     /** What a run found, on the run detail page. */
     runChapterSet: "updated",
     runChapterQuery: "",
@@ -3255,43 +3265,200 @@ function mangadexPanel() {
 
 // ----------------------------------------------------------------------- runs
 
+const RUNS_PAGE = 50;
+
+/** Mirrors the `RunState` and `RunKind` enums in prisma/schema.prisma. */
+const RUN_STATES = ["PENDING", "EXECUTING", "INGESTING", "PROCESSED", "FAILED", "DEAD_LETTER", "CANCELLED"];
+const RUN_KINDS = ["UPDATE", "CLEAN", "FORCE"];
+
 VIEWS.runs = (route) => {
   if (route.param) return runDetail(route.param);
   if (route.tab === "dead-letter") return deadLetterPanel();
 
-  const runs = new Resource("runs", () => api("/runs?limit=50"));
+  const f = () => store.filters;
+
+  const runs = new Resource("runs", () => {
+    const q = new URLSearchParams({
+      limit: String(RUNS_PAGE),
+      offset: String(f().runsPage * RUNS_PAGE),
+    });
+    if (f().runsExtension) q.set("extension", f().runsExtension);
+    if (f().runsState) q.set("state", f().runsState);
+    if (f().runsKind) q.set("kind", f().runsKind);
+    if (f().runsTriggeredBy) q.set("triggeredBy", f().runsTriggeredBy);
+    if (f().runsScope) q.set("scope", f().runsScope);
+    if (f().runsQuery) q.set("q", f().runsQuery);
+    return api(`/runs?${q}`);
+  });
+
+  /** Any change to what is being asked for invalidates the page number. */
+  const refilter = (patch) => {
+    setFilter({ ...patch, runsPage: 0 });
+    void runs.load({ force: true });
+  };
+
+  const picker = (id, label, values, key, all) =>
+    el(
+      "span",
+      { class: "row tight" },
+      el("label", { class: "inline", for: id, text: label }),
+      el(
+        "select",
+        { id, onchange: (event) => refilter({ [key]: event.target.value }) },
+        el("option", { value: "", text: all, selected: f()[key] === "" }),
+        values.map(([value, text]) =>
+          el("option", { value, text, selected: value === f()[key] }),
+        ),
+      ),
+    );
+
+  const triggeredBox = el("input", {
+    id: "runs-triggered-by",
+    type: "search",
+    value: f().runsTriggeredBy,
+    // Substring, so "user:" is every manual trigger and "schedule" is none of
+    // them — a scheduled run has no `triggeredBy` at all.
+    placeholder: "user:someone@example.com",
+    "aria-label": "Filter by who triggered the run",
+  });
+  const searchBox = el("input", {
+    id: "runs-q",
+    type: "search",
+    value: f().runsQuery,
+    placeholder: "run id, idempotency key, or error text",
+    "aria-label": "Search runs",
+  });
+  const apply = () =>
+    refilter({ runsTriggeredBy: triggeredBox.value.trim(), runsQuery: searchBox.value.trim() });
+  for (const box of [triggeredBox, searchBox]) {
+    box.addEventListener("change", apply);
+    box.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") apply();
+    });
+  }
+
+  const anyFilter = () =>
+    Boolean(
+      f().runsExtension || f().runsState || f().runsKind || f().runsTriggeredBy || f().runsScope || f().runsQuery,
+    );
 
   return card(
     "Recent runs",
+    row(
+      extensionPicker("runs-extension", "Extension", "runsExtension", (name) =>
+        refilter({ runsExtension: name }),
+      ),
+      picker("runs-state", "State", RUN_STATES.map((s) => [s, s]), "runsState", "any state"),
+      picker("runs-kind", "Kind", RUN_KINDS.map((k) => [k, k]), "runsKind", "any kind"),
+      picker(
+        "runs-scope",
+        "Scope",
+        [
+          ["catalogue", "whole catalogue"],
+          ["scoped", "named titles only"],
+        ],
+        "runsScope",
+        "any scope",
+      ),
+    ),
+    row(
+      el("span", { class: "row tight" }, el("label", { class: "inline", for: "runs-triggered-by", text: "Triggered by" }), triggeredBox),
+      el("span", { class: "row tight" }, el("label", { class: "inline", for: "runs-q", text: "Search" }), searchBox),
+      el("button", { type: "button", class: "primary", text: "Apply", onclick: apply }),
+      el("button", {
+        type: "button",
+        text: "Clear",
+        onclick: () => {
+          triggeredBox.value = "";
+          searchBox.value = "";
+          refilter({
+            runsExtension: "",
+            runsState: "",
+            runsKind: "",
+            runsTriggeredBy: "",
+            runsScope: "",
+            runsQuery: "",
+          });
+        },
+      }),
+    ),
     live(
       [runs],
-      ({ runs: rows }) =>
-        table(
-          ["Extension", "Kind", "State", "Chapters found", "Segments", "Triggered by", "Created", "Error"],
-          rows.map((run) => [
-            routeLink(routeTo("runs", run.id, null), run.extension),
-            run.kind,
-            chip(run.state),
-            // null means no segment has committed an envelope yet, which is not
-            // the same as a run that found nothing, so it reads "-", not "0".
-            run.chaptersFound == null
-              ? "-"
-              : el(
-                  "span",
-                  {},
-                  el("strong", { text: String(run.chaptersFound) }),
-                  run.chaptersSeen == null
-                    ? null
-                    : el("span", { class: "dim small", text: ` of ${run.chaptersSeen} seen` }),
-                ),
-            String(run.segmentsTotal),
-            run.triggeredBy,
-            fmtTime(run.createdAt),
-            truncate(run.error, 80),
-          ]),
-          { empty: "No run has been created yet. Trigger one from an extension." },
-        ),
-      { reserve: 260, skeleton: () => skeletonTable(6, 8) },
+      (data) => {
+        const rows = data.runs ?? [];
+        return el(
+          "div",
+          {},
+          table(
+            [
+              "Extension",
+              "Kind",
+              "State",
+              "Chapters found",
+              "Titles found",
+              "Scope",
+              "Segments",
+              "Triggered by",
+              "Created",
+              "Error",
+            ],
+            rows.map((run) => [
+              routeLink(routeTo("runs", run.id, null), run.extension),
+              run.kind,
+              chip(run.state),
+              // null means no segment has committed an envelope yet, which is not
+              // the same as a run that found nothing, so it reads "-", not "0".
+              run.chaptersFound == null
+                ? "-"
+                : el(
+                    "span",
+                    {},
+                    el("strong", { text: String(run.chaptersFound) }),
+                    run.chaptersSeen == null
+                      ? null
+                      : el("span", { class: "dim small", text: ` of ${run.chaptersSeen} seen` }),
+                  ),
+              run.titlesFound == null
+                ? "-"
+                : el(
+                    "span",
+                    {},
+                    el("strong", { text: String(run.titlesFound) }),
+                    run.untrackedManga
+                      ? el("span", {
+                          class: "dim small",
+                          text: ` · ${run.untrackedManga} untracked`,
+                          title: "Series this run saw that the platform does not track",
+                        })
+                      : null,
+                  ),
+              // A scoped run's catalogue snapshot is silent about every title it
+              // was not asked about, so "found nothing" means something
+              // different here than on a catalogue-wide run. Say which it is.
+              run.scoped
+                ? el("span", {
+                    text: `${run.scopeMangaIds?.length ?? 0} title(s)`,
+                    title: "This run looked only at these titles, and is silent about the rest",
+                  })
+                : el("span", { class: "dim", text: "catalogue" }),
+              String(run.segmentsTotal),
+              run.triggeredBy,
+              fmtTime(run.createdAt),
+              truncate(run.error, 80),
+            ]),
+            {
+              empty: anyFilter()
+                ? "No run matches these filters. Clear them to see the rest."
+                : "No run has been created yet. Trigger one from an extension.",
+            },
+          ),
+          pager(data.total ?? 0, f().runsPage, RUNS_PAGE, (page) => {
+            setFilter({ runsPage: page });
+            void runs.load({ force: true });
+          }),
+        );
+      },
+      { reserve: 260, skeleton: () => skeletonTable(6, 9) },
     ),
   );
 };
@@ -3683,8 +3850,20 @@ function runChapterSummary(data, refilter) {
       el(
         "div",
         { class: "stat" },
+        // The true count, uncapped. The breakdown table below is a page of at
+        // most MANGA_BREAKDOWN_LIMIT of these, which is what `mangaCapped`
+        // qualifies — the number here is never the page size.
         el("div", { class: "n", text: String(data.mangaTitles ?? 0) }),
-        el("div", { class: "k", text: data.mangaCapped ? "titles (capped)" : "titles" }),
+        el("div", { class: "k", text: "titles" }),
+      ),
+      el(
+        "div",
+        { class: "stat" },
+        el("div", {
+          class: "n",
+          text: totals.untrackedManga == null ? "-" : String(totals.untrackedManga),
+        }),
+        el("div", { class: "k", text: "untracked series" }),
       ),
       el(
         "div",
@@ -3731,7 +3910,13 @@ function runChapterSummary(data, refilter) {
       ? el(
           "details",
           {},
-          el("summary", { text: `By series (${byManga.length})` }),
+          // Says what it is a page OF when it is one, so a capped list cannot
+          // be read as the whole breakdown.
+          el("summary", {
+            text: data.mangaCapped
+              ? `By series (top ${byManga.length} of ${data.mangaTitles})`
+              : `By series (${byManga.length})`,
+          }),
           table(
             ["Series", "Chapters", ""],
             byManga.map((entry) => [
