@@ -28,10 +28,15 @@ import { startMetricsServer } from "../core/observability/metricsServer.js";
  * RESTORE -- the corrective verb, the one a reader is waiting on -- was not
  * looked at once.
  *
- * WHAT THIS GIVES UP. The kinds used to run removals-first, so a chapter
- * deleted upstream could not race the re-upload of its replacement. They now
- * interleave freely, and that guarantee is gone by choice. What still holds:
+ * WHAT REPLACED THE ORDER. The kinds used to run removals-first, so no two of
+ * them could ever be working on one chapter at the same time. Three things do
+ * that job now, none of them an ordering:
  *
+ *  - The interlock in `UploadTaskStore.claim`: a row is passed over while any
+ *    other row about the same chapter is LEASED. That is the direct replacement
+ *    -- a DELETE and an UNAVAILABLE for one chapter still cannot run at once --
+ *    and it is scoped per publisher chapter rather than per queue, so unrelated
+ *    work never waits.
  *  - `UploadSessionLock` (in UploadTaskWorkers) serialises every stretch that
  *    holds MangaDex's one upload session, so UPLOAD, UNAVAILABLE and RESTORE
  *    take turns to put images up. DELETE and EDIT open no session at all.
@@ -39,9 +44,11 @@ import { startMetricsServer } from "../core/observability/metricsServer.js";
  *    `runDelete` and `runUnavailable` both treat a chapter that has gone from
  *    MangaDex as already handled rather than as a failure.
  *
- * So the residual risk is a window, not a corruption: a replacement chapter can
- * briefly exist alongside the one being deleted. If that starts mattering, the
- * fix is a dedupe-key interlock in the store, not a return to a fixed order.
+ * What is genuinely given up is ordering between DIFFERENT chapters: a chapter
+ * removed upstream and the re-upload of its replacement are two chapters with
+ * two identities, so nothing sequences them any more. The window that leaves is
+ * both of them existing briefly, which reconcile already finds and the
+ * duplicate scan already reports.
  */
 
 /** Long enough for a full page set at the MangaDex ratelimit. */

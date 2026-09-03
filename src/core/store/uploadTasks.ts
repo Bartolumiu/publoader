@@ -66,6 +66,48 @@ export function uploadDedupeKey(chapter: {
 }
 
 /**
+ * Which real-world chapter a queue row is about, for the purpose of not writing
+ * to it from two places at once. SQL over the row, because the interlock is a
+ * predicate inside `claim` and has to be computable there.
+ *
+ * Three deliberate differences from `dedupe_key`:
+ *
+ *  - THE EXTENSION IS IN IT. `uploadDedupeKey` is
+ *    `chapterId|chapterNumber|chapterLanguage` with no publisher, so two
+ *    extensions numbering from the same integer space describe the same key.
+ *    They do not collide today -- comikey is `EPI-`, omoi uuids, mangaplus
+ *    eight digits -- but k_manga (304221) and mangaup_global (109515) are both
+ *    plain six-digit integers and only luck keeps them apart. An interlock that
+ *    inherited that would stall one publisher's chapter behind an unrelated
+ *    one's, which is precisely the thing not to build.
+ *  - THE NUMBER IS NOT IN IT. The number is mutable -- publishers correct it,
+ *    and so do we -- and `dedupe.ts` is explicit that "the url is the identity,
+ *    and the number is not". A key carrying it would let the same chapter be
+ *    written by two kinds at once purely because one of them had learned a new
+ *    number.
+ *  - IT FALLS BACK to the MangaDex chapter id, then to `dedupe_key`. EDIT,
+ *    DELETE, UNAVAILABLE and RESTORE all key on `mdChapterId`, but their
+ *    payloads carry the publisher's identity too, so this lines the kinds up on
+ *    the same chapter where they can be lined up, and stays unique where they
+ *    cannot.
+ *
+ * Deliberately NOT a dedupe key: 81 rows in the live queue are one publisher
+ * chapter split across several chapter numbers, which is a supported shape
+ * (`splitChapterIds`). Those share a scope and must still all upload. This
+ * makes them take turns; it must never make them one row.
+ */
+function scopeKeySql(alias: string): Prisma.Sql {
+  const col = (name: string) => Prisma.raw(`${alias}.${name}`);
+  return Prisma.sql`(
+    coalesce(${col("chapter")} ->> 'extensionName', '') || '|' ||
+    coalesce(${col("chapter")} ->> 'chapterId',
+             ${col("chapter")} ->> 'mdChapterId',
+             ${col("dedupe_key")}) || '|' ||
+    coalesce(${col("chapter")} ->> 'chapterLanguage', '')
+  )`;
+}
+
+/**
  * The dedupe key for a hand-built task, derived exactly as the producers do:
  * `uploadDedupeKey` for UPLOAD and the MangaDex chapter id for every other kind.
  * Returning null rather than a degenerate key stops a chapter with no identity
@@ -466,9 +508,26 @@ export class UploadTaskStore {
         : Prisma.empty;
     const rows = await this.prisma.$queryRaw<UploadTask[]>(Prisma.sql`
       WITH candidate AS (
-        SELECT id FROM upload_tasks
+        SELECT id FROM upload_tasks c
         WHERE kind = ${kind}::"UploadTaskKind" AND state = 'PENDING' AND not_before <= now()
         ${notPaused}
+        -- The interlock. One loop per kind, all draining at once, means two
+        -- kinds can reach the same chapter simultaneously -- a DELETE removing
+        -- it while an UNAVAILABLE uploads a card over it, which the old fixed
+        -- order made impossible by construction. A row is passed over while any
+        -- other row about the same chapter is LEASED.
+        --
+        -- The lease IS the lock, which is what makes this safe without a second
+        -- table: it is taken and released by the transitions that already exist,
+        -- and sweepExpired frees it when an uploader dies holding it. Skipped,
+        -- never blocked, so a long upload delays the other kinds' work by one
+        -- pass rather than stalling their loops.
+        AND NOT EXISTS (
+          SELECT 1 FROM upload_tasks busy
+          WHERE busy.state = 'LEASED'
+            AND busy.id <> c.id
+            AND ${scopeKeySql("busy")} = ${scopeKeySql("c")}
+        )
         ORDER BY not_before ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1

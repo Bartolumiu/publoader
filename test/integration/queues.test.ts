@@ -6,6 +6,7 @@ import { buildContext, type AppContext } from "../../src/core/api/context.js";
 import { buildServer } from "../../src/core/api/server.js";
 import { registerQueueRoutes } from "../../src/core/api/routes/queues.js";
 import { closeDb, dbReady, resetDb, testPrisma } from "./db.js";
+import type { UploadTaskKind } from "@prisma/client";
 
 /**
  * Full operator control of the upload queues.
@@ -871,6 +872,136 @@ describe.skipIf(!dbReady())("queue management endpoints", () => {
     // And still claimable behind its neighbour, which is what "back" means.
     expect((await ctx.uploadTasks.claim("EDIT", 60))?.id).toBe(edB.id);
     expect((await ctx.uploadTasks.claim("EDIT", 60))?.id).toBe(edA.id);
+  });
+
+  /**
+   * The chapter interlock.
+   *
+   * Every kind drains in its own loop now, all at once, so two kinds can reach
+   * the same chapter at the same time -- a DELETE removing it while an
+   * UNAVAILABLE uploads a card over it. The fixed order used to make that
+   * impossible; this does it instead, by passing over any row whose chapter is
+   * already leased by another row.
+   */
+  describe("chapter interlock", () => {
+    /** Re-read a row, for the lease id a claim just wrote onto it. */
+    const current = (id: string) => prisma.uploadTask.findUniqueOrThrow({ where: { id } });
+    const MD_A = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+    const MD_B = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb";
+
+    /** A task carrying a real publisher identity, which is what the scope reads. */
+    const chapterTask = (
+      kind: UploadTaskKind,
+      identity: { extension: string; chapterId: string; language?: string; number?: string },
+      overrides: Record<string, unknown> = {},
+    ) =>
+      task({
+        kind,
+        dedupeKey: `${kind}-${identity.extension}-${identity.chapterId}-${identity.number ?? "1"}`,
+        chapter: {
+          extensionName: identity.extension,
+          chapterId: identity.chapterId,
+          chapterNumber: identity.number ?? "1",
+          chapterLanguage: identity.language ?? "en",
+        },
+        ...overrides,
+      });
+
+    it("will not hand out a chapter another kind is already holding", async () => {
+      const upload = await chapterTask("UPLOAD", { extension: "mangaplus", chapterId: "1013910" });
+      await chapterTask("UNAVAILABLE", { extension: "mangaplus", chapterId: "1013910" });
+
+      // The UPLOAD is leased, so the card for the same chapter is passed over.
+      expect((await ctx.uploadTasks.claim("UPLOAD", 300))?.id).toBe(upload.id);
+      expect(await ctx.uploadTasks.claim("UNAVAILABLE", 300)).toBeNull();
+
+      // Skipped, not lost: once the upload settles the card is claimable, and
+      // its date was never touched.
+      await ctx.uploadTasks.completeDone(upload.id, (await current(upload.id)).leaseId ?? "");
+      expect((await ctx.uploadTasks.claim("UNAVAILABLE", 300))?.chapter).toMatchObject({
+        chapterId: "1013910",
+      });
+    });
+
+    it("does not confuse two extensions that number from the same id space", async () => {
+      // k_manga and mangaup_global are both plain six-digit integers, so this
+      // is one collision away from real. The publisher is part of the scope
+      // precisely so one of them never waits on the other.
+      const a = await chapterTask("UPLOAD", { extension: "k_manga", chapterId: "304221" });
+      const b = await chapterTask("UNAVAILABLE", { extension: "mangaup_global", chapterId: "304221" });
+
+      expect((await ctx.uploadTasks.claim("UPLOAD", 300))?.id).toBe(a.id);
+      // Same id, different publisher: a different chapter, and claimable.
+      expect((await ctx.uploadTasks.claim("UNAVAILABLE", 300))?.id).toBe(b.id);
+    });
+
+    it("does not confuse two languages of one chapter, which are separate chapters", async () => {
+      const en = await chapterTask("UPLOAD", { extension: "mangaplus", chapterId: "1013910" });
+      const es = await chapterTask("UNAVAILABLE", {
+        extension: "mangaplus",
+        chapterId: "1013910",
+        language: "es",
+      });
+
+      expect((await ctx.uploadTasks.claim("UPLOAD", 300))?.id).toBe(en.id);
+      expect((await ctx.uploadTasks.claim("UNAVAILABLE", 300))?.id).toBe(es.id);
+    });
+
+    it("still lets a split episode upload every one of its numbers", async () => {
+      // 81 rows in the live queue are one publisher chapter split across several
+      // chapter numbers. They share a scope by design -- the number is not in it
+      // -- so they take turns, but every one of them must still go up.
+      const first = await chapterTask("UPLOAD", {
+        extension: "mangaup_global",
+        chapterId: "98157",
+        number: "2",
+      });
+      const second = await chapterTask("UPLOAD", {
+        extension: "mangaup_global",
+        chapterId: "98157",
+        number: "3",
+      });
+
+      // One at a time, and the second is not dropped: it is claimed the moment
+      // the first stops being held.
+      expect((await ctx.uploadTasks.claim("UPLOAD", 300))?.id).toBe(first.id);
+      expect(await ctx.uploadTasks.claim("UPLOAD", 300)).toBeNull();
+      await ctx.uploadTasks.completeDone(first.id, (await current(first.id)).leaseId ?? "");
+      expect((await ctx.uploadTasks.claim("UPLOAD", 300))?.id).toBe(second.id);
+    });
+
+    it("frees the chapter when the holder's lease is swept", async () => {
+      // An uploader that dies holding a lease must not wedge the chapter for
+      // good; the sweep that requeues the row releases the interlock with it.
+      const held = await chapterTask(
+        "UPLOAD",
+        { extension: "omoi", chapterId: "05e78d52" },
+        { state: "LEASED", leaseId: LEASE_ID, leaseExpiresAt: new Date(Date.now() - 60_000) },
+      );
+      await chapterTask("DELETE", { extension: "omoi", chapterId: "05e78d52" });
+
+      expect(await ctx.uploadTasks.claim("DELETE", 300)).toBeNull();
+      await ctx.uploadTasks.sweepExpired();
+      expect((await ctx.uploadTasks.claim("DELETE", 300))?.chapter).toMatchObject({
+        chapterId: "05e78d52",
+      });
+      expect(held.id).toBeTruthy();
+    });
+
+    it("leaves rows with no publisher identity claimable, one per dedupe key", async () => {
+      // Reconcile-built rows carry an mdChapterId and no publisher chapter id.
+      // They fall back to that id, so they neither collide with each other nor
+      // strand themselves behind an unrelated row.
+      const a = await task({ kind: "DELETE", dedupeKey: MD_A, chapter: { mdChapterId: MD_A } });
+      const b = await task({
+        kind: "UNAVAILABLE",
+        dedupeKey: MD_B,
+        chapter: { mdChapterId: MD_B },
+      });
+
+      expect((await ctx.uploadTasks.claim("DELETE", 300))?.id).toBe(a.id);
+      expect((await ctx.uploadTasks.claim("UNAVAILABLE", 300))?.id).toBe(b.id);
+    });
   });
 
   /**
