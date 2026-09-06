@@ -327,11 +327,14 @@ Inside the sandbox, `runner.mjs` (`runner-node/runner.mjs`):
   `log()` to stderr, and the guarded `fetch` (`runner.mjs:309-323`);
 - imports the entrypoint and refuses it if `default` is not a function
   (`runner.mjs:532-556`);
-- calls `collect({postedChapterIds, cleanRun, trackedSubset})`;
+- calls `collect({postedChapterIds, cleanRun, kind, trackedSubset})`, where
+  `kind` is the run's own `UPDATE | FORCE | CLEAN` and is what lets a planner
+  tell "the schedule says nothing is due" from "an operator asked for this
+  anyway";
 - normalizes the result, dropping chapters with no usable MangaDex mapping the
   way v1's `md_manga_id is None` filter did (`runner.mjs:604-629`);
 - **filters output to the segment unconditionally**, whether or not the extension
-  honoured `trackedSubset` (`runner.mjs:637-642`);
+  honoured `trackedSubset` (`runner.mjs:847-855`);
 - prints the envelope as the last line of stdout and exits 0. A failed run is a
   *result*, not a crash (`runner.mjs:746-767`).
 
@@ -784,7 +787,7 @@ dedupe key would absorb the duplicate task, the removal passes reason over the
 
 Two independent enforcement points back the design up. The runner filters its
 output to `segmentMangaIds` regardless of whether the extension honoured
-`trackedSubset` (`runner.mjs:637-642`), so non-overlapping output is a property of
+`trackedSubset` (`runner.mjs:847-855`), so non-overlapping output is a property of
 the runner rather than of extension cooperation. And `mergeEnvelopes` collapses
 `allChapters` to null if *any* segment declined to publish a full listing
 (`core/processor/processor.ts:644-646`), so a partial view can never be mistaken for a complete

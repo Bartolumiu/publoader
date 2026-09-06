@@ -161,6 +161,31 @@ describe("node runner", () => {
     expect(envelope.allChapters).toEqual([]);
   });
 
+  /**
+   * The run kind has to reach the extension, because the extension is now the
+   * only place that decides whether a series is worth fetching.
+   *
+   * In the Python system "force" never travelled: it meant "invoke this
+   * extension outside its scheduled hour", a decision the host made and the
+   * extension never saw. The TypeScript ports moved a second, finer decision
+   * inside `collect()` — per-series predicates that skip a title the
+   * publisher's update feed does not mention — and nothing told them a forced
+   * run was different. So a forced run over a quiet series fetched nothing and
+   * finished green, which is the opposite of what the operator asked for.
+   */
+  it("tells the extension which of the three run kinds this is", async () => {
+    const forced = await runFixture({ kind: "FORCE", postedChapterIds: ["c1", "c2"] });
+    // The fixture only ignores what it has already posted when kind is FORCE,
+    // so both chapters coming back is proof the value arrived.
+    expect(forced.updatedChapters.map((c) => c["chapterId"])).toEqual(["c1", "c2"]);
+    // FORCE is not CLEAN: it fetches regardless of the schedule, but it makes
+    // no claim about the catalogue, so removal detection stays disabled.
+    expect(forced.allChapters).toBeNull();
+
+    const scheduled = await runFixture({ kind: "UPDATE", postedChapterIds: ["c1", "c2"] });
+    expect(scheduled.updatedChapters).toEqual([]);
+  });
+
   it("drops chapters whose external manga id has no mapping", async () => {
     // v1 parity: an unmapped series cannot be uploaded, so it never travels.
     const envelope = await runFixture({ mangaIdMap: { [OTHER_MD_ID]: ["somethingelse"] } });
