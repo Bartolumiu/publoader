@@ -340,7 +340,7 @@ runs
 runs
   .command("trigger <extension> [mangaIds...]")
   .description("create a run now (bypasses the schedule); name external ids to run just those series")
-  .option("--kind <kind>", "UPDATE | CLEAN | FORCE", "FORCE")
+  .option("--kind <kind>", "UPDATE | CLEAN | FORCE (FORCE needs series)", "")
   .option("--namespace <name>", "catalogue the named external ids belong to")
   .option("--idempotency-key <key>", "reuse a key to make the trigger retry-safe")
   .action(
@@ -349,9 +349,19 @@ runs
       mangaIds: string[],
       opts: { kind: string; namespace?: string; idempotencyKey?: string },
     ) => {
-      const kind = opts.kind.toUpperCase();
+      // Naming series IS the request to force them, so an explicit --kind is
+      // only needed to ask for something else. Defaulting to FORCE regardless
+      // would now be an error every time the command is used without ids.
+      const kind = opts.kind ? opts.kind.toUpperCase() : mangaIds.length ? "FORCE" : "UPDATE";
       if (!["UPDATE", "CLEAN", "FORCE"].includes(kind)) {
         fail("--kind must be one of UPDATE, CLEAN, FORCE");
+      }
+      if (kind === "FORCE" && mangaIds.length === 0) {
+        fail(
+          "a FORCE run must name the series it is for. It switches off every skip an " +
+            "extension would apply, so an unscoped one re-fetches the whole catalogue; " +
+            "use --kind CLEAN for that.",
+        );
       }
       const res = await api<{
         runId: string;

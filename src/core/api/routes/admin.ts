@@ -482,7 +482,11 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       const body = z
         .object({
           extension: z.string().regex(EXTENSION_NAME_RE),
-          kind: z.enum(["UPDATE", "CLEAN", "FORCE"]).default("FORCE"),
+          /**
+           * Defaults to UPDATE rather than FORCE: FORCE now requires
+           * `mangaIds`, so it cannot be what an omitted kind means.
+           */
+          kind: z.enum(["UPDATE", "CLEAN", "FORCE"]).default("UPDATE"),
           idempotencyKey: z.string().max(256).optional(),
           /**
            * Limit the run to these tracked external ids. Absent is what every
@@ -493,6 +497,18 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           namespace: z.string().max(MAX_NAMESPACE_LENGTH).optional(),
         })
         .parse(req.body);
+      // Refused before the bundle lookup so the answer is about the request,
+      // not about the extension. See `createRunForExtension` for why a forced
+      // run without series is the most expensive thing this API can be asked
+      // for, and why CLEAN is the thing being asked for instead.
+      if (body.kind === "FORCE" && !body.mangaIds?.length) {
+        return reply.code(400).send({
+          error:
+            "a FORCE run must name the series it is for (mangaIds). It switches off every " +
+            "skip an extension would apply, so an unscoped one re-fetches the publisher's " +
+            'whole catalogue. Use {"kind": "CLEAN"} for that, which also computes removals.',
+        });
+      }
       if (await ctx.settings.isPaused()) {
         return reply.code(409).send({ error: "platform is paused" });
       }

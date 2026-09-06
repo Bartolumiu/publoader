@@ -187,7 +187,7 @@ describe.skipIf(!dbReady())("control-plane API", () => {
       method: "POST",
       url: "/api/v1/admin/runs",
       headers: admin,
-      payload: { extension: "mangaplus", kind: "FORCE" },
+      payload: { extension: "mangaplus", kind: "UPDATE" },
     });
     expect(trigger.statusCode).toBe(201);
 
@@ -382,7 +382,7 @@ describe.skipIf(!dbReady())("control-plane API", () => {
       method: "POST",
       url: "/api/v1/admin/runs",
       headers: admin,
-      payload: { extension: "mangaplus", kind: "FORCE" },
+      payload: { extension: "mangaplus", kind: "UPDATE" },
     });
     const detail = await app.inject({
       method: "GET",
@@ -392,6 +392,42 @@ describe.skipIf(!dbReady())("control-plane API", () => {
     // Null, not an empty object: "has not started" and "started and reported
     // nothing" are different, and only one of them is worth worrying about.
     expect(detail.json().run.progress).toBeNull();
+  });
+
+  /**
+   * A forced run switches off every skip an extension would apply, so one that
+   * names no series is "re-fetch this publisher's entire catalogue, ignoring
+   * every signal that says nothing changed" — the most expensive request the
+   * platform can make, and it used to be the default kind of this endpoint.
+   *
+   * That request already has a name. CLEAN does the same fetch and is honest
+   * about what a full catalogue is for: computing removals from it.
+   */
+  it("refuses a FORCE run that names no series, and points at CLEAN", async () => {
+    await publishBundle();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/runs",
+      headers: admin,
+      payload: { extension: "mangaplus", kind: "FORCE" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toContain("CLEAN");
+    expect(await prisma.run.count()).toBe(0);
+  });
+
+  it("no longer treats an omitted kind as FORCE", async () => {
+    await publishBundle();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/runs",
+      headers: admin,
+      payload: { extension: "mangaplus" },
+    });
+    expect(res.statusCode).toBe(201);
+    // UPDATE, because FORCE now needs series and so cannot be what silence means.
+    const run = await prisma.run.findUniqueOrThrow({ where: { id: res.json().runId } });
+    expect(run.kind).toBe("UPDATE");
   });
 
   it("refuses a scoped run over a named catalogue, which a bare external id cannot address", async () => {
@@ -459,7 +495,7 @@ describe.skipIf(!dbReady())("control-plane API", () => {
       method: "POST",
       url: "/api/v1/admin/runs",
       headers: admin,
-      payload: { extension: "mangaplus", kind: "FORCE" },
+      payload: { extension: "mangaplus", kind: "UPDATE" },
     });
     const lease = await app.inject({
       method: "POST",
@@ -596,7 +632,7 @@ describe.skipIf(!dbReady())("control-plane API", () => {
         method: "POST",
         url: "/api/v1/admin/runs",
         headers: admin,
-        payload: { extension: "mangaplus", kind: "FORCE" },
+        payload: { extension: "mangaplus", kind: "UPDATE" },
       });
       const lease = await app.inject({ method: "POST", url: "/api/v1/worker/lease", headers, payload: {} });
       const leased = lease.json();

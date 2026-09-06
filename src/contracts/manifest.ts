@@ -2,10 +2,27 @@ import { z } from "zod";
 
 export const EXTENSION_NAME_RE = /^[a-z0-9_]+$/;
 
-/** The kinds of run a schedule slot may create. Mirrors Prisma's `RunKind`. */
+/** Every kind of run. Mirrors Prisma's `RunKind`. */
 export const RUN_KINDS = ["UPDATE", "CLEAN", "FORCE"] as const;
 export const RunKind = z.enum(RUN_KINDS);
 export type RunKind = z.infer<typeof RunKind>;
+
+/**
+ * The kinds a schedule slot may create — which is not all of them.
+ *
+ * FORCE names the series it is for. It exists so an operator can say "fetch
+ * these two now, whatever the publisher's update feed claims", and every
+ * predicate an extension would use to skip a title is switched off for it. A
+ * clock has no series to name, so a scheduled FORCE could only mean "fetch the
+ * entire catalogue in full, on a timer" — which is what CLEAN already is, minus
+ * CLEAN's honesty about computing removals from what it found.
+ *
+ * No published manifest or operator slot has ever used it, so nothing is being
+ * taken away; the option was simply expressible and meaningless.
+ */
+export const SCHEDULABLE_RUN_KINDS = ["UPDATE", "CLEAN"] as const;
+export const SchedulableRunKind = z.enum(SCHEDULABLE_RUN_KINDS);
+export type SchedulableRunKind = z.infer<typeof SchedulableRunKind>;
 
 /**
  * One slot in a manifest's `schedule`.
@@ -21,8 +38,12 @@ export const ManifestScheduleEntry = z.object({
   minute: z.number().int().min(0).max(59),
   day: z.number().int().min(0).max(6).optional(),
   days: z.array(z.number().int().min(0).max(6)).max(7).optional(),
-  /** What the slot creates. `UPDATE` is the ordinary incremental run. */
-  kind: RunKind.default("UPDATE"),
+  /**
+   * What the slot creates. `UPDATE` is the ordinary incremental run; `CLEAN` is
+   * the periodic full sweep. `FORCE` is not schedulable — it is defined by the
+   * series it names, and a clock names none.
+   */
+  kind: SchedulableRunKind.default("UPDATE"),
   /** Operator-facing note; never interpreted. */
   label: z.string().min(1).max(80).optional(),
   timezone: z.literal("UTC").default("UTC"),

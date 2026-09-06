@@ -398,7 +398,7 @@ describe.skipIf(!dbReady())("github push webhook", () => {
         method: "POST",
         url: "/api/v1/admin/runs",
         headers: { authorization: `Bearer ${ADMIN}`, "content-type": "application/json" },
-        payload: { extension: "nonexistent", kind: "FORCE" },
+        payload: { extension: "nonexistent", kind: "UPDATE" },
       });
       expect(res.statusCode).toBe(404);
       expect(res.json()).toEqual({ error: "no bundle published for nonexistent" });

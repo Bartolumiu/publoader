@@ -25,13 +25,22 @@ const BULK_CHAPTERS = 4000;
 
 /** An ExtensionFactory: takes the context, returns something with collect(). */
 const factory = (ctx) => ({
-  async collect({ postedChapterIds, cleanRun }) {
+  async collect({ postedChapterIds, cleanRun, kind }) {
     if (ctx.mangaIdMap.has(SLOW_MARKER)) {
       ctx.log("slow mode: stalling so the driver can kill this worker", { ms: SLOW_MS });
       await new Promise((resolve) => setTimeout(resolve, SLOW_MS));
     }
 
-    const posted = new Set(postedChapterIds);
+    /*
+     * A miniature of what every real planner does with `kind`.
+     *
+     * UPDATE is the scheduled pass, so evidence that a chapter cannot be new is
+     * worth acting on. FORCE is an operator overriding exactly that evidence —
+     * so the fixture ignores what it has already posted and collects the lot,
+     * which is the smallest honest stand-in for "fetch regardless of the
+     * publisher's update signal".
+     */
+    const posted = kind === "FORCE" ? new Set() : new Set(postedChapterIds);
     const now = new Date();
     const expire = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 

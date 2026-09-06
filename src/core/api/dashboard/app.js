@@ -8953,7 +8953,6 @@ function extensionIndexTable(data, schedule, extResource, scheduleResource) {
           : el("span", { class: "dim", text: "default" }),
         [
           gatedButton("runs:write", { text: "Run", onclick: (e) => triggerRun(name, "UPDATE", e.currentTarget) }),
-          gatedButton("runs:write", { text: "Force", onclick: (e) => triggerRun(name, "FORCE", e.currentTarget) }),
           gatedButton("runs:write", {
             class: "danger",
             text: "Clean",
@@ -9395,6 +9394,14 @@ function extensionUploadScheduleControls(name, data, resource) {
   ]);
 }
 
+/**
+ * Start a whole-extension run.
+ *
+ * There is deliberately no FORCE here any more. A forced run is defined by the
+ * series it names — it switches off every skip an extension would apply, so an
+ * unscoped one re-fetches the publisher's entire catalogue, which is what CLEAN
+ * is for and says so. Forcing a series is a button on the series map instead.
+ */
 async function triggerRun(extension, kind, button) {
   if (
     kind === "CLEAN" &&
@@ -9755,7 +9762,6 @@ function extensionDetail(name, tab) {
               : el("p", { class: "error", text: "No bundle is published for this extension, so it cannot run." }),
             row(
               gatedButton("runs:write", { text: "Run", onclick: (e) => triggerRun(name, "UPDATE", e.currentTarget) }),
-              gatedButton("runs:write", { text: "Force", onclick: (e) => triggerRun(name, "FORCE", e.currentTarget) }),
               gatedButton("runs:write", {
                 class: "danger",
                 text: "Clean",
@@ -9909,7 +9915,6 @@ function schedulePanel(name) {
       { id: "sched-kind" },
       el("option", { value: "UPDATE", text: "update: the ordinary incremental run" }),
       el("option", { value: "CLEAN", text: "clean: full catalogue, computes removals" }),
-      el("option", { value: "FORCE", text: "force" }),
     );
     const label = el("input", { id: "sched-label", type: "text", maxlength: "80", placeholder: "note (optional)" });
     // Checkboxes rather than a multi-select: "every day" has to be the visible

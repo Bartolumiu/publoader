@@ -90,12 +90,32 @@ export type CollectResult = z.infer<typeof CollectResult>;
 export interface CollectInput {
   /** Chapter ids already uploaded for this extension (empty on clean runs). */
   postedChapterIds: readonly string[];
-  /** Clean run: return the full catalogue in allChapters. */
+  /** Clean run: return the full catalogue in allChapters. Same as `kind === "CLEAN"`. */
   cleanRun: boolean;
   /**
-   * When set, this job is one segment of a partitioned run: fetch only these
-   * external manga ids. The runner filters the output to this set regardless,
-   * so honoring it is an optimization, not a correctness requirement.
+   * Which of the three runs this is, and therefore how much licence the
+   * extension has to skip a title:
+   *
+   *   UPDATE  the scheduled pass. Skip whatever the publisher's own update
+   *           signal says cannot have changed; that is the whole point of it.
+   *   FORCE   an operator asked for this one. Fetch the latest for every
+   *           candidate regardless of that signal — "nothing changed" is the
+   *           belief they are overriding, so honouring it here means a forced
+   *           run over a quiet series fetches nothing, which is the opposite
+   *           of what was asked for. Narrowed by `trackedSubset` when the
+   *           operator named series; otherwise the whole tracked set.
+   *   CLEAN   fetch everything and return `allChapters`, which is what removal
+   *           detection is computed from.
+   *
+   * Absent on a bundle running under a runner older than this field; treat a
+   * missing value as "UPDATE" and nothing changes.
+   */
+  kind?: "UPDATE" | "FORCE" | "CLEAN";
+  /**
+   * When set, fetch only these external manga ids: either one segment of a
+   * partitioned run, or the series an operator named on a scoped run. The
+   * runner filters the output to this set regardless, so honoring it is an
+   * optimization, not a correctness requirement.
    */
   trackedSubset: readonly string[] | null;
 }

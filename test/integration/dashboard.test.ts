@@ -343,7 +343,7 @@ describe.skipIf(!dbReady())("dashboard sessions, accounts, and assets", () => {
     // InjectOptions.payload is a union that `unknown` does not satisfy, and
     // widening it here is what let the whole file stop type-checking.
     const forbidden: [string, string, Record<string, unknown>?][] = [
-      ["POST", "/api/v1/admin/runs", { extension: "opstest", kind: "FORCE" }],
+      ["POST", "/api/v1/admin/runs", { extension: "opstest", kind: "UPDATE" }],
       ["POST", "/api/v1/admin/pause", {}],
       ["POST", "/api/v1/admin/resume", {}],
       ["GET", "/api/v1/admin/workers"],

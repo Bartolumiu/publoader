@@ -78,7 +78,7 @@ describe.skipIf(!dbReady())("hot-plug extension lifecycle", () => {
       method: "POST",
       url: "/api/v1/admin/runs",
       headers: admin,
-      payload: { extension, kind: "FORCE", idempotencyKey: `t:${extension}:${Math.random()}` },
+      payload: { extension, kind: "UPDATE", idempotencyKey: `t:${extension}:${Math.random()}` },
     });
 
   beforeEach(async () => {

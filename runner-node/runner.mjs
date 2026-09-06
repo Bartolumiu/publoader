@@ -17,6 +17,7 @@
  *
  *   {"jobId": str, "extension": str, "kind": "SCHEDULED"|"CLEAN"|"MANUAL"|...,
  *    "segmentMangaIds": [str], "postedChapterIds": [str], "manifest": {...},
+ *    "kind": "UPDATE" | "FORCE" | "CLEAN",
  *    "mangaIdMap": {mdMangaId: [externalId]}, "overrideOptions": {...},
  *    "timeoutSeconds": int}
  *
@@ -767,7 +768,24 @@ async function runJob(job, bundleDir, outputDir) {
   const extensionName = String(job.extension ?? manifest.name ?? "");
   const mangaIdMap = job.mangaIdMap ?? {};
   const segmentIds = new Set((job.segmentMangaIds ?? []).map(String));
-  const cleanRun = String(job.kind ?? "").toUpperCase() === "CLEAN";
+  /*
+   * The three run kinds mean three different things to a planner, and until now
+   * only one of them was visible here:
+   *
+   *   UPDATE  publish what the schedule says is due. An extension may narrow by
+   *           whatever update signal its publisher offers.
+   *   FORCE   fetch the latest for these series regardless of that signal. An
+   *           operator asked for this run, and "the listing says nothing changed"
+   *           is exactly the belief they are overriding.
+   *   CLEAN   fetch everything, and return allChapters so removal can be judged.
+   *
+   * `cleanRun` alone could not express the middle one, so a FORCE run was
+   * indistinguishable from an UPDATE and got skipped by the same predicates.
+   * That made a forced run over a series with no recent chapter fetch nothing
+   * at all, which is the opposite of what the word promises.
+   */
+  const kind = String(job.kind ?? "UPDATE").toUpperCase();
+  const cleanRun = kind === "CLEAN";
 
   const { ctx, fetchState } = buildContext(
     bundleDir,
@@ -796,6 +814,7 @@ async function runJob(job, bundleDir, outputDir) {
   const postedChapterIds = cleanRun ? [] : (job.postedChapterIds ?? []).map(String);
   const trackedSubset = segmentIds.size > 0 ? [...segmentIds].sort() : null;
   log("info", "calling collect()", {
+    kind,
     cleanRun,
     postedChapterIds: postedChapterIds.length,
     trackedSubset: trackedSubset?.length ?? null,
@@ -804,7 +823,10 @@ async function runJob(job, bundleDir, outputDir) {
   // Marked so the caller can class a throw from here as TRANSIENT.
   let raw;
   try {
-    raw = await runtime.collect({ postedChapterIds, cleanRun, trackedSubset });
+    // `cleanRun` is kept alongside `kind` rather than replaced by it: every
+    // published bundle destructures it, and a runner that dropped it would
+    // silently turn every clean run into an update run.
+    raw = await runtime.collect({ postedChapterIds, cleanRun, kind, trackedSubset });
   } catch (err) {
     const wrapped = err instanceof Error ? err : new Error(String(err));
     wrapped.publoaderPhase = "run";
