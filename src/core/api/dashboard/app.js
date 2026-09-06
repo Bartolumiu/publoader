@@ -1286,18 +1286,81 @@ function ago(value) {
   return `${Math.round(seconds / 86_400)}d ago`;
 }
 
+/** A bare length of time, with no direction attached: "3m 20s". */
+function span(seconds) {
+  const abs = Math.abs(Math.round(seconds));
+  return abs < 60
+    ? `${abs}s`
+    : abs < 3600
+      ? `${Math.floor(abs / 60)}m ${abs % 60}s`
+      : abs < 86_400
+        ? `${Math.floor(abs / 3600)}h ${Math.floor((abs % 3600) / 60)}m`
+        : `${Math.floor(abs / 86_400)}d ${Math.floor((abs % 86_400) / 3600)}h`;
+}
+
 /** Human-readable countdown; negative means the deadline has already passed. */
 function duration(seconds) {
-  const abs = Math.abs(Math.round(seconds));
-  const parts =
-    abs < 60
-      ? `${abs}s`
-      : abs < 3600
-        ? `${Math.floor(abs / 60)}m ${abs % 60}s`
-        : abs < 86_400
-          ? `${Math.floor(abs / 3600)}h ${Math.floor((abs % 3600) / 60)}m`
-          : `${Math.floor(abs / 86_400)}d ${Math.floor((abs % 86_400) / 3600)}h`;
+  const parts = span(seconds);
   return seconds < 0 ? `${parts} ago` : `in ${parts}`;
+}
+
+/**
+ * What the processor last said about a run, in one line.
+ *
+ * INGESTING is the state with no visible content: a run in it is walking its
+ * titles one at a time and deciding nothing for most of them, so the console
+ * showed a chip that sat there for six minutes and nothing else. Whether that
+ * meant "working" or "wedged" was unanswerable without shell access to the
+ * host, which is the whole reason this exists.
+ *
+ * Two numbers, and they answer different questions. The counter is progress.
+ * The age of the line is whether there IS progress: a heartbeat is emitted
+ * every 15 seconds while the loop turns, so one that is minutes old on a run
+ * still marked INGESTING is the stall, and it is called out as such rather than
+ * left as a timestamp to be worked out.
+ */
+const PROGRESS_STALE_MS = 90_000;
+
+function runProgressLine(progress, state) {
+  if (!progress) return null;
+  const f = progress.fields || {};
+  const at = new Date(progress.at).getTime();
+  const idleMs = Number.isFinite(at) ? Date.now() - at : 0;
+  // Only a run that is supposed to be moving can be stalled. A PROCESSED run's
+  // last line is hours old by design and means nothing is wrong.
+  const stalled = state === "INGESTING" && idleMs > PROGRESS_STALE_MS;
+  const counted =
+    Number.isFinite(f.done) && Number.isFinite(f.total) ? `${f.done} of ${f.total}` : null;
+
+  let text;
+  switch (progress.msg) {
+    case "processing run":
+      text = `starting on ${f.titles ?? "?"} title(s)`;
+      break;
+    case "still processing run":
+      text = `title ${counted ?? "?"}`;
+      break;
+    case "checking for duplicate chapters":
+      text = `checking ${f.titles ?? "?"} title(s) for duplicates`;
+      break;
+    case "still checking for duplicates":
+      text = `duplicates ${counted ?? "?"}`;
+      break;
+    case "run processed":
+      text = Number.isFinite(f.elapsedMs) ? `processed in ${span(f.elapsedMs / 1000)}` : "processed";
+      break;
+    default:
+      text = progress.msg;
+  }
+
+  return el("span", {
+    class: stalled ? "warn-text small" : "dim small",
+    text: stalled ? `${text} · no progress for ${span(idleMs / 1000)}` : text,
+    title: stalled
+      ? `The processor last reported ${ago(progress.at)}. It reports every 15s while it is ` +
+        "working, so this run is probably stuck on one title."
+      : `Reported ${ago(progress.at)}` + (f.mangaId ? `, after ${f.mangaId}` : ""),
+  });
 }
 
 const truncate = (text, max = 160) =>
@@ -3406,7 +3469,7 @@ VIEWS.runs = (route) => {
             rows.map((run) => [
               routeLink(routeTo("runs", run.id, null), run.extension),
               run.kind,
-              chip(run.state),
+              el("div", {}, chip(run.state), runProgressLine(run.progress, run.state)),
               // null means no segment has committed an envelope yet, which is not
               // the same as a run that found nothing, so it reads "-", not "0".
               run.chaptersFound == null
@@ -3572,7 +3635,11 @@ function runDetail(runId) {
         {},
         card(
           null,
-          row(chip(data.state), el("span", { class: "dim", text: `${data.kind} · ${data.extension}` })),
+          row(
+            chip(data.state),
+            el("span", { class: "dim", text: `${data.kind} · ${data.extension}` }),
+            runProgressLine(data.progress, data.state),
+          ),
           defs([
             ["Run", el("code", { text: data.id })],
             ["Extension", `${data.extension} @ ${data.extensionVersion}`],

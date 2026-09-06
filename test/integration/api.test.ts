@@ -307,6 +307,93 @@ describe.skipIf(!dbReady())("control-plane API", () => {
     expect(jobs[0]!.segmentMangaIds).toEqual(["100002"]);
   });
 
+  /**
+   * INGESTING is the state with nothing to show: the processor walks its titles
+   * one at a time and logs nothing for a title that decided nothing, so both the
+   * console and the bot showed a chip that sat unchanged for minutes. The
+   * heartbeat lands in `log_events` under its own component; these two routes
+   * are what turn it into an answer.
+   */
+  it("reports where a run has got to, newest line only, on the list and the run", async () => {
+    await publishBundle();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/runs",
+      headers: admin,
+      payload: { extension: "mangaplus", kind: "CLEAN" },
+    });
+    const runId = created.json().runId;
+
+    // Two beats and a line from another component, which must not win: the
+    // reader takes the newest PROGRESS line, not the newest line.
+    await prisma.logEvent.createMany({
+      data: [
+        {
+          level: 30,
+          service: "core-processor",
+          component: "run-progress",
+          runId,
+          msg: "still processing run",
+          fields: { done: 100, total: 900, elapsedMs: 30_000 },
+          createdAt: new Date(Date.now() - 60_000),
+        },
+        {
+          level: 30,
+          service: "core-processor",
+          component: "run-progress",
+          runId,
+          msg: "still processing run",
+          fields: { done: 412, total: 900, elapsedMs: 90_000, mangaId: "abc" },
+          createdAt: new Date(Date.now() - 30_000),
+        },
+        {
+          level: 30,
+          service: "core-processor",
+          component: null,
+          runId,
+          msg: "manga processed",
+          fields: { mangaId: "zzz" },
+          createdAt: new Date(),
+        },
+      ],
+    });
+
+    const detail = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/runs/${runId}`,
+      headers: admin,
+    });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().run.progress).toMatchObject({
+      msg: "still processing run",
+      fields: { done: 412, total: 900 },
+    });
+
+    // The list answers for the whole page in one statement, so the runs table
+    // can show progress without 25 round trips.
+    const list = await app.inject({ method: "GET", url: "/api/v1/admin/runs", headers: admin });
+    const listed = list.json().runs.find((r: { id: string }) => r.id === runId);
+    expect(listed.progress.fields.done).toBe(412);
+  });
+
+  it("reports no progress for a run the processor has not reached", async () => {
+    await publishBundle();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/runs",
+      headers: admin,
+      payload: { extension: "mangaplus", kind: "FORCE" },
+    });
+    const detail = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/runs/${created.json().runId}`,
+      headers: admin,
+    });
+    // Null, not an empty object: "has not started" and "started and reported
+    // nothing" are different, and only one of them is worth worrying about.
+    expect(detail.json().run.progress).toBeNull();
+  });
+
   it("refuses a scoped run over a named catalogue, which a bare external id cannot address", async () => {
     await publishBundle();
     await prisma.trackedManga.create({

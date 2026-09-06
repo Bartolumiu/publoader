@@ -167,6 +167,19 @@ export interface RunSummary {
   untrackedManga?: number | null;
   /** True when the run looked only at named titles. */
   scoped?: boolean;
+  /**
+   * Where the processor has got to, or null before it starts. INGESTING is the
+   * state with nothing else to report, so this is the only thing that
+   * distinguishes a run that is working from one that is stuck.
+   */
+  progress?: RunProgress | null;
+}
+
+export interface RunProgress {
+  /** The processor's own message: "still processing run", "run processed", … */
+  msg: string;
+  at: string;
+  fields: Record<string, unknown>;
 }
 
 export interface JobSummary {

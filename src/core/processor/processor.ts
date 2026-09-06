@@ -19,6 +19,7 @@ import { RemovalCheckStore, REMOVAL_CONFIRMATIONS } from "../store/removalChecks
 import { ExtensionConfigStore } from "../store/extensionConfig.js";
 import { ResultStore } from "../store/results.js";
 import { activeTrackedTitles } from "../store/trackedManga.js";
+import { RUN_PROGRESS_COMPONENT } from "../observability/runProgress.js";
 import { AuditLog, SettingsStore, type RemovalMode } from "../store/settings.js";
 import { UploadTaskStore, uploadDedupeKey } from "../store/uploadTasks.js";
 import { intervalMsOf, planUploadSchedule, summariseSchedule } from "./uploadSchedule.js";
@@ -57,6 +58,11 @@ function progressReporter(
   message: string,
   total: number,
 ): (fields?: Record<string, unknown>) => void {
+  // Tagged here rather than by each caller: the admin API reads the newest line
+  // of this component to answer "what is this run doing", and a heartbeat that
+  // forgot the tag would be invisible to it while looking perfectly fine in the
+  // log page.
+  const progress = log.child({ component: RUN_PROGRESS_COMPONENT });
   const startedAt = Date.now();
   let lastAt = startedAt;
   let done = 0;
@@ -65,7 +71,7 @@ function progressReporter(
     const now = Date.now();
     if (now - lastAt < PROGRESS_EVERY_MS) return;
     lastAt = now;
-    log.info({ ...fields, done, total, elapsedMs: now - startedAt }, message);
+    progress.info({ ...fields, done, total, elapsedMs: now - startedAt }, message);
   };
 }
 
@@ -621,7 +627,8 @@ export class RunProcessor {
     // the only thing that distinguishes "this will be a while" from "this is
     // stuck". It is not derivable from anything already logged — `visiting` is
     // the updates plus, on a clean or scoped run, titles with no updates at all.
-    log.info(
+    const progress = log.child({ component: RUN_PROGRESS_COMPONENT });
+    progress.info(
       {
         kind: run.kind,
         scoped,
@@ -949,7 +956,7 @@ export class RunProcessor {
       await this.rearmRecheckCooldowns(run.extension, log);
     }
 
-    log.info({ ...totals, dupes, elapsedMs: Date.now() - startedAt }, "run processed");
+    progress.info({ ...totals, dupes, elapsedMs: Date.now() - startedAt }, "run processed");
     await this.markProcessed(run.id, log);
   }
 
@@ -1534,7 +1541,9 @@ export class RunProcessor {
     const unique = new Set(mangaIds);
     // Two MangaDex requests per title and, on a clean run, every tracked title:
     // this is routinely the longest phase of a run and until now the quietest.
-    log.info({ titles: unique.size, kind: run.kind }, "checking for duplicate chapters");
+    log
+      .child({ component: RUN_PROGRESS_COMPONENT })
+      .info({ titles: unique.size, kind: run.kind }, "checking for duplicate chapters");
     const reportCheck = progressReporter(log, "still checking for duplicates", unique.size);
 
     for (const mangaId of unique) {

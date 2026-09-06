@@ -47,7 +47,7 @@ import {
   type WorkerAction,
 } from "./apiClient.js";
 import type { Sensitivity } from "./authz.js";
-import type { BotAuthzView, Scope } from "./apiClient.js";
+import type { BotAuthzView, RunProgress, Scope } from "./apiClient.js";
 import { hasScope } from "../core/api/scopes.js";
 import type { AuthzEntry, AuthzListName } from "../core/store/botAuthz.js";
 import { DEFAULT_COOLDOWN_DAYS, MAX_COOLDOWN_DAYS, NAMESPACE_RE } from "../core/store/trackedManga.js";
@@ -1398,11 +1398,16 @@ const commands: BotCommand[] = [
           const found = r.chaptersFound == null ? "-" : String(r.chaptersFound);
           const seen = r.chaptersSeen == null ? "" : ` of ${r.chaptersSeen} seen`;
           const titles = r.titlesFound == null ? "" : ` across ${r.titlesFound} title(s)`;
+          // Only for a run still in flight. On a finished run the counts above
+          // already say what it did, and a third line each would turn a page of
+          // 25 runs into a wall.
+          const progress = r.state === "INGESTING" ? runProgress(r) : null;
           return (
             `${runIcon(r.state)} \`${r.id.slice(0, 8)}\` **${r.extension}** [${r.kind}] ${r.state} ` +
             `: ${shortTime(r.createdAt)} by ${r.triggeredBy ?? "schedule"}\n` +
             ` found **${found}**${seen}${titles}${r.scoped ? " · scoped" : ""}` +
-            (r.untrackedManga ? ` · ${r.untrackedManga} untracked` : "")
+            (r.untrackedManga ? ` · ${r.untrackedManga} untracked` : "") +
+            (progress ? `\n ${progress}` : "")
           );
         });
         // The page against the match count: a filtered list that fills its page
@@ -1419,6 +1424,9 @@ const commands: BotCommand[] = [
         `run \`${run.id}\``,
         `created ${shortTime(run.createdAt)}, finished ${shortTime(run.finishedAt)}`,
         `triggered by ${run.triggeredBy ?? "schedule"}`,
+        // Kept for a finished run too: here the last line is "processed in 4m
+        // 12s", which is the question a person opens one run to ask.
+        ...(runProgress(run) ? [runProgress(run) as string] : []),
       ];
       const jobs = run.jobs ?? [];
       const jobLines = jobs.slice(0, 15).map((j) => {
@@ -4419,6 +4427,72 @@ function runIcon(state: string): string {
     default:
       return ":hourglass:";
   }
+}
+
+/** How long something took or has been idle: "3m 20s". */
+function span(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+/**
+ * Where the processor has got to on a run, or null if it has said nothing yet.
+ *
+ * INGESTING is the state with nothing else to report: the run is walking its
+ * titles one at a time and deciding nothing for most of them, so `/runs show`
+ * gave a state and a job list that both sat unchanged for minutes. Whether that
+ * meant "working" or "wedged" was not answerable from Discord at all.
+ *
+ * Two facts, answering different questions. The counter is progress; the age of
+ * the line is whether there IS progress. A heartbeat lands every 15 seconds
+ * while the loop turns, so one that is minutes old on a run still marked
+ * INGESTING is the stall itself, and is called out rather than left as a
+ * timestamp for the reader to subtract.
+ */
+const PROGRESS_STALE_MS = 90_000;
+
+function runProgress(run: { state: string; progress?: RunProgress | null }): string | null {
+  const progress = run.progress;
+  if (!progress) return null;
+  const fields = progress.fields ?? {};
+  const num = (key: string): number | null =>
+    typeof fields[key] === "number" && Number.isFinite(fields[key]) ? (fields[key] as number) : null;
+
+  const done = num("done");
+  const total = num("total");
+  const counted = done !== null && total !== null ? `${done} of ${total}` : null;
+  const elapsed = num("elapsedMs");
+
+  let text: string;
+  switch (progress.msg) {
+    case "processing run":
+      text = `starting on ${num("titles") ?? "?"} title(s)`;
+      break;
+    case "still processing run":
+      text = `title ${counted ?? "?"}`;
+      break;
+    case "checking for duplicate chapters":
+      text = `checking ${num("titles") ?? "?"} title(s) for duplicates`;
+      break;
+    case "still checking for duplicates":
+      text = `duplicates ${counted ?? "?"}`;
+      break;
+    case "run processed":
+      text = elapsed === null ? "processed" : `processed in ${span(elapsed)}`;
+      break;
+    default:
+      text = progress.msg;
+  }
+
+  const idleMs = Date.now() - new Date(progress.at).getTime();
+  // Only a run that is meant to be moving can be stalled; a finished run's last
+  // line is legitimately hours old.
+  if (run.state === "INGESTING" && Number.isFinite(idleMs) && idleMs > PROGRESS_STALE_MS) {
+    return `:warning: ${text} — nothing reported for **${span(idleMs)}**; probably stuck on one title`;
+  }
+  return `${text} _(${span(Math.max(0, idleMs))} ago)_`;
 }
 
 function workerIcon(status: string): string {

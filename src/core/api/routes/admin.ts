@@ -31,6 +31,7 @@ import {
   listQuarantinedSubmissions,
 } from "../../observability/errorFeed.js";
 import { workerNames } from "../../store/workers.js";
+import { latestRunProgress, runProgressFor } from "../../observability/runProgress.js";
 import {
   encodeSortCursor,
   numberKeys,
@@ -664,11 +665,17 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       // returned. `chaptersFound` is null for a run with no committed envelope
       // yet, which is distinct from a run that found nothing.
       const totals = await ctx.runChapters.totalsForRuns(runs.map((run) => run.id));
+      // Where each run has got to. One statement for the page, not one per row:
+      // INGESTING is the state an operator stares at, and "412 of 900 titles"
+      // on the row is the difference between waiting and wondering.
+      const progress = await latestRunProgress(ctx.prisma, runs.map((run) => run.id));
       return {
         runs: runs.map((run) => {
           const found = totals.get(run.id);
           return {
             ...run,
+            /** The processor's last word on this run, or null before it starts. */
+            progress: progress.get(run.id) ?? null,
             chaptersFound: found ? found.updated : null,
             chaptersSeen: found ? found.all : null,
             titlesFound: found ? found.titlesUpdated : null,
@@ -698,6 +705,9 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       return {
         run: {
           ...run,
+          // The last progress line only. The rest is history, and the log page
+          // already serves it: /admin/logs?runId=…&component=run-progress.
+          progress: await runProgressFor(ctx.prisma, id),
           jobs: run.jobs.map((job) => ({
             ...job,
             leaseWorkerName: job.leaseWorkerId ? (names.get(job.leaseWorkerId) ?? null) : null,
