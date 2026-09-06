@@ -203,6 +203,29 @@ export class SchedulerService {
       scope?: { mangaIds: string[]; mdMangaIds: string[] };
     },
   ): Promise<{ runId: string; created: boolean; segments: number }> {
+    /*
+     * FORCE is defined by the series it names.
+     *
+     * Every predicate an extension uses to skip a title is switched off for a
+     * forced run, so an unscoped one is "fetch the publisher's entire catalogue
+     * in full, ignoring every signal that says nothing changed" — the most
+     * expensive request this platform can make, and reachable from a button
+     * labelled "Force" that read like a slightly firmer Run.
+     *
+     * The whole-catalogue sweep already has a name and a confirmation dialog:
+     * CLEAN, which additionally computes removals from what it finds and is
+     * therefore honest about what a full fetch is for.
+     *
+     * Checked here rather than only at the API edge because the scheduler
+     * reaches this function too, and a rule enforced in one caller is a rule
+     * the other caller does not have.
+     */
+    if (opts.kind === "FORCE" && (opts.scope?.mangaIds.length ?? 0) === 0) {
+      throw new Error(
+        "a FORCE run must name the series it is for; use CLEAN to re-fetch the whole catalogue",
+      );
+    }
+
     let segments: ReturnType<typeof computeSegments> = [];
     // A scoped run is one job over a named subset, never partitioned: the
     // subset is already small, and its whole purpose is that the processor can

@@ -597,7 +597,7 @@ function withSlotOptions(s: SlashCommandSubcommandBuilder): SlashCommandSubcomma
       o
         .setName("kind")
         .setDescription("What this slot runs. Default: update.")
-        .addChoices(...RUN_KINDS),
+        .addChoices(...SCHEDULABLE_RUN_KINDS),
     )
     .addStringOption((o) =>
       o
@@ -638,9 +638,20 @@ async function resolveSlot(
 
 const RUN_KINDS: { name: string; value: RunKind }[] = [
   { name: "update (respect the schedule's normal behaviour)", value: "UPDATE" },
-  { name: "force (run now regardless of schedule)", value: "FORCE" },
+  { name: "force (these series now, whatever the feed says — needs series)", value: "FORCE" },
   { name: "clean (destructive: full re-scrape)", value: "CLEAN" },
 ];
+
+/**
+ * What a schedule slot may create, which is not every kind.
+ *
+ * FORCE is defined by the series it names — it switches off every skip an
+ * extension would apply — so a scheduled one could only mean "re-fetch the
+ * whole catalogue on a timer", which is CLEAN with less honesty about it.
+ */
+const SCHEDULABLE_RUN_KINDS: { name: string; value: RunKind }[] = RUN_KINDS.filter(
+  (kind) => kind.value !== "FORCE",
+);
 
 /**
  * The same kinds and every run state, as plain names for FILTERING by.
@@ -932,6 +943,13 @@ const commands: BotCommand[] = [
         .split(/[\s,]+/)
         .map((id) => id.trim())
         .filter(Boolean);
+      if (kind === "FORCE" && mangaIds.length === 0) {
+        throw new UserError(
+          "A force run has to name the series it is for: `series:<external id>`, comma- or " +
+            "space-separated. It switches off every skip the extension would apply, so an " +
+            "unscoped one re-fetches the publisher's whole catalogue — that is `mode:clean`.",
+        );
+      }
       if (kind === "CLEAN" && ctx.options.boolean("confirm") !== true) {
         return {
           text:
@@ -2238,7 +2256,7 @@ const commands: BotCommand[] = [
     // options were filled in would mean the same command name is sometimes
     // allowed and sometimes not, which is worse to reason about than one answer.
     sensitivity: "mutate",
-    ephemeral: true,
+    ephemeral: false,
     builder: new SlashCommandBuilder()
       .setName("map")
       .setDescription("Map a series from its two links: the publisher's page and the MangaDex title.")
@@ -2322,7 +2340,7 @@ const commands: BotCommand[] = [
     description: "Map several series at once from pasted publisher and MangaDex links.",
     // Same gate as /map: this writes the series map, in bulk.
     sensitivity: "mutate",
-    ephemeral: true,
+    ephemeral: false,
     builder: new SlashCommandBuilder()
       .setName("map-many")
       .setDescription("Map several series at once from pasted publisher and MangaDex links."),

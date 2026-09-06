@@ -71,7 +71,7 @@ different:
 | kind | what your planner should fetch |
 |---|---|
 | `UPDATE` | the scheduled pass. Skip what the publisher's own update signal rules out — that is the whole point of it. |
-| `FORCE` | every candidate, regardless of that signal. Still narrowed by `trackedSubset`. |
+| `FORCE` | every candidate, regardless of that signal. Always carries a `trackedSubset`: a forced run names the series it is for, so it can never mean the whole catalogue. |
 | `CLEAN` | everything, and return `allChapters`. |
 
 **`FORCE` is not `UPDATE`, and treating it as one is a real bug.** An operator
@@ -301,7 +301,7 @@ reason: the API host it calls, and the web host its `chapterUrl` values point at
 | `runtime` | inferred | `"node"` for anything new. `"python"` survives only so historical bundles remain describable, and publishing one is refused |
 | `class_name` | `"Extension"` | v1 vestige; unused by the v2 runner |
 | `permissions` | network on, no fs, no subprocess | **Descriptive, not enforced.** The real sandbox is the runner's argv and the guarded fetch. Fill it in honestly as documentation of intent |
-| `schedule` | none | One slot, or a **list** of them (max 48). A slot is `{hour: 0..23, minute: 0..59, day?: 0..6, days?: [0..6], kind?: "UPDATE"\|"CLEAN"\|"FORCE", label?, timezone: "UTC"}`. `day`/`days` use **Monday = 0** (Python's `weekday()`, not JS's `getUTCDay()`: the conversion is in `slots.ts`); omitting both means every day. `kind` defaults to `UPDATE`. Without a schedule the extension is never scheduled and can only be run manually. Operators can replace the whole list in the database |
+| `schedule` | none | One slot, or a **list** of them (max 48). A slot is `{hour: 0..23, minute: 0..59, day?: 0..6, days?: [0..6], kind?: "UPDATE"\|"CLEAN", label?, timezone: "UTC"}`. `FORCE` is **not** schedulable: it is defined by the series it names, and a clock names none. `day`/`days` use **Monday = 0** (Python's `weekday()`, not JS's `getUTCDay()`: the conversion is in `slots.ts`); omitting both means every day. `kind` defaults to `UPDATE`. Without a schedule the extension is never scheduled and can only be run manually. Operators can replace the whole list in the database |
 | `data_files` | `{}` | Logical name → filename in the bundle. Two names are special: `manga_id_map` and `override_options` seed `tracked_manga` and `extension_configs` at first publish (`store/bundles.ts:103-132`) |
 | `partition` | none | `{mode: "tracked_manga", maxSegments: 2..32 (4), minMangaPerSegment: ≥1 (25)}`. See [partitioned execution](architecture-guide.md#partitioned-execution). Declare it once you have enough tracked series that one host cannot get through them politely |
 | `min_trust` | `"COMMUNITY"` | Set `"TRUSTED"` to restrict this extension to workers the operator vouched for. Enforced in the claim query, so it is not bypassable |
@@ -509,7 +509,7 @@ export PUBLOADER_API_URL=http://127.0.0.1:8100
 export PUBLOADER_ADMIN_TOKEN=dev-admin-not-a-secret
 
 pnpm exec tsx src/cli/admin.ts bundle publish /path/to/your-extension
-pnpm exec tsx src/cli/admin.ts runs trigger your_extension --kind FORCE
+pnpm exec tsx src/cli/admin.ts runs trigger your_extension <external-id>
 pnpm exec tsx src/cli/admin.ts runs list
 pnpm exec tsx src/cli/admin.ts errors
 ```

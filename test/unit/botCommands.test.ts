@@ -269,9 +269,33 @@ describe("/run", () => {
   });
 
   it("does not require confirmation for FORCE, which is not destructive", async () => {
-    const triggerRun = vi.fn().mockResolvedValue({ runId: "run-3", created: true });
-    await invoke("run", fakeApi({ triggerRun }), { extension: "mangaplus", mode: "FORCE" });
-    expect(triggerRun).toHaveBeenCalledWith("discord:ardax", expect.objectContaining({ kind: "FORCE" }));
+    const triggerRun = vi.fn().mockResolvedValue({ runId: "run-3", created: true, scopedTo: 1 });
+    await invoke("run", fakeApi({ triggerRun }), {
+      extension: "mangaplus",
+      mode: "FORCE",
+      series: "100001",
+    });
+    expect(triggerRun).toHaveBeenCalledWith(
+      "discord:ardax",
+      expect.objectContaining({ kind: "FORCE", mangaIds: ["100001"] }),
+    );
+  });
+
+  /**
+   * A forced run switches off every skip the extension would apply, so one with
+   * no series is "re-fetch this publisher's entire catalogue, ignoring every
+   * signal that says nothing changed" — reachable from a one-word option that
+   * read like a slightly firmer update. That request has a name already.
+   */
+  it("refuses a force run that names no series, and says what to use instead", async () => {
+    const triggerRun = vi.fn();
+    const reply = await invoke("run", fakeApi({ triggerRun }), {
+      extension: "mangaplus",
+      mode: "FORCE",
+    });
+    expect(triggerRun).not.toHaveBeenCalled();
+    expect(reply.text).toContain("series");
+    expect(reply.text).toContain("mode:clean");
   });
 
   it("rejects a malformed extension name locally, with a usable message", async () => {
