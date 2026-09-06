@@ -915,12 +915,23 @@ const commands: BotCommand[] = [
           .setDescription("update (default), force, or clean.")
           .addChoices(...RUN_KINDS.map((k) => ({ name: k.name, value: k.value }))),
       )
+      .addStringOption((o) =>
+        o
+          .setName("series")
+          .setDescription("External ids, comma- or space-separated. Runs just these series."),
+      )
       .addBooleanOption((o) =>
         o.setName("confirm").setDescription("Required for mode:clean; confirms a destructive re-scrape."),
       ),
     async run(ctx) {
       const extension = requireExtensionName(ctx.options.string("extension"));
       const kind = (ctx.options.string("mode") ?? "UPDATE") as RunKind;
+      // Typed by a person into a chat box, so both separators are accepted:
+      // "a, b" and "a b" are the same request and neither is a mistake.
+      const mangaIds = (ctx.options.string("series") ?? "")
+        .split(/[\s,]+/)
+        .map((id) => id.trim())
+        .filter(Boolean);
       if (kind === "CLEAN" && ctx.options.boolean("confirm") !== true) {
         return {
           text:
@@ -934,10 +945,22 @@ const commands: BotCommand[] = [
         extension,
         kind,
         idempotencyKey: `discord:${ctx.interactionId}`,
+        ...(mangaIds.length ? { mangaIds } : {}),
       });
+      // Named series the map does not have, or that are paused, are dropped by
+      // the server rather than failing the run. Saying so here is the only
+      // place the person who typed them will see it.
+      const skipped = [
+        result.skipped?.unknown.length ? `${result.skipped.unknown.length} not tracked` : null,
+        result.skipped?.paused.length ? `${result.skipped.paused.length} paused` : null,
+      ].filter(Boolean);
+      const scope =
+        result.scopedTo === undefined
+          ? ""
+          : ` over **${result.scopedTo}** series` + (skipped.length ? ` (${skipped.join(", ")} left out)` : "");
       return {
         text: result.created
-          ? `:rocket: Started **${kind}** run for \`${extension}\`: run \`${result.runId}\`. Follow it with \`/runs show id:${result.runId}\`.`
+          ? `:rocket: Started **${kind}** run for \`${extension}\`${scope}: run \`${result.runId}\`. Follow it with \`/runs show id:${result.runId}\`.`
           : `:information_source: A run for that exact request already existed: \`${result.runId}\` (nothing new was created).`,
       };
     },

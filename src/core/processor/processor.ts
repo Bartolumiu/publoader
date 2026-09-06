@@ -35,6 +35,40 @@ import {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** How often a long per-title loop says where it has got to. */
+const PROGRESS_EVERY_MS = 15_000;
+
+/**
+ * A heartbeat for the two loops that make INGESTING slow.
+ *
+ * Both walk one title at a time, each costing a MangaDex request or two, and
+ * both log nothing for a title that decided nothing — which is most of them on
+ * a clean sweep. The result is that a run over a thousand series is several
+ * minutes of complete silence between "processing run" and "run processed", and
+ * that silence looks exactly the same whether the processor is working steadily
+ * or is wedged on one request that will never return.
+ *
+ * The returned function is called once per title and logs at most every
+ * PROGRESS_EVERY_MS. It names the title it has just finished, so a stalled run
+ * is not just "stopped at 412 of 900" but "stopped after this one".
+ */
+function progressReporter(
+  log: Logger,
+  message: string,
+  total: number,
+): (fields?: Record<string, unknown>) => void {
+  const startedAt = Date.now();
+  let lastAt = startedAt;
+  let done = 0;
+  return (fields = {}) => {
+    done += 1;
+    const now = Date.now();
+    if (now - lastAt < PROGRESS_EVERY_MS) return;
+    lastAt = now;
+    log.info({ ...fields, done, total, elapsedMs: now - startedAt }, message);
+  };
+}
+
 /**
  * Turns committed result envelopes into MangaDex work.
  *
@@ -582,6 +616,24 @@ export class RunProcessor {
     /** Every chapter this run decided to upload, queued after the loop. */
     const pendingUploads: Chapter[] = [];
 
+    // Said before the work rather than after it: how long this run will take is
+    // roughly the title count times a MangaDex round trip, and that number is
+    // the only thing that distinguishes "this will be a while" from "this is
+    // stuck". It is not derivable from anything already logged — `visiting` is
+    // the updates plus, on a clean or scoped run, titles with no updates at all.
+    log.info(
+      {
+        kind: run.kind,
+        scoped,
+        titles: visiting.length,
+        updates: merged.updatedChapters.length,
+        catalogue: merged.allChapters?.length ?? null,
+      },
+      "processing run",
+    );
+    const reportVisit = progressReporter(log, "still processing run", visiting.length);
+    const startedAt = Date.now();
+
     for (const [mangaId, updatedChapters] of visiting) {
       const chaptersOnMd = await this.md.chaptersForManga(mangaId, groupId);
       for (const mdChapter of chaptersOnMd) {
@@ -729,6 +781,12 @@ export class RunProcessor {
         },
         "manga processed",
       );
+      reportVisit({
+        mangaId,
+        upload: totals.upload,
+        edit: totals.edit,
+        remove: totals.remove,
+      });
     }
 
     // Queue the run's uploads, spread across days when there are enough of them
@@ -891,7 +949,7 @@ export class RunProcessor {
       await this.rearmRecheckCooldowns(run.extension, log);
     }
 
-    log.info({ ...totals, dupes }, "run processed");
+    log.info({ ...totals, dupes, elapsedMs: Date.now() - startedAt }, "run processed");
     await this.markProcessed(run.id, log);
   }
 
@@ -1473,7 +1531,17 @@ export class RunProcessor {
     const multiChapters = merged.overrideOptions.multi_chapters ?? {};
     let deleted = 0;
 
-    for (const mangaId of new Set(mangaIds)) {
+    const unique = new Set(mangaIds);
+    // Two MangaDex requests per title and, on a clean run, every tracked title:
+    // this is routinely the longest phase of a run and until now the quietest.
+    log.info({ titles: unique.size, kind: run.kind }, "checking for duplicate chapters");
+    const reportCheck = progressReporter(log, "still checking for duplicates", unique.size);
+
+    for (const mangaId of unique) {
+      // At the top of the body, not the bottom: two `continue`s below would
+      // skip it, and the titles that decide nothing are exactly the ones whose
+      // silence this exists to break.
+      reportCheck({ mangaId, deleted });
       const chapterIds = aggregateChapterIds(await this.aggregateFor(mangaId, groupId));
       if (chapterIds.length === 0) continue;
 

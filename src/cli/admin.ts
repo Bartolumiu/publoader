@@ -338,33 +338,51 @@ runs
   });
 
 runs
-  .command("trigger <extension>")
-  .description("create a run now (bypasses the schedule)")
+  .command("trigger <extension> [mangaIds...]")
+  .description("create a run now (bypasses the schedule); name external ids to run just those series")
   .option("--kind <kind>", "UPDATE | CLEAN | FORCE", "FORCE")
+  .option("--namespace <name>", "catalogue the named external ids belong to")
   .option("--idempotency-key <key>", "reuse a key to make the trigger retry-safe")
-  .action(async (extension: string, opts: { kind: string; idempotencyKey?: string }) => {
-    const kind = opts.kind.toUpperCase();
-    if (!["UPDATE", "CLEAN", "FORCE"].includes(kind)) {
-      fail("--kind must be one of UPDATE, CLEAN, FORCE");
-    }
-    const res = await api<{ runId: string; created: boolean; jobs?: number }>(
-      "/api/v1/admin/runs",
-      {
+  .action(
+    async (
+      extension: string,
+      mangaIds: string[],
+      opts: { kind: string; namespace?: string; idempotencyKey?: string },
+    ) => {
+      const kind = opts.kind.toUpperCase();
+      if (!["UPDATE", "CLEAN", "FORCE"].includes(kind)) {
+        fail("--kind must be one of UPDATE, CLEAN, FORCE");
+      }
+      const res = await api<{
+        runId: string;
+        created: boolean;
+        jobs?: number;
+        scopedTo?: number;
+        skipped?: { unknown: string[]; paused: string[] };
+      }>("/api/v1/admin/runs", {
         method: "POST",
         json: {
           extension,
           kind,
+          ...(mangaIds.length ? { mangaIds } : {}),
+          ...(opts.namespace ? { namespace: opts.namespace } : {}),
           ...(opts.idempotencyKey ? { idempotencyKey: opts.idempotencyKey } : {}),
         },
-      },
-    );
-    kv({
-      runId: res.runId,
-      created: res.created,
-      jobs: res.jobs ?? "-",
-      note: res.created ? "queued" : "idempotency key already existed; no new run",
-    });
-  });
+      });
+      kv({
+        runId: res.runId,
+        created: res.created,
+        jobs: res.jobs ?? "-",
+        // Named series that were dropped are the half of the answer a bare
+        // "queued" hides: the run is real, it just covers fewer series than
+        // were asked for.
+        scope: res.scopedTo === undefined ? "whole catalogue" : `${res.scopedTo} series`,
+        ...(res.skipped?.unknown.length ? { notTracked: res.skipped.unknown.join(", ") } : {}),
+        ...(res.skipped?.paused.length ? { paused: res.skipped.paused.join(", ") } : {}),
+        note: res.created ? "queued" : "idempotency key already existed; no new run",
+      });
+    },
+  );
 
 // ---- jobs ----
 const jobs = program.command("jobs").description("individual scrape jobs");

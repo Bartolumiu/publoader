@@ -11,6 +11,7 @@ import {
   MAX_COOLDOWN_DAYS,
   MAX_NAMESPACE_LENGTH,
   NAMESPACE_RE,
+  isTrackedRowActive,
   normaliseNamespace,
   parsePairs,
 } from "../../store/trackedManga.js";
@@ -482,6 +483,13 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
           extension: z.string().regex(EXTENSION_NAME_RE),
           kind: z.enum(["UPDATE", "CLEAN", "FORCE"]).default("FORCE"),
           idempotencyKey: z.string().max(256).optional(),
+          /**
+           * Limit the run to these tracked external ids. Absent is what every
+           * caller before this asked for: the whole catalogue.
+           */
+          mangaIds: z.array(z.string().min(1).max(512)).min(1).max(MAX_BATCH_ROWS).optional(),
+          /** Which catalogue `mangaIds` are read from. */
+          namespace: z.string().max(MAX_NAMESPACE_LENGTH).optional(),
         })
         .parse(req.body);
       if (await ctx.settings.isPaused()) {
@@ -490,6 +498,62 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
       const bundle = await ctx.bundles.latest(body.extension);
       if (!bundle) return reply.code(404).send({ error: `no bundle published for ${body.extension}` });
       const manifest = Manifest.parse(bundle.manifest);
+
+      /*
+       * A scoped run: the named series and no others.
+       *
+       * The pair is resolved here rather than taken from the caller because a
+       * scope needs both of a series' names — the external id the worker
+       * fetches, and the MangaDex id the processor trusts the snapshot about —
+       * and only the map holds them together.
+       *
+       * Two kinds of row are dropped rather than carried, and both are reported
+       * back, because "3 of the 5 you named" is the answer and "ok" is not:
+       *
+       *  - ids that are not in the map, which would send a worker after a series
+       *    whose chapters could not be uploaded when they came back.
+       *  - paused ids, because the manga map handed to a worker leaves paused
+       *    series out entirely (see the job-claim route); naming one in a
+       *    segment yields an id the extension is never told the title for.
+       */
+      let scope: { mangaIds: string[]; mdMangaIds: string[] } | undefined;
+      let skipped: { unknown: string[]; paused: string[] } | undefined;
+      if (body.mangaIds) {
+        const namespace = normaliseNamespace(body.namespace);
+        // The same limit the scheduler refuses to partition around: a segment
+        // carries bare external ids, so it cannot say which catalogue one
+        // belongs to. Running the whole extension is the honest alternative.
+        if (namespace !== DEFAULT_NAMESPACE) {
+          return reply.code(409).send({
+            error:
+              "a run's manga subset travels as a bare external id, which cannot name the " +
+              `"${namespace}" catalogue. Run ${body.extension} unscoped instead.`,
+            namespace,
+          });
+        }
+        const wanted = [...new Set(body.mangaIds)];
+        const rows = await ctx.prisma.trackedManga.findMany({
+          where: { extension: body.extension, namespace, mangaId: { in: wanted } },
+          select: { mangaId: true, mdMangaId: true, recheckAfter: true },
+        });
+        const known = new Set(rows.map((row) => row.mangaId));
+        const active = rows.filter((row) => isTrackedRowActive(row));
+        skipped = {
+          unknown: wanted.filter((id) => !known.has(id)),
+          paused: rows.filter((row) => !isTrackedRowActive(row)).map((row) => row.mangaId),
+        };
+        if (active.length === 0) {
+          return reply.code(400).send({
+            error: `none of those ${wanted.length} series can be run for ${body.extension}`,
+            ...skipped,
+          });
+        }
+        scope = {
+          mangaIds: active.map((row) => row.mangaId),
+          mdMangaIds: active.map((row) => row.mdMangaId),
+        };
+      }
+
       const key =
         body.idempotencyKey ??
         `manual:${body.extension}:${body.kind}:${new Date().toISOString()}`;
@@ -497,9 +561,22 @@ export function registerAdminRoutes(app: FastifyInstance, ctx: AppContext): void
         idempotencyKey: key,
         kind: body.kind,
         triggeredBy: actor(req),
+        ...(scope ? { scope } : {}),
       });
-      await ctx.audit.record(actor(req), "run.trigger", result.runId, body);
-      return reply.code(result.created ? 201 : 200).send(result);
+      await ctx.audit.record(actor(req), "run.trigger", result.runId, {
+        ...body,
+        // A scope may be 2000 ids; the audit row records the shape of the
+        // request, not a second copy of the map.
+        ...(body.mangaIds
+          ? { mangaIds: body.mangaIds.slice(0, 50), mangaIdCount: body.mangaIds.length }
+          : {}),
+        ...(skipped ? { skipped } : {}),
+      });
+      return reply.code(result.created ? 201 : 200).send({
+        ...result,
+        ...(scope ? { scopedTo: scope.mangaIds.length } : {}),
+        ...(skipped ? { skipped } : {}),
+      });
     });
 
     /**
