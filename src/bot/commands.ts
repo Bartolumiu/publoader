@@ -47,7 +47,7 @@ import {
   type WorkerAction,
 } from "./apiClient.js";
 import type { Sensitivity } from "./authz.js";
-import type { BotAuthzView, RunProgress, Scope } from "./apiClient.js";
+import type { BotAuthzView, RunProgress, Scope, SourceMapResult } from "./apiClient.js";
 import { hasScope } from "../core/api/scopes.js";
 import type { AuthzEntry, AuthzListName } from "../core/store/botAuthz.js";
 import { DEFAULT_COOLDOWN_DAYS, MAX_COOLDOWN_DAYS, NAMESPACE_RE } from "../core/store/trackedManga.js";
@@ -2259,6 +2259,12 @@ const commands: BotCommand[] = [
           .setName("manga-id")
           .setDescription("The extension's own id, for a link this cannot read on its own.")
           .setRequired(false),
+      )
+      .addBooleanOption((o) =>
+        o
+          .setName("run")
+          .setDescription("Force a run for this series once it is mapped. On by default; pass false to skip.")
+          .setRequired(false),
       ),
     async run(ctx) {
       const source = requireString(ctx.options, "source");
@@ -2280,21 +2286,28 @@ const commands: BotCommand[] = [
       });
       const where = `\`${result.extension}\`/\`${qualified(result.namespace, result.mangaId)}\``;
       if (result.outcome === "unchanged") {
+        // No run either: nothing changed, so whatever schedule the series was
+        // already on is still the right answer for it.
         return { text: `${where} already points at <${mdTitleUrl(result.mdMangaId)}>; nothing changed.` };
       }
       const how = viaPhrase(result.resolution.match?.via);
+      const started = await runMappedSeries(ctx, result);
       if (result.outcome === "repointed") {
         return {
-          text:
-            `:twisted_rightwards_arrows: **Repointed** ${where} (${how}).\n` +
-            `Was <${mdTitleUrl(result.previousMdMangaId ?? "")}>\nNow <${mdTitleUrl(result.mdMangaId)}>\n` +
+          text: lines([
+            `:twisted_rightwards_arrows: **Repointed** ${where} (${how}).`,
+            `Was <${mdTitleUrl(result.previousMdMangaId ?? "")}>`,
+            `Now <${mdTitleUrl(result.mdMangaId)}>`,
             "Chapters already uploaded stay where they are; new ones land on the new title.",
+            started,
+          ].filter(Boolean)),
         };
       }
       return {
         text: lines([
           `:link: ${where} → <${mdTitleUrl(result.mdMangaId)}>`,
           `Read from the link you pasted (${how}).`,
+          started,
           // The queue row is the part an operator would otherwise forget, and
           // forgetting it means the series is offered for creation again.
           result.untrackedRow
@@ -4426,6 +4439,49 @@ function runIcon(state: string): string {
       return ":black_circle:";
     default:
       return ":hourglass:";
+  }
+}
+
+/**
+ * Start a run for the series a `/map` call just wired up.
+ *
+ * The same bargain the console's map forms make, for the same reason: a mapping
+ * does nothing until a run covers it, and the next scheduled one may be a day
+ * away, so the command that exists to start publishing a series ought to start
+ * publishing it. Scoped to the one series, which is what makes it affordable —
+ * one series' worth of requests, not the publisher's whole catalogue.
+ *
+ * It never fails the command. The mapping is already written by the time this
+ * runs, and a run that could not start is a second sentence rather than an
+ * error that hides the first.
+ */
+async function runMappedSeries(ctx: HandlerContext, result: SourceMapResult): Promise<string> {
+  if (ctx.options.boolean("run") === false) return "";
+  // A run's manga subset travels as a bare external id, which cannot name a
+  // catalogue. The server refuses one; saying so beats relaying its 409.
+  if (result.namespace) {
+    return (
+      `_Not run: \`${result.extension}\` keeps this id in the \`${result.namespace}\` catalogue, ` +
+      "and a run's series subset cannot name one. Run the extension instead._"
+    );
+  }
+  try {
+    const run = await ctx.api.triggerRun(ctx.actor, {
+      extension: result.extension,
+      kind: "FORCE",
+      mangaIds: [result.mangaId],
+      idempotencyKey: `discord:map:${ctx.interactionId}`,
+    });
+    return (
+      `:rocket: Running \`${result.extension}\` for this series alone: run \`${run.runId}\`. ` +
+      `Follow it with \`/runs show id:${run.runId}\`.`
+    );
+  } catch (err) {
+    return (
+      ":warning: Mapped, but the run did not start " +
+      `(${err instanceof Error ? err.message : String(err)}). ` +
+      `Start one with \`/run extension:${result.extension} series:${result.mangaId}\`.`
+    );
   }
 }
 

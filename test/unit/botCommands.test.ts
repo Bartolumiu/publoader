@@ -1010,6 +1010,102 @@ describe("/map", () => {
     expect(reply.text).toContain(previous);
   });
 
+  /**
+   * A mapping does nothing until a run covers it, and the next scheduled one
+   * may be a day away, so the command that exists to start publishing a series
+   * starts publishing it. Scoped to that series: one series' worth of requests,
+   * not the publisher's catalogue.
+   */
+  it("starts a run for the series it just mapped, and only that series", async () => {
+    const mapFromSource = vi.fn().mockResolvedValue({
+      ok: true,
+      changed: true,
+      outcome: "added",
+      extension: "comikey",
+      namespace: "",
+      mangaId: "kengan-omega",
+      mdMangaId: TITLE_ID,
+      resolution: resolution(),
+    });
+    const triggerRun = vi.fn().mockResolvedValue({ runId: "run-1", created: true, scopedTo: 1 });
+    const reply = await invoke("map", fakeApi({ mapFromSource, triggerRun }), {
+      source: SOURCE,
+      mangadex: TITLE_ID,
+    });
+
+    expect(triggerRun).toHaveBeenCalledWith("discord:ardax", {
+      extension: "comikey",
+      kind: "FORCE",
+      mangaIds: ["kengan-omega"],
+      idempotencyKey: "discord:map:interaction-1",
+    });
+    expect(reply.text).toContain("run-1");
+  });
+
+  it("skips the run when asked to", async () => {
+    const mapFromSource = vi.fn().mockResolvedValue({
+      ok: true,
+      changed: true,
+      outcome: "added",
+      extension: "comikey",
+      namespace: "",
+      mangaId: "kengan-omega",
+      mdMangaId: TITLE_ID,
+      resolution: resolution(),
+    });
+    const triggerRun = vi.fn();
+    await invoke("map", fakeApi({ mapFromSource, triggerRun }), {
+      source: SOURCE,
+      mangadex: TITLE_ID,
+      run: false,
+    });
+    expect(triggerRun).not.toHaveBeenCalled();
+  });
+
+  it("still reports the mapping when the run cannot be started", async () => {
+    const mapFromSource = vi.fn().mockResolvedValue({
+      ok: true,
+      changed: true,
+      outcome: "added",
+      extension: "comikey",
+      namespace: "",
+      mangaId: "kengan-omega",
+      mdMangaId: TITLE_ID,
+      resolution: resolution(),
+    });
+    const triggerRun = vi.fn().mockRejectedValue(new Error("platform is paused"));
+    const reply = await invoke("map", fakeApi({ mapFromSource, triggerRun }), {
+      source: SOURCE,
+      mangadex: TITLE_ID,
+    });
+    // The write happened. Losing that behind the run's failure would be the
+    // worst of both: the operator retries a mapping that already exists.
+    expect(reply.text).toContain("kengan-omega");
+    expect(reply.text).toContain("platform is paused");
+  });
+
+  it("does not try to run a series held in a named catalogue", async () => {
+    const mapFromSource = vi.fn().mockResolvedValue({
+      ok: true,
+      changed: true,
+      outcome: "added",
+      extension: "viz",
+      namespace: "vizmanga",
+      mangaId: "709",
+      mdMangaId: TITLE_ID,
+      resolution: resolution(),
+    });
+    const triggerRun = vi.fn();
+    const reply = await invoke("map", fakeApi({ mapFromSource, triggerRun }), {
+      source: SOURCE,
+      mangadex: TITLE_ID,
+    });
+    // A run's series subset is a bare external id, which cannot name a
+    // catalogue; the server refuses it, so the bot does not ask.
+    expect(triggerRun).not.toHaveBeenCalled();
+    expect(reply.text).toContain("vizmanga");
+  });
+
   it("refuses a chapter link as the target instead of mapping onto nothing", async () => {
     const mapFromSource = vi.fn();
     const reply = await invoke("map", fakeApi({ mapFromSource }), {
