@@ -47,7 +47,7 @@ import {
   type WorkerAction,
 } from "./apiClient.js";
 import type { Sensitivity } from "./authz.js";
-import type { BotAuthzView, Scope } from "./apiClient.js";
+import type { BotAuthzView, RunProgress, Scope, SourceMapResult } from "./apiClient.js";
 import { hasScope } from "../core/api/scopes.js";
 import type { AuthzEntry, AuthzListName } from "../core/store/botAuthz.js";
 import { DEFAULT_COOLDOWN_DAYS, MAX_COOLDOWN_DAYS, NAMESPACE_RE } from "../core/store/trackedManga.js";
@@ -915,12 +915,23 @@ const commands: BotCommand[] = [
           .setDescription("update (default), force, or clean.")
           .addChoices(...RUN_KINDS.map((k) => ({ name: k.name, value: k.value }))),
       )
+      .addStringOption((o) =>
+        o
+          .setName("series")
+          .setDescription("External ids, comma- or space-separated. Runs just these series."),
+      )
       .addBooleanOption((o) =>
         o.setName("confirm").setDescription("Required for mode:clean; confirms a destructive re-scrape."),
       ),
     async run(ctx) {
       const extension = requireExtensionName(ctx.options.string("extension"));
       const kind = (ctx.options.string("mode") ?? "UPDATE") as RunKind;
+      // Typed by a person into a chat box, so both separators are accepted:
+      // "a, b" and "a b" are the same request and neither is a mistake.
+      const mangaIds = (ctx.options.string("series") ?? "")
+        .split(/[\s,]+/)
+        .map((id) => id.trim())
+        .filter(Boolean);
       if (kind === "CLEAN" && ctx.options.boolean("confirm") !== true) {
         return {
           text:
@@ -934,10 +945,22 @@ const commands: BotCommand[] = [
         extension,
         kind,
         idempotencyKey: `discord:${ctx.interactionId}`,
+        ...(mangaIds.length ? { mangaIds } : {}),
       });
+      // Named series the map does not have, or that are paused, are dropped by
+      // the server rather than failing the run. Saying so here is the only
+      // place the person who typed them will see it.
+      const skipped = [
+        result.skipped?.unknown.length ? `${result.skipped.unknown.length} not tracked` : null,
+        result.skipped?.paused.length ? `${result.skipped.paused.length} paused` : null,
+      ].filter(Boolean);
+      const scope =
+        result.scopedTo === undefined
+          ? ""
+          : ` over **${result.scopedTo}** series` + (skipped.length ? ` (${skipped.join(", ")} left out)` : "");
       return {
         text: result.created
-          ? `:rocket: Started **${kind}** run for \`${extension}\`: run \`${result.runId}\`. Follow it with \`/runs show id:${result.runId}\`.`
+          ? `:rocket: Started **${kind}** run for \`${extension}\`${scope}: run \`${result.runId}\`. Follow it with \`/runs show id:${result.runId}\`.`
           : `:information_source: A run for that exact request already existed: \`${result.runId}\` (nothing new was created).`,
       };
     },
@@ -1375,11 +1398,16 @@ const commands: BotCommand[] = [
           const found = r.chaptersFound == null ? "-" : String(r.chaptersFound);
           const seen = r.chaptersSeen == null ? "" : ` of ${r.chaptersSeen} seen`;
           const titles = r.titlesFound == null ? "" : ` across ${r.titlesFound} title(s)`;
+          // Only for a run still in flight. On a finished run the counts above
+          // already say what it did, and a third line each would turn a page of
+          // 25 runs into a wall.
+          const progress = r.state === "INGESTING" ? runProgress(r) : null;
           return (
             `${runIcon(r.state)} \`${r.id.slice(0, 8)}\` **${r.extension}** [${r.kind}] ${r.state} ` +
             `: ${shortTime(r.createdAt)} by ${r.triggeredBy ?? "schedule"}\n` +
             ` found **${found}**${seen}${titles}${r.scoped ? " · scoped" : ""}` +
-            (r.untrackedManga ? ` · ${r.untrackedManga} untracked` : "")
+            (r.untrackedManga ? ` · ${r.untrackedManga} untracked` : "") +
+            (progress ? `\n ${progress}` : "")
           );
         });
         // The page against the match count: a filtered list that fills its page
@@ -1396,6 +1424,9 @@ const commands: BotCommand[] = [
         `run \`${run.id}\``,
         `created ${shortTime(run.createdAt)}, finished ${shortTime(run.finishedAt)}`,
         `triggered by ${run.triggeredBy ?? "schedule"}`,
+        // Kept for a finished run too: here the last line is "processed in 4m
+        // 12s", which is the question a person opens one run to ask.
+        ...(runProgress(run) ? [runProgress(run) as string] : []),
       ];
       const jobs = run.jobs ?? [];
       const jobLines = jobs.slice(0, 15).map((j) => {
@@ -2228,6 +2259,12 @@ const commands: BotCommand[] = [
           .setName("manga-id")
           .setDescription("The extension's own id, for a link this cannot read on its own.")
           .setRequired(false),
+      )
+      .addBooleanOption((o) =>
+        o
+          .setName("run")
+          .setDescription("Force a run for this series once it is mapped. On by default; pass false to skip.")
+          .setRequired(false),
       ),
     async run(ctx) {
       const source = requireString(ctx.options, "source");
@@ -2249,21 +2286,28 @@ const commands: BotCommand[] = [
       });
       const where = `\`${result.extension}\`/\`${qualified(result.namespace, result.mangaId)}\``;
       if (result.outcome === "unchanged") {
+        // No run either: nothing changed, so whatever schedule the series was
+        // already on is still the right answer for it.
         return { text: `${where} already points at <${mdTitleUrl(result.mdMangaId)}>; nothing changed.` };
       }
       const how = viaPhrase(result.resolution.match?.via);
+      const started = await runMappedSeries(ctx, result);
       if (result.outcome === "repointed") {
         return {
-          text:
-            `:twisted_rightwards_arrows: **Repointed** ${where} (${how}).\n` +
-            `Was <${mdTitleUrl(result.previousMdMangaId ?? "")}>\nNow <${mdTitleUrl(result.mdMangaId)}>\n` +
+          text: lines([
+            `:twisted_rightwards_arrows: **Repointed** ${where} (${how}).`,
+            `Was <${mdTitleUrl(result.previousMdMangaId ?? "")}>`,
+            `Now <${mdTitleUrl(result.mdMangaId)}>`,
             "Chapters already uploaded stay where they are; new ones land on the new title.",
+            started,
+          ].filter(Boolean)),
         };
       }
       return {
         text: lines([
           `:link: ${where} → <${mdTitleUrl(result.mdMangaId)}>`,
           `Read from the link you pasted (${how}).`,
+          started,
           // The queue row is the part an operator would otherwise forget, and
           // forgetting it means the series is offered for creation again.
           result.untrackedRow
@@ -4396,6 +4440,115 @@ function runIcon(state: string): string {
     default:
       return ":hourglass:";
   }
+}
+
+/**
+ * Start a run for the series a `/map` call just wired up.
+ *
+ * The same bargain the console's map forms make, for the same reason: a mapping
+ * does nothing until a run covers it, and the next scheduled one may be a day
+ * away, so the command that exists to start publishing a series ought to start
+ * publishing it. Scoped to the one series, which is what makes it affordable —
+ * one series' worth of requests, not the publisher's whole catalogue.
+ *
+ * It never fails the command. The mapping is already written by the time this
+ * runs, and a run that could not start is a second sentence rather than an
+ * error that hides the first.
+ */
+async function runMappedSeries(ctx: HandlerContext, result: SourceMapResult): Promise<string> {
+  if (ctx.options.boolean("run") === false) return "";
+  // A run's manga subset travels as a bare external id, which cannot name a
+  // catalogue. The server refuses one; saying so beats relaying its 409.
+  if (result.namespace) {
+    return (
+      `_Not run: \`${result.extension}\` keeps this id in the \`${result.namespace}\` catalogue, ` +
+      "and a run's series subset cannot name one. Run the extension instead._"
+    );
+  }
+  try {
+    const run = await ctx.api.triggerRun(ctx.actor, {
+      extension: result.extension,
+      kind: "FORCE",
+      mangaIds: [result.mangaId],
+      idempotencyKey: `discord:map:${ctx.interactionId}`,
+    });
+    return (
+      `:rocket: Running \`${result.extension}\` for this series alone: run \`${run.runId}\`. ` +
+      `Follow it with \`/runs show id:${run.runId}\`.`
+    );
+  } catch (err) {
+    return (
+      ":warning: Mapped, but the run did not start " +
+      `(${err instanceof Error ? err.message : String(err)}). ` +
+      `Start one with \`/run extension:${result.extension} series:${result.mangaId}\`.`
+    );
+  }
+}
+
+/** How long something took or has been idle: "3m 20s". */
+function span(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+/**
+ * Where the processor has got to on a run, or null if it has said nothing yet.
+ *
+ * INGESTING is the state with nothing else to report: the run is walking its
+ * titles one at a time and deciding nothing for most of them, so `/runs show`
+ * gave a state and a job list that both sat unchanged for minutes. Whether that
+ * meant "working" or "wedged" was not answerable from Discord at all.
+ *
+ * Two facts, answering different questions. The counter is progress; the age of
+ * the line is whether there IS progress. A heartbeat lands every 15 seconds
+ * while the loop turns, so one that is minutes old on a run still marked
+ * INGESTING is the stall itself, and is called out rather than left as a
+ * timestamp for the reader to subtract.
+ */
+const PROGRESS_STALE_MS = 90_000;
+
+function runProgress(run: { state: string; progress?: RunProgress | null }): string | null {
+  const progress = run.progress;
+  if (!progress) return null;
+  const fields = progress.fields ?? {};
+  const num = (key: string): number | null =>
+    typeof fields[key] === "number" && Number.isFinite(fields[key]) ? (fields[key] as number) : null;
+
+  const done = num("done");
+  const total = num("total");
+  const counted = done !== null && total !== null ? `${done} of ${total}` : null;
+  const elapsed = num("elapsedMs");
+
+  let text: string;
+  switch (progress.msg) {
+    case "processing run":
+      text = `starting on ${num("titles") ?? "?"} title(s)`;
+      break;
+    case "still processing run":
+      text = `title ${counted ?? "?"}`;
+      break;
+    case "checking for duplicate chapters":
+      text = `checking ${num("titles") ?? "?"} title(s) for duplicates`;
+      break;
+    case "still checking for duplicates":
+      text = `duplicates ${counted ?? "?"}`;
+      break;
+    case "run processed":
+      text = elapsed === null ? "processed" : `processed in ${span(elapsed)}`;
+      break;
+    default:
+      text = progress.msg;
+  }
+
+  const idleMs = Date.now() - new Date(progress.at).getTime();
+  // Only a run that is meant to be moving can be stalled; a finished run's last
+  // line is legitimately hours old.
+  if (run.state === "INGESTING" && Number.isFinite(idleMs) && idleMs > PROGRESS_STALE_MS) {
+    return `:warning: ${text} — nothing reported for **${span(idleMs)}**; probably stuck on one title`;
+  }
+  return `${text} _(${span(Math.max(0, idleMs))} ago)_`;
 }
 
 function workerIcon(status: string): string {

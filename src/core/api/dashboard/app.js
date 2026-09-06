@@ -1286,18 +1286,81 @@ function ago(value) {
   return `${Math.round(seconds / 86_400)}d ago`;
 }
 
+/** A bare length of time, with no direction attached: "3m 20s". */
+function span(seconds) {
+  const abs = Math.abs(Math.round(seconds));
+  return abs < 60
+    ? `${abs}s`
+    : abs < 3600
+      ? `${Math.floor(abs / 60)}m ${abs % 60}s`
+      : abs < 86_400
+        ? `${Math.floor(abs / 3600)}h ${Math.floor((abs % 3600) / 60)}m`
+        : `${Math.floor(abs / 86_400)}d ${Math.floor((abs % 86_400) / 3600)}h`;
+}
+
 /** Human-readable countdown; negative means the deadline has already passed. */
 function duration(seconds) {
-  const abs = Math.abs(Math.round(seconds));
-  const parts =
-    abs < 60
-      ? `${abs}s`
-      : abs < 3600
-        ? `${Math.floor(abs / 60)}m ${abs % 60}s`
-        : abs < 86_400
-          ? `${Math.floor(abs / 3600)}h ${Math.floor((abs % 3600) / 60)}m`
-          : `${Math.floor(abs / 86_400)}d ${Math.floor((abs % 86_400) / 3600)}h`;
+  const parts = span(seconds);
   return seconds < 0 ? `${parts} ago` : `in ${parts}`;
+}
+
+/**
+ * What the processor last said about a run, in one line.
+ *
+ * INGESTING is the state with no visible content: a run in it is walking its
+ * titles one at a time and deciding nothing for most of them, so the console
+ * showed a chip that sat there for six minutes and nothing else. Whether that
+ * meant "working" or "wedged" was unanswerable without shell access to the
+ * host, which is the whole reason this exists.
+ *
+ * Two numbers, and they answer different questions. The counter is progress.
+ * The age of the line is whether there IS progress: a heartbeat is emitted
+ * every 15 seconds while the loop turns, so one that is minutes old on a run
+ * still marked INGESTING is the stall, and it is called out as such rather than
+ * left as a timestamp to be worked out.
+ */
+const PROGRESS_STALE_MS = 90_000;
+
+function runProgressLine(progress, state) {
+  if (!progress) return null;
+  const f = progress.fields || {};
+  const at = new Date(progress.at).getTime();
+  const idleMs = Number.isFinite(at) ? Date.now() - at : 0;
+  // Only a run that is supposed to be moving can be stalled. A PROCESSED run's
+  // last line is hours old by design and means nothing is wrong.
+  const stalled = state === "INGESTING" && idleMs > PROGRESS_STALE_MS;
+  const counted =
+    Number.isFinite(f.done) && Number.isFinite(f.total) ? `${f.done} of ${f.total}` : null;
+
+  let text;
+  switch (progress.msg) {
+    case "processing run":
+      text = `starting on ${f.titles ?? "?"} title(s)`;
+      break;
+    case "still processing run":
+      text = `title ${counted ?? "?"}`;
+      break;
+    case "checking for duplicate chapters":
+      text = `checking ${f.titles ?? "?"} title(s) for duplicates`;
+      break;
+    case "still checking for duplicates":
+      text = `duplicates ${counted ?? "?"}`;
+      break;
+    case "run processed":
+      text = Number.isFinite(f.elapsedMs) ? `processed in ${span(f.elapsedMs / 1000)}` : "processed";
+      break;
+    default:
+      text = progress.msg;
+  }
+
+  return el("span", {
+    class: stalled ? "warn-text small" : "dim small",
+    text: stalled ? `${text} · no progress for ${span(idleMs / 1000)}` : text,
+    title: stalled
+      ? `The processor last reported ${ago(progress.at)}. It reports every 15s while it is ` +
+        "working, so this run is probably stuck on one title."
+      : `Reported ${ago(progress.at)}` + (f.mangaId ? `, after ${f.mangaId}` : ""),
+  });
 }
 
 const truncate = (text, max = 160) =>
@@ -3406,7 +3469,7 @@ VIEWS.runs = (route) => {
             rows.map((run) => [
               routeLink(routeTo("runs", run.id, null), run.extension),
               run.kind,
-              chip(run.state),
+              el("div", {}, chip(run.state), runProgressLine(run.progress, run.state)),
               // null means no segment has committed an envelope yet, which is not
               // the same as a run that found nothing, so it reads "-", not "0".
               run.chaptersFound == null
@@ -3572,7 +3635,11 @@ function runDetail(runId) {
         {},
         card(
           null,
-          row(chip(data.state), el("span", { class: "dim", text: `${data.kind} · ${data.extension}` })),
+          row(
+            chip(data.state),
+            el("span", { class: "dim", text: `${data.kind} · ${data.extension}` }),
+            runProgressLine(data.progress, data.state),
+          ),
           defs([
             ["Run", el("code", { text: data.id })],
             ["Extension", `${data.extension} @ ${data.extensionVersion}`],
@@ -10599,6 +10666,58 @@ function isPaused(item) {
 }
 
 /**
+ * Force a run over just these series.
+ *
+ * The buttons on the Runs card ask an extension for its whole catalogue, which
+ * is the wrong instrument for the two questions this page actually raises: "I
+ * have just mapped this series, where are its chapters" and "this one series is
+ * behind". Both are one series' worth of requests, and paying for the catalogue
+ * to answer them is why they get put off.
+ *
+ * Two kinds of row are dropped rather than sent, because the server refuses
+ * them and a button that produces a 409 is worse than one that says why:
+ *
+ *   - a series in a NAMED catalogue. A run's subset travels as a bare external
+ *     id, which cannot say which catalogue it belongs to.
+ *   - a PAUSED series. The manga map handed to a worker leaves paused series
+ *     out entirely, so naming one would fetch nothing; unpause it first.
+ */
+async function runTrackedSeries(name, items, button) {
+  const runnable = items.filter((item) => !item.namespace && !isPaused(item));
+  const dropped = items.length - runnable.length;
+  if (!runnable.length) {
+    return void toast(
+      items.length === 1
+        ? "that series is paused, or lives in a named catalogue; neither can be run on its own"
+        : "none of those can be run on their own: they are paused, or in a named catalogue",
+      false,
+    );
+  }
+  // The server's batch ceiling. Said here rather than let through as a schema
+  // error, because the useful half of the answer is what to do instead.
+  if (runnable.length > 2000) {
+    return void toast(
+      `a scoped run takes at most 2000 series and ${runnable.length} are listed; ` +
+        `narrow the search, or run ${name} unscoped from its Runs card`,
+      false,
+    );
+  }
+  const result = await act(
+    "run.FORCE",
+    () =>
+      api("/runs", {
+        method: "POST",
+        body: { extension: name, kind: "FORCE", mangaIds: runnable.map((item) => item.mangaId) },
+      }),
+    { button },
+  );
+  if (result && dropped) {
+    toast(`${dropped} of ${items.length} left out: paused, or in a named catalogue.`, false);
+  }
+  return result;
+}
+
+/**
  * Take a series out of runs for a while.
  *
  * The case this is for: a publisher whose free set is a frozen prefix, where a
@@ -10774,17 +10893,34 @@ function trackedCard(name, tracked) {
     list: "tracked-namespaces",
     "aria-label": "Catalogue",
   });
+  /*
+   * A new mapping does nothing until a run covers it, and the next scheduled
+   * one may be a day away. Checked by default because the reason to add a
+   * mapping is to start uploading the series, and the run it triggers is scoped
+   * to that series: it costs one series' worth of requests, not the
+   * catalogue's.
+   */
+  const runAfterAdd = el("input", { id: "tracked-run-after", type: "checkbox", checked: true });
+
+  /**
+   * What the search box currently narrows the map to. Shared by the table and
+   * by the "Run these" button, so the button acts on exactly the rows the
+   * operator can see; two copies of this filter would eventually disagree, and
+   * the disagreement would be a run over series nobody looked at.
+   */
+  const matchesIn = (rows, needle) =>
+    needle
+      ? rows.filter((item) =>
+          [item.mangaId, item.mdMangaId, item.source, item.namespace].some((field) => (field || "").toLowerCase().includes(needle)),
+        )
+      : rows;
 
   const body = live(
     [tracked],
     (data) => {
       const rows = data.tracked;
       const needle = search.value.trim().toLowerCase();
-      const matches = needle
-        ? rows.filter((item) =>
-            [item.mangaId, item.mdMangaId, item.source, item.namespace].some((field) => (field || "").toLowerCase().includes(needle)),
-          )
-        : rows;
+      const matches = matchesIn(rows, needle);
       return el(
         "div",
         {},
@@ -10818,6 +10954,11 @@ function trackedCard(name, tracked) {
                 })
               : el("span", { text: "active" }),
             [
+              gatedButton("runs:write", {
+                text: "Run",
+                title: "Force a run for this series alone",
+                onclick: (event) => void runTrackedSeries(name, [item], event.currentTarget),
+              }),
               gatedButton("tracked:write", {
                 text: "Repoint",
                 title: "Point this external id at a different MangaDex title",
@@ -10922,6 +11063,14 @@ function trackedCard(name, tracked) {
       mdMangaId,
       el("label", { class: "inline", for: "tracked-namespace", text: "Catalogue" }),
       namespaceInput,
+      can("runs:write")
+        ? el(
+            "label",
+            { class: "inline", for: "tracked-run-after", title: "Force a run for this series alone once it is mapped" },
+            runAfterAdd,
+            " Run it after adding",
+          )
+        : null,
       gatedButton("tracked:append", {
         class: "primary",
         text: "Add mapping",
@@ -10965,6 +11114,9 @@ function trackedCard(name, tracked) {
               { button, refresh: [tracked] },
             ).then((ok) => {
               if (ok) {
+                if (runAfterAdd.checked) {
+                  void runTrackedSeries(name, [{ mangaId: externalId, namespace }], button);
+                }
                 mangaId.value = "";
                 mdMangaId.value = "";
                 // The catalogue is deliberately kept: adding several rows to one
@@ -11029,6 +11181,34 @@ function trackedCard(name, tracked) {
     }),
     row(
       search,
+      gatedButton("runs:write", {
+        text: "Run these",
+        title: "Force a run over the series listed below, and no others",
+        onclick: async (event) => {
+          const button = event.currentTarget;
+          const items = matchesIn(tracked.data?.tracked ?? [], search.value.trim().toLowerCase());
+          const runnable = items.filter((item) => !item.namespace && !isPaused(item));
+          if (!runnable.length) {
+            return void toast("nothing in this list can be run on its own", false);
+          }
+          // Confirmed even though a force run deletes nothing: with an empty
+          // search box this button is the whole catalogue, and the count is the
+          // only thing that distinguishes that from the one series the operator
+          // filtered down to.
+          const ok = await confirmDialog({
+            title: `Force a run for ${runnable.length} series`,
+            lead: `${name} will be asked for these ${runnable.length} series and no others.`,
+            points: [
+              "Nothing is deleted; a force run only uploads what the extension returns.",
+              items.length > runnable.length
+                ? `${items.length - runnable.length} of the ${items.length} listed are paused or in a named catalogue, and are left out.`
+                : "Narrow the list with the search box first if that is more than you meant.",
+            ],
+            confirmLabel: `Run ${runnable.length} series`,
+          });
+          if (ok) await runTrackedSeries(name, runnable, button);
+        },
+      }),
       el("button", {
         type: "button",
         text: "Export map",
@@ -11080,6 +11260,8 @@ function bulkCurationCard(name, tracked) {
   });
   const preview = el("div", { id: "bulk-preview" });
   const applyRow = el("div", {});
+  /** Same bargain as the single-mapping form, over whatever the batch adds. */
+  const runAfterApply = el("input", { id: "bulk-run-after", type: "checkbox", checked: true });
 
   const OUTCOME_TONE = {
     added: "ok",
@@ -11208,6 +11390,19 @@ function bulkCurationCard(name, tracked) {
         { button: applyButton, refresh: [tracked] },
       );
       if (applied) {
+        // Only rows the batch actually put in the map: an unchanged row is
+        // already being run on its own schedule, and a rejected one has nothing
+        // to run. `removed` rows are gone, which is the point of removing them.
+        const added = (applied.results ?? []).filter(
+          (result) => result.outcome === "added" || result.outcome === "updated",
+        );
+        if (runAfterApply.checked && added.length) {
+          void runTrackedSeries(
+            name,
+            added.map((result) => ({ mangaId: result.mangaId, namespace: result.namespace ?? "" })),
+            applyButton,
+          );
+        }
         clear();
         text.value = "";
       }
@@ -11241,6 +11436,14 @@ function bulkCurationCard(name, tracked) {
         text: "Preview changes",
         onclick: (event) => void runPreview(event.currentTarget),
       }),
+      can("runs:write")
+        ? el(
+            "label",
+            { class: "inline", for: "bulk-run-after", title: "Force a run scoped to the series this batch adds" },
+            runAfterApply,
+            " Run what this adds",
+          )
+        : null,
       el("button", {
         type: "button",
         text: "Paste from clipboard",
@@ -11709,6 +11912,8 @@ function mapManyCard({ seed = "", heading = "Map many from links", onDone } = {}
   });
   const preview = el("div", { id: "map-many-preview" });
   const applyRow = el("div", {});
+  /** Same bargain as the other two add surfaces, one run per extension mapped. */
+  const runAfterApply = el("input", { id: "map-many-run-after", type: "checkbox", checked: true });
 
   const OUTCOME_TONE = {
     added: "ok",
@@ -11837,6 +12042,22 @@ function mapManyCard({ seed = "", heading = "Map many from links", onDone } = {}
             (applied.untrackedNote ? `. ${applied.untrackedNote}` : "."),
         }),
       );
+      // One scoped run per extension the paste touched. Grouped rather than
+      // one run per row, because a run is per-extension and twenty rows of one
+      // publisher are twenty times the work for the same answer.
+      if (runAfterApply.checked) {
+        const byExtension = new Map();
+        for (const result of applied.results ?? []) {
+          if (result.outcome !== "added" && result.outcome !== "updated") continue;
+          if (!result.extension || !result.mangaId) continue;
+          const items = byExtension.get(result.extension) ?? [];
+          items.push({ mangaId: result.mangaId, namespace: result.namespace ?? "" });
+          byExtension.set(result.extension, items);
+        }
+        for (const [extension, items] of byExtension) {
+          void runTrackedSeries(extension, items, applyButton);
+        }
+      }
       text.value = "";
       onDone?.(applied);
     });
@@ -11857,6 +12078,14 @@ function mapManyCard({ seed = "", heading = "Map many from links", onDone } = {}
         text: "Preview changes",
         onclick: (event) => void runPreview(event.currentTarget),
       }),
+      can("runs:write")
+        ? el(
+            "label",
+            { class: "inline", for: "map-many-run-after", title: "Force a run scoped to the series this paste maps" },
+            runAfterApply,
+            " Run what this adds",
+          )
+        : null,
       el("button", {
         type: "button",
         text: "Paste from clipboard",
@@ -12118,6 +12347,11 @@ VIEWS.tracked = () => {
                     })
                   : el("span", { text: "active" }),
                 [
+                  gatedButton("runs:write", {
+                    text: "Run",
+                    title: "Force a run for this series alone",
+                    onclick: (event) => void runTrackedSeries(item.extension, [item], event.currentTarget),
+                  }),
                   gatedButton("tracked:write", {
                     text: "Repoint",
                     title: "Point this external id at a different MangaDex title",
@@ -12198,6 +12432,19 @@ VIEWS.tracked = () => {
                 },
               },
             ),
+            row(
+              gatedButton("runs:write", {
+                text: "Run this page",
+                title: "Force a run over the series listed above, and no others",
+                onclick: (event) => void runListedSeries(data.tracked ?? [], event.currentTarget),
+              }),
+              el("span", {
+                class: "dim small",
+                text:
+                  "Runs the rows on this page only. Narrow the filter, or page through, " +
+                  "to run a different set.",
+              }),
+            ),
             trackedPager(data, walked(), page),
           ),
         { reserve: 300, skeleton: () => skeletonTable(9, 8) },
@@ -12208,6 +12455,45 @@ VIEWS.tracked = () => {
     mapSyncCard(null),
   );
 };
+
+/**
+ * Force a run over a mixed list of series, one run per extension.
+ *
+ * This listing crosses extensions and a run does not, so the rows are grouped
+ * before they are sent: twenty comikey rows and three omoi rows are two runs,
+ * not twenty-three. `runTrackedSeries` still decides what each run may carry.
+ */
+async function runListedSeries(items, button) {
+  const runnable = items.filter((item) => !item.namespace && !isPaused(item));
+  if (!runnable.length) {
+    return void toast("nothing on this page can be run on its own", false);
+  }
+  const byExtension = new Map();
+  for (const item of runnable) {
+    const group = byExtension.get(item.extension) ?? [];
+    group.push(item);
+    byExtension.set(item.extension, group);
+  }
+  const shape = [...byExtension]
+    .map(([extension, group]) => `${extension} · ${group.length}`)
+    .join(", ");
+  const ok = await confirmDialog({
+    title: `Force ${byExtension.size} run(s) over ${runnable.length} series`,
+    lead: "Each extension is asked for its listed series and no others.",
+    points: [
+      shape,
+      "Nothing is deleted; a force run only uploads what the extension returns.",
+      items.length > runnable.length
+        ? `${items.length - runnable.length} of the ${items.length} rows are paused or in a named catalogue, and are left out.`
+        : "Only the rows on this page are run.",
+    ],
+    confirmLabel: `Run ${runnable.length} series`,
+  });
+  if (!ok) return;
+  for (const [extension, group] of byExtension) {
+    await runTrackedSeries(extension, group, button);
+  }
+}
 
 /** Walk the map a page at a time; the count is what makes the paging honest. */
 function trackedPager(data, trail, go) {

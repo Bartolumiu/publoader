@@ -255,6 +255,180 @@ describe.skipIf(!dbReady())("control-plane API", () => {
   });
 
   /**
+   * Running one series, or a handful, instead of the publisher's whole
+   * catalogue: what the tracked-series page's Run buttons ask for.
+   *
+   * The interesting part is what the endpoint refuses to carry. A scope needs
+   * both of a series' names, so it is resolved from the map rather than trusted
+   * from the caller; ids the map does not have would send a worker after a
+   * series whose chapters could not be uploaded, and paused ids would be handed
+   * to a worker whose manga map deliberately omits them.
+   */
+  it("scopes a run to named series, dropping ids that are untracked or paused", async () => {
+    await publishBundle();
+    await prisma.trackedManga.createMany({
+      data: [
+        {
+          extension: "mangaplus",
+          mangaId: "100002",
+          mdMangaId: "b3c7e5d1-0000-4000-8000-000000000002",
+        },
+        {
+          extension: "mangaplus",
+          mangaId: "100003",
+          mdMangaId: "b3c7e5d1-0000-4000-8000-000000000003",
+          recheckAfter: new Date(Date.now() + 86_400_000),
+        },
+      ],
+    });
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/runs",
+      headers: admin,
+      payload: {
+        extension: "mangaplus",
+        kind: "FORCE",
+        mangaIds: ["100002", "100003", "does-not-exist"],
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json();
+    expect(body.scopedTo).toBe(1);
+    expect(body.skipped).toEqual({ unknown: ["does-not-exist"], paused: ["100003"] });
+
+    // Both halves of the scope, and only the runnable series in each: the
+    // MangaDex ids the processor trusts the snapshot about...
+    const run = await prisma.run.findUniqueOrThrow({ where: { id: body.runId } });
+    expect(run.scopeMangaIds).toEqual(["b3c7e5d1-0000-4000-8000-000000000002"]);
+    // ...and the external ids the worker fetches, as one unpartitioned job.
+    const jobs = await prisma.job.findMany({ where: { runId: body.runId } });
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.segmentMangaIds).toEqual(["100002"]);
+  });
+
+  /**
+   * INGESTING is the state with nothing to show: the processor walks its titles
+   * one at a time and logs nothing for a title that decided nothing, so both the
+   * console and the bot showed a chip that sat unchanged for minutes. The
+   * heartbeat lands in `log_events` under its own component; these two routes
+   * are what turn it into an answer.
+   */
+  it("reports where a run has got to, newest line only, on the list and the run", async () => {
+    await publishBundle();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/runs",
+      headers: admin,
+      payload: { extension: "mangaplus", kind: "CLEAN" },
+    });
+    const runId = created.json().runId;
+
+    // Two beats and a line from another component, which must not win: the
+    // reader takes the newest PROGRESS line, not the newest line.
+    await prisma.logEvent.createMany({
+      data: [
+        {
+          level: 30,
+          service: "core-processor",
+          component: "run-progress",
+          runId,
+          msg: "still processing run",
+          fields: { done: 100, total: 900, elapsedMs: 30_000 },
+          createdAt: new Date(Date.now() - 60_000),
+        },
+        {
+          level: 30,
+          service: "core-processor",
+          component: "run-progress",
+          runId,
+          msg: "still processing run",
+          fields: { done: 412, total: 900, elapsedMs: 90_000, mangaId: "abc" },
+          createdAt: new Date(Date.now() - 30_000),
+        },
+        {
+          level: 30,
+          service: "core-processor",
+          component: null,
+          runId,
+          msg: "manga processed",
+          fields: { mangaId: "zzz" },
+          createdAt: new Date(),
+        },
+      ],
+    });
+
+    const detail = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/runs/${runId}`,
+      headers: admin,
+    });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json().run.progress).toMatchObject({
+      msg: "still processing run",
+      fields: { done: 412, total: 900 },
+    });
+
+    // The list answers for the whole page in one statement, so the runs table
+    // can show progress without 25 round trips.
+    const list = await app.inject({ method: "GET", url: "/api/v1/admin/runs", headers: admin });
+    const listed = list.json().runs.find((r: { id: string }) => r.id === runId);
+    expect(listed.progress.fields.done).toBe(412);
+  });
+
+  it("reports no progress for a run the processor has not reached", async () => {
+    await publishBundle();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/runs",
+      headers: admin,
+      payload: { extension: "mangaplus", kind: "FORCE" },
+    });
+    const detail = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/runs/${created.json().runId}`,
+      headers: admin,
+    });
+    // Null, not an empty object: "has not started" and "started and reported
+    // nothing" are different, and only one of them is worth worrying about.
+    expect(detail.json().run.progress).toBeNull();
+  });
+
+  it("refuses a scoped run over a named catalogue, which a bare external id cannot address", async () => {
+    await publishBundle();
+    await prisma.trackedManga.create({
+      data: {
+        extension: "mangaplus",
+        namespace: "vizmanga",
+        mangaId: "709",
+        mdMangaId: "b3c7e5d1-0000-4000-8000-000000000004",
+      },
+    });
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/runs",
+      headers: admin,
+      payload: { extension: "mangaplus", mangaIds: ["709"], namespace: "vizmanga" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().namespace).toBe("vizmanga");
+    expect(await prisma.run.count()).toBe(0);
+  });
+
+  it("refuses a scoped run naming nothing runnable, rather than running the whole catalogue", async () => {
+    await publishBundle();
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/admin/runs",
+      headers: admin,
+      payload: { extension: "mangaplus", mangaIds: ["nope"] },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().unknown).toEqual(["nope"]);
+    expect(await prisma.run.count()).toBe(0);
+  });
+
+  /**
    * viz reuses numeric ids across its `shonenjump` and `vizmanga` catalogues, so
    * the lease has to say which catalogue an id belongs to. The flat shape cannot,
    * hence the second wire form; and `mangaIdMapNamespaced` so a runner that does

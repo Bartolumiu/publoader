@@ -103,6 +103,7 @@ function apiRoutes(): { match: RegExp; body: unknown }[] {
     },
     { match: /\/stats$/, body: { paused: false, workers: {}, jobs: {}, uploadTasks: [], quarantined: 0 } },
     { match: /\/runs\?limit=1/, body: { runs: [] } },
+    { match: /\/runs$/, body: { runId: "r1", created: true, scopedTo: 1 } },
     { match: /\/source\/resolve/, body: { match: null, reason: "nothing" } },
     { match: /\/tracked\/extensions$/, body: FACETS },
     { match: /\/tracked\?/, body: () => LISTING() },
@@ -270,5 +271,40 @@ describe("the series map across every extension", () => {
     await settle();
     const [deleted] = calls.filter((c) => c.method === "DELETE");
     expect(String(deleted!.path)).toContain("/extensions/mangaplus/tracked/100818");
+  });
+
+  /**
+   * The reason a mapping exists is to publish the series, and until a run
+   * covers it nothing does. From this page that used to mean going to the
+   * extension and running its whole catalogue.
+   */
+  it("runs one series without running its extension's catalogue", async () => {
+    buttonLabelled("Run", rowFor("100818")).click();
+    await settle();
+    const [triggered] = calls.filter((c) => c.method === "POST" && /\/runs$/.test(c.path));
+    expect(triggered!.body).toEqual({
+      extension: "mangaplus",
+      kind: "FORCE",
+      mangaIds: ["100818"],
+    });
+  });
+
+  it("runs the whole page as one run per extension, not one per row", async () => {
+    buttonLabelled("Run this page").click();
+    await settle();
+    const modal = doc.getElementById("modal");
+    // Named per extension, because that is how many runs the click makes.
+    expect(modal.textContent).toContain("comikey · 1");
+    expect(modal.textContent).toContain("mangaplus · 1");
+    buttonLabelled("Run 3 series", modal).click();
+    await settle();
+
+    const triggered = calls.filter((c) => c.method === "POST" && /\/runs$/.test(c.path));
+    expect(triggered).toHaveLength(3);
+    expect(triggered.map((c) => c.body.extension).sort()).toEqual(["comikey", "mangaplus", "omoi"]);
+    // Each run carries only its own extension's series.
+    expect(triggered.find((c) => c.body.extension === "comikey")!.body.mangaIds).toEqual([
+      "kengan-omega",
+    ]);
   });
 });
