@@ -1017,18 +1017,34 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
 
     /** Distinct services and components present, for the log page's filters. */
     scope.get("/api/v1/admin/logs/sources", { preHandler: requireScope("runs:read") }, async () => {
+      // `groupBy`, not `findMany({ distinct })`. Prisma applies `distinct` in
+      // the client, so it must read every matching row before it can dedupe
+      // one: `take` bounds the result, not the fetch. Against a `log_events`
+      // that grows without bound that is the whole table into node's heap,
+      // which is exactly what it did -- this route OOM-killed core-api and the
+      // process restarted, so the caller saw a 502 with no error logged and
+      // every other request in flight died with it.
+      //
+      // `groupBy` is a real SQL GROUP BY: the database returns one row per
+      // distinct value and memory is bounded by the number of distinct
+      // services, which is single digits. `orderBy` is required by Prisma
+      // alongside `take` here, and doubles as the sort the response wants.
       const [services, components] = await Promise.all([
-        ctx.prisma.logEvent.findMany({ distinct: ["service"], select: { service: true }, take: 50 }),
-        ctx.prisma.logEvent.findMany({
-          distinct: ["component"],
-          select: { component: true },
+        ctx.prisma.logEvent.groupBy({
+          by: ["service"],
+          orderBy: { service: "asc" },
+          take: 50,
+        }),
+        ctx.prisma.logEvent.groupBy({
+          by: ["component"],
           where: { component: { not: null } },
+          orderBy: { component: "asc" },
           take: 200,
         }),
       ]);
       return {
-        services: services.map((row) => row.service).sort(),
-        components: components.map((row) => row.component).filter(Boolean).sort(),
+        services: services.map((row) => row.service),
+        components: components.map((row) => row.component).filter(Boolean),
       };
     });
 

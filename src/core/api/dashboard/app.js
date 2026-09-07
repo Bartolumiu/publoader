@@ -5207,8 +5207,17 @@ function queueRestaggerDialog(scope, tasks, done) {
     type: "number",
     min: "1",
     max: String(MAX_GAP_SECONDS),
+    // A placeholder until the standing pace arrives below, not the answer. This
+    // used to be the answer: the field opened on 60 whatever the queue actually
+    // ran at, so a queue pacing one every 10s described itself as one a minute
+    // and the operator had no way to tell from this dialog. Pressing the button
+    // then silently re-spaced the queue six times slower than it had been.
     value: "60",
   });
+  // Cleared once the operator types, so a slow settings fetch cannot overwrite
+  // a number they chose deliberately.
+  let gapTouched = false;
+  const standing = { spacingSeconds: null };
   const keepPacing = el("input", {
     id: "restagger-persist",
     type: "checkbox",
@@ -5248,12 +5257,40 @@ function queueRestaggerDialog(scope, tasks, done) {
     // "up to" for a selection: the ticks can include a DONE or LEASED row, and
     // the server moves neither. The toast afterwards reports what actually did.
     const noun = ids ? `up to ${pending} selected row(s)` : `${pending} queued`;
+    // The pace in force is named alongside the one being typed. Without it the
+    // dialog describes only the future, and an operator cannot see whether they
+    // are about to speed the queue up, slow it down, or change nothing at all.
+    const inForce =
+      standing.spacingSeconds === null
+        ? ""
+        : standing.spacingSeconds > 0
+          ? ` New chapters currently queue one every ${standing.spacingSeconds}s.`
+          : " New chapters currently spread evenly across the day (auto).";
     outcome.textContent =
       `${noun}, one every ${gapSeconds}s. The last one becomes claimable ` +
-      `${duration((pending - 1) * gapSeconds)}.`;
+      `${duration((pending - 1) * gapSeconds)}.${inForce}`;
     return gapSeconds;
   };
-  gap.oninput = describe;
+  gap.oninput = () => {
+    gapTouched = true;
+    describe();
+  };
+
+  // Best-effort like the count above: a failed read costs the prefill, not the
+  // dialog. `spacingSeconds: 0` is "auto", which is not a gap this field can
+  // hold, so the placeholder stands and the note says so instead.
+  if (can("settings:read")) {
+    void api("/upload-schedule", { quiet: true })
+      .then((view) => {
+        const seconds = Number(view?.global?.spacingSeconds);
+        standing.spacingSeconds = Number.isFinite(seconds) ? seconds : null;
+        if (!gapTouched && standing.spacingSeconds > 0) {
+          gap.value = String(standing.spacingSeconds);
+        }
+        describe();
+      })
+      .catch(() => {});
+  }
   scoped.onchange = () => {
     // The standing pace follows the whole queue, so widening back to it makes
     // the "keep this pace" offer meaningful again.

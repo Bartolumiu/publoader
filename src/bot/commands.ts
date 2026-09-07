@@ -3692,7 +3692,7 @@ const commands: BotCommand[] = [
           includeAcknowledged: ctx.options.boolean("include-acknowledged") === true,
           limit: 15,
         });
-        const rows = Array.isArray(result.collisions) ? result.collisions : [];
+        const rows = Array.isArray(result.entries) ? result.entries : [];
         if (rows.length === 0) {
           return { text: "No collisions outstanding.", title: "Collisions", tone: "ok" };
         }
@@ -4304,7 +4304,7 @@ const commands: BotCommand[] = [
       ),
     async run(ctx) {
       const hours = ctx.options.integer("hours") ?? 24;
-      const { events } = await ctx.api.activity(ctx.actor, {
+      const { activity: events = [] } = await ctx.api.activity(ctx.actor, {
         severity: (ctx.options.string("severity") as "error" | "warn" | "all" | null) ?? "all",
         hours,
         extension: ctx.options.string("extension") ?? undefined,

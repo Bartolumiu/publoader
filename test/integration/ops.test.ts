@@ -428,6 +428,49 @@ describe.skipIf(!dbReady())("operational triage endpoints", () => {
     expect(paged.statusCode).toBe(400);
   });
 
+  /**
+   * `log_events` is the one table that grows without bound and is never
+   * truncated, so this route has to answer from an aggregate rather than by
+   * reading rows. It used to use `findMany({ distinct })`, which Prisma applies
+   * in the client: every row had to be fetched before it could dedupe one, and
+   * `take` bounded the reply rather than the read. In production that was the
+   * whole table into node's heap -- core-api was OOM-killed and restarted on
+   * each call, so the caller got a 502, nothing was logged, and every other
+   * in-flight request died with the process.
+   *
+   * What this pins is the response contract -- deduplicated, null-free and
+   * sorted -- not the memory behaviour: at four rows the old client-side
+   * `distinct` answers correctly too, and the failure only appears at a table
+   * size no test should have to build. The guard against the crash itself is
+   * the `groupBy` in the route and the comment above it; this test is here so a
+   * rewrite back to row-reading has to at least stay correct, and so the route
+   * has coverage at all, which it had none of when it was taking the API down.
+   */
+  it("answers the log sources from distinct values, not by reading every row", async () => {
+    await prisma.logEvent.createMany({
+      data: [
+        { level: 30, service: "srcs-alpha", component: "one", msg: "a" },
+        { level: 30, service: "srcs-alpha", component: "one", msg: "b" },
+        { level: 40, service: "srcs-beta", component: "two", msg: "c" },
+        { level: 30, service: "srcs-beta", component: null, msg: "d" },
+      ],
+    });
+
+    const res = await app.inject({ method: "GET", url: "/api/v1/admin/logs/sources", headers: root });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { services: string[]; components: string[] };
+
+    // Deduplicated: four rows carry two services and two components.
+    expect(body.services).toContain("srcs-alpha");
+    expect(body.services).toContain("srcs-beta");
+    expect(body.services.filter((s) => s === "srcs-alpha")).toHaveLength(1);
+    expect(body.components.filter((c) => c === "one")).toHaveLength(1);
+    // The null component is dropped rather than surfacing as a blank filter.
+    expect(body.components).not.toContain(null);
+    // Sorted, because the picker that renders this does not sort it itself.
+    expect([...body.services].sort()).toEqual(body.services);
+  });
+
   it("treats a dedupe-key search as text, not as a LIKE pattern", async () => {
     // `%` in a key an operator pasted must match a literal `%`, or the search
     // quietly returns the whole queue.

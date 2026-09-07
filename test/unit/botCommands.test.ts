@@ -1960,8 +1960,12 @@ describe("/throttle", () => {
 
 describe("/activity", () => {
   it("renders the feed worst-first with its window in the title", async () => {
+    // `activity` is the key `GET /api/v1/admin/activity` actually returns. The
+    // fixtures here said `events`, so they agreed with the client's mistaken
+    // read and stayed green while the live command threw "Cannot read
+    // properties of undefined (reading 'length')" on every invocation.
     const activity = vi.fn().mockResolvedValue({
-      events: [
+      activity: [
         { kind: "run", severity: "error", at: "2026-07-29T15:00:00Z", message: "scrape failed", extension: "omoi" },
       ],
     });
@@ -1973,14 +1977,14 @@ describe("/activity", () => {
   });
 
   it("says so plainly when nothing happened", async () => {
-    const activity = vi.fn().mockResolvedValue({ events: [] });
+    const activity = vi.fn().mockResolvedValue({ activity: [] });
     const reply = await invoke("activity", fakeApi({ activity }), {});
     expect(reply.text).toContain("Nothing in the last 24h");
     expect(reply.tone).toBe("ok");
   });
 
   it("notes hidden audit entries only when the caller lacks the scope", async () => {
-    const activity = vi.fn().mockResolvedValue({ events: [] });
+    const activity = vi.fn().mockResolvedValue({ activity: [] });
     const withAudit = await invoke("activity", fakeApi({ activity }), {}, undefined, ["runs:read", "audit:read"]);
     expect(withAudit.footer).toBeUndefined();
     const without = await invoke("activity", fakeApi({ activity }), {}, undefined, ["runs:read"]);
@@ -2326,8 +2330,15 @@ describe("/chapters", () => {
   it("lists collisions and points writes at the dashboard", async () => {
     // The bot cannot resolve one: every chapter write route refuses an
     // api-token principal outright, so offering the action would be a lie.
+    // `entries` is what `GET /api/v1/admin/chapters/collisions` returns
+    // (`{ ok, entries, total, outstanding }`). This fixture used to say
+    // `collisions`, which is the name the client wrongly read -- so the test
+    // agreed with the bug and passed while the real command answered "No
+    // collisions outstanding." against a route that had just listed some.
     const chapterCollisions = vi.fn().mockResolvedValue({
-      collisions: [{ mdChapterId: "cccccccc-1", extension: "k_manga", chapterNumber: "36.1" }],
+      ok: true,
+      entries: [{ mdChapterId: "cccccccc-1", extension: "k_manga", chapterNumber: "36.1" }],
+      total: 1,
     });
     const reply = await invoke("chapters", fakeApi({ chapterCollisions }), {}, "collisions");
     expect(reply.text).toContain("k_manga");
@@ -2338,7 +2349,7 @@ describe("/chapters", () => {
   it("is calm when there are no collisions", async () => {
     const reply = await invoke(
       "chapters",
-      fakeApi({ chapterCollisions: vi.fn().mockResolvedValue({ collisions: [] }) }),
+      fakeApi({ chapterCollisions: vi.fn().mockResolvedValue({ ok: true, entries: [], total: 0 }) }),
       {},
       "collisions",
     );

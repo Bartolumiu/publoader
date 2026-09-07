@@ -1006,7 +1006,12 @@ export class AdminApiClient {
   chapterCollisions(
     actor: string,
     query: { extension?: string; includeAcknowledged?: boolean; limit?: number },
-  ): Promise<{ collisions?: unknown[]; total?: number; [key: string]: unknown }> {
+    // The route pages under `entries` (`{ ok, entries, total, outstanding }`).
+    // This said `collisions`, and because the caller guarded the read with
+    // `Array.isArray` the miss never threw -- `/chapters collisions` simply
+    // answered "No collisions outstanding." every time, including when there
+    // were some.
+  ): Promise<{ entries?: unknown[]; total?: number; [key: string]: unknown }> {
     return this.request({
       method: "GET",
       path: "/api/v1/admin/chapters/collisions",
@@ -1371,7 +1376,11 @@ export class AdminApiClient {
     });
   }
 
-  activity(actor: string, query: ActivityQuery): Promise<{ events: ActivityEvent[] }> {
+  // The route calls the list `activity`, not `events`, and the dashboard reads
+  // it under that name. This said `events`, and since `request` casts the JSON
+  // rather than checking it, nothing caught the difference until `/activity`
+  // reached `undefined.length` at runtime.
+  activity(actor: string, query: ActivityQuery): Promise<{ activity: ActivityEvent[] }> {
     return this.request({
       method: "GET",
       path: "/api/v1/admin/activity",
