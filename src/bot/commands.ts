@@ -260,6 +260,23 @@ function age(value: string | null | undefined): string {
   return `${Math.round(minutes / 60)}h ago`;
 }
 
+/**
+ * How long a worker may go quiet before `ACTIVE` stops describing it.
+ *
+ * `status` is the administrative state -- what an operator set -- and it keeps
+ * saying ACTIVE long after the host stopped answering, which is how the roster
+ * came to show `ACTIVE/TRUSTED, heartbeat 7h ago` and mean it. Workers beat
+ * about once a minute, so five is several missed in a row rather than one slow
+ * one.
+ */
+const HEARTBEAT_STALE_MS = 5 * 60 * 1000;
+
+function heartbeatStale(value: string | null | undefined): boolean {
+  if (!value) return true;
+  const beat = new Date(value).getTime();
+  return !Number.isFinite(beat) || Date.now() - beat > HEARTBEAT_STALE_MS;
+}
+
 function counts(record: Record<string, number>): string {
   const entries = Object.entries(record).filter(([, n]) => n > 0);
   if (entries.length === 0) return "none";
@@ -350,63 +367,105 @@ export class UserError extends Error {
 
 // ---- status ---------------------------------------------------------------
 
+/** Terminal, and someone has to look at it. */
+const ATTENTION_STATES = new Set(["DEAD_LETTER", "FAILED"]);
+/** Terminal and finished with. Counted, never listed. */
+const SETTLED_STATES = new Set(["DONE", "SUCCEEDED", "CANCELLED"]);
+
+/** Thousands separators: `19321` and `19,321` do not read at the same speed. */
+function num(value: number): string {
+  return value.toLocaleString("en-US");
+}
+
+/**
+ * Sort counted states into the three things a reader does with them.
+ *
+ * Every count used to be printed in one flat run, which put the lifetime totals
+ * -- by far the largest numbers -- in front of the two or three that describe
+ * right now. `UPLOAD/DONE=22264` is not news; `UPLOAD/PENDING=19321` beside it
+ * is the queue, and `UNAVAILABLE/DEAD_LETTER=2` is the thing to go and fix.
+ * Anything unrecognised counts as live, so a state added later shows up as work
+ * in progress rather than silently joining the finished pile.
+ */
+function triage(rows: { label: string; state: string; count: number }[]): {
+  live: string[];
+  needsLook: string[];
+  needsLookTotal: number;
+  settled: number;
+} {
+  const live: string[] = [];
+  const needsLook: string[] = [];
+  let needsLookTotal = 0;
+  let settled = 0;
+  for (const row of rows) {
+    if (row.count <= 0) continue;
+    if (SETTLED_STATES.has(row.state)) {
+      settled += row.count;
+    } else if (ATTENTION_STATES.has(row.state)) {
+      needsLook.push(`${row.label}=${num(row.count)}`);
+      needsLookTotal += row.count;
+    } else {
+      live.push(`${row.label}=${num(row.count)}`);
+    }
+  }
+  return { live, needsLook, needsLookTotal, settled };
+}
+
+/** One line per group, worst first, so the eye stops at the problem. */
+function renderTriage(group: ReturnType<typeof triage>, settledNoun: string): string {
+  const parts: string[] = [];
+  if (group.needsLook.length > 0) parts.push(`⚠ ${group.needsLook.join(" ")}`);
+  if (group.live.length > 0) parts.push(group.live.join(" "));
+  if (group.settled > 0) parts.push(`${num(group.settled)} ${settledNoun}`);
+  return parts.length > 0 ? parts.join("\n") : "none";
+}
+
 async function statusReply(ctx: HandlerContext): Promise<BotReply> {
   const stats = await ctx.api.stats(ctx.actor);
   const fields: NonNullable<BotReply["fields"]> = [];
 
-  fields.push({ name: "Jobs", value: counts(stats.jobs), inline: true });
+  const jobs = triage(
+    Object.entries(stats.jobs).map(([state, count]) => ({ label: state, state, count })),
+  );
+  const tasks = triage(
+    (stats.uploadTasks ?? []).map((d) => ({ label: `${d.kind}/${d.state}`, state: d.state, count: d.count })),
+  );
 
-  const depths = (stats.uploadTasks ?? []).filter((d) => d.count > 0);
-  fields.push({
-    name: "Upload tasks",
-    value: depths.length > 0 ? depths.map((d) => `${d.kind}/${d.state}=${d.count}`).join(" ") : "none queued",
-    inline: true,
-  });
-
+  // Widest content first and full width: the queue depth is the number most
+  // people open this for, and it is the one that no longer fits an inline third.
+  fields.push({ name: "Upload tasks", value: renderTriage(tasks, "finished") });
+  fields.push({ name: "Jobs", value: renderTriage(jobs, "finished"), inline: true });
   fields.push({ name: "Workers", value: counts(stats.workers), inline: true });
   fields.push({
     name: "Quarantined",
-    value: stats.quarantined > 0 ? `${stats.quarantined} — see \`/quarantine\`` : "0",
+    value: stats.quarantined > 0 ? `${num(stats.quarantined)} — see \`/quarantine\`` : "0",
     inline: true,
   });
 
-  // The fleet is only fetched for someone entitled to see it. Asking and
-  // catching the 403 would work, but it spends a request to learn something
-  // already known, and it puts "you cannot see this" in front of a person who
-  // did not ask about workers — a reply should be shaped to its reader, not
-  // annotated with what was withheld from them.
-  let fleetHidden = false;
-  if (ctx.can("workers:read")) {
-    try {
-      const { workers } = await ctx.api.workers(ctx.actor);
-      if (workers.length > 0) {
-        const fleet = workers
-          .slice(0, 10)
-          .map((w) => `• \`${w.name}\`: ${w.status}/${w.trust}, heartbeat ${age(w.lastHeartbeatAt)}`);
-        if (workers.length > 10) fleet.push(`…and ${workers.length - 10} more`);
-        fields.push({ name: "Fleet", value: fleet.join("\n") });
-      }
-    } catch (err) {
-      // `can()` answers optimistically when the caller's scopes could not be
-      // resolved, so the 403 is still reachable and must not take the whole
-      // status command down with it — the rest of the reply is still useful.
-      if (err instanceof AdminApiError && err.status === 403) {
-        fleetHidden = true;
-        fields.push({ name: "Fleet", value: "not shown: the bot's token lacks `workers:read`." });
-      } else {
-        throw err;
-      }
-    }
-  } else {
-    fleetHidden = true;
-  }
+  // Named rather than counted. "Platform healthy" printed above fourteen
+  // dead-lettered jobs is the reply contradicting itself, and the headline is
+  // the part people quote.
+  const trouble: string[] = [];
+  if (jobs.needsLookTotal > 0) trouble.push(`${num(jobs.needsLookTotal)} job(s) dead-lettered`);
+  if (tasks.needsLookTotal > 0) trouble.push(`${num(tasks.needsLookTotal)} upload task(s) dead-lettered`);
+  if (stats.quarantined > 0) trouble.push(`${num(stats.quarantined)} quarantined`);
 
+  const healthy = trouble.length === 0;
   return {
-    text: stats.paused ? "The platform is **paused**: nothing is being scheduled or dispatched." : "Running normally.",
-    title: stats.paused ? "Platform paused" : "Platform healthy",
-    tone: stats.paused ? "warn" : stats.quarantined > 0 ? "warn" : "ok",
+    text: stats.paused
+      ? "The platform is **paused**: nothing is being scheduled or dispatched."
+      : healthy
+        ? "Running normally."
+        : `Running, but ${trouble.join(", ")}. Dead-lettered work has exhausted its retries: it stays there until someone retries or clears it.`,
+    title: stats.paused ? "Platform paused" : healthy ? "Platform healthy" : "Platform running, with a backlog to clear",
+    tone: stats.paused || !healthy ? "warn" : "ok",
     fields,
-    footer: fleetHidden && !ctx.can("workers:read") ? "Some sections are hidden by your permissions." : undefined,
+    // The fleet used to be inlined here, which meant a second request on every
+    // status, a permissions dance for a section nobody had asked for, and the
+    // same four workers listed under a "Workers ACTIVE=4" that had just counted
+    // them. `/workers list` already existed and says it better -- with the
+    // heartbeat ages that make "ACTIVE" worth reading.
+    footer: ctx.can("workers:read") ? "Fleet and heartbeat ages: `/workers list`." : undefined,
   };
 }
 
@@ -860,12 +919,12 @@ function describeView(view: BotAuthzView): string {
 const commands: BotCommand[] = [
   {
     name: "status",
-    description: "Platform health: pause state, job counts, upload-task depths, worker fleet.",
+    description: "Platform health: pause state, job counts, upload-task depths.",
     sensitivity: "read",
     ephemeral: false,
     builder: new SlashCommandBuilder()
       .setName("status")
-      .setDescription("Platform health: pause state, job counts, upload-task depths, worker fleet."),
+      .setDescription("Platform health: pause state, job counts, upload-task depths."),
     run: statusReply,
   },
   {
@@ -2144,12 +2203,27 @@ const commands: BotCommand[] = [
         if (workers.length === 0) {
           return { text: "No workers enrolled. Mint an enrollment token with `/enroll`." };
         }
-        const rendered = workers.map(
-          (w) =>
-            `${workerIcon(w.status)} \`${w.name}\`: ${w.status}/${w.trust}, agent ${w.agentVersion ?? "?"}, ` +
-            `heartbeat ${age(w.lastHeartbeatAt)}\n   id \`${w.id}\``,
-        );
-        return { text: lines([`**${workers.length} worker(s)**`, ...rendered]) };
+        const rendered = workers.map((w) => {
+          // Only worth saying of a worker that is supposed to be taking jobs: a
+          // DRAINED or REVOKED one is quiet because someone made it quiet.
+          const silent = w.status === "ACTIVE" && heartbeatStale(w.lastHeartbeatAt);
+          return (
+            `${silent ? ":orange_circle:" : workerIcon(w.status)} \`${w.name}\`: ${w.status}/${w.trust}, ` +
+            `agent ${w.agentVersion ?? "?"}, heartbeat ${age(w.lastHeartbeatAt)}` +
+            `${silent ? " — **not reporting**" : ""}\n   id \`${w.id}\``
+          );
+        });
+        const silentCount = workers.filter(
+          (w) => w.status === "ACTIVE" && heartbeatStale(w.lastHeartbeatAt),
+        ).length;
+        return {
+          text: lines([`**${workers.length} worker(s)**`, ...rendered]),
+          footer:
+            silentCount > 0
+              ? `${silentCount} marked ACTIVE ${silentCount === 1 ? "has" : "have"} not beaten in over 5 minutes; ` +
+                "ACTIVE is the state someone set, not proof the host is up."
+              : undefined,
+        };
       }
       const id = requireString(ctx.options, "id");
 

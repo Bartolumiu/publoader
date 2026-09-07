@@ -155,23 +155,8 @@ describe("/status", () => {
     paused: false,
   };
 
-  it("reports pause state, job counts, queue depths and the fleet", async () => {
-    const api = fakeApi({
-      stats: vi.fn().mockResolvedValue(stats),
-      workers: vi.fn().mockResolvedValue({
-        workers: [
-          {
-            id: "w1",
-            name: "alpha",
-            status: "ACTIVE",
-            trust: "TRUSTED",
-            lastHeartbeatAt: new Date().toISOString(),
-            agentVersion: "1.0.0",
-            createdAt: new Date().toISOString(),
-          },
-        ],
-      }),
-    });
+  it("reports pause state, job counts and queue depths", async () => {
+    const api = fakeApi({ stats: vi.fn().mockResolvedValue(stats) });
     const reply = await invoke("status", api);
     // The numbers moved into embed fields; the text is now the one-line verdict.
     const rendered = fieldText(reply);
@@ -179,7 +164,59 @@ describe("/status", () => {
     expect(reply.tone).toBe("ok");
     expect(rendered).toContain("QUEUED=3");
     expect(rendered).toContain("UPLOAD/PENDING=7");
-    expect(rendered).toContain("alpha");
+  });
+
+  it("does not carry the fleet, and never asks for it", async () => {
+    // The roster lived here and duplicated the `Workers ACTIVE=n` count two
+    // fields above it, for the price of a second request on every status.
+    // `/workers list` is the command for it and shows heartbeat ages besides.
+    const workers = vi.fn().mockResolvedValue({ workers: [] });
+    const api = fakeApi({ stats: vi.fn().mockResolvedValue(stats), workers });
+    const reply = await invoke("status", api, {}, undefined, ["stats:read", "workers:read"]);
+    expect(workers).not.toHaveBeenCalled();
+    expect(fieldText(reply)).not.toContain("Fleet");
+    expect(reply.footer).toContain("/workers list");
+  });
+
+  it("keeps the pointer to the fleet out of a reply that could not follow it", async () => {
+    const api = fakeApi({ stats: vi.fn().mockResolvedValue(stats) });
+    const reply = await invoke("status", api, {}, undefined, ["stats:read"]);
+    expect(reply.footer).toBeUndefined();
+  });
+
+  it("separates work that needs a look from lifetime totals, and says so in the title", async () => {
+    // The counts used to print in one flat run, so `SUCCEEDED=375` sat beside
+    // `DEAD_LETTER=14` and the headline said "Platform healthy" over both.
+    const api = fakeApi({
+      stats: vi.fn().mockResolvedValue({
+        jobs: { SUCCEEDED: 375, CANCELLED: 1, DEAD_LETTER: 14 },
+        uploadTasks: [
+          { kind: "UPLOAD", state: "PENDING", count: 19321 },
+          { kind: "UPLOAD", state: "DONE", count: 22264 },
+          { kind: "UNAVAILABLE", state: "DEAD_LETTER", count: 2 },
+        ],
+        workers: { ACTIVE: 4 },
+        quarantined: 10,
+        paused: false,
+      }),
+    });
+    const reply = await invoke("status", api);
+    const rendered = fieldText(reply);
+
+    // The two numbers worth acting on are named; the finished ones collapse.
+    expect(rendered).toContain("DEAD_LETTER=14");
+    expect(rendered).toContain("UNAVAILABLE/DEAD_LETTER=2");
+    expect(rendered).toContain("UPLOAD/PENDING=19,321");
+    expect(rendered).toContain("376 finished");
+    expect(rendered).toContain("22,264 finished");
+    // Individual DONE rows are folded into that total rather than listed.
+    expect(rendered).not.toContain("UPLOAD/DONE");
+
+    // And the headline no longer contradicts the body.
+    expect(reply.title).not.toContain("healthy");
+    expect(reply.tone).toBe("warn");
+    expect(reply.text).toContain("14 job(s) dead-lettered");
+    expect(reply.text).toContain("10 quarantined");
   });
 
   it("says the platform is paused, loudly", async () => {
@@ -191,40 +228,6 @@ describe("/status", () => {
     expect(reply.text).toContain("paused");
     expect(reply.title).toContain("paused");
     expect(reply.tone).toBe("warn");
-  });
-
-  it("still reports status when the token cannot read the fleet", async () => {
-    // A partial credential must degrade one section, not the whole command.
-    const api = fakeApi({
-      stats: vi.fn().mockResolvedValue(stats),
-      workers: vi.fn().mockRejectedValue(
-        new AdminApiError({ status: 403, detail: "no scope", scope: "workers:read", method: "GET", path: "/x" }),
-      ),
-    });
-    const reply = await invoke("status", api);
-    expect(fieldText(reply)).toContain("QUEUED=3");
-    expect(fieldText(reply)).toContain("lacks `workers:read`");
-  });
-
-  it("does not even ask for the fleet when the caller may not see it", async () => {
-    // The point of scoping the reply: a read-only operator gets the platform
-    // numbers without a worker roster, and without a line telling them what
-    // they were denied.
-    const workers = vi.fn().mockResolvedValue({ workers: [] });
-    const api = fakeApi({ stats: vi.fn().mockResolvedValue(stats), workers });
-    const reply = await invoke("status", api, {}, undefined, ["stats:read"]);
-    expect(workers).not.toHaveBeenCalled();
-    expect(fieldText(reply)).not.toContain("Fleet");
-    expect(fieldText(reply)).toContain("QUEUED=3");
-    expect(reply.footer).toContain("hidden by your permissions");
-  });
-
-  it("shows the fleet to a caller who holds workers:read", async () => {
-    const workers = vi.fn().mockResolvedValue({ workers: [] });
-    const api = fakeApi({ stats: vi.fn().mockResolvedValue(stats), workers });
-    const reply = await invoke("status", api, {}, undefined, ["stats:read", "workers:read"]);
-    expect(workers).toHaveBeenCalled();
-    expect(reply.footer).toBeUndefined();
   });
 
   it("flags quarantined submissions", async () => {
@@ -660,6 +663,54 @@ describe("/workers", () => {
     const reply = await invoke("workers", api, {}, "list");
     expect(reply.text).toContain("worker-uuid-1234");
     expect(reply.text).toContain("heartbeat never");
+  });
+
+  it("marks an ACTIVE worker that stopped beating, and leaves a drained one alone", async () => {
+    // `ACTIVE/TRUSTED, heartbeat 7h ago` is the roster contradicting itself:
+    // the status is what an operator set, not evidence the host is up. A
+    // DRAINED worker is quiet on purpose and gets no such note.
+    const api = fakeApi({
+      workers: vi.fn().mockResolvedValue({
+        workers: [
+          {
+            id: "w-silent",
+            name: "angry_panda",
+            status: "ACTIVE",
+            trust: "COMMUNITY",
+            lastHeartbeatAt: new Date(Date.now() - 7 * 3600 * 1000).toISOString(),
+            agentVersion: "1.0.0",
+            createdAt: "2026-07-01T00:00:00Z",
+          },
+          {
+            id: "w-live",
+            name: "server",
+            status: "ACTIVE",
+            trust: "TRUSTED",
+            lastHeartbeatAt: new Date(Date.now() - 30 * 1000).toISOString(),
+            agentVersion: "1.0.0",
+            createdAt: "2026-07-01T00:00:00Z",
+          },
+          {
+            id: "w-drained",
+            name: "bench",
+            status: "DRAINED",
+            trust: "TRUSTED",
+            lastHeartbeatAt: null,
+            agentVersion: null,
+            createdAt: "2026-07-01T00:00:00Z",
+          },
+        ],
+      }),
+    });
+    const reply = await invoke("workers", api, {}, "list");
+    const silentLine = reply.text!.split("\n").find((l) => l.includes("angry_panda"))!;
+    const liveLine = reply.text!.split("\n").find((l) => l.includes("server"))!;
+    const drainedLine = reply.text!.split("\n").find((l) => l.includes("bench"))!;
+
+    expect(silentLine).toContain("not reporting");
+    expect(liveLine).not.toContain("not reporting");
+    expect(drainedLine).not.toContain("not reporting");
+    expect(reply.footer).toContain("1 marked ACTIVE has not beaten");
   });
 
   it("drains and activates without confirmation; both are reversible", async () => {
