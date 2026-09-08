@@ -118,6 +118,7 @@ interface ClaimedRun {
  */
 export type RemovalPass =
   | "no-longer-listed"
+  | "paywalled"
   | "duplicates"
   | "manga-untracked"
   | "manga-without-external-chapters";
@@ -130,9 +131,17 @@ export type RemovalPass =
  * MangaDex against each other, so it says nothing about whether the publisher
  * was reachable, and holding it for two days would leave a duplicate up for two
  * days for no gain.
+ *
+ * `paywalled` is present despite NOT being absence-derived — it acts on a
+ * positive claim, an expiry the publisher stated. It is held anyway because it
+ * is the only pass that hard-deletes on extension-reported data: a bundle that
+ * got its clock or its expiry parsing wrong would otherwise delete a whole back
+ * catalogue on first sight, irreversibly. One run's delay is a cheap premium
+ * against that.
  */
 const LISTING_DERIVED_PASSES = new Set<RemovalPass>([
   "no-longer-listed",
+  "paywalled",
   "manga-untracked",
   "manga-without-external-chapters",
 ]);
@@ -618,7 +627,15 @@ export class RunProcessor {
     // `visited` is the one that answers "did the re-check actually look at this
     // catalogue, or just at the handful of series with new chapters?" — a
     // question the per-manga lines below cannot answer once they are quiet.
-    const totals = { visited: 0, upload: 0, edit: 0, skip: 0, remove: 0, unfetchable: 0 };
+    const totals = {
+      visited: 0,
+      upload: 0,
+      edit: 0,
+      skip: 0,
+      remove: 0,
+      paywalled: 0,
+      unfetchable: 0,
+    };
     /** Every chapter this run decided to upload, queued after the loop. */
     const pendingUploads: Chapter[] = [];
 
@@ -717,10 +734,16 @@ export class RunProcessor {
       //
       // Before the removals, so a chapter that came back and went again in the
       // same pass starts its tally from one rather than resuming an old one.
+      // `toDelete` counts as still-nominated alongside `toRemove`. Both passes
+      // hold their chapters across runs, and both read the same tally, so
+      // forgetting a paywalled chapter here because it is not in `toRemove`
+      // would reset its count every run and it could never reach confirmation.
       if (allMangaChapters !== null) {
-        const missing = new Set(decision.toRemove.map((mdChapter) => mdChapter.id));
+        const nominated = new Set(
+          [...decision.toRemove, ...decision.toDelete].map((mdChapter) => mdChapter.id),
+        );
         await this.forgetRemovalChecks(
-          chaptersOnMd.filter((mdChapter) => !missing.has(mdChapter.id)).map((c) => c.id),
+          chaptersOnMd.filter((mdChapter) => !nominated.has(mdChapter.id)).map((c) => c.id),
           run.extension,
         );
       }
@@ -733,6 +756,16 @@ export class RunProcessor {
         removalMode,
         "no-longer-listed",
       );
+      // Always "delete", never the configured removal mode: a card would leave
+      // the paywall link standing, which is the thing being removed.
+      await this.enqueueRemovals(
+        decision.toDelete,
+        mangaId,
+        run.extension,
+        groupId,
+        "delete",
+        "paywalled",
+      );
       await this.recordUploaded(
         [...decision.toEdit.map((edit) => edit.chapter), ...decision.skipped],
         run.extension,
@@ -743,6 +776,7 @@ export class RunProcessor {
       totals.edit += decision.toEdit.length;
       totals.skip += decision.skipped.length;
       totals.remove += decision.toRemove.length;
+      totals.paywalled += decision.toDelete.length;
       totals.unfetchable += decision.missingWithoutPages.length;
 
       // The one thing a clean run can find but not fix. Logged per manga at
@@ -775,6 +809,7 @@ export class RunProcessor {
         decision.toUpload.length +
           decision.toEdit.length +
           decision.toRemove.length +
+          decision.toDelete.length +
           decision.missingWithoutPages.length >
         0;
       log[decided ? "info" : "debug"](
@@ -785,6 +820,7 @@ export class RunProcessor {
           edit: decision.toEdit.length,
           skipped: decision.skipped.length,
           remove: decision.toRemove.length,
+          paywalled: decision.toDelete.length,
         },
         "manga processed",
       );
