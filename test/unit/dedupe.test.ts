@@ -828,6 +828,89 @@ describe("decideForManga on a clean run", () => {
   });
 });
 
+describe("chapters another extension uploaded", () => {
+  /**
+   * One MangaDex title fed by two publishers. `chaptersForManga` filters by
+   * manga and group, never by extension, so comikey's run sees mangaup_global's
+   * chapters and its listing has never heard of their urls. 169 titles hold
+   * 19,408 such chapters.
+   */
+  const SHARED = "https://global.manga-up.com/manga/1/9";
+
+  it("does not remove a co-publisher's chapter as no-longer-listed", () => {
+    const mine = mdChapter("md-mine", { externalUrl: "https://comikey.example/a/1" });
+    const theirs = mdChapter("md-theirs", { externalUrl: SHARED });
+
+    const listing = [chapter({ chapterId: "1", chapterUrl: "https://comikey.example/a/1" })];
+
+    // Without the ownership record both are judged, and the foreign one falls.
+    expect(
+      decide({ allMangaChapters: listing, chaptersOnMd: [mine, theirs] }).toRemove.map((c) => c.id),
+    ).toEqual(["md-theirs"]);
+
+    // With it, the foreign chapter is not this run's to judge.
+    expect(
+      decide({
+        allMangaChapters: listing,
+        chaptersOnMd: [mine, theirs],
+        chaptersOwnedElsewhere: new Set(["md-theirs"]),
+      }).toRemove,
+    ).toEqual([]);
+  });
+
+  it("still removes our own chapter the publisher dropped", () => {
+    const mine = mdChapter("md-mine", { externalUrl: "https://comikey.example/a/1" });
+    const theirs = mdChapter("md-theirs", { externalUrl: SHARED });
+
+    const result = decide({
+      allMangaChapters: [],
+      chaptersOnMd: [mine, theirs],
+      chaptersOwnedElsewhere: new Set(["md-theirs"]),
+    });
+    expect(result.toRemove.map((c) => c.id)).toEqual(["md-mine"]);
+  });
+
+  it("protects a co-publisher's chapter in a language we do not publish", () => {
+    // The worst case: an unpublished language skips the coverage check outright,
+    // so a foreign chapter in one is removed on the strength of no evidence.
+    const theirs = mdChapter("md-theirs", { externalUrl: SHARED, translatedLanguage: "ru" });
+
+    expect(
+      decide({ allMangaChapters: [], chaptersOnMd: [theirs], languages: ["en"] }).toRemove.map(
+        (c) => c.id,
+      ),
+    ).toEqual(["md-theirs"]);
+
+    expect(
+      decide({
+        allMangaChapters: [],
+        chaptersOnMd: [theirs],
+        languages: ["en"],
+        chaptersOwnedElsewhere: new Set(["md-theirs"]),
+      }).toRemove,
+    ).toEqual([]);
+  });
+
+  it("does not card a co-publisher's chapter as paywalled either", () => {
+    const theirs = mdChapter("md-theirs", { externalUrl: SHARED });
+    const listing = [
+      chapter({ chapterId: "9", chapterUrl: SHARED, chapterExpire: "2000-01-01T00:00:00Z" }),
+    ];
+
+    expect(
+      decide({ allMangaChapters: listing, chaptersOnMd: [theirs] }).toPaywalled.map((c) => c.id),
+    ).toEqual(["md-theirs"]);
+
+    expect(
+      decide({
+        allMangaChapters: listing,
+        chaptersOnMd: [theirs],
+        chaptersOwnedElsewhere: new Set(["md-theirs"]),
+      }).toPaywalled,
+    ).toEqual([]);
+  });
+});
+
 describe("paywalled chapters", () => {
   const NOW = new Date("2026-09-08T12:00:00Z");
   const URL = "https://mangaplus.shueisha.co.jp/viewer/1000";

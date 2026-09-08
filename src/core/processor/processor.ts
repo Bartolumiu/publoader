@@ -693,11 +693,19 @@ export class RunProcessor {
         backfillVolumes(needVolumes, await this.aggregateFor(mangaId, ""));
       }
 
+      // Who uploaded each of these, where we know. One MangaDex title can be
+      // fed by several publishers, and `chaptersForManga` filters by manga and
+      // group only -- so without this the removal passes see another
+      // extension's chapters as ones this publisher dropped. See
+      // `chaptersOwnedElsewhere` in dedupe.ts.
+      const chaptersOwnedElsewhere = await this.foreignChapterIds(chaptersOnMd, run.extension);
+
       const decision = decideForManga({
         mangadexMangaId: mangaId,
         updatedChapters,
         allMangaChapters,
         chaptersOnMd,
+        chaptersOwnedElsewhere,
         // Uploads happen asynchronously off the UploadTask queue, so nothing has
         // been posted to MangaDex by the time this run is processed.
         postedMdUpdates: [],
@@ -1255,6 +1263,33 @@ export class RunProcessor {
   }
 
   /**
+   * Which of these MangaDex chapters a DIFFERENT extension uploaded.
+   *
+   * `uploaded_chapters` is the record of who published what, so this is one
+   * lookup rather than a judgement. Only rows whose extension is set and is not
+   * this run's count: a row we have no attribution for stays eligible, because
+   * "unknown owner" must not silently make chapters unremovable — the passes
+   * already have their own guards for the things they may not touch.
+   *
+   * Empty when nothing on the title is foreign, which is the overwhelming
+   * majority of titles.
+   */
+  private async foreignChapterIds(
+    chaptersOnMd: readonly MdChapter[],
+    extension: string,
+  ): Promise<ReadonlySet<string>> {
+    if (chaptersOnMd.length === 0) return new Set();
+    const rows = await this.prisma.uploadedChapter.findMany({
+      where: {
+        mdChapterId: { in: chaptersOnMd.map((mdChapter) => mdChapter.id) },
+        extension: { notIn: ["", extension] },
+      },
+      select: { mdChapterId: true },
+    });
+    return new Set(rows.map((row) => row.mdChapterId));
+  }
+
+  /**
    * Route chapters that should leave MangaDex to either the hard-delete queue
    * or the "replace with an unavailable card" queue, and drop them from the
    * uploaded bookkeeping so nothing re-queues them later.
@@ -1502,7 +1537,12 @@ export class RunProcessor {
 
     let removed = 0;
     for (const mangaId of untracked) {
-      const mdChapters = chaptersOnMdByManga.get(mangaId) ?? [];
+      const all = chaptersOnMdByManga.get(mangaId) ?? [];
+      // "This extension no longer tracks the title" says nothing about another
+      // extension that still does, and the group filter cannot tell them apart.
+      const foreign = await this.foreignChapterIds(all, extension);
+      const mdChapters = all.filter((mdChapter) => !foreign.has(mdChapter.id));
+      if (mdChapters.length === 0) continue;
       await this.enqueueRemovals(
         mdChapters,
         mangaId,
@@ -1534,7 +1574,11 @@ export class RunProcessor {
     let removed = 0;
     const removedFrom: string[] = [];
     for (const mangaId of candidates) {
-      const mdChapters = await this.md.chaptersForManga(mangaId, groupId);
+      const all = await this.md.chaptersForManga(mangaId, groupId);
+      // This publisher listing nothing for the title is not evidence about a
+      // co-publisher that still lists it. See `foreignChapterIds`.
+      const foreign = await this.foreignChapterIds(all, extension);
+      const mdChapters = all.filter((mdChapter) => !foreign.has(mdChapter.id));
       if (mdChapters.length === 0) continue;
       await this.resolveMangaNames([mangaId]);
       await this.enqueueRemovals(
