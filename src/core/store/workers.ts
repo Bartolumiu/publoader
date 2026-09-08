@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { PrismaClient, Worker, TrustTier } from "@prisma/client";
+import { WORKER_ALIVE_SECONDS } from "./jobs.js";
 
 /**
  * Worker identity, enrollment, and credential lifecycle.
@@ -104,6 +105,27 @@ export class WorkerStore {
       data: { status },
     });
     return res.count === 1;
+  }
+
+  /**
+   * How many workers could actually claim a job for this extension right now.
+   *
+   * Mirrors the eligibility half of `JobStore.claim`: ACTIVE, heartbeating,
+   * trusted enough, and either capable of everything (empty list) or of this
+   * extension by name. Used to decide how many segments a run is worth cutting
+   * into, so the answer has to be "workers that would take one", not "rows in
+   * the table" — a drained or long-dead worker counted here buys segments that
+   * nobody runs, and the run waits on them.
+   */
+  async countLive(extension: string, minTrust: TrustTier): Promise<number> {
+    return this.prisma.worker.count({
+      where: {
+        status: "ACTIVE",
+        lastHeartbeatAt: { gt: new Date(Date.now() - WORKER_ALIVE_SECONDS * 1000) },
+        ...(minTrust === "TRUSTED" ? { trust: "TRUSTED" as const } : {}),
+        OR: [{ extensions: { isEmpty: true } }, { extensions: { has: extension } }],
+      },
+    });
   }
 
   async list(): Promise<Worker[]> {

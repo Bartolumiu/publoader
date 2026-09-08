@@ -337,6 +337,61 @@ describe.skipIf(!dbReady())("multi-slot schedules", () => {
     expect(new Set(covered).size).toBe(120);
   });
 
+  it("cuts one segment per live worker when the fleet outnumbers maxSegments", async () => {
+    await seedTracked(400);
+    await prisma.worker.createMany({
+      data: Array.from({ length: 7 }, (_, i) => ({
+        name: `w-${i}`,
+        tokenHash: `hash-${i}`,
+        lastHeartbeatAt: new Date(),
+      })),
+    });
+    const scheduler = new SchedulerService(prisma, log, { baseSeconds: 1, maxSeconds: 2 });
+
+    const result = await scheduler.createRunForExtension(partitioned as never, bundle as never, {
+      idempotencyKey: "update-fleet-sized",
+      kind: "UPDATE",
+      triggeredBy: "test",
+    });
+
+    // Seven live workers against a manifest that says four: the manifest is the
+    // floor, so all seven get something rather than three sitting idle.
+    expect(result.segments).toBe(7);
+    const jobs = await prisma.job.findMany({ where: { runId: result.runId } });
+    expect(jobs).toHaveLength(7);
+    expect(new Set(jobs.flatMap((job) => job.segmentMangaIds)).size).toBe(400);
+  });
+
+  it("ignores workers that could not claim the job anyway", async () => {
+    await seedTracked(400);
+    await prisma.worker.createMany({
+      data: [
+        // Alive, but registered for a different extension.
+        { name: "other", tokenHash: "h-other", extensions: ["comikey"], lastHeartbeatAt: new Date() },
+        // Capable of everything, but silent for an hour.
+        { name: "stale", tokenHash: "h-stale", lastHeartbeatAt: new Date(Date.now() - 3600_000) },
+        // Alive and capable, but drained.
+        {
+          name: "drained",
+          tokenHash: "h-drained",
+          status: "DRAINED" as const,
+          lastHeartbeatAt: new Date(),
+        },
+      ],
+    });
+    const scheduler = new SchedulerService(prisma, log, { baseSeconds: 1, maxSeconds: 2 });
+
+    const result = await scheduler.createRunForExtension(partitioned as never, bundle as never, {
+      idempotencyKey: "update-no-eligible-fleet",
+      kind: "UPDATE",
+      triggeredBy: "test",
+    });
+
+    // None of the three would ever take this job, so none of them buys a
+    // segment it would then be waited on for; the manifest's number stands.
+    expect(result.segments).toBe(4);
+  });
+
   it("still runs a SCOPED clean as a single segment", async () => {
     await seedTracked(120);
     const scheduler = new SchedulerService(prisma, log, { baseSeconds: 1, maxSeconds: 2 });

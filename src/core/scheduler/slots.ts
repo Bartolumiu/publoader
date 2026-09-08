@@ -82,16 +82,29 @@ export function dueSlot(
  * external manga-id list into contiguous segments; identical inputs always
  * produce identical segment keys, so retries/replays address the same
  * segments.
+ *
+ * `maxSegments` is a floor once `workers` is known, not a ceiling. The manifest
+ * number is a guess made when the extension was written, and a fleet that has
+ * since grown is the one fact it cannot have accounted for: with eight workers
+ * live and a manifest saying four, four of them sit idle while the run takes
+ * twice as long as it needs to. So the target is one segment per worker that
+ * could actually claim one, and the manifest value only stops a momentarily
+ * empty fleet from collapsing a run to a single job.
+ *
+ * `minMangaPerSegment` remains a hard bound above both: workers are not a
+ * reason to hand someone a segment of three series, where per-run overhead
+ * costs more than the parallelism buys.
  */
 export function computeSegments(
   extension: string,
   runKey: string,
   mangaIds: string[],
-  partition: { maxSegments: number; minMangaPerSegment: number },
+  partition: { maxSegments: number; minMangaPerSegment: number; workers?: number },
 ): JobSegment[] {
   const sorted = [...new Set(mangaIds)].sort();
   const bySize = Math.floor(sorted.length / partition.minMangaPerSegment);
-  const total = Math.max(1, Math.min(partition.maxSegments, bySize));
+  const wanted = Math.max(partition.maxSegments, partition.workers ?? 0);
+  const total = Math.max(1, Math.min(wanted, bySize));
   if (total <= 1 || sorted.length === 0) {
     return [];
   }
