@@ -166,10 +166,29 @@ describe("computeSegments", () => {
     expect(computeSegments("x", "r", [], partition)).toEqual([]);
   });
 
-  it("respects maxSegments", () => {
+  it("respects maxSegments when no worker count is known", () => {
     const many = Array.from({ length: 1000 }, (_, i) => String(i));
     const segments = computeSegments("x", "r", many, partition);
     expect(segments.length).toBeLessThanOrEqual(4);
+  });
+
+  it("cuts one segment per live worker once there are more workers than maxSegments", () => {
+    const many = Array.from({ length: 1000 }, (_, i) => String(i));
+    const segments = computeSegments("x", "r", many, { ...partition, workers: 10 });
+    expect(segments.length).toBe(10);
+    expect(segments.flatMap((s) => s.mangaIds).sort()).toEqual([...many].sort());
+  });
+
+  it("a fleet smaller than maxSegments does not shrink the run", () => {
+    const many = Array.from({ length: 1000 }, (_, i) => String(i));
+    expect(computeSegments("x", "r", many, { ...partition, workers: 1 })).toHaveLength(4);
+    expect(computeSegments("x", "r", many, { ...partition, workers: 0 })).toHaveLength(4);
+  });
+
+  it("minMangaPerSegment still caps a large fleet", () => {
+    // 100 ids at 25 each is four segments' worth of work, whatever the fleet size.
+    const segments = computeSegments("x", "r", ids, { ...partition, workers: 50 });
+    expect(segments).toHaveLength(4);
   });
 });
 

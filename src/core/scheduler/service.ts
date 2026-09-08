@@ -6,6 +6,7 @@ import { JobStore } from "../store/jobs.js";
 import { BundleStore } from "../store/bundles.js";
 import { SettingsStore, AuditLog } from "../store/settings.js";
 import { UploadTaskStore } from "../store/uploadTasks.js";
+import { WorkerStore } from "../store/workers.js";
 import { activeTrackedWhere } from "../store/trackedManga.js";
 import { computeSegments, dueSlot, effectiveSchedules, slotId } from "./slots.js";
 import type { DiscordEmbedInput } from "../md/webhook.js";
@@ -29,6 +30,7 @@ export class SchedulerService {
   private readonly bundles: BundleStore;
   private readonly settings: SettingsStore;
   private readonly uploadTasks: UploadTaskStore;
+  private readonly workers: WorkerStore;
   private readonly audit: AuditLog;
 
   /**
@@ -57,6 +59,7 @@ export class SchedulerService {
     this.bundles = new BundleStore(prisma);
     this.settings = new SettingsStore(prisma);
     this.uploadTasks = new UploadTaskStore(prisma);
+    this.workers = new WorkerStore(prisma);
     this.audit = new AuditLog(prisma);
     this.notifier = options.notifier ?? null;
     this.autoSync = options.autoSync ?? null;
@@ -280,6 +283,12 @@ export class SchedulerService {
             "segmentMangaIds cannot express a namespace",
         );
       } else {
+        // Counted per run, not configured: the fleet is whatever is heartbeating
+        // at this minute, and a manifest written months ago cannot know it. The
+        // count is a snapshot and deliberately not defended: a worker that dies
+        // between here and the claim just means its segment waits for another,
+        // which is the same thing that happens when a worker dies mid-job.
+        const workers = await this.workers.countLive(manifest.name, manifest.min_trust);
         segments = computeSegments(
           manifest.name,
           opts.idempotencyKey,
@@ -287,6 +296,7 @@ export class SchedulerService {
           {
             maxSegments: manifest.partition.maxSegments,
             minMangaPerSegment: manifest.partition.minMangaPerSegment,
+            workers,
           },
         );
       }

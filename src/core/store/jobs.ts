@@ -67,12 +67,14 @@ export function backoffSeconds(attempt: number, policy: RetryPolicy): number {
 }
 
 /**
- * How recently a worker must have heartbeated to count as competition for the
- * fairness rule. Generous relative to the heartbeat interval: treating a live
+ * How recently a worker must have heartbeated to count as live: as competition
+ * for the fairness rule below, and as a reason to cut a run into more segments
+ * (`WorkerStore.countLive`). Generous relative to the heartbeat
+ * interval: treating a live
  * worker as dead costs fairness, treating a dead one as live costs throughput,
  * and the second is the worse trade.
  */
-const FAIRNESS_ALIVE_SECONDS = 120;
+export const WORKER_ALIVE_SECONDS = 120;
 
 /**
  * How long after claiming a worker is asked to stand aside. Short on purpose;
@@ -199,7 +201,7 @@ export class JobStore {
             (
               SELECT count(*) FROM workers
               WHERE status = 'ACTIVE'
-                AND last_heartbeat_at > now() - make_interval(secs => ${FAIRNESS_ALIVE_SECONDS})
+                AND last_heartbeat_at > now() - make_interval(secs => ${WORKER_ALIVE_SECONDS})
             ) <= 1
             OR NOT EXISTS (
               SELECT 1 FROM jobs prev

@@ -151,6 +151,11 @@ export const Manifest = z
     partition: z
       .object({
         mode: z.literal("tracked_manga"),
+        /**
+         * Floor, not ceiling: a run is cut into one segment per live worker,
+         * and this is what it falls back to when the fleet is smaller than it
+         * (or momentarily empty). `minMangaPerSegment` is the real upper bound.
+         */
         maxSegments: z.number().int().min(2).max(32).default(4),
         minMangaPerSegment: z.number().int().min(1).default(25),
       })
