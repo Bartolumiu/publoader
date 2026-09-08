@@ -827,3 +827,88 @@ describe("decideForManga on a clean run", () => {
     ]);
   });
 });
+
+describe("paywalled chapters", () => {
+  const NOW = new Date("2026-09-08T12:00:00Z");
+  const URL = "https://mangaplus.shueisha.co.jp/viewer/1000";
+
+  const paywalled = (over: Partial<DecideInput> = {}) =>
+    decide({
+      allMangaChapters: [
+        chapter({ chapterId: "1000", chapterUrl: URL, chapterExpire: "2026-09-01T00:00:00Z" }),
+      ],
+      chaptersOnMd: [mdChapter("md-1", { externalUrl: URL })],
+      now: NOW,
+      ...over,
+    });
+
+  it("flags a chapter the publisher still lists but no longer serves free", () => {
+    const result = paywalled();
+    expect(result.toPaywalled.map((c) => c.id)).toEqual(["md-1"]);
+    // The url is still in the listing, so the no-longer-listed pass must not
+    // also claim it: the two sets are disjoint and would otherwise both queue.
+    expect(result.toRemove).toEqual([]);
+  });
+
+  it("leaves a chapter whose free window has not closed yet", () => {
+    const result = paywalled({
+      allMangaChapters: [
+        chapter({ chapterId: "1000", chapterUrl: URL, chapterExpire: "2026-09-30T00:00:00Z" }),
+      ],
+    });
+    expect(result.toPaywalled).toEqual([]);
+    expect(result.toRemove).toEqual([]);
+  });
+
+  it("treats a missing expiry as unknown rather than expired", () => {
+    // Most extensions never populate chapterExpire. No evidence, no deletion.
+    const result = paywalled({
+      allMangaChapters: [chapter({ chapterId: "1000", chapterUrl: URL, chapterExpire: null })],
+    });
+    expect(result.toPaywalled).toEqual([]);
+  });
+
+  it("keeps a shared url while any chapter behind it is still free", () => {
+    // One MANGA Plus viewer serves several numbered chapters; the link is only
+    // a paywall once every one of them has rotated out.
+    const result = paywalled({
+      allMangaChapters: [
+        chapter({ chapterId: "1000", chapterUrl: URL, chapterExpire: "2026-09-01T00:00:00Z" }),
+        chapter({ chapterId: "1000", chapterUrl: URL, chapterExpire: "2026-09-30T00:00:00Z" }),
+      ],
+    });
+    expect(result.toPaywalled).toEqual([]);
+  });
+
+  it("never deletes somebody else's upload", () => {
+    const result = paywalled({
+      chaptersOnMd: [mdChapter("md-1", { externalUrl: URL }, ["grp"], "someone-else")],
+    });
+    expect(result.toPaywalled).toEqual([]);
+  });
+
+  it("leaves a chapter that already carries our card", () => {
+    // Carding repoints externalUrl away from the chapter, so a carded chapter
+    // can no longer match the listing anyway - but the guard is explicit so a
+    // future change to the card url cannot start hard-deleting carded rows.
+    const carded = mdChapter("md-1", { externalUrl: URL });
+    (carded.attributes as unknown as { pages: number }).pages = 1;
+    const result = paywalled({ chaptersOnMd: [carded] });
+    expect(result.toPaywalled).toEqual([]);
+  });
+
+  it("still routes an unlisted chapter to removal, not deletion", () => {
+    const result = paywalled({
+      allMangaChapters: [
+        chapter({ chapterId: "999", chapterUrl: "https://elsewhere/9", chapterExpire: null }),
+      ],
+    });
+    expect(result.toPaywalled).toEqual([]);
+    expect(result.toRemove.map((c) => c.id)).toEqual(["md-1"]);
+  });
+
+  it("says nothing when the extension publishes no catalogue", () => {
+    const result = paywalled({ allMangaChapters: null });
+    expect(result.toPaywalled).toEqual([]);
+  });
+});

@@ -67,6 +67,8 @@ export interface DecideInput {
    * somebody's work gone.
    */
   botUserId?: string | null;
+  /** Injectable clock, so the paywall pass is testable. Defaults to now. */
+  now?: Date;
   /**
    * Whether this extension fetches chapter images at all, judged over the whole
    * run rather than this manga.
@@ -104,6 +106,22 @@ export interface DecideResult {
   skippedDifferentId: Chapter[];
   /** Chapters on MangaDex that no longer belong there. */
   toRemove: MdChapter[];
+  /**
+   * Chapters that were free when we published them and have since rotated
+   * behind the publisher's paywall.
+   *
+   * Removed under the configured removal mode, NOT hard-deleted. This is the
+   * ordinary end of a free chapter's life, not a chapter that should never have
+   * gone up: it was legitimately published, and the card is the honest record
+   * that it is no longer readable. Deletion is reserved for a chapter that was
+   * paid all along, which this pass cannot identify — every chapter it sees was
+   * free at upload time, by definition of having been uploaded.
+   *
+   * Disjoint from `toRemove` by construction — removal needs the url absent
+   * from the listing, this needs it present — so the two never contend for a
+   * chapter.
+   */
+  toPaywalled: MdChapter[];
   /**
    * Uploads that reuse a number already on MangaDex under our group. Reported,
    * never acted on: see `findNumberCollisions`.
@@ -407,6 +425,61 @@ export function mdChapterMangaId(mdChapter: MdChapter): string | null {
  * the publisher's chapters for this manga. Only meaningful when the extension
  * supplied a full chapter listing.
  */
+/**
+ * Chapters the publisher still lists, but behind a paywall.
+ *
+ * `findExtraChapters` cannot see these, and that is the whole point of this
+ * pass. It decides removal by asking whether a MangaDex chapter's externalUrl
+ * is still in the publisher's listing — and an expired chapter still is. MANGA
+ * Plus keeps a rotated-out chapter in the title detail and simply stops serving
+ * it for free; the extension skips it for upload for exactly that reason, but
+ * only for upload. So the url matches, the chapter looks present, nothing ever
+ * removes it, and the link left standing on MangaDex now points at a paywall.
+ * That set only grows: every run re-confirms it as "still listed".
+ *
+ * What this pass is NOT: an answer to "should this chapter ever have gone up?".
+ * Every chapter it can see was free when publoader published it, so a hit here
+ * is a free chapter reaching the end of its free life — carded, not deleted.
+ *
+ * `chapterExpire` is the only signal that says "no longer free", and it is
+ * per-publisher. An extension that does not populate it produces nothing here,
+ * which is the right failure direction — no evidence, no removal. It is also
+ * only half the story: `availability.ts` in publoader-extensions documents the
+ * far-future sentinel MANGA Plus puts on subscriber-only chapters, which no
+ * expiry comparison can catch.
+ *
+ * A url shared by several listing entries (one MANGA Plus viewer serving four
+ * numbered chapters) counts as paywalled only when EVERY entry behind it has
+ * expired. One still-free chapter keeps the link honest.
+ */
+function findPaywalledChapters(input: DecideInput): MdChapter[] {
+  if (input.allMangaChapters === null) return [];
+
+  const now = input.now ?? new Date();
+  // url -> "every listing entry behind it has expired". A null or unparseable
+  // expiry is unknown rather than expired, and vetoes the url outright.
+  const expiredByUrl = new Map<string, boolean>();
+  for (const chapter of input.allMangaChapters) {
+    if (chapter.chapterUrl === null) continue;
+    const expiry = chapter.chapterExpire === null ? null : new Date(chapter.chapterExpire);
+    const expired =
+      expiry !== null && !Number.isNaN(expiry.getTime()) && expiry.getTime() < now.getTime();
+    expiredByUrl.set(chapter.chapterUrl, (expiredByUrl.get(chapter.chapterUrl) ?? true) && expired);
+  }
+
+  return input.chaptersOnMd.filter((mdChapter) => {
+    const url = mdChapter.attributes.externalUrl;
+    if (url === null) return false;
+    return (
+      // The two guards every destructive pass carries: never somebody else's
+      // upload, and never a chapter already carrying our card.
+      uploadedByBot(mdChapter, input.botUserId ?? null) &&
+      !isCarded(mdChapter) &&
+      expiredByUrl.get(url) === true
+    );
+  });
+}
+
 function findExtraChapters(input: DecideInput): MdChapter[] {
   if (input.allMangaChapters === null) return [];
 
@@ -653,6 +726,7 @@ export function decideForManga(input: DecideInput): DecideResult {
   // updated chapter, and it is queued for removal in the
   // constructor regardless.
   const toRemove = input.chaptersOnMd.length > 0 ? findExtraChapters(input) : [];
+  const toPaywalled = input.chaptersOnMd.length > 0 ? findPaywalledChapters(input) : [];
 
   const { candidates, fromListingOnly } = decideCandidates(input);
   const updated = candidates
@@ -727,6 +801,7 @@ export function decideForManga(input: DecideInput): DecideResult {
     skipped,
     skippedDifferentId,
     toRemove,
+    toPaywalled,
     missingWithoutPages,
     numberCollisions: findNumberCollisions(toUpload, input),
   };
