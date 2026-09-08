@@ -160,8 +160,12 @@ Each entry declares the scope its view needs and is simply absent without it;
 a contributor's sidebar is Overview, Extensions, Tracked, Untracked and Docs. The
 current entry carries `aria-current="page"` and is marked three ways (fill,
 brighter text, a left rule), because "which page am I on" should not require
-reading. The sidebar collapses to icons with the button at its foot, and
-remembers that in `localStorage`. Below 860px it becomes a drawer: a hamburger in
+reading. Under that button sits the build this core-api is running, the same
+string a worker reports as its agent version, so "is the fleet on the deploy I
+just cut" is a comparison rather than an investigation; it is substituted into
+the page's HTML at boot rather than fetched, so it needs no scope and survives a
+core too broken to answer `/stats`. The sidebar collapses to icons with the
+button at its foot, and remembers that in `localStorage`. Below 860px it becomes a drawer: a hamburger in
 the header opens it, a tap outside or Escape closes it, and while closed it is
 `inert` so Tab cannot walk into it.
 

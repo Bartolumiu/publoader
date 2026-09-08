@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { FastifyInstance, FastifyReply } from "fastify";
+import { VERSION } from "../../version.js";
 
 /**
  * Static operator dashboard, served from the API process itself so there is
@@ -33,6 +34,18 @@ const ASSET_TYPES: Record<string, string> = {
 const REQUIRED_ASSETS = ["index.html", "app.js", "style.css"] as const;
 
 /**
+ * Placeholder in index.html that the served page's build stamp replaces.
+ *
+ * Substitution rather than an endpoint the page fetches: the build is a
+ * constant for the life of the process, so polling for it would be silly, and
+ * every admin route is scoped while "which build is this" is the first question
+ * asked when a worker's agent version does not match what was deployed. It also
+ * means the version is in the HTML source, where curl and a browser's view-source
+ * can both reach it without a session.
+ */
+const BUILD_PLACEHOLDER = "__BUILD__";
+
+/**
  * No inline scripts or styles, no external origins, and the page may not be
  * framed. `connect-src 'self'` keeps a tampered asset from exfiltrating the
  * admin data it can read.
@@ -60,7 +73,11 @@ function loadAssets(): Map<string, { body: Buffer; contentType: string }> {
     if (!entry.isFile()) continue;
     const contentType = ASSET_TYPES[extname(entry.name).toLowerCase()];
     if (!contentType) continue;
-    assets.set(entry.name, { body: readFileSync(join(dir, entry.name)), contentType });
+    let body = readFileSync(join(dir, entry.name));
+    if (entry.name === "index.html") {
+      body = Buffer.from(body.toString("utf8").replaceAll(BUILD_PLACEHOLDER, VERSION), "utf8");
+    }
+    assets.set(entry.name, { body, contentType });
   }
 
   const missing = REQUIRED_ASSETS.filter((name) => !assets.has(name));

@@ -496,8 +496,22 @@ body.nav-collapsed #nav-collapse .nav-icon {
   transform: rotate(180deg);
 }
 
+/* The build this core-api is running, under the collapse control. Monospace
+   because it is an identifier an operator compares character-for-character
+   against a worker's agent version in the Workers table, not prose; and clipped
+   rather than wrapped, so a long stamp cannot widen the sidebar. */
+#build {
+  margin: 7px 3px 1px;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 /* Collapsed: icons only. Labels are removed from the accessibility tree along
    with the layout, and the link keeps its title so a pointer still explains it. */
+body.nav-collapsed #build,
 body.nav-collapsed .brand-name,
 body.nav-collapsed .nav-group h2,
 body.nav-collapsed .nav-label,
@@ -1990,6 +2004,10 @@ dialog::backdrop {
     --nav-w: 280px;
   }
 
+  /* `nav-collapsed` is remembered in localStorage and is still on the body in
+     a drawer, where the sidebar is full width; everything the collapsed
+     desktop layout hides has to come back, the build stamp included. */
+  body.nav-collapsed #build,
   body.nav-collapsed .brand-name,
   body.nav-collapsed .nav-group h2,
   body.nav-collapsed .nav-label,
@@ -2007,8 +2025,15 @@ dialog::backdrop {
     padding: 0 12px;
   }
 
-  .sidebar-foot {
+  /* Collapsing is meaningless in a drawer, so the control goes; the footer
+     itself stays, because the build stamp it carries is worth reading on a
+     phone too. */
+  #nav-collapse {
     display: none;
+  }
+
+  .sidebar-foot {
+    border-top: none;
   }
 
   body.nav-open .nav-scrim {

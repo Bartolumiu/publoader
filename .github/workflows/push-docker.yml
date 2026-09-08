@@ -39,6 +39,7 @@ jobs:
     outputs:
       owner: ${{ steps.meta.outputs.owner }}
       version: ${{ steps.meta.outputs.version }}
+      build: ${{ steps.meta.outputs.build }}
     steps:
       # A tag push or a manual run publishes that version as well as `latest`;
       # a plain push to master only moves `latest`, so merging never silently
@@ -71,6 +72,13 @@ jobs:
             *[!0-9.]*) echo "::error::version must look like 2.1.2, got '$version'"; exit 1 ;;
           esac
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # The build stamp baked into every image (PUBLOADER_BUILD), and the
+          # only thing a running process can say about which image it is. The
+          # sha is what makes it unique: a plain push to master publishes no
+          # version, and three `latest` images that all reported "dev" would be
+          # as useless as the "1.0.0" every worker used to report. Resolved here
+          # with the tags so the three parallel builds cannot disagree.
+          echo "build=${version:-dev}+${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
   build:
     needs: meta
@@ -127,6 +135,8 @@ jobs:
           target: ${{ matrix.target }}
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            PUBLOADER_BUILD=${{ needs.meta.outputs.build }}
           # Attestations are not consumed by anything that deploys these, and
           # generating them adds a build and a push per architecture.
           provenance: false

@@ -109,10 +109,13 @@ Request:
 
 ```json
 { "enrollToken": "pe_…", "name": "worker-01",
-  "extensions": ["mangaplus"], "agentVersion": "1.0.0" }
+  "extensions": ["mangaplus"], "agentVersion": "2.1.7+a1b2c3d" }
 ```
 
 `extensions` and `agentVersion` are optional; `name` is truncated to 128 chars.
+The bundled agent sends its build stamp (`PUBLOADER_BUILD`, baked into the image
+as `<version>+<short sha>`) without being asked, and repeats it on every
+heartbeat, so `GET /workers` shows what each host is actually running.
 
 | Status | Meaning |
 | --- | --- |

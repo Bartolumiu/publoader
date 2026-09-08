@@ -105,6 +105,20 @@ RUN mkdir -p /var/lib/publoader-worker && chown 10001:10001 /var/lib/publoader-w
 
 ENV NODE_ENV=production \
     WORKER_STATE_PATH=/var/lib/publoader-worker
+
+# ---------------------------------------------------------------------------
+# Build identity. `PUBLOADER_BUILD` is the only thing that tells a running
+# process which image it is; src/version.ts reads it and nothing else.
+#
+# CI fills it with `<release version, or dev>+<short sha>` (see the `meta` job in
+# .github/workflows/push-docker.yml). An un-passed build gets the empty default
+# and reports `dev`, which is the honest answer for an image built by hand.
+#
+# It is deliberately the LAST thing that varies in the build: it changes on
+# every commit, so anything cached after it would be rebuilt every time.
+# ---------------------------------------------------------------------------
+ARG PUBLOADER_BUILD=""
+ENV PUBLOADER_BUILD=${PUBLOADER_BUILD}
 # executor.ts probes for the runner relative to dist/; this pins it explicitly
 # so a layout change fails loudly at spawn instead of silently probing.
 ENV PUBLOADER_NODE_RUNNER=/app/runner-node/runner.mjs \

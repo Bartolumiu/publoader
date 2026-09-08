@@ -18,6 +18,7 @@ import { resolve } from "node:path";
 import { BundleBuildError, buildExtensionBundle } from "../core/webhooks/bundleBuilder.js";
 import { DEFAULT_COOLDOWN_DAYS, MAX_COOLDOWN_DAYS } from "../core/store/trackedManga.js";
 import { parseMdTitleId } from "../core/md/titleId.js";
+import { VERSION } from "../version.js";
 
 const DEFAULT_API_URL = "https://publoader.ardax.dev";
 
@@ -169,7 +170,7 @@ const program = new Command();
 program
   .name("publoader-admin")
   .description("Operator CLI for the Publoader distributed platform")
-  .version("1.0.0")
+  .version(VERSION)
   .showHelpAfterError();
 
 // ---- enroll tokens ----

@@ -248,7 +248,7 @@ was attempted.
 ```bash
 curl -fsS -X POST https://publoader.ardax.dev/api/v1/worker/enroll \
   -H 'content-type: application/json' \
-  -d '{"enrollToken":"pe_...","name":"hetzner-fsn-1","agentVersion":"1.0.0"}'
+  -d '{"enrollToken":"pe_...","name":"hetzner-fsn-1","agentVersion":"2.1.7+a1b2c3d"}'
 # -> 201 {"workerId":"...","workerToken":"pw_...","trust":"COMMUNITY"}
 ```
 
