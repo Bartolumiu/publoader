@@ -70,6 +70,24 @@ export interface DecideInput {
   /** Injectable clock, so the paywall pass is testable. Defaults to now. */
   now?: Date;
   /**
+   * MangaDex chapters on this title that a DIFFERENT extension uploaded.
+   *
+   * One MangaDex title can be fed by several publishers — 169 titles hold
+   * 19,408 chapters from more than one extension, mostly comikey beside
+   * mangaup_global. `chaptersForManga` filters by manga and group, never by
+   * extension, so every one of those chapters arrives in `chaptersOnMd` when
+   * ANY of the extensions runs. To the removal passes they then look exactly
+   * like a chapter the publisher dropped: this run's listing has never heard of
+   * the other publisher's url, so it is "no longer listed" and gets carded or
+   * deleted. A chapter in a language this extension does not publish is worse
+   * still — that branch skips the language-coverage check entirely.
+   *
+   * `uploaded_chapters.extension` is the record of who uploaded what, and this
+   * is that record reaching the decision. Absent means "not known", which
+   * removes nothing extra and so cannot make the passes more destructive.
+   */
+  chaptersOwnedElsewhere?: ReadonlySet<string>;
+  /**
    * Whether this extension fetches chapter images at all, judged over the whole
    * run rather than this manga.
    *
@@ -467,18 +485,25 @@ function findPaywalledChapters(input: DecideInput): MdChapter[] {
     expiredByUrl.set(chapter.chapterUrl, (expiredByUrl.get(chapter.chapterUrl) ?? true) && expired);
   }
 
+  const ownedElsewhere = input.chaptersOwnedElsewhere ?? new Set<string>();
+
   return input.chaptersOnMd.filter((mdChapter) => {
     const url = mdChapter.attributes.externalUrl;
     if (url === null) return false;
     return (
-      // The two guards every destructive pass carries: never somebody else's
-      // upload, and never a chapter already carrying our card.
+      // The three guards every destructive pass carries: never somebody else's
+      // upload, never another extension's chapter on a shared title, and never
+      // a chapter already carrying our card.
       uploadedByBot(mdChapter, input.botUserId ?? null) &&
+      !ownedElsewhere.has(mdChapter.id) &&
       !isCarded(mdChapter) &&
       expiredByUrl.get(url) === true
     );
   });
 }
+
+/** Shared empty set, so the hot filter allocates nothing per chapter. */
+const EMPTY_OWNERSHIP: ReadonlySet<string> = new Set<string>();
 
 function findExtraChapters(input: DecideInput): MdChapter[] {
   if (input.allMangaChapters === null) return [];
@@ -518,6 +543,10 @@ function findExtraChapters(input: DecideInput): MdChapter[] {
       // never uploaded for deletion because of it. `uploadedByBot` fails closed
       // when the uploader is unknown or the bot id is not configured.
       uploadedByBot(mdChapter, input.botUserId ?? null) &&
+      // Another extension's chapter on a title both publish is not ours to
+      // judge: this run's listing was never going to mention the other
+      // publisher's url. See `chaptersOwnedElsewhere`.
+      !(input.chaptersOwnedElsewhere ?? EMPTY_OWNERSHIP).has(mdChapter.id) &&
       // A chapter already carrying our card has reached the end state this
       // pass exists to move chapters towards, and it can never satisfy the url
       // test below: marking it unavailable repointed its externalUrl away from

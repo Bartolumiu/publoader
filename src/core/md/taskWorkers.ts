@@ -5,7 +5,7 @@ import { metrics } from "../../metrics.js";
 import { generateChapterCard } from "./card.js";
 import { unavailableCardOptions } from "./unavailableCard.js";
 import { chapterFromJson, chapterToColumns, uploadedChapterColumns } from "./chapterRows.js";
-import type { MdChapterDetail, MdExtendedApi } from "./client.js";
+import { isUploadSessionConflict, type MdChapterDetail, type MdExtendedApi } from "./client.js";
 import type { DiscordEmbedInput, DiscordNotifier } from "./webhook.js";
 import { queueEmbed, queueFinishedEmbed, queueSummaryEmbed } from "./webhookEmbeds.js";
 import { botUserIdFromClientId, isCarded, type Chapter } from "./types.js";
@@ -231,6 +231,48 @@ export class UploadTaskWorkers {
     return { busy: this.session.busy, queued: this.session.queued };
   }
 
+  /**
+   * Begin an upload session, clearing a leaked one if that is what refused us.
+   *
+   * All three begin sites already delete a stale session first, but that check
+   * asks `GET /upload` and believes the answer. When the answer is wrong — the
+   * lagging read described on `optimisticLockVersion`, or a session that
+   * appeared between the read and the begin — the begin is refused and nothing
+   * recovers it. The task fails, retries into the same wrong answer, and
+   * dead-letters; uploads and cards go the same way, which is why this sits
+   * around the begin rather than in either queue.
+   *
+   * CALLERS MUST ALREADY HOLD `this.session`. The recovery deletes whatever
+   * session the account has open, and outside the lock that is as likely to be
+   * the other queue's live upload as the leak being cleared.
+   *
+   * One retry only. If a second begin is refused, something is holding a
+   * session that this is not entitled to delete, and failing the task is the
+   * honest outcome.
+   */
+  private async beginWithLeakRecovery<T>(
+    md: MdExtendedApi,
+    log: Logger,
+    what: string,
+    begin: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await begin();
+    } catch (err) {
+      if (!isUploadSessionConflict(err)) throw err;
+
+      const leaked = await md.currentUploadSession();
+      log.warn(
+        { what, sessionId: leaked?.id ?? null, err },
+        leaked
+          ? "begin refused: an upload session was still open; deleting it and retrying once"
+          : "begin refused for an open upload session that GET /upload does not report; retrying once",
+      );
+      if (leaked) await md.deleteUploadSession(leaked.id);
+      return await begin();
+    }
+  }
+
   /** The MangaDex account publoader uploads as; see `uploadedByBot`. */
   private get botUserId(): string | null {
     return this.deps.config.mdBotUserId ?? botUserIdFromClientId(this.deps.config.mdClientId);
@@ -438,7 +480,9 @@ export class UploadTaskWorkers {
         await md.deleteUploadSession(existingSession.id);
       }
 
-      const session = await md.createUploadSession(mdMangaId, [mdGroupId]);
+      const session = await this.beginWithLeakRecovery(md, log, "upload", () =>
+        md.createUploadSession(mdMangaId, [mdGroupId]),
+      );
       log.info(
         { sessionId: session.id, images: chapter.imageArtifacts.length },
         "upload session opened",
@@ -882,7 +926,9 @@ export class UploadTaskWorkers {
           await md.deleteUploadSession(openSession.id);
         }
 
-        const session = await md.beginEditSession(mdChapterId, attrs.version);
+        const session = await this.beginWithLeakRecovery(md, log, "card", () =>
+          md.beginEditSession(mdChapterId, attrs.version),
+        );
         try {
           const pageId = await this.uploadCard(session.id, card, log);
           if (!pageId) throw new TaskError(`couldn't upload the chapter card for ${mdChapterId}`);
@@ -1160,7 +1206,9 @@ export class UploadTaskWorkers {
         await md.deleteUploadSession(openSession.id);
       }
 
-      const session = await md.beginEditSession(mdChapterId, attrs.version);
+      const session = await this.beginWithLeakRecovery(md, log, "restore", () =>
+        md.beginEditSession(mdChapterId, attrs.version),
+      );
       try {
         // The card is a file of this session, and it has to be taken OUT of the
         // session before the commit; a commit alone leaves it exactly where it

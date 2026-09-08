@@ -132,6 +132,49 @@ export function optimisticLockVersion(err: unknown): number | null {
 }
 
 /**
+ * Is this the rejection that says the account already holds an open session?
+ *
+ * MangaDex allows exactly one upload session per account, and refuses to begin
+ * a second one. Both queues clear a stale session before they begin — but that
+ * clearing reads `GET /upload` first, and a read that answers "none" while one
+ * actually exists (the same lagging cache `optimisticLockVersion` describes,
+ * or a session opened between the read and the begin) leaves the begin to fail
+ * with nothing left to recover it. Uploads and cards dead-letter alike, which
+ * is what this predicate exists to catch.
+ *
+ * Matched on the body rather than the status alone: 409 is also how an
+ * optimistic-lock conflict arrives, and those must be replayed with the version
+ * MangaDex named, not by deleting a session. 400 is accepted too because the
+ * status for this rejection is not something the docs pin down.
+ *
+ * Deliberately narrow. Deleting the account's open session is destructive to
+ * whatever is uploading into it, so an unrecognised error must not reach that
+ * path — see the lock note in `taskWorkers.ts`.
+ */
+export function isUploadSessionConflict(err: unknown): boolean {
+  if (!(err instanceof MdRequestError)) return false;
+  if (err.status !== 409 && err.status !== 400) return false;
+
+  // The message carries the raw body, so a response that failed to parse or
+  // arrived in an undocumented shape is still readable.
+  const phrases: string[] = [err.message];
+  const errors = err.body?.errors;
+  if (Array.isArray(errors)) {
+    for (const entry of errors) {
+      if (entry === null || typeof entry !== "object") continue;
+      const { title, detail } = entry as { title?: unknown; detail?: unknown };
+      if (typeof title === "string") phrases.push(title);
+      if (typeof detail === "string") phrases.push(detail);
+    }
+  }
+
+  return phrases.some(
+    (phrase) =>
+      /upload[_ ]?session/i.test(phrase) && /already|exists?\b|still open|delete it/i.test(phrase),
+  );
+}
+
+/**
  * What the last response's rate-limit headers imply about our pace.
  *
  * Exported and pure because it is the arithmetic that decides how hard this
