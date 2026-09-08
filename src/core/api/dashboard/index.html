@@ -106,6 +106,13 @@
                   aria-controls="nav">
             <span class="nav-collapse-label">Collapse</span>
           </button>
+          <!-- The build this core-api is running. Substituted into the served
+               HTML at boot (see dashboard.ts), not fetched: it is a constant
+               for the life of the process, and an operator comparing it against
+               a worker's agent version should not have to hold a scope to see
+               it. An unsubstituted page shows the placeholder itself, which is
+               a visible bug rather than a silent blank. -->
+          <p id="build" class="dim small" title="core build">__BUILD__</p>
         </div>
       </aside>
       <!-- Closes the mobile drawer on a tap outside it. Not focusable: Escape

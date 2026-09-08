@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Manifest } from "../contracts/manifest.js";
 import type { ResultEnvelope } from "../contracts/envelope.js";
+import { VERSION } from "../version.js";
 
 /**
  * Where a worker looks for the control plane when CORE_URL (config.coreUrl) is
@@ -187,7 +188,13 @@ export class CoreApiClient {
   constructor(opts: { baseUrl?: string; token?: string; agentVersion?: string }) {
     this.baseUrl = (opts.baseUrl ?? DEFAULT_CORE_URL).replace(/\/+$/, "");
     this.token = opts.token;
-    this.agentVersion = opts.agentVersion ?? "1.0.0";
+    // Defaulted here rather than at the one call site in agent.ts: this string
+    // is what enrollment and every heartbeat write to `Worker.agentVersion`,
+    // and it is the only version an operator ever sees for a worker host. The
+    // default used to be the literal "1.0.0", which no caller overrode and no
+    // release bumped, so every worker ever enrolled reported the same made-up
+    // number. A caller that forgets the field must still report the truth.
+    this.agentVersion = opts.agentVersion ?? VERSION;
   }
 
   readonly agentVersion: string;

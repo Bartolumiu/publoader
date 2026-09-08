@@ -239,6 +239,20 @@ COPY --chown=root:root assets ./assets
 RUN test -n "$(ls -A ./assets/fonts 2>/dev/null)" \
     || (echo "no assets/fonts in the runtime image" >&2; exit 1)
 
+# ---------------------------------------------------------------------------
+# Build identity. `PUBLOADER_BUILD` is the only thing that tells a running
+# process which image it is; src/version.ts reads it and nothing else.
+#
+# CI fills it with `<release version, or dev>+<short sha>` (see the `meta` job in
+# .github/workflows/push-docker.yml). An un-passed build gets the empty default
+# and reports `dev`, which is the honest answer for an image built by hand.
+#
+# It is deliberately the LAST thing that varies in the build: it changes on
+# every commit, so anything cached after it would be rebuilt every time.
+# ---------------------------------------------------------------------------
+ARG PUBLOADER_BUILD=""
+ENV PUBLOADER_BUILD=${PUBLOADER_BUILD}
+
 # Everything is owned by root and only readable by the service account: the
 # process can execute its own code but cannot rewrite it, which is what makes
 # `read_only: true` in compose meaningful rather than decorative.
