@@ -121,7 +121,14 @@ describe.skipIf(!dbReady())("scoped runs", () => {
    */
   async function runWithEnvelope(opts: {
     scopeMangaIds: string[];
-    stillListed: { mdMangaId: string; mangaId: string; chapterId: string; url: string }[];
+    stillListed: {
+      mdMangaId: string;
+      mangaId: string;
+      chapterId: string;
+      url: string;
+      /** ISO expiry; past means the publisher no longer serves it free. */
+      expire?: string;
+    }[];
     /**
      * What the extension flagged as new or changed, when that is not simply
      * everything it lists. A real extension keeping its own cursor answers a
@@ -181,7 +188,7 @@ describe.skipIf(!dbReady())("scoped runs", () => {
       entries.map((entry) => ({
         chapterLookup: null,
         chapterTimestamp: null,
-        chapterExpire: null,
+        chapterExpire: entry.expire ?? null,
         chapterLanguage: "en",
         chapterNumber: "1",
         chapterTitle: "A chapter",
@@ -265,6 +272,48 @@ describe.skipIf(!dbReady())("scoped runs", () => {
       url: "https://publisher.example/a/a2",
     },
   ];
+
+  /**
+   * A chapter that was free when publoader published it and has since rotated
+   * behind the publisher's paywall is CARDED, not hard-deleted.
+   *
+   * It is still listed, so `no-longer-listed` cannot see it; the paywalled pass
+   * is what does. But it reached the ordinary end of a free chapter's life
+   * rather than being something that should never have gone up, so it takes the
+   * configured removal mode like any other removal. Deletion is reserved for a
+   * chapter that was paid all along, which this pass cannot identify.
+   */
+  it("cards a chapter the publisher still lists but no longer serves free", async () => {
+    const { run } = await runWithEnvelope({
+      scopeMangaIds: [SERIES_A],
+      stillListed: [
+        { ...A_LOST_ONE[0]!, expire: "2000-01-01T00:00:00Z" },
+        {
+          mdMangaId: SERIES_A,
+          mangaId: "series-a",
+          chapterId: "a2",
+          url: "https://publisher.example/a/a2",
+          expire: "2999-01-01T00:00:00Z",
+        },
+      ],
+    });
+
+    const processor = new RunProcessor(prisma, fakeMd(), log, {
+      botUserId: BOT,
+      removalConfirmations: 1,
+    });
+    await processor.processRun({
+      id: run.id,
+      extension: "testext",
+      bundleSha256: BUNDLE,
+      kind: "CLEAN",
+      scopeMangaIds: [SERIES_A],
+    });
+
+    // UNAVAILABLE, never DELETE: `queuedFor` reads both kinds, so a hard delete
+    // would show up here and fail this.
+    expect(await queuedFor()).toEqual(["UNAVAILABLE:aaaa1111-0000-4000-8000-000000000001"]);
+  });
 
   it("marks what the publisher dropped, for the series it asked about", async () => {
     const { run } = await runWithEnvelope({

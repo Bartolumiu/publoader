@@ -133,11 +133,11 @@ export type RemovalPass =
  * days for no gain.
  *
  * `paywalled` is present despite NOT being absence-derived — it acts on a
- * positive claim, an expiry the publisher stated. It is held anyway because it
- * is the only pass that hard-deletes on extension-reported data: a bundle that
- * got its clock or its expiry parsing wrong would otherwise delete a whole back
- * catalogue on first sight, irreversibly. One run's delay is a cheap premium
- * against that.
+ * positive claim, an expiry the publisher stated. It is held anyway because
+ * that claim is a timestamp comparison made against a clock and a parser the
+ * bundle owns: a bundle that got either wrong would card a whole back catalogue
+ * on first sight, and un-carding is not currently a working path on MangaDex.
+ * One run's delay is a cheap premium against that.
  */
 const LISTING_DERIVED_PASSES = new Set<RemovalPass>([
   "no-longer-listed",
@@ -734,13 +734,13 @@ export class RunProcessor {
       //
       // Before the removals, so a chapter that came back and went again in the
       // same pass starts its tally from one rather than resuming an old one.
-      // `toDelete` counts as still-nominated alongside `toRemove`. Both passes
+      // `toPaywalled` counts as still-nominated alongside `toRemove`. Both passes
       // hold their chapters across runs, and both read the same tally, so
       // forgetting a paywalled chapter here because it is not in `toRemove`
       // would reset its count every run and it could never reach confirmation.
       if (allMangaChapters !== null) {
         const nominated = new Set(
-          [...decision.toRemove, ...decision.toDelete].map((mdChapter) => mdChapter.id),
+          [...decision.toRemove, ...decision.toPaywalled].map((mdChapter) => mdChapter.id),
         );
         await this.forgetRemovalChecks(
           chaptersOnMd.filter((mdChapter) => !nominated.has(mdChapter.id)).map((c) => c.id),
@@ -756,14 +756,18 @@ export class RunProcessor {
         removalMode,
         "no-longer-listed",
       );
-      // Always "delete", never the configured removal mode: a card would leave
-      // the paywall link standing, which is the thing being removed.
+      // The configured removal mode, exactly like `no-longer-listed`. A chapter
+      // that was free when we published it and has since gone behind the
+      // paywall has reached the ordinary end of a free chapter's life; it was
+      // legitimately published, so the card is the honest record rather than a
+      // deletion. Hard-deleting is for a chapter that was paid all along, which
+      // this pass cannot identify -- everything it sees was free at upload time.
       await this.enqueueRemovals(
-        decision.toDelete,
+        decision.toPaywalled,
         mangaId,
         run.extension,
         groupId,
-        "delete",
+        removalMode,
         "paywalled",
       );
       await this.recordUploaded(
@@ -776,7 +780,7 @@ export class RunProcessor {
       totals.edit += decision.toEdit.length;
       totals.skip += decision.skipped.length;
       totals.remove += decision.toRemove.length;
-      totals.paywalled += decision.toDelete.length;
+      totals.paywalled += decision.toPaywalled.length;
       totals.unfetchable += decision.missingWithoutPages.length;
 
       // The one thing a clean run can find but not fix. Logged per manga at
@@ -809,7 +813,7 @@ export class RunProcessor {
         decision.toUpload.length +
           decision.toEdit.length +
           decision.toRemove.length +
-          decision.toDelete.length +
+          decision.toPaywalled.length +
           decision.missingWithoutPages.length >
         0;
       log[decided ? "info" : "debug"](
@@ -820,7 +824,7 @@ export class RunProcessor {
           edit: decision.toEdit.length,
           skipped: decision.skipped.length,
           remove: decision.toRemove.length,
-          paywalled: decision.toDelete.length,
+          paywalled: decision.toPaywalled.length,
         },
         "manga processed",
       );

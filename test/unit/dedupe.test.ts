@@ -842,9 +842,9 @@ describe("paywalled chapters", () => {
       ...over,
     });
 
-  it("deletes a chapter the publisher still lists but no longer serves free", () => {
+  it("flags a chapter the publisher still lists but no longer serves free", () => {
     const result = paywalled();
-    expect(result.toDelete.map((c) => c.id)).toEqual(["md-1"]);
+    expect(result.toPaywalled.map((c) => c.id)).toEqual(["md-1"]);
     // The url is still in the listing, so the no-longer-listed pass must not
     // also claim it: the two sets are disjoint and would otherwise both queue.
     expect(result.toRemove).toEqual([]);
@@ -856,7 +856,7 @@ describe("paywalled chapters", () => {
         chapter({ chapterId: "1000", chapterUrl: URL, chapterExpire: "2026-09-30T00:00:00Z" }),
       ],
     });
-    expect(result.toDelete).toEqual([]);
+    expect(result.toPaywalled).toEqual([]);
     expect(result.toRemove).toEqual([]);
   });
 
@@ -865,7 +865,7 @@ describe("paywalled chapters", () => {
     const result = paywalled({
       allMangaChapters: [chapter({ chapterId: "1000", chapterUrl: URL, chapterExpire: null })],
     });
-    expect(result.toDelete).toEqual([]);
+    expect(result.toPaywalled).toEqual([]);
   });
 
   it("keeps a shared url while any chapter behind it is still free", () => {
@@ -877,14 +877,14 @@ describe("paywalled chapters", () => {
         chapter({ chapterId: "1000", chapterUrl: URL, chapterExpire: "2026-09-30T00:00:00Z" }),
       ],
     });
-    expect(result.toDelete).toEqual([]);
+    expect(result.toPaywalled).toEqual([]);
   });
 
   it("never deletes somebody else's upload", () => {
     const result = paywalled({
       chaptersOnMd: [mdChapter("md-1", { externalUrl: URL }, ["grp"], "someone-else")],
     });
-    expect(result.toDelete).toEqual([]);
+    expect(result.toPaywalled).toEqual([]);
   });
 
   it("leaves a chapter that already carries our card", () => {
@@ -894,7 +894,7 @@ describe("paywalled chapters", () => {
     const carded = mdChapter("md-1", { externalUrl: URL });
     (carded.attributes as unknown as { pages: number }).pages = 1;
     const result = paywalled({ chaptersOnMd: [carded] });
-    expect(result.toDelete).toEqual([]);
+    expect(result.toPaywalled).toEqual([]);
   });
 
   it("still routes an unlisted chapter to removal, not deletion", () => {
@@ -903,12 +903,12 @@ describe("paywalled chapters", () => {
         chapter({ chapterId: "999", chapterUrl: "https://elsewhere/9", chapterExpire: null }),
       ],
     });
-    expect(result.toDelete).toEqual([]);
+    expect(result.toPaywalled).toEqual([]);
     expect(result.toRemove.map((c) => c.id)).toEqual(["md-1"]);
   });
 
   it("says nothing when the extension publishes no catalogue", () => {
     const result = paywalled({ allMangaChapters: null });
-    expect(result.toDelete).toEqual([]);
+    expect(result.toPaywalled).toEqual([]);
   });
 });

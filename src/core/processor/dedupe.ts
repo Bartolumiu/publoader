@@ -107,17 +107,21 @@ export interface DecideResult {
   /** Chapters on MangaDex that no longer belong there. */
   toRemove: MdChapter[];
   /**
-   * Chapters the publisher still lists but no longer lets anyone read for free.
+   * Chapters that were free when we published them and have since rotated
+   * behind the publisher's paywall.
    *
-   * Hard-deleted whatever the removal mode, like `duplicates`: an unavailable
-   * card would leave a link to a paywall standing on MangaDex, which is the
-   * thing being removed.
+   * Removed under the configured removal mode, NOT hard-deleted. This is the
+   * ordinary end of a free chapter's life, not a chapter that should never have
+   * gone up: it was legitimately published, and the card is the honest record
+   * that it is no longer readable. Deletion is reserved for a chapter that was
+   * paid all along, which this pass cannot identify — every chapter it sees was
+   * free at upload time, by definition of having been uploaded.
    *
    * Disjoint from `toRemove` by construction — removal needs the url absent
    * from the listing, this needs it present — so the two never contend for a
    * chapter.
    */
-  toDelete: MdChapter[];
+  toPaywalled: MdChapter[];
   /**
    * Uploads that reuse a number already on MangaDex under our group. Reported,
    * never acted on: see `findNumberCollisions`.
@@ -433,9 +437,16 @@ export function mdChapterMangaId(mdChapter: MdChapter): string | null {
  * removes it, and the link left standing on MangaDex now points at a paywall.
  * That set only grows: every run re-confirms it as "still listed".
  *
+ * What this pass is NOT: an answer to "should this chapter ever have gone up?".
+ * Every chapter it can see was free when publoader published it, so a hit here
+ * is a free chapter reaching the end of its free life — carded, not deleted.
+ *
  * `chapterExpire` is the only signal that says "no longer free", and it is
  * per-publisher. An extension that does not populate it produces nothing here,
- * which is the right failure direction — no evidence, no deletion.
+ * which is the right failure direction — no evidence, no removal. It is also
+ * only half the story: `availability.ts` in publoader-extensions documents the
+ * far-future sentinel MANGA Plus puts on subscriber-only chapters, which no
+ * expiry comparison can catch.
  *
  * A url shared by several listing entries (one MANGA Plus viewer serving four
  * numbered chapters) counts as paywalled only when EVERY entry behind it has
@@ -715,7 +726,7 @@ export function decideForManga(input: DecideInput): DecideResult {
   // updated chapter, and it is queued for removal in the
   // constructor regardless.
   const toRemove = input.chaptersOnMd.length > 0 ? findExtraChapters(input) : [];
-  const toDelete = input.chaptersOnMd.length > 0 ? findPaywalledChapters(input) : [];
+  const toPaywalled = input.chaptersOnMd.length > 0 ? findPaywalledChapters(input) : [];
 
   const { candidates, fromListingOnly } = decideCandidates(input);
   const updated = candidates
@@ -790,7 +801,7 @@ export function decideForManga(input: DecideInput): DecideResult {
     skipped,
     skippedDifferentId,
     toRemove,
-    toDelete,
+    toPaywalled,
     missingWithoutPages,
     numberCollisions: findNumberCollisions(toUpload, input),
   };
