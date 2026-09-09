@@ -59,14 +59,10 @@ while (running) {
   if (await shouldRestart(settings, "processor", log)) break;
 
   try {
-    // The pause gate stops new MangaDex-facing work without stopping the
-    // scheduler: runs simply queue up in INGESTING until it is lifted.
-    if (await settings.isPaused()) {
-      log.debug("paused; skipping tick");
-    } else {
-      const processed = await processor.tick();
-      if (processed > 0) log.info({ processed }, "runs processed");
-    }
+    // The pause gate lives in `tick`, which re-reads it between runs rather
+    // than once here: runs simply queue up in INGESTING until it is lifted.
+    const processed = await processor.tick();
+    if (processed > 0) log.info({ processed }, "runs processed");
 
     for (const depth of await tasks.depths()) {
       metrics.uploadTasks.set({ kind: depth.kind, state: depth.state }, depth.count);
