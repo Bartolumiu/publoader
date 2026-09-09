@@ -913,6 +913,10 @@ export class UploadTaskWorkers {
           detail,
           unavailableAt: readString(raw, "unavailableAt"),
           footerNote,
+          // Whoever queued the card says why; absent, the card keeps the
+          // "removed" wording it has always carried.
+          reason: cardReason(raw),
+          subscriptionName: readString(raw, "subscriptionName"),
         }),
       );
 
@@ -1592,11 +1596,32 @@ function domainRoot(url: string | null | undefined): string | null {
  * sees, and an unrecognised value silently falling through to "removed" would
  * tell them a chapter is gone when it is merely paid for.
  */
+/**
+ * The card wording a queued UNAVAILABLE asks for.
+ *
+ * Validated rather than trusted, for the same reason as `cardOnUpload`: the
+ * value picks what a reader is told, and an unrecognised one falling through
+ * to "removed" would say a chapter is gone when it is merely paid for. Null
+ * when nothing was asked, which leaves the card's own default in place.
+ */
+function cardReason(raw: Record<string, unknown>): UnavailableReason | null {
+  const reason = readString(raw, "reason") ?? readString(raw, "unavailableReason");
+  const known: UnavailableReason[] = ["removed", "subscriber-only", "region-locked"];
+  return known.includes(reason as UnavailableReason) ? (reason as UnavailableReason) : null;
+}
+
 function cardOnUpload(
   raw: Record<string, unknown>,
 ): { reason: UnavailableReason; subscriptionName: string | null } | null {
-  if (raw["uploadAsUnavailable"] !== true) return null;
-  const reason = readString(raw, "reason");
+  // `unavailableReason` is the extension's own word for why a reader cannot
+  // open the chapter, and carries straight through from the wire contract.
+  // `uploadAsUnavailable` + `reason` is the older sidecar shape a queueing
+  // caller may still set; both are read so neither surface has to change first.
+  const reason =
+    readString(raw, "unavailableReason") ??
+    (raw["uploadAsUnavailable"] === true ? readString(raw, "reason") : null);
+  if (reason === null) return null;
+
   const known: UnavailableReason[] = ["removed", "subscriber-only", "region-locked"];
   return {
     reason: known.includes(reason as UnavailableReason)

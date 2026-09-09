@@ -27,6 +27,16 @@ export interface Chapter {
   mangaUrl: string | null;
   extensionName: string | null;
   imageArtifacts: string[];
+  /**
+   * Why an ordinary reader cannot open this chapter, when they cannot; null
+   * for a freely readable one, which is nearly all of them.
+   *
+   * Set by the extension. It decides whether the chapter is published live or
+   * published already carded, and which wording that card carries.
+   */
+  unavailableReason?: "subscriber-only" | "region-locked" | "removed" | null;
+  /** The tier a `subscriber-only` chapter needs, e.g. "MANGA Plus MAX". */
+  subscriptionName?: string | null;
 }
 
 export function chapterFromRecord(record: ChapterRecord, extension: string): Chapter {

@@ -42,6 +42,23 @@ export const ChapterInput = z
     mdMangaId: z.string().uuid().nullable().default(null),
     mangaName: z.string().max(1024).nullable().default(null),
     mangaUrl: z.string().max(2048).nullable().default(null),
+    /**
+     * Why an ordinary reader cannot open this chapter, when they cannot.
+     *
+     * Null means freely readable — the case for nearly every chapter, and the
+     * default, so an extension that never sets it behaves exactly as before.
+     *
+     * Report the chapter WITH a reason rather than dropping it. A dropped
+     * chapter is indistinguishable from one the publisher deleted, so the
+     * platform cards it as "removed" and tells readers a chapter they could
+     * have paid to read is gone.
+     */
+    unavailableReason: z
+      .enum(["subscriber-only", "region-locked", "removed"])
+      .nullable()
+      .default(null),
+    /** The tier a `subscriber-only` chapter needs, e.g. "MANGA Plus MAX". */
+    subscriptionName: z.string().max(128).nullable().default(null),
     /** Page images (rare; card generation is core-side). */
     images: z.array(z.instanceof(Uint8Array)).max(500).optional(),
   })
