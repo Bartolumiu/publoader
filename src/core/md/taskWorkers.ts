@@ -12,7 +12,7 @@ import {
   type MdExtendedApi,
 } from "./client.js";
 import type { DiscordEmbedInput, DiscordNotifier } from "./webhook.js";
-import { queueEmbed, queueFinishedEmbed, queueSummaryEmbed } from "./webhookEmbeds.js";
+import { queueEmbed, queueSummaryEmbed } from "./webhookEmbeds.js";
 import { botUserIdFromClientId, isCarded, type Chapter } from "./types.js";
 import type { UnavailableReason } from "./card.js";
 import type { SettingsStore } from "../store/settings.js";
@@ -379,21 +379,19 @@ export class UploadTaskWorkers {
   }
 
   /**
-   * The end-of-drain messages the queue workers send.
+   * The end-of-drain message the queue workers send: the UNAVAILABLE summary,
+   * and nothing else.
    *
    * `processed` counts per kind rather than per worker thread, which is the
    * closest this architecture has: the embed is named after the worker, and
    * here one uploader drains typed queues, so the kind IS the queue.
    *
-   * Nothing is sent when nothing was processed: speak only when there is
-   * done something, and a per-tick "finished 0 items" would be constant noise.
-   *
-   * "Finished all items in queue" additionally requires that something actually
-   * SUCCEEDED. A task that fails goes back to the queue with a backoff, so a
-   * pass that only failed has emptied nothing; announcing it as finished, once
-   * per pass, for as long as the failure persists, is how this channel filled
-   * with identical messages. The failures are reported by their own per-chapter
-   * embeds, which is where an operator can act on them.
+   * Every kind used to also get a bare "Finished all items in queue" when its
+   * queue emptied. It carried no information a reader could act on — the work
+   * itself is already reported per chapter — and with several kinds draining
+   * independently it arrived several times over, so it was removed as spam.
+   * UNAVAILABLE keeps its summary because it is summary-only: it sends no
+   * per-chapter embeds, so this is the only place its counts appear.
    */
   async flushQueueSummary(
     counts: Map<string, { processed: number; failed: number }>,
@@ -431,7 +429,6 @@ export class UploadTaskWorkers {
       if (kind === "UNAVAILABLE") {
         embeds.push(queueSummaryEmbed(kind, total.processed, total.failed));
       }
-      if (total.processed > 0) embeds.push(queueFinishedEmbed(kind));
     }
     if (embeds.length > 0) await this.deps.notifier.send(embeds);
   }

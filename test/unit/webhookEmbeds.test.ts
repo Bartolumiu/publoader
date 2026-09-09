@@ -14,7 +14,6 @@ import {
   noUpdatesEmbed,
   notIndexedEmbed,
   queueEmbed,
-  queueFinishedEmbed,
   queueSummaryEmbed,
   runErrorEmbed,
   runStartedEmbed,
@@ -212,10 +211,6 @@ describe("queue embeds", () => {
   it("mentions failures in the summary only when there were some", () => {
     expect(queueSummaryEmbed("UNAVAILABLE", 40, 2).description).toContain("Failed: 2");
     expect(queueSummaryEmbed("UNAVAILABLE", 40, 0).description).not.toContain("Failed");
-  });
-
-  it("announces a finished queue", () => {
-    expect(queueFinishedEmbed("DELETE").title).toBe("Delete: Finished all items in queue");
   });
 });
 
