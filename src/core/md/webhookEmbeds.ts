@@ -93,13 +93,13 @@ export function chapterField(
 ): DiscordField {
   const name =
     `Success: ${success ? "True" : "False"}\n` +
-    `Manga: ${chapter.mangaName ?? "None"}\n` +
-    `Chapter: ${chapter.chapterNumber ?? "None"}\n` +
-    `Extension: ${chapter.extensionName ?? "None"}`;
+    `Manga: ${chapter.mangaName ?? "—"}\n` +
+    `Chapter: ${chapter.chapterNumber ?? "—"}\n` +
+    `Extension: ${chapter.extensionName ?? "—"}`;
 
   const value =
-    `Language: \`${chapter.chapterLanguage ?? "None"}\`\n` +
-    `Chapter title: \`${chapter.chapterTitle ?? "None"}\`\n` +
+    `Language: \`${chapter.chapterLanguage ?? "—"}\`\n` +
+    `Chapter title: \`${chapter.chapterTitle ?? "—"}\`\n` +
     `Chapter expiry: \`${expiryText(chapter.chapterExpire)}\`\n` +
     "\n" +
     formatLink("MangaDex", "chapter", chapter.mdChapterId ? `${MD_CHAPTER_URL}${chapter.mdChapterId}` : null, failedUpload) +
@@ -248,9 +248,9 @@ export function dupesEmbeds(
   const fields: DiscordField[] = groups.map((g) => ({
     name:
       `Dupes of chapter: ${g.mainChapterId}\n` +
-      `Chapter Number: ${g.chapterNumber ?? "None"}\n` +
-      `Chapter Language: ${g.language ?? "None"}`,
-    value: g.duplicateIds.map((id) => `[${id}](${MD_CHAPTER_URL}${id})`).join("\n") || "None",
+      `Chapter Number: ${g.chapterNumber ?? "—"}\n` +
+      `Chapter Language: ${g.language ?? "—"}`,
+    value: g.duplicateIds.map((id) => `[${id}](${MD_CHAPTER_URL}${id})`).join("\n") || "—",
     inline: true,
   }));
 

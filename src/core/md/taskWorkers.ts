@@ -5,7 +5,12 @@ import { metrics } from "../../metrics.js";
 import { generateChapterCard } from "./card.js";
 import { unavailableCardOptions } from "./unavailableCard.js";
 import { chapterFromJson, chapterToColumns, uploadedChapterColumns } from "./chapterRows.js";
-import { isUploadSessionConflict, type MdChapterDetail, type MdExtendedApi } from "./client.js";
+import {
+  isUploadSessionConflict,
+  mdVolume,
+  type MdChapterDetail,
+  type MdExtendedApi,
+} from "./client.js";
 import type { DiscordEmbedInput, DiscordNotifier } from "./webhook.js";
 import { queueEmbed, queueFinishedEmbed, queueSummaryEmbed } from "./webhookEmbeds.js";
 import { botUserIdFromClientId, isCarded, type Chapter } from "./types.js";
@@ -534,7 +539,9 @@ export class UploadTaskWorkers {
         const committed = await md.commitUploadSession(
           session.id,
           {
-            volume: chapter.chapterVolume,
+            // Publishers do not all number volumes the way MangaDex validates
+            // them, and a volume it refuses fails the whole commit. See mdVolume.
+            volume: mdVolume(chapter.chapterVolume),
             chapter: chapter.chapterNumber,
             title: chapter.chapterTitle,
             translatedLanguage: chapter.chapterLanguage ?? "",
