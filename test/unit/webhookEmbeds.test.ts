@@ -107,10 +107,15 @@ describe("chapterField", () => {
     expect(value).toContain("Mangaplus chapter link:");
   });
 
-  it("says None for absent fields, as Python's dict.get did", () => {
+  it("shows an absent field as a dash, not as the word None", () => {
+    // This used to print "None", carried over from the Python original's
+    // dict.get. In Discord that reads as a chapter genuinely titled "None"
+    // rather than one with no title, which is what it was mistaken for.
     const field = chapterField({});
-    expect(field.name).toContain("Manga: None");
-    expect(field.value).toContain("Language: `None`");
+    expect(field.name).toContain("Manga: —");
+    expect(field.value).toContain("Language: `—`");
+    expect(field.name).not.toContain("None");
+    expect(field.value).not.toContain("None");
   });
 });
 

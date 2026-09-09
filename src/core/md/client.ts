@@ -132,6 +132,37 @@ export function optimisticLockVersion(err: unknown): number | null {
 }
 
 /**
+ * MangaDex's own validation pattern for `volume` and `chapter`.
+ *
+ * `^(0|[1-9]\d*)((\.\d+){1,2})?[a-z]?$` — the server rejects anything else with
+ * a 400 `validation_exception`, and a rejected commit fails the whole task.
+ */
+const MD_NUMBER_RE = /^(0|[1-9]\d*)((\.\d+){1,2})?[a-z]?$/;
+
+/**
+ * A volume MangaDex will accept, or null.
+ *
+ * Publishers do not all number volumes the way MangaDex validates them. omoi
+ * reports the volume as its printed NAME — "Kiss Me At the Stroke of Midnight
+ * 1", "1 (Omnibus)", "23:45" — and MangaDex answers the commit with
+ *
+ *   400 Error validating /chapterDraft/volume: Does not match the regex
+ *       pattern ^(0|[1-9]\d*)((\.\d+){1,2})?[a-z]?$
+ *
+ * which fails the upload, retries into the same rejection, and dead-letters.
+ * The chapter itself is fine; only the volume label is unusable.
+ *
+ * Dropping it to null publishes the chapter with no volume, which is what the
+ * catalogue already looks like for every extension that reports no volume at
+ * all. Refusing the chapter over a cosmetic field would be the worse trade.
+ */
+export function mdVolume(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const trimmed = value.trim();
+  return MD_NUMBER_RE.test(trimmed) ? trimmed : null;
+}
+
+/**
  * Is this the rejection that says the account already holds an open session?
  *
  * MangaDex allows exactly one upload session per account, and refuses to begin
