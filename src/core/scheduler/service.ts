@@ -67,7 +67,8 @@ export class SchedulerService {
 
   /** One scheduler tick. Exposed for tests; the service loop calls it forever. */
   async tick(now = new Date()): Promise<void> {
-    if (await this.settings.isPaused()) {
+    const paused = await this.settings.isPaused();
+    if (paused) {
       this.log.debug("scheduler paused; skipping slot creation");
     } else {
       // Isolated deliberately. Slot creation touches bundles, manifests and
@@ -103,10 +104,20 @@ export class SchedulerService {
     // Last, and isolated: publishing extension code is the least urgent thing
     // this tick does and the most likely to be slow (a 32 MB archive per changed
     // repo), so it must not be able to delay or abort the queue work above.
-    try {
-      await this.maybeSyncGithub(now);
-    } catch (err) {
-      this.log.error({ err }, "github auto-sync failed");
+    //
+    // Skipped entirely while paused. This was the one thing in the tick that
+    // still reached outside the platform on its own -- fetching repositories and
+    // publishing new bundles -- and a pause that leaves the extension code
+    // changing underneath it is not a stopped platform. The sweeps above stay:
+    // they only put abandoned work back where it can wait.
+    if (paused) {
+      this.log.debug("scheduler paused; skipping github auto-sync");
+    } else {
+      try {
+        await this.maybeSyncGithub(now);
+      } catch (err) {
+        this.log.error({ err }, "github auto-sync failed");
+      }
     }
   }
 

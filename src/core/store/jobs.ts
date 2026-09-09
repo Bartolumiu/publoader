@@ -406,6 +406,44 @@ export class JobStore {
   }
 
   /**
+   * Hand a leased job straight back, because the PLATFORM stopped rather than
+   * the job failing.
+   *
+   * Deliberately not `fail` and not the lease sweeper. Both of those spend an
+   * attempt and dead-letter a job whose budget is gone, so an operator who
+   * paused while a run was on its third attempt would have dead-lettered it,
+   * and the only evidence left would read "lease expired; attempts exhausted" —
+   * naming a worker crash that never happened. A pause is not the job's fault
+   * and must not cost it a life: `claim` incremented `attempt` when it handed
+   * this job out, so this gives that increment back and the job is claimed
+   * again, unchanged, once the platform resumes.
+   *
+   * `cancel_requested` is deliberately NOT set: `claim` filters on it, so
+   * flagging the job would leave it unclaimable after the resume as well.
+   *
+   * Returns false when the lease is not the current one, which is the ordinary
+   * outcome of two renews racing and not an error.
+   */
+  async releaseForPause(jobId: string, leaseId: string): Promise<boolean> {
+    const res = await this.prisma.job.updateMany({
+      where: { id: jobId, leaseId, state: { in: ["LEASED", "RUNNING"] } },
+      data: {
+        state: "PENDING",
+        attempt: { decrement: 1 },
+        notBefore: new Date(),
+        // Not an error class: the row is a to-do again, not a failure, and
+        // `countOutstandingErrors` must not put it in front of anyone.
+        errorClass: null,
+        lastError: "released: the platform was paused",
+        leaseId: null,
+        leaseWorkerId: null,
+        leaseExpiresAt: null,
+      },
+    });
+    return res.count === 1;
+  }
+
+  /**
    * Request cancellation. PENDING jobs cancel immediately; live leases keep
    * the flag and the worker aborts on its next renew.
    */

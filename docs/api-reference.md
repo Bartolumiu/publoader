@@ -356,10 +356,16 @@ source of truth and paging happens in Postgres rather than in the API process.
 | `POST` | `/pause` | `settings:write` | `{minutes?: 1..1440}`. Omitting `minutes` pauses indefinitely → `{ok, paused: true, indefinite}` |
 | `POST` | `/resume` | `settings:write` | → `{ok, paused: false}` |
 
-Pausing stops new leases (`routes/worker.ts:110`), scheduled run creation
-(`scheduler/service.ts:46-50`), and processor ticks
-(`services/processor.ts:52-54`). In-flight work finishes.
-`routes/admin.ts:190-205`.
+Pausing stops new leases (`routes/worker.ts`), scheduled run creation and the
+GitHub auto-sync (`scheduler/service.ts`), run processing between runs
+(`processor/processor.ts`), and upload-task draining (`services/uploader.ts`).
+Work already running is stopped too: `start` and `renew` both return `409`
+while paused and hand the lease back (`JobStore.releaseForPause`), so a worker
+mid-scrape aborts and abandons the job without submitting. The job returns to
+`PENDING` with the attempt the claim took refunded, and is not flagged
+`cancel_requested`, so a pause can neither dead-letter it nor leave it
+unclaimable after the resume. Only the upload task each queue is holding
+finishes. See "Pause and resume" in `docs/operations.md`.
 
 ### Extensions, schedules, and config
 

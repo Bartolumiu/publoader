@@ -109,7 +109,13 @@ export function registerWorkerRoutes(app: FastifyInstance, ctx: AppContext): voi
 
       const deadline = Date.now() + waitSeconds * 1000;
       do {
-        if (await ctx.settings.isPaused()) break;
+        // Answered like a drained worker rather than with a bare 204: an empty
+        // 204 sends the agent back in a second, so every worker polls the core
+        // once a second for the length of the pause. `drained` idles it for a
+        // minute, which is what a platform that is handing out nothing wants.
+        if (await ctx.settings.isPaused()) {
+          return reply.code(204).header("x-publoader-drained", "true").send();
+        }
         const claimed = await ctx.jobs.claim(worker.id, {
           extensions,
           trust: worker.trust,
@@ -192,6 +198,14 @@ export function registerWorkerRoutes(app: FastifyInstance, ctx: AppContext): voi
       const { jobId } = req.params as { jobId: string };
       const body = RenewBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: body.error.message });
+      // A job leased in the moment before the pause landed must not begin.
+      // Handed back here rather than left for the sweeper, which would hold it
+      // LEASED for the whole TTL and then charge it a failed attempt.
+      if (await ctx.settings.isPaused()) {
+        await ctx.jobs.releaseForPause(jobId, body.data.leaseId);
+        ctx.log.info({ jobId, workerId: req.worker!.id }, "platform paused; job released before start");
+        return reply.code(409).send({ error: "platform is paused" });
+      }
       const ok = await ctx.jobs.start(jobId, body.data.leaseId);
       if (!ok) return reply.code(409).send({ error: "lease not current" });
       return { ok: true };
@@ -201,6 +215,24 @@ export function registerWorkerRoutes(app: FastifyInstance, ctx: AppContext): voi
       const { jobId } = req.params as { jobId: string };
       const body = RenewBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: body.error.message });
+      /**
+       * The pause reaches work that is ALREADY RUNNING through here, and only
+       * through here. Everything else gates the NEXT thing: a catalogue scrape
+       * runs for tens of minutes, so a pause that waits for it is a pause that
+       * does not visibly pause anything.
+       *
+       * The lease goes back to PENDING and the worker is answered the way a
+       * lost lease is answered, so it aborts the runner and abandons the job
+       * WITHOUT submitting -- no envelope, no failed attempt, nothing for the
+       * error feed. `releaseForPause` returns the attempt too, so pausing costs
+       * the job none of its retry budget; it is simply claimed again after the
+       * resume, which the claim gate holds off until then.
+       */
+      if (await ctx.settings.isPaused()) {
+        await ctx.jobs.releaseForPause(jobId, body.data.leaseId);
+        ctx.log.info({ jobId, workerId: req.worker!.id }, "platform paused; running job released");
+        return reply.code(409).send({ error: "platform is paused" });
+      }
       const renewed = await ctx.jobs.renew(jobId, body.data.leaseId, ctx.config.leaseTtlSeconds);
       if (!renewed) return reply.code(409).send({ error: "lease not current" });
       return {

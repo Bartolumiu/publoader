@@ -407,7 +407,7 @@ export function registerOpsRoutes(app: FastifyInstance, ctx: AppContext): void {
             service: "core-scheduler",
             everySeconds: 15 * 60,
             configuredBy: "hardcoded interval; on/off in settings (github_auto_sync)",
-            enabled: githubEnabled,
+            enabled: githubEnabled && !paused,
             lastRun: githubSync,
             lastRunKnown: true,
             note: "Recorded before the work, so it means last attempted rather than last succeeded.",

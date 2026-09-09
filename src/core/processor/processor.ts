@@ -431,6 +431,15 @@ export class RunProcessor {
     let processed = 0;
 
     for (let i = 0; i < this.maxRunsPerTick; i++) {
+      // Per run, not once per tick: a tick is up to ten runs and a single big
+      // catalogue takes minutes to decide, so a gate read only at the top let a
+      // pause spend a quarter of an hour still queueing deletes and uploads.
+      // Between runs is the safe place to stop -- processRun is idempotent and
+      // a run left in INGESTING is simply picked up again after the resume.
+      if (await this.settings.isPaused()) {
+        this.log.debug("paused; stopping run processing");
+        break;
+      }
       const run = await this.claimRun(attempted);
       if (!run) break;
       attempted.add(run.id);

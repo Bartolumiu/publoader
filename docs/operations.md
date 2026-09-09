@@ -2513,9 +2513,33 @@ padmin stats                 # confirm
 ```
 
 Pause is stored in Postgres, so every replica honours it immediately; there is
-no per-process state to get out of sync. It gates: new scheduler runs, new job
-leases, and upload-task draining. It does **not** abort in-flight work; a
-chapter mid-upload finishes.
+no per-process state to get out of sync. It stops everything the platform does
+on its own, and that includes work already under way:
+
+| | while paused |
+| --- | --- |
+| scheduled run creation | stopped |
+| GitHub extension auto-sync | stopped |
+| new job leases | refused; workers are told to idle for a minute |
+| a job leased but not yet started | refused at `start`; the sweeper requeues it |
+| **a job already running** | **stopped** — its lease is taken back at the next renewal, at most `LEASE_TTL_SECONDS / 3` (100s by default) later; the worker abandons it without submitting and the job returns to `PENDING` with its attempt refunded |
+| run processing | stopped between runs, not only between ticks |
+| upload-task draining | stopped; the gate is re-read between tasks |
+| map sync to GitHub | stopped |
+
+The one thing that finishes is the upload task each queue is holding at that
+instant — at most five, a few seconds each. Aborting mid-session leaves a
+half-committed chapter on MangaDex, which is worse than the second it costs to
+finish it.
+
+Nothing is lost. A cancelled run is requeued rather than failed, and a run left
+in `INGESTING` is picked up by the first processor tick after the resume.
+
+Operator actions still work while paused, by design: you pause in order to fix
+things, so queue purges, bulk edits, reconciles and publishes all still land.
+They queue rather than execute — nothing leaves for MangaDex until you resume.
+The exceptions are `POST /runs` and a live re-check, which return `409`, because
+starting a run *is* the thing you paused.
 
 Use pause for: upgrades, credential rotation, "something is wrong and I need to
 think", and any time you are unsure whether the platform is about to do
