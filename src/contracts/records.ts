@@ -25,6 +25,30 @@ export const ChapterRecord = z
     mangaUrl: z.string().max(2048).nullable().default(null),
     extensionName: z.string().max(128).nullable().default(null),
     imageArtifacts: z.array(z.string().uuid()).max(500).default([]),
+    /**
+     * Why a reader cannot open this chapter for free, when they cannot.
+     *
+     * Absent (the default) means the chapter is freely readable and is
+     * published normally. Anything else means the publisher still LISTS the
+     * chapter but will not serve it to an ordinary reader, and the chapter is
+     * published already carded, carrying this reason as its wording.
+     *
+     * This exists so an extension can report its whole catalogue rather than
+     * silently dropping what it cannot read. Dropping was the old behaviour and
+     * it is indistinguishable, from the platform's side, from the publisher
+     * having removed the chapter — so a paid chapter and a deleted one produced
+     * the same card, and the paid one told readers it was gone.
+     */
+    unavailableReason: z
+      .enum(["subscriber-only", "region-locked", "removed"])
+      .nullable()
+      .default(null),
+    /**
+     * What the publisher calls the tier a `subscriber-only` chapter needs, e.g.
+     * "MANGA Plus MAX". Only the extension knows the name; without one the card
+     * stays generic rather than inventing it.
+     */
+    subscriptionName: z.string().max(128).nullable().default(null),
   })
   .strict();
 export type ChapterRecord = z.infer<typeof ChapterRecord>;

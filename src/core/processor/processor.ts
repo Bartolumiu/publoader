@@ -1404,12 +1404,16 @@ export class RunProcessor {
     if (confirmed.length === 0) return;
     mdChapters = confirmed;
 
+    // What the card should say. `paywalled` found the chapter still listed and
+    // no longer free, so "removed" would be untrue -- it is the one pass that
+    // knows a reader could still get to the chapter by paying for it.
+    const reason = pass === "paywalled" ? "subscriber-only" : "removed";
+
     for (const mdChapter of mdChapters) {
-      await this.tasks.enqueue(
-        kind,
-        mdChapter.id,
-        chapterFromMdChapter(mdChapter, { mdMangaId, extension, groupId, mangaName, mode }),
-      );
+      await this.tasks.enqueue(kind, mdChapter.id, {
+        ...chapterFromMdChapter(mdChapter, { mdMangaId, extension, groupId, mangaName, mode }),
+        reason,
+      });
       await this.prisma.uploadedChapter.deleteMany({ where: { mdChapterId: mdChapter.id } });
     }
 

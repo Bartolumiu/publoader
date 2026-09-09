@@ -1968,7 +1968,23 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
       { preHandler: [requireScope("chapters:write"), requireAdminRole] },
       async (req, reply) => {
         const body = parseOrThrow(
-          bulkBody({ force: z.boolean().default(false), footerNote: z.string().max(600).optional() }),
+          bulkBody({
+            force: z.boolean().default(false),
+            footerNote: z.string().max(600).optional(),
+            /**
+             * Why the chapter cannot be read, which selects the card's wording.
+             *
+             * Defaults to `removed`, which is what this route could only ever
+             * say before — and it is a lie for the commonest case. A chapter
+             * the publisher still lists but has put behind coins or a
+             * subscription is not gone: told "removed", a reader stops looking
+             * for something they could have paid to read. 30k mangaup_global
+             * chapters are exactly that.
+             */
+            reason: z.enum(["removed", "subscriber-only", "region-locked"]).default("removed"),
+            /** The tier a `subscriber-only` card should name, e.g. "MANGA Plus MAX". */
+            subscriptionName: z.string().max(128).optional(),
+          }),
           req.body ?? {},
         );
         return runBulk(req, reply, {
@@ -1979,9 +1995,17 @@ export function registerChapterRoutes(app: FastifyInstance, ctx: AppContext): vo
             unavailableAt: new Date().toISOString(),
             ...(body.force ? { force: true } : {}),
             ...(body.footerNote ? { footerNote: body.footerNote } : {}),
+            reason: body.reason,
+            ...(body.subscriptionName ? { subscriptionName: body.subscriptionName } : {}),
           },
           auditAction: "chapter.unavailable",
-          auditDetail: { force: body.force, footerNote: body.footerNote ?? null, bulkKind: "unavailable" },
+          auditDetail: {
+            force: body.force,
+            footerNote: body.footerNote ?? null,
+            reason: body.reason,
+            subscriptionName: body.subscriptionName ?? null,
+            bulkKind: "unavailable",
+          },
         });
       },
     );

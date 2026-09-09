@@ -313,6 +313,13 @@ describe.skipIf(!dbReady())("scoped runs", () => {
     // UNAVAILABLE, never DELETE: `queuedFor` reads both kinds, so a hard delete
     // would show up here and fail this.
     expect(await queuedFor()).toEqual(["UNAVAILABLE:aaaa1111-0000-4000-8000-000000000001"]);
+
+    // And the card must say why. "removed" is the default wording and it is
+    // untrue here -- the publisher still lists this chapter, it is just no
+    // longer free, so a reader told "removed" stops looking for something they
+    // could have paid to read.
+    const [task] = await prisma.uploadTask.findMany({ where: { kind: "UNAVAILABLE" } });
+    expect((task!.chapter as Record<string, unknown>)["reason"]).toBe("subscriber-only");
   });
 
   it("marks what the publisher dropped, for the series it asked about", async () => {
