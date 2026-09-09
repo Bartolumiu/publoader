@@ -2,7 +2,7 @@
  * The Discord embeds this platform sends.
  *
  *   `updatesEmbeds`      per manga, at update-check time
- *   `queueEmbed`, `queueSummaryEmbed`, `queueFinishedEmbed`
+ *   `queueEmbed`, `queueSummaryEmbed`
  *                        per worker queue: progress and summary
  *   `dupesEmbeds`        duplicate chapters found
  *   `notIndexedEmbed`    uploaded but not indexed by MangaDex
@@ -222,15 +222,6 @@ export function queueSummaryEmbed(
     colour: COLOUR_DEFAULT,
     timestamp: new Date().toISOString(),
     footer: titleCase(workerType),
-  };
-}
-
-/** `PubloaderQueueWebhook.send_queue_finished`. */
-export function queueFinishedEmbed(workerType: string): DiscordEmbedInput {
-  return {
-    title: `${titleCase(workerType)}: Finished all items in queue`,
-    colour: COLOUR_DEFAULT,
-    timestamp: new Date().toISOString(),
   };
 }
 

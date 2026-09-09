@@ -3,20 +3,19 @@ import { UploadTaskWorkers, type TaskWorkerDeps } from "../../src/core/md/taskWo
 import type { DiscordEmbedInput } from "../../src/core/md/webhook.js";
 
 /**
- * What the queue workers say at the end of a drain.
+ * What the queue workers say at the end of a drain, which is now: nothing,
+ * unless the queue is UNAVAILABLE.
  *
- * "Finished all items in queue" was sent whenever a pass touched anything, and
- * a task that FAILS is touched: it goes back to the queue with a backoff and is
- * claimed again on the next pass, forever, if the failure is permanent. So a
- * single stuck task produced that message every few minutes, indefinitely, in a
- * channel where it is indistinguishable from real completions. Announcing a
- * queue as finished when nothing left it is also simply untrue.
+ * Every kind used to announce "Finished all items in queue". The message said
+ * nothing an operator could act on — the work itself is already reported per
+ * chapter — and it arrived once per kind, so a drain touching UPLOAD, EDIT and
+ * DELETE posted three of them. UNAVAILABLE is the exception: it sends no
+ * per-chapter embeds, so its summary is the only report of what it did.
  *
- * The same untruth had a second source: a drain is not one pass. While a run is
- * processing, tasks arrive in a trickle, so the uploader wakes, handles one, and
- * sleeps. Reporting per pass turned a single clean run into a message a minute,
- * every one of them announcing a queue that plainly was not finished. So the
- * totals now accumulate and are only reported once nothing is left to claim.
+ * The accumulation is still here and still matters. A drain is not one pass:
+ * while a run is processing, tasks arrive in a trickle, so the uploader wakes,
+ * handles one, and sleeps. Totals accumulate and are reported once nothing is
+ * left to claim, so a multi-pass drain yields one summary, not one per pass.
  */
 describe("flushQueueSummary", () => {
   const workersWith = (): { workers: UploadTaskWorkers; sent: DiscordEmbedInput[][] } => {
@@ -37,22 +36,16 @@ describe("flushQueueSummary", () => {
   /** Nothing left to claim: the queue really is finished. */
   const drained = new Map<string, number>();
 
-  it("announces a queue as finished once it has actually completed work", async () => {
+  it("says nothing when a queue finishes its work", async () => {
     const { workers, sent } = workersWith();
     await workers.flushQueueSummary(new Map([["DELETE", { processed: 3, failed: 0 }]]), drained);
-    expect(titles(sent)).toEqual(["Delete: Finished all items in queue"]);
-  });
-
-  it("says nothing about finishing when every task failed and was requeued", async () => {
-    const { workers, sent } = workersWith();
-    await workers.flushQueueSummary(new Map([["DELETE", { processed: 0, failed: 2 }]]), drained);
     expect(sent).toEqual([]);
   });
 
-  it("still announces a partially failed drain, which did empty some of the queue", async () => {
+  it("says nothing for a partially failed drain either", async () => {
     const { workers, sent } = workersWith();
     await workers.flushQueueSummary(new Map([["UPLOAD", { processed: 1, failed: 1 }]]), drained);
-    expect(titles(sent)).toEqual(["Upload: Finished all items in queue"]);
+    expect(sent).toEqual([]);
   });
 
   it("keeps the unavailable summary, which is where a failure count is reported", async () => {
@@ -76,8 +69,8 @@ describe("flushQueueSummary", () => {
     // One task handled, three still waiting: this drain is not over, and the
     // uploader will be back in a few seconds for the next one.
     await workers.flushQueueSummary(
-      new Map([["UPLOAD", { processed: 1, failed: 0 }]]),
-      new Map([["UPLOAD", 3]]),
+      new Map([["UNAVAILABLE", { processed: 1, failed: 0 }]]),
+      new Map([["UNAVAILABLE", 3]]),
     );
     expect(sent).toEqual([]);
   });
@@ -100,20 +93,20 @@ describe("flushQueueSummary", () => {
       new Map([["UNAVAILABLE", { processed: 1, failed: 0 }]]),
       drained,
     );
-    expect(titles(sent)).toEqual([
-      "3 chapters marked unavailable",
-      "Unavailable: Finished all items in queue",
-    ]);
+    expect(titles(sent)).toEqual(["3 chapters marked unavailable"]);
     expect(sent.flat()[0]?.description).toContain("Failed: 1");
   });
 
   it("does not re-announce a queue that is already settled", async () => {
     const { workers, sent } = workersWith();
-    await workers.flushQueueSummary(new Map([["EDIT", { processed: 2, failed: 0 }]]), drained);
-    expect(titles(sent)).toEqual(["Edit: Finished all items in queue"]);
+    await workers.flushQueueSummary(
+      new Map([["UNAVAILABLE", { processed: 2, failed: 0 }]]),
+      drained,
+    );
+    expect(titles(sent)).toEqual(["2 chapters marked unavailable"]);
 
     // A later idle pass has nothing to add, and must not repeat itself.
     await workers.flushQueueSummary(new Map(), drained);
-    expect(titles(sent)).toEqual(["Edit: Finished all items in queue"]);
+    expect(titles(sent)).toEqual(["2 chapters marked unavailable"]);
   });
 });
