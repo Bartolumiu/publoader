@@ -12,7 +12,7 @@ import {
   type MdExtendedApi,
 } from "./client.js";
 import type { DiscordEmbedInput, DiscordNotifier } from "./webhook.js";
-import { queueEmbed, queueSummaryEmbed } from "./webhookEmbeds.js";
+import { notIndexedEmbed, queueEmbed, queueSummaryEmbed } from "./webhookEmbeds.js";
 import { botUserIdFromClientId, isCarded, type Chapter } from "./types.js";
 import type { UnavailableReason } from "./card.js";
 import type { SettingsStore } from "../store/settings.js";
@@ -36,6 +36,47 @@ import { UploadSessionLock } from "./sessionLock.js";
  */
 
 const IMAGE_BATCH_SIZE = 10;
+
+/**
+ * How long a committed chapter is left alone before we ask MangaDex whether it
+ * is actually there, and how many are asked about per sweep.
+ *
+ * A commit that returns a chapter id is not the same as a chapter readers can
+ * open: MangaDex accepts the upload, hands back the id, and indexing happens
+ * afterwards. When it does not happen, nothing else notices. The task is DONE,
+ * `uploaded_chapters` has a row, no retry is owed -- the upload genuinely
+ * succeeded -- and the chapter is invisible.
+ *
+ * The grace is generous because the cost of waiting is a map entry: the sweep
+ * does not block the drains and an id that is not old enough yet is simply
+ * looked at on a later tick. Five minutes against the fifteen seconds a healthy
+ * write was measured to take on 2026-09-02 (see `CARD_VERIFY_DELAYS_SECONDS`).
+ *
+ * The cap is what keeps a backfill from turning one tick into hundreds of
+ * requests: `chaptersByIds` pages internally at 100, so 500 is five calls, and
+ * whatever is left over is swept on the next tick five seconds later.
+ */
+const INDEX_GRACE_MS = 5 * 60_000;
+const INDEX_SWEEP_MAX = 500;
+
+/**
+ * The ids old enough to ask about, oldest first, up to `limit`.
+ *
+ * Split out because it is the whole of the sweep's decision-making and the rest
+ * of `sweepNotIndexed` is I/O.
+ */
+export function dueForIndexCheck(
+  pending: ReadonlyMap<string, number>,
+  now: number,
+  limit: number,
+): string[] {
+  const cutoff = now - INDEX_GRACE_MS;
+  return [...pending]
+    .filter(([, committedAt]) => committedAt <= cutoff)
+    .sort((a, b) => a[1] - b[1])
+    .slice(0, limit)
+    .map(([mdChapterId]) => mdChapterId);
+}
 
 /**
  * The embed title the UNAVAILABLE queue reports under, and the one action whose
@@ -217,6 +258,21 @@ export class UploadTaskWorkers {
    * finished. These totals wait until it actually is.
    */
   private readonly queueTotals = new Map<string, { processed: number; failed: number }>();
+
+  /**
+   * Chapters MangaDex accepted, waiting to be seen on the site: id -> the
+   * moment of the commit. Emptied by `sweepNotIndexed`.
+   *
+   * In memory, so a restart forgets whatever was in flight. That is the same
+   * ceiling `uploaded_list` had in uploader.py and it is the right one: the
+   * alternative is a column on UploadLog recording that a row has been checked,
+   * and a migration to tell an operator about a case that has to be chased on
+   * MangaDex by hand anyway.
+   *
+   * ponytail: in-memory, survives no restart; move to an UploadLog marker if a
+   * missed window ever matters.
+   */
+  private readonly awaitingIndex = new Map<string, number>();
 
   /**
    * Turnstile for the one upload session the MangaDex account is allowed.
@@ -433,6 +489,70 @@ export class UploadTaskWorkers {
     if (embeds.length > 0) await this.deps.notifier.send(embeds);
   }
 
+  /**
+   * Remember a chapter MangaDex accepted, for `sweepNotIndexed` to check later.
+   *
+   * Public because the sweep and this are the two halves of one thing and the
+   * tests drive both; nothing outside the upload path should call it.
+   */
+  noteCommitted(mdChapterId: string): void {
+    this.awaitingIndex.set(mdChapterId, Date.now());
+  }
+
+  /**
+   * Did the chapters we uploaded actually appear on MangaDex?
+   *
+   * The port of `check_all_chapters_uploaded` in uploader.py, which was the one
+   * thing that noticed a commit MangaDex accepted and then never indexed. It
+   * was lost in the move to this platform: the embed came across, the sweep
+   * that fed it did not, so since then such a chapter has been silent.
+   *
+   * Two deliberate differences from the Python:
+   *
+   *  - it is not gated on the queue being empty. Python ran this when the
+   *    uploader queue hit zero, which on a 28k-chapter backfill is days after
+   *    the first commit. Here the grace period does that job, so a chapter is
+   *    asked about five minutes after it goes up whether or not the queue has
+   *    drained, and a run that starts failing to index says so while it is
+   *    still running.
+   *  - it says nothing when everything indexed. Python posted "N chapters
+   *    indexed" on every drain; the bare per-queue "finished" embed was removed
+   *    from this platform as spam and this would be the same message again.
+   *    The success count goes to the log, which is where a count belongs.
+   *
+   * Never gets its own retry: an id it could not resolve stays in the map only
+   * if the read threw, and the next tick is five seconds away.
+   */
+  async sweepNotIndexed(): Promise<void> {
+    const due = dueForIndexCheck(this.awaitingIndex, Date.now(), INDEX_SWEEP_MAX);
+    if (due.length === 0) return;
+
+    // Read BEFORE forgetting: a throw here must leave the ids to be asked about
+    // again, not drop them into the same silence this exists to end.
+    const found = await this.deps.md.chaptersByIds(due);
+    for (const mdChapterId of due) this.awaitingIndex.delete(mdChapterId);
+
+    const seen = new Set(found.map((chapter) => chapter.id));
+    const missing = due.filter((mdChapterId) => !seen.has(mdChapterId));
+    if (missing.length === 0) {
+      this.deps.log.info({ checked: due.length }, "uploaded chapters are indexed on MangaDex");
+      return;
+    }
+
+    // Not an error the platform can act on -- the upload worked and retrying it
+    // would duplicate the chapter -- but the loudest level is right: it is the
+    // only trace that a chapter nobody can read exists.
+    this.deps.log.error(
+      { mdChapterIds: missing, checked: due.length },
+      "chapters were committed but MangaDex has not indexed them",
+    );
+    if (this.deps.notifier.enabled) {
+      await this.deps.notifier.send([
+        notIndexedEmbed(`${missing.length} chapters not indexed`, missing),
+      ]);
+    }
+  }
+
   // -------------------------------------------------------------- UPLOAD
 
   private async runUpload(
@@ -573,7 +693,13 @@ export class UploadTaskWorkers {
     await prisma.uploadLog.create({
       data: { dedupeKey: task.dedupeKey, mdChapterId, outcome: "COMMITTED" },
     });
-    if (mdChapterId) await this.recordUploadedChapter(chapter, mdChapterId);
+    if (mdChapterId) {
+      await this.recordUploadedChapter(chapter, mdChapterId);
+      // Only a fresh commit. The skip path above got here by asking MangaDex
+      // whether the chapter exists and being told yes, so re-asking in five
+      // minutes tests nothing.
+      this.noteCommitted(mdChapterId);
+    }
     await this.deleteArtifacts(chapter.imageArtifacts);
 
     metrics.uploadsTotal.inc({ outcome: "upload_committed" });
