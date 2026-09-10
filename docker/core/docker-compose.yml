@@ -61,6 +61,13 @@ x-app-security: &app-security
 # unaffected either way -- upload_tasks live in postgres, an in-flight task has
 # stop_grace_period to finish, and anything cut short is reclaimed by the lease
 # sweep. Restarts cost time, never work.
+#
+# SERVICE LEVEL ONLY. This anchor is `labels:`, not environment variables, so
+# merging it into an `environment:` block yields `environment.labels` as a
+# mapping and compose refuses the whole file: "services.core-processor.
+# environment.labels must be a boolean, null, number or string". It was merged
+# into all three `environment:` blocks as well as the services themselves when
+# it was added, which is what that error was.
 x-watchtower-app: &watchtower-app
   labels:
     com.centurylinklabs.watchtower.scope: publoader
@@ -227,7 +234,7 @@ services:
       # about what has NOT changed: uploading chapters remains core-uploader's
       # alone; it owns the upload queue and the upload session, and no other
       # process claims from it.
-      <<: [*core-env, *md-env, *watchtower-app]
+      <<: [*core-env, *md-env]
       PORT: "8100"
       HOST: 0.0.0.0
       # Metrics are NOT on 8100. The tunnel forwards every path on the public
@@ -353,7 +360,7 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
-      <<: [*core-env, *md-env, *watchtower-app]
+      <<: [*core-env, *md-env]
       METRICS_PORT: "8102"
       HOST: 0.0.0.0
     # Internal only (see the note on core-scheduler). Scrape
@@ -394,7 +401,7 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
-      <<: [*core-env, *md-env, *watchtower-app]
+      <<: [*core-env, *md-env]
       METRICS_PORT: "8103"
       HOST: 0.0.0.0
     # Internal only (see the note on core-scheduler). Scrape
