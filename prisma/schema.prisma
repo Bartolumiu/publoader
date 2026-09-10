@@ -432,6 +432,16 @@ model UploadLog {
   outcome     UploadOutcome
   detail      String?
   createdAt   DateTime      @default(now()) @map("created_at")
+  /// When `sweepNotIndexed` settled whether MangaDex actually indexed this
+  /// commit. NULL means not asked yet.
+  ///
+  /// A COMMITTED row is written the moment MangaDex hands back a chapter id,
+  /// and that is not the same as a chapter readers can open. This column is
+  /// what turns the row into the sweep's own queue: unchecked rows past the
+  /// grace period are the work, and stamping one takes it out of the partial
+  /// index the sweep reads. Restart-safe for free, which the in-memory version
+  /// of this was not.
+  indexCheckedAt DateTime?  @map("index_checked_at")
 
   @@index([dedupeKey])
   @@map("upload_logs")
