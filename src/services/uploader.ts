@@ -317,6 +317,9 @@ async function houseLoop(): Promise<void> {
       const drained = new Map(unreported);
       unreported.clear();
       await workers.flushQueueSummary(drained, remaining);
+      // A MangaDex read, so it honours the pause the same way the drains do.
+      // Anything it does not get to now is still due on the next tick.
+      if (!paused) await workers.sweepNotIndexed();
     } catch (err) {
       log.error({ err }, "uploader housekeeping iteration failed");
     }
