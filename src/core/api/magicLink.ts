@@ -7,6 +7,7 @@ import type { Logger } from "../../logging.js";
 import type { Mailer } from "../email/mailer.js";
 import { linkEmail, passwordChangedEmail, signupPendingEmail } from "../email/templates.js";
 import type { LoginTokenStore } from "../store/loginTokens.js";
+import { accountLabel } from "../store/adminUsers.js";
 import { SESSION_COOKIE, cleanActor, cookieHeader, isSecureRequest } from "./session.js";
 
 /**
@@ -263,7 +264,7 @@ export function registerMagicLinkRoutes(app: FastifyInstance, ctx: AppContext): 
     }
 
     const { user, token } = result;
-    const actor = cleanActor(user.displayName ?? user.email) ?? user.email;
+    const actor = cleanActor(accountLabel(user)) ?? user.id;
     const cookie = await ctx.adminUsers.createSession(user, actor, sessionTtlSeconds);
     await ctx.audit.record(`admin:${actor}`, "session.login", user.id, {
       method: "magic-link",

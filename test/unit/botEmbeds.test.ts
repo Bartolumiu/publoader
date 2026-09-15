@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildErrorEmbed, buildReplyEmbed, inferTone, listAppendChoices, withoutEmailDomains } from "../../src/bot/bot.js";
-import { accountLabel, scopeChecker } from "../../src/bot/commands.js";
+import { scopeChecker } from "../../src/bot/commands.js";
+import { accountLabel } from "../../src/core/store/adminUsers.js";
 
 /**
  * Presentation lives in one place, so this is where it is checked.

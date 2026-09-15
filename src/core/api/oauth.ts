@@ -14,6 +14,7 @@ import {
   signValue,
   unsignValue,
 } from "./session.js";
+import { accountLabel } from "../store/adminUsers.js";
 
 /**
  * "Login with Discord" for the operator dashboard.
@@ -328,7 +329,10 @@ export function registerOAuthRoutes(app: FastifyInstance, ctx: AppContext): void
         .send(notice("Awaiting approval", "Your account exists but has not been approved yet. An owner has to approve it before you can sign in."));
     }
 
-    const actor = cleanActor(match.user.displayName ?? identity.username) ?? match.user.email;
+    // `identity.username` is this login's handle, which is fresher than the
+    // stored one if they renamed themselves on Discord since last time.
+    const actor =
+      cleanActor(accountLabel({ ...match.user, discordUsername: identity.username })) ?? match.user.id;
     const cookie = await ctx.adminUsers.createSession(match.user, actor, ctx.config.sessionTtlMinutes * 60);
     await ctx.audit.record(`admin:${actor}`, "session.login", match.user.id, {
       method: "discord",

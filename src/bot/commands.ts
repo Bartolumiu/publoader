@@ -50,6 +50,7 @@ import type { Sensitivity } from "./authz.js";
 import type { BotAuthzView, RunProgress, Scope, SourceMapResult } from "./apiClient.js";
 import { hasScope } from "../core/api/scopes.js";
 import type { AuthzEntry, AuthzListName } from "../core/store/botAuthz.js";
+import { accountLabel } from "../core/store/adminUsers.js";
 import { DEFAULT_COOLDOWN_DAYS, MAX_COOLDOWN_DAYS, NAMESPACE_RE } from "../core/store/trackedManga.js";
 import { mdTitleUrl, parseMdTitleId } from "../core/md/titleId.js";
 
@@ -241,26 +242,6 @@ function codeBlock(text: string, lang = ""): string {
 
 function lines(parts: string[]): string {
   return truncate(parts.join("\n"));
-}
-
-/**
- * Name an account in a reply, without naming its email address.
- *
- * An account carries two real names — the display name it chose and the
- * Discord handle it linked — and either is a better answer to "who is this?"
- * than an address. Both are optional, so the last resort is the name in front
- * of the address: `ardax@ardax.dev` is somebody called `ardax` here, and the
- * part that makes it contactable is nobody's business in a chat channel.
- */
-export function accountLabel(account: {
-  displayName?: string | null;
-  discordUsername?: string | null;
-  email?: string | null;
-}): string {
-  const name = account.displayName?.trim() || account.discordUsername?.trim();
-  if (name) return name;
-  const local = account.email?.split("@")[0]?.trim();
-  return local || "unknown account";
 }
 
 /** `2026-07-29T15:05`: enough to correlate, short enough for a chat line. */
