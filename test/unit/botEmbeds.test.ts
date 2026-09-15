@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildErrorEmbed, buildReplyEmbed, inferTone, listAppendChoices } from "../../src/bot/bot.js";
+import { buildErrorEmbed, buildReplyEmbed, inferTone, listAppendChoices, redactEmails } from "../../src/bot/bot.js";
 import { scopeChecker } from "../../src/bot/commands.js";
 
 /**
@@ -171,5 +171,45 @@ describe("listAppendChoices", () => {
 
   it("offers nothing rather than everything when the fragment matches nothing", () => {
     expect(listAppendChoices("zzz", names)).toEqual([]);
+  });
+});
+
+describe("redactEmails", () => {
+  it("masks the local part and keeps the domain", () => {
+    expect(redactEmails("curche454@gmail.com")).toBe("c***@gmail.com");
+  });
+
+  it("masks every address in a line, not just the first", () => {
+    // `/activity` renders audit detail as raw JSON, which can carry several.
+    expect(redactEmails('{"email":"a@one.dev","invitedBy":"b@two.co.uk"}')).toBe(
+      '{"email":"a***@one.dev","invitedBy":"b***@two.co.uk"}',
+    );
+  });
+
+  it("leaves text that merely contains an @ alone", () => {
+    // Discord mentions and package names are not addresses, and mangling them
+    // would be a second bug wearing the fix's clothes.
+    expect(redactEmails("<@1234567890> ran @discordjs/rest@2.6.3")).toBe("<@1234567890> ran @discordjs/rest@2.6.3");
+  });
+
+  it("scrubs the description, the title, the fields and the footer", () => {
+    // Every one of those reaches Discord, so a fix that only covered the
+    // description would still leak through /permissions' layout.
+    const embed = buildReplyEmbed("permissions", {
+      text: "ops@ardax.dev — ADMIN",
+      title: "ops@ardax.dev",
+      fields: [{ name: "ops@ardax.dev", value: "invited by owner@ardax.dev" }],
+      footer: "acting as owner@ardax.dev",
+    }).toJSON();
+    const everything = JSON.stringify(embed);
+    expect(everything).not.toContain("ops@ardax.dev");
+    expect(everything).not.toContain("owner@ardax.dev");
+    expect(embed.description).toBe("o***@ardax.dev — ADMIN");
+    expect(embed.footer?.text).toBe("acting as o***@ardax.dev");
+  });
+
+  it("scrubs an error reply too, which is where an unhandled address surfaces", () => {
+    const embed = buildErrorEmbed("permissions", "no account matches admin@ardax.dev").toJSON();
+    expect(embed.description).toBe("no account matches a***@ardax.dev");
   });
 });

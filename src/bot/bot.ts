@@ -227,6 +227,25 @@ const EMBED_DESCRIPTION_LIMIT = 4096;
 const EMBED_FIELD_LIMIT = 1024;
 
 /**
+ * Mask any email address on its way out to Discord.
+ *
+ * Operator addresses reach a reply from several directions that have nothing
+ * to do with each other: `/permissions` prints an account's address on
+ * purpose, an audit actor *is* an address whenever a dashboard account signed
+ * in without a display name (see `cleanActor` in `core/api/session.ts`), and
+ * `/activity` folds audit detail in as raw JSON. Masking each of those at its
+ * own call site would leave the next one to be written leaking again, so it
+ * happens here, where every reply already passes through.
+ *
+ * The domain and the first character survive because `/audit` has to stay
+ * readable — "who did this" is the question it exists to answer, and three
+ * actors that all render as `[redacted]` cannot answer it.
+ */
+export function redactEmails(text: string): string {
+  return text.replace(/([A-Za-z0-9._%+-])[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})/g, "$1***@$2");
+}
+
+/**
  * Turn a handler's reply into the embed that is actually sent.
  *
  * One place decides presentation. A handler says what happened and, at most,
@@ -238,21 +257,21 @@ export function buildReplyEmbed(commandName: string, reply: BotReply): EmbedBuil
   const tone: ReplyTone = reply.tone ?? inferred.tone;
   const embed = new EmbedBuilder()
     .setColor(TONE_COLOUR[tone])
-    .setTitle(`${TONE_MARK[tone]} ${reply.title ?? `/${commandName}`}`.slice(0, 256));
+    .setTitle(redactEmails(`${TONE_MARK[tone]} ${reply.title ?? `/${commandName}`}`).slice(0, 256));
 
-  const description = (reply.tone ? reply.text : inferred.text).trim();
+  const description = redactEmails((reply.tone ? reply.text : inferred.text).trim());
   if (description) embed.setDescription(description.slice(0, EMBED_DESCRIPTION_LIMIT));
 
   // Discord silently drops an embed with more than 25 fields, which would lose
   // the reply rather than shorten it.
   for (const field of (reply.fields ?? []).slice(0, 25)) {
     embed.addFields({
-      name: field.name.slice(0, 256),
-      value: (field.value || "—").slice(0, EMBED_FIELD_LIMIT),
+      name: redactEmails(field.name).slice(0, 256),
+      value: redactEmails(field.value || "—").slice(0, EMBED_FIELD_LIMIT),
       inline: field.inline ?? false,
     });
   }
-  if (reply.footer) embed.setFooter({ text: reply.footer.slice(0, 2048) });
+  if (reply.footer) embed.setFooter({ text: redactEmails(reply.footer).slice(0, 2048) });
   return embed;
 }
 
