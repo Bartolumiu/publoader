@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildErrorEmbed, buildReplyEmbed, inferTone, listAppendChoices, redactEmails } from "../../src/bot/bot.js";
-import { scopeChecker } from "../../src/bot/commands.js";
+import { buildErrorEmbed, buildReplyEmbed, inferTone, listAppendChoices, withoutEmailDomains } from "../../src/bot/bot.js";
+import { accountLabel, scopeChecker } from "../../src/bot/commands.js";
 
 /**
  * Presentation lives in one place, so this is where it is checked.
@@ -174,25 +174,27 @@ describe("listAppendChoices", () => {
   });
 });
 
-describe("redactEmails", () => {
-  it("masks the local part and keeps the domain", () => {
-    expect(redactEmails("curche454@gmail.com")).toBe("c***@gmail.com");
+describe("withoutEmailDomains", () => {
+  it("keeps the name and drops what makes it contactable", () => {
+    expect(withoutEmailDomains("curche454@gmail.com")).toBe("curche454");
   });
 
-  it("masks every address in a line, not just the first", () => {
+  it("reduces every address in a line, not just the first", () => {
     // `/activity` renders audit detail as raw JSON, which can carry several.
-    expect(redactEmails('{"email":"a@one.dev","invitedBy":"b@two.co.uk"}')).toBe(
-      '{"email":"a***@one.dev","invitedBy":"b***@two.co.uk"}',
+    expect(withoutEmailDomains('{"email":"ada@one.dev","invitedBy":"bea@two.co.uk"}')).toBe(
+      '{"email":"ada","invitedBy":"bea"}',
     );
   });
 
   it("leaves text that merely contains an @ alone", () => {
     // Discord mentions and package names are not addresses, and mangling them
     // would be a second bug wearing the fix's clothes.
-    expect(redactEmails("<@1234567890> ran @discordjs/rest@2.6.3")).toBe("<@1234567890> ran @discordjs/rest@2.6.3");
+    expect(withoutEmailDomains("<@1234567890> ran @discordjs/rest@2.6.3")).toBe(
+      "<@1234567890> ran @discordjs/rest@2.6.3",
+    );
   });
 
-  it("scrubs the description, the title, the fields and the footer", () => {
+  it("covers the description, the title, the fields and the footer", () => {
     // Every one of those reaches Discord, so a fix that only covered the
     // description would still leak through /permissions' layout.
     const embed = buildReplyEmbed("permissions", {
@@ -201,15 +203,33 @@ describe("redactEmails", () => {
       fields: [{ name: "ops@ardax.dev", value: "invited by owner@ardax.dev" }],
       footer: "acting as owner@ardax.dev",
     }).toJSON();
-    const everything = JSON.stringify(embed);
-    expect(everything).not.toContain("ops@ardax.dev");
-    expect(everything).not.toContain("owner@ardax.dev");
-    expect(embed.description).toBe("o***@ardax.dev — ADMIN");
-    expect(embed.footer?.text).toBe("acting as o***@ardax.dev");
+    expect(JSON.stringify(embed)).not.toContain("ardax.dev");
+    expect(embed.description).toBe("ops — ADMIN");
+    expect(embed.footer?.text).toBe("acting as owner");
   });
 
-  it("scrubs an error reply too, which is where an unhandled address surfaces", () => {
+  it("covers an error reply too, which is where an unhandled address surfaces", () => {
     const embed = buildErrorEmbed("permissions", "no account matches admin@ardax.dev").toJSON();
-    expect(embed.description).toBe("no account matches a***@ardax.dev");
+    expect(embed.description).toBe("no account matches admin");
+  });
+});
+
+describe("accountLabel", () => {
+  it("prefers the name the account chose", () => {
+    expect(accountLabel({ displayName: "Ardax", discordUsername: "xunder", email: "ops@ardax.dev" })).toBe("Ardax");
+  });
+
+  it("falls back to the linked Discord handle", () => {
+    expect(accountLabel({ displayName: null, discordUsername: "xunder", email: "ops@ardax.dev" })).toBe("xunder");
+  });
+
+  it("falls back to the name in front of the address, never the address", () => {
+    const label = accountLabel({ displayName: null, discordUsername: null, email: "curche454@gmail.com" });
+    expect(label).toBe("curche454");
+    expect(label).not.toContain("@");
+  });
+
+  it("says so rather than rendering an empty bold blob for an account with nothing", () => {
+    expect(accountLabel({ displayName: "  ", discordUsername: null, email: null })).toBe("unknown account");
   });
 });

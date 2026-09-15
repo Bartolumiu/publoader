@@ -141,6 +141,11 @@ export function registerPermissionRoutes(app: FastifyInstance, ctx: AppContext):
       return {
         userId: user.id,
         email: user.email,
+        // Both names travel alongside the address so a caller that should not
+        // show an address has something to show instead; the Discord bot is
+        // the one that cannot, and it picks in that order.
+        displayName: user.displayName,
+        discordUsername: user.discordUsername,
         role: user.role,
         baseline: await ctx.permissions.roleScopes(user.role),
         extraScopes: user.extraScopes,

@@ -587,7 +587,10 @@ export interface PermissionCatalogue {
 
 export interface UserPermissions {
   userId: string;
+  /** Never rendered into Discord; `accountLabel` in commands.ts names the account. */
   email: string;
+  displayName?: string | null;
+  discordUsername?: string | null;
   role: string;
   baseline: string[];
   extraScopes: string[];

@@ -243,6 +243,26 @@ function lines(parts: string[]): string {
   return truncate(parts.join("\n"));
 }
 
+/**
+ * Name an account in a reply, without naming its email address.
+ *
+ * An account carries two real names — the display name it chose and the
+ * Discord handle it linked — and either is a better answer to "who is this?"
+ * than an address. Both are optional, so the last resort is the name in front
+ * of the address: `ardax@ardax.dev` is somebody called `ardax` here, and the
+ * part that makes it contactable is nobody's business in a chat channel.
+ */
+export function accountLabel(account: {
+  displayName?: string | null;
+  discordUsername?: string | null;
+  email?: string | null;
+}): string {
+  const name = account.displayName?.trim() || account.discordUsername?.trim();
+  if (name) return name;
+  const local = account.email?.split("@")[0]?.trim();
+  return local || "unknown account";
+}
+
 /** `2026-07-29T15:05`: enough to correlate, short enough for a chat line. */
 function shortTime(value: string | null | undefined): string {
   if (!value) return "-";
@@ -3425,7 +3445,7 @@ const commands: BotCommand[] = [
       if (sub === "user") {
         const perms = await ctx.api.userPermissions(ctx.actor, requireString(ctx.options, "id"));
         const parts = [
-          `**${perms.email}** — ${perms.role}`,
+          `**${accountLabel(perms)}** — ${perms.role}`,
           `**Role baseline**: ${code(perms.baseline)}`,
           `**Granted on top**: ${code(perms.extraScopes)}`,
           `**Denied**: ${code(perms.deniedScopes)}`,
@@ -3481,7 +3501,7 @@ const commands: BotCommand[] = [
       });
       return {
         text: lines([
-          `:closed_lock_with_key: **${current.email}**`,
+          `:closed_lock_with_key: **${accountLabel(current)}**`,
           `**Granted**: ${code(res.extraScopes)}`,
           `**Denied**: ${code(res.deniedScopes)}`,
           `**Effective**: ${code(res.effective)}`,
