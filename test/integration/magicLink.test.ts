@@ -288,6 +288,33 @@ describe.skipIf(!dbReady())("email sign-in links", () => {
     expect(res.statusCode).toBe(409);
   });
 
+  // ---- what the session is recorded as ----
+
+  /**
+   * The actor is what `GET /audit` answers "who did this?" with, and it is
+   * rendered straight into Discord by the bot's `/audit` and `/activity`. It
+   * used to fall back to the account's email address, which is how operator
+   * addresses ended up in a chat channel.
+   */
+  it("names a session after the account, never after its email address", async () => {
+    const { user } = await invite("ada.lovelace@example.com");
+    const redeemed = await redeem(lastToken());
+    expect(redeemed.statusCode).toBe(200);
+    expect(redeemed.json().actor).toBe("ada.lovelace");
+    expect(redeemed.json().actor).not.toContain("@");
+
+    // And the row the audit trail actually reads, not just the response.
+    const session = await prisma.adminSession.findFirst({ where: { userId: user.id } });
+    expect(session?.actor).toBe("ada.lovelace");
+  });
+
+  it("prefers the display name once the account has one", async () => {
+    const { user } = await invite("grace@example.com");
+    await prisma.adminUser.update({ where: { id: user.id }, data: { displayName: "Grace Hopper" } });
+    const redeemed = await redeem(lastToken());
+    expect(redeemed.json().actor).toBe("Grace Hopper");
+  });
+
   // ---- what the login page is told ----
 
   it("advertises the magic-link method only when a mailer is configured", async () => {

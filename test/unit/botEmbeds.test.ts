@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildErrorEmbed, buildReplyEmbed, inferTone, listAppendChoices } from "../../src/bot/bot.js";
+import { buildErrorEmbed, buildReplyEmbed, inferTone, listAppendChoices, withoutEmailDomains } from "../../src/bot/bot.js";
 import { scopeChecker } from "../../src/bot/commands.js";
+import { accountLabel } from "../../src/core/store/adminUsers.js";
 
 /**
  * Presentation lives in one place, so this is where it is checked.
@@ -171,5 +172,65 @@ describe("listAppendChoices", () => {
 
   it("offers nothing rather than everything when the fragment matches nothing", () => {
     expect(listAppendChoices("zzz", names)).toEqual([]);
+  });
+});
+
+describe("withoutEmailDomains", () => {
+  it("keeps the name and drops what makes it contactable", () => {
+    expect(withoutEmailDomains("curche454@gmail.com")).toBe("curche454");
+  });
+
+  it("reduces every address in a line, not just the first", () => {
+    // `/activity` renders audit detail as raw JSON, which can carry several.
+    expect(withoutEmailDomains('{"email":"ada@one.dev","invitedBy":"bea@two.co.uk"}')).toBe(
+      '{"email":"ada","invitedBy":"bea"}',
+    );
+  });
+
+  it("leaves text that merely contains an @ alone", () => {
+    // Discord mentions and package names are not addresses, and mangling them
+    // would be a second bug wearing the fix's clothes.
+    expect(withoutEmailDomains("<@1234567890> ran @discordjs/rest@2.6.3")).toBe(
+      "<@1234567890> ran @discordjs/rest@2.6.3",
+    );
+  });
+
+  it("covers the description, the title, the fields and the footer", () => {
+    // Every one of those reaches Discord, so a fix that only covered the
+    // description would still leak through /permissions' layout.
+    const embed = buildReplyEmbed("permissions", {
+      text: "ops@ardax.dev — ADMIN",
+      title: "ops@ardax.dev",
+      fields: [{ name: "ops@ardax.dev", value: "invited by owner@ardax.dev" }],
+      footer: "acting as owner@ardax.dev",
+    }).toJSON();
+    expect(JSON.stringify(embed)).not.toContain("ardax.dev");
+    expect(embed.description).toBe("ops — ADMIN");
+    expect(embed.footer?.text).toBe("acting as owner");
+  });
+
+  it("covers an error reply too, which is where an unhandled address surfaces", () => {
+    const embed = buildErrorEmbed("permissions", "no account matches admin@ardax.dev").toJSON();
+    expect(embed.description).toBe("no account matches admin");
+  });
+});
+
+describe("accountLabel", () => {
+  it("prefers the name the account chose", () => {
+    expect(accountLabel({ displayName: "Ardax", discordUsername: "xunder", email: "ops@ardax.dev" })).toBe("Ardax");
+  });
+
+  it("falls back to the linked Discord handle", () => {
+    expect(accountLabel({ displayName: null, discordUsername: "xunder", email: "ops@ardax.dev" })).toBe("xunder");
+  });
+
+  it("falls back to the name in front of the address, never the address", () => {
+    const label = accountLabel({ displayName: null, discordUsername: null, email: "curche454@gmail.com" });
+    expect(label).toBe("curche454");
+    expect(label).not.toContain("@");
+  });
+
+  it("says so rather than rendering an empty bold blob for an account with nothing", () => {
+    expect(accountLabel({ displayName: "  ", discordUsername: null, email: null })).toBe("unknown account");
   });
 });

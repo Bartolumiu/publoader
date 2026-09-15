@@ -8,7 +8,7 @@ import type { Logger } from "../../logging.js";
 import { constantTimeEqual,
   type ImpersonatedUser,
 } from "./auth.js";
-import { verifyPassword } from "../store/adminUsers.js";
+import { accountLabel, verifyPassword } from "../store/adminUsers.js";
 
 /**
  * Browser sessions for the operator dashboard.
@@ -272,7 +272,7 @@ export function registerSessionRoutes(app: FastifyInstance, ctx: AppContext): vo
       await ctx.audit.record(`ip:${req.ip}`, "session.login.unapproved", user.id);
       return reply.code(403).send({ error: "account is awaiting approval" });
     }
-    return issue(reply, req, user, cleanActor(user.displayName ?? user.email) ?? user.email);
+    return issue(reply, req, user, cleanActor(accountLabel(user)) ?? user.id);
   });
 
   /**

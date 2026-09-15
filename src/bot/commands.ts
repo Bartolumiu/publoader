@@ -50,6 +50,7 @@ import type { Sensitivity } from "./authz.js";
 import type { BotAuthzView, RunProgress, Scope, SourceMapResult } from "./apiClient.js";
 import { hasScope } from "../core/api/scopes.js";
 import type { AuthzEntry, AuthzListName } from "../core/store/botAuthz.js";
+import { accountLabel } from "../core/store/adminUsers.js";
 import { DEFAULT_COOLDOWN_DAYS, MAX_COOLDOWN_DAYS, NAMESPACE_RE } from "../core/store/trackedManga.js";
 import { mdTitleUrl, parseMdTitleId } from "../core/md/titleId.js";
 
@@ -3425,7 +3426,7 @@ const commands: BotCommand[] = [
       if (sub === "user") {
         const perms = await ctx.api.userPermissions(ctx.actor, requireString(ctx.options, "id"));
         const parts = [
-          `**${perms.email}** — ${perms.role}`,
+          `**${accountLabel(perms)}** — ${perms.role}`,
           `**Role baseline**: ${code(perms.baseline)}`,
           `**Granted on top**: ${code(perms.extraScopes)}`,
           `**Denied**: ${code(perms.deniedScopes)}`,
@@ -3481,7 +3482,7 @@ const commands: BotCommand[] = [
       });
       return {
         text: lines([
-          `:closed_lock_with_key: **${current.email}**`,
+          `:closed_lock_with_key: **${accountLabel(current)}**`,
           `**Granted**: ${code(res.extraScopes)}`,
           `**Denied**: ${code(res.deniedScopes)}`,
           `**Effective**: ${code(res.effective)}`,

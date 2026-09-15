@@ -227,6 +227,28 @@ const EMBED_DESCRIPTION_LIMIT = 4096;
 const EMBED_FIELD_LIMIT = 1024;
 
 /**
+ * Reduce any email address on its way out to Discord to the name in front of
+ * it: `ardax@ardax.dev` renders as `ardax`.
+ *
+ * Commands name a person from the account record where they can (see
+ * `accountLabel` in `commands.ts`), but addresses still reach a reply from
+ * directions no command controls: an audit actor *is* an address for every
+ * entry written before sign-in stopped falling back to one, and `/activity`
+ * folds audit detail in as raw JSON, which carries the address of whoever was
+ * invited or approved. Handling those at each call site would leave the next
+ * one to be written leaking again, so it happens here, where every reply
+ * already passes through.
+ *
+ * The name survives rather than the whole thing being struck out because
+ * `/audit` exists to answer "who did this", and three actors that all render
+ * as `[redacted]` cannot answer it. What is dropped is the part that makes an
+ * address contactable.
+ */
+export function withoutEmailDomains(text: string): string {
+  return text.replace(/([A-Za-z0-9._%+-]+)@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "$1");
+}
+
+/**
  * Turn a handler's reply into the embed that is actually sent.
  *
  * One place decides presentation. A handler says what happened and, at most,
@@ -238,21 +260,21 @@ export function buildReplyEmbed(commandName: string, reply: BotReply): EmbedBuil
   const tone: ReplyTone = reply.tone ?? inferred.tone;
   const embed = new EmbedBuilder()
     .setColor(TONE_COLOUR[tone])
-    .setTitle(`${TONE_MARK[tone]} ${reply.title ?? `/${commandName}`}`.slice(0, 256));
+    .setTitle(withoutEmailDomains(`${TONE_MARK[tone]} ${reply.title ?? `/${commandName}`}`).slice(0, 256));
 
-  const description = (reply.tone ? reply.text : inferred.text).trim();
+  const description = withoutEmailDomains((reply.tone ? reply.text : inferred.text).trim());
   if (description) embed.setDescription(description.slice(0, EMBED_DESCRIPTION_LIMIT));
 
   // Discord silently drops an embed with more than 25 fields, which would lose
   // the reply rather than shorten it.
   for (const field of (reply.fields ?? []).slice(0, 25)) {
     embed.addFields({
-      name: field.name.slice(0, 256),
-      value: (field.value || "—").slice(0, EMBED_FIELD_LIMIT),
+      name: withoutEmailDomains(field.name).slice(0, 256),
+      value: withoutEmailDomains(field.value || "—").slice(0, EMBED_FIELD_LIMIT),
       inline: field.inline ?? false,
     });
   }
-  if (reply.footer) embed.setFooter({ text: reply.footer.slice(0, 2048) });
+  if (reply.footer) embed.setFooter({ text: withoutEmailDomains(reply.footer).slice(0, 2048) });
   return embed;
 }
 

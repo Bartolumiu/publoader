@@ -73,6 +73,31 @@ export function toPublicUser(user: AdminUser): AdminUserPublic {
   return { ...rest, hasPassword: passwordHash !== null };
 }
 
+/**
+ * What to call an account, when an email address is not an acceptable answer.
+ *
+ * An account has two real names — the display name it chose and the Discord
+ * handle it linked — and either beats an address at answering "who is this?".
+ * Both are optional, so the last resort is the name in front of the address:
+ * `ardax@ardax.dev` belongs to somebody called `ardax`, and the rest of it is
+ * only what makes them contactable.
+ *
+ * This is the one definition on purpose. It names an account in the Discord
+ * bot's replies *and* builds the `actor` recorded against every session, so
+ * the audit trail and the chat surface cannot drift into calling the same
+ * person two different things.
+ */
+export function accountLabel(account: {
+  displayName?: string | null;
+  discordUsername?: string | null;
+  email?: string | null;
+}): string {
+  const name = account.displayName?.trim() || account.discordUsername?.trim();
+  if (name) return name;
+  const local = account.email?.split("@")[0]?.trim();
+  return local || "unknown account";
+}
+
 export class AdminUserStore {
   constructor(private readonly prisma: PrismaClient) {}
 
